@@ -223,8 +223,7 @@ fn definitions() -> Value {
         "scope",
         json!({
             "local":{"id":reference("Id")},
-            "remote":{"host":reference("Id"),"id":reference("Id")},
-            "legacy":{"reference":object(json!({"source":text(MAX_REFERENCE_BYTES),"project":text(MAX_REFERENCE_BYTES),"id":text(MAX_REFERENCE_BYTES)}))}
+            "remote":{"host":reference("Id"),"id":reference("Id")}
         }),
     );
     json!({

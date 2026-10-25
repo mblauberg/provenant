@@ -435,7 +435,8 @@ Fabric does not own these wire forms.
   `continuation_unsupported`, `confinement_refused`, `lane_depth`,
   `lane_coordination_refused`,
   `worktree_missing`, `base_unreachable`, `branch_exists`, `output_too_large`,
-  `state_corrupt`, `publication_failed`, `cancelled`, `timeout` and `io`.
+  `state_corrupt`, `upgrade_refused`, `publication_failed`, `cancelled`,
+  `timeout` and `io`.
   Uncertain mutations include their `operation_id`. Oversized read responses
   return `result_too_large`, while committed mutation receipts keep the
   transport ceiling so a lowered read limit cannot hide them. Health checks do

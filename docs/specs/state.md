@@ -343,7 +343,7 @@ from its own checkout.
 | Kiro registration | No observed use. |
 | `_shared`, JavaScript workflows, old link layouts | Retained skills are replaced individually; exact retired links are removed by the legacy manifest. Custom skill contents and old receipts are not read. |
 | Runtime provisioning and Codex skill overrides | The product needs no Python, Node or daemon. Another tool's skill preferences are left alone. |
-| Telemetry ledger and generic import | Telemetry reduces run records. Fabric alone owns any read-only import and its receipt. |
+| Telemetry ledger and generic import | Telemetry reduces run records. Nothing imports old state; an old Fabric store is left untouched. |
 | Configuration includes, interpolation, automatic migration | Executable or implicit configuration cannot be audited. |
 
 ## Verification

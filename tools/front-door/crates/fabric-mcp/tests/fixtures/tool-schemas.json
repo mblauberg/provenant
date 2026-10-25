@@ -149,51 +149,6 @@
             {
               "additionalProperties": false,
               "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
                 "id": {
                   "$ref": "#/$defs/Id"
                 },
@@ -697,51 +652,6 @@
         },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {
@@ -1323,51 +1233,6 @@
         },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {
@@ -2066,51 +1931,6 @@
             {
               "additionalProperties": false,
               "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
                 "id": {
                   "$ref": "#/$defs/Id"
                 },
@@ -2647,51 +2467,6 @@
         },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {
@@ -3296,51 +3071,6 @@
         },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {
@@ -3961,51 +3691,6 @@
             {
               "additionalProperties": false,
               "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
                 "id": {
                   "$ref": "#/$defs/Id"
                 },
@@ -4586,51 +4271,6 @@
         },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {
@@ -5308,51 +4948,6 @@
             {
               "additionalProperties": false,
               "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
                 "id": {
                   "$ref": "#/$defs/Id"
                 },
@@ -5830,51 +5425,6 @@
         },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {
@@ -6545,51 +6095,6 @@
         },
         "MessageRef": {
           "oneOf": [
-            {
-              "additionalProperties": false,
-              "properties": {
-                "reference": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "id": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "project": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    },
-                    "source": {
-                      "maxLength": 1024,
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "type": "string",
-                      "x-provenant-maxUtf8Bytes": 1024
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "project",
-                    "source"
-                  ],
-                  "type": "object"
-                },
-                "scope": {
-                  "const": "legacy"
-                }
-              },
-              "required": [
-                "reference",
-                "scope"
-              ],
-              "type": "object"
-            },
             {
               "additionalProperties": false,
               "properties": {

@@ -302,6 +302,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
         FacadeError::OwnerUnavailable => (Outcome::Refused, "UNSUPPORTED"),
         FacadeError::Cancelled => (Outcome::Error, "CANCELLED"),
         FacadeError::StateCorrupt => (Outcome::Error, "STATE_CORRUPT"),
+        FacadeError::UpgradeRefused => (Outcome::Refused, "UPGRADE_REFUSED"),
         FacadeError::Timeout => (Outcome::Error, "TIMEOUT"),
         FacadeError::StaleFence
         | FacadeError::ContinuationUnsupported
