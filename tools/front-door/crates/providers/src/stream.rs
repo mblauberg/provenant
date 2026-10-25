@@ -14,6 +14,9 @@ pub enum ProviderEvent {
         message: String,
         pool: Option<String>,
     },
+    RateLimited {
+        message: String,
+    },
     AuthRequired,
     Error,
     TransientError,
@@ -206,7 +209,9 @@ impl StreamState {
                 }
                 ProviderEvent::Error => self.error = true,
                 ProviderEvent::TransientError => self.transient_error = true,
-                ProviderEvent::Refusal | ProviderEvent::QuotaLimited { .. } => self.refusal = true,
+                ProviderEvent::Refusal
+                | ProviderEvent::QuotaLimited { .. }
+                | ProviderEvent::RateLimited { .. } => self.refusal = true,
                 ProviderEvent::AuthRequired => self.auth_required = true,
                 _ => {}
             }

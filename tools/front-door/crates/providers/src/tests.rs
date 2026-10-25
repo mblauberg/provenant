@@ -115,6 +115,47 @@ fn recovered_transport_retry_succeeds_but_turn_failure_stays_failed() -> Result<
     Ok(())
 }
 #[test]
+fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
+    for message in [
+        "exceeded retry limit, last status: 429 Too Many Requests",
+        "exceeded retry limit, last status: 429",
+        "TOO MANY REQUESTS",
+    ] {
+        let raw = format!(
+            "{{\"type\":\"error\",\"message\":\"{message}\"}}\n\
+             {{\"type\":\"turn.failed\",\"error\":{{\"message\":\"{message}\"}}}}\n"
+        );
+        let (events, outcome) = replay(&codex::Codex, &raw, EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused);
+        assert!(events.contains(&ProviderEvent::RateLimited {
+            message: message.into(),
+        }));
+    }
+    let recovered = format!(
+        "{{\"type\":\"error\",\"message\":\"Reconnecting… 1/5 (429 Too Many Requests)\"}}\n{}",
+        fixture!("codex/success.jsonl")
+    );
+    let (events, outcome) = replay(&codex::Codex, &recovered, EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Success);
+    assert!(events.contains(&ProviderEvent::TransientError));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::RateLimited { .. }))
+    );
+    for message in [
+        "invalid request",
+        "request id: 429",
+        "https://example.test/429",
+    ] {
+        let raw = format!("{{\"type\":\"error\",\"message\":\"{message}\"}}\n");
+        let (events, outcome) = replay(&codex::Codex, &raw, EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed);
+        assert_eq!(events, vec![ProviderEvent::Error]);
+    }
+    Ok(())
+}
+#[test]
 fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dyn std::error::Error>>
 {
     let exit = ExitObservation {

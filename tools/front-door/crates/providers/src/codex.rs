@@ -211,8 +211,11 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             E::Terminal,
         ],
         Event::Error { message } => {
-            vec![if message.to_ascii_lowercase().contains("reconnecting") {
+            let lower = message.to_ascii_lowercase();
+            vec![if lower.contains("reconnecting") {
                 E::TransientError
+            } else if lower.contains("too many requests") || lower.contains("status: 429") {
+                E::RateLimited { message }
             } else {
                 E::Error
             }]
