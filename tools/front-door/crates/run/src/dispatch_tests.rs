@@ -345,39 +345,41 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     Ok(())
 }
 
+/// Prepares a plan; no guardian ever runs it.
+struct Ready;
+impl Providers for Ready {
+    fn prepare(
+        &self,
+        _: &TaskRequest,
+        _: &str,
+        _: &LaunchPaths,
+        _: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        Ok(PreparedLaunch {
+            argv: vec!["fixture".into()],
+            environment: Vec::new(),
+            stdin: Vec::new(),
+            secret_input: None,
+            cwd: "/".into(),
+            route: route(),
+            skipped_routes: Vec::new(),
+            observed_head: None,
+            confinement: None,
+        })
+    }
+    fn decode(
+        &self,
+        _: &RouteRecord,
+        _: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        unreachable!("no guardian runs a provider in these tests")
+    }
+}
+
 #[test]
 fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult {
-    struct Ready;
-    impl Providers for Ready {
-        fn prepare(
-            &self,
-            _: &TaskRequest,
-            _: &str,
-            _: &LaunchPaths,
-            _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, String> {
-            Ok(PreparedLaunch {
-                argv: vec!["fixture".into()],
-                environment: Vec::new(),
-                stdin: Vec::new(),
-                secret_input: None,
-                cwd: "/".into(),
-                route: route(),
-                skipped_routes: Vec::new(),
-                observed_head: None,
-                confinement: None,
-            })
-        }
-        fn decode(
-            &self,
-            _: &RouteRecord,
-            _: &[u8],
-            _: &ExitObservation,
-            _: &std::path::Path,
-        ) -> std::result::Result<Decoded, String> {
-            unreachable!("the holder refuses before any guardian")
-        }
-    }
     let parent = AttemptId::from_bytes([9; 16]);
     let sealed = provenant_core::ActorId::from_bytes([7; 16]);
     let forged = provenant_core::ActorId::from_bytes([66; 16]);
@@ -532,6 +534,30 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
         assert_eq!(request["requester"], serde_json::to_value(sealed)?);
         assert_eq!(request["scope"], serde_json::to_value(scope)?);
     }
+    Ok(())
+}
+
+#[test]
+fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let mut run = input();
+    // An invalid capture plan makes the launch publish never-spawned
+    // evidence instead of starting a guardian.
+    run.request.tasks[0]
+        .profile
+        .knobs
+        .insert("lanes.silence_seconds".into(), 0.into());
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    assert!(store.held_attempts().is_empty());
+    store.start(run.run_id, &Ready, &|_, _| Ok(Vec::new()), &call)?;
+    assert_eq!(store.held_attempts(), vec![id]);
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    assert!(artifacts::read_sealed(&dir, "process-exit.json", RECORD_LIMIT)?.is_some());
     Ok(())
 }
 
