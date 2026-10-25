@@ -351,9 +351,13 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   deadline or supervisor signal cancels only this worker's children; normal
   parent completion leaves their custody intact. The host first stops every
   child it handed to a guardian, including one launched after its last scan,
-  through the directory and from the scope and requester it held in memory at
-  hand-off, so renaming the attempt directory cannot redirect the stop. The
-  child's record and launch summary do not decide the stop. It then stops the
+  through the attempt-directory descriptor, scope and requester it held at hand-off,
+  so renaming the attempt directory cannot redirect the stop. The
+  child's record and launch summary do not decide the stop. Superseded
+  generations retain their scopes for owner checks but drop their handles.
+  The host retains at most 64 held child handles and refuses further hand-offs
+  before custody acquisition, because lane-writable terminal records cannot
+  authorise releasing them. It then stops the
   accepted children that never reached a guardian, from their records. A failed
   scan read does not end the worker before that stop. The stop request itself
   still lands in the attempt directory, which the lane can write, so the lane

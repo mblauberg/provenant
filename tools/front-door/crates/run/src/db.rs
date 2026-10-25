@@ -68,10 +68,15 @@ impl Request<'_> {
         }
     }
 }
-/// A child's scope and attempt directory retained from hand-off.
+// Leave room below macOS's common 256-descriptor soft limit for SQLite,
+// publication and guardian launch. Lane-writable terminal records cannot
+// authorise releasing these handles, so refuse further hand-offs at this cap.
+pub(crate) const HELD_CHILD_LIMIT: usize = 64;
+
+/// Keep the scope after its handle is superseded: owner checks still need it.
 pub(crate) struct Held {
     pub(crate) scope: provenant_supervisor::custody::Scope,
-    pub(crate) directory: Directory,
+    pub(crate) handle: Option<provenant_supervisor::custody::CustodyHandle>,
 }
 
 /// One connection, one owning thread. Call budgets are supplied afresh and no
@@ -83,11 +88,39 @@ pub struct RunStore {
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     pub(crate) sealed_requester: Option<ActorId>,
-    /// Scopes and directories this host view handed to a guardian.
+    /// Scopes and bounded custody handles this host view handed to a guardian.
     pub(crate) launched: std::cell::RefCell<Vec<Held>>,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
+    pub(crate) fn check_held_capacity(&self, id: provenant_core::AttemptId) -> Result<()> {
+        let active = self
+            .launched
+            .borrow()
+            .iter()
+            .filter(|held| held.handle.is_some() && held.scope.attempt != id)
+            .count();
+        if active >= HELD_CHILD_LIMIT {
+            return Err(RunError::Validation("held child directory limit reached"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hold_child(&self, handle: provenant_supervisor::custody::CustodyHandle) {
+        let scope = handle.scope();
+        let mut launched = self.launched.borrow_mut();
+        for held in launched
+            .iter_mut()
+            .filter(|held| held.scope.attempt == scope.attempt)
+        {
+            held.handle = None;
+        }
+        launched.push(Held {
+            scope,
+            handle: Some(handle),
+        });
+    }
+
     /// The host's view of a child store, opened from the parent attempt's
     /// sealed holder context. The lane can write this store and its attempt
     /// summaries, so launch and the started attempt's owner use this requester

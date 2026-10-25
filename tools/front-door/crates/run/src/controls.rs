@@ -188,18 +188,11 @@ impl RunStore {
             .rev()
             .find(|held| held.scope.attempt == id)
         {
-            let requester = self.child_requester()?;
-            let stopped = held
-                .directory
-                .try_clone()
-                .map_err(|error| error.to_string())
-                .and_then(|dir| {
-                    custody::stop(
-                        &custody::hold(dir, held.scope, requester),
-                        StopReason::ExplicitCancellation,
-                    )
-                    .map_err(|error| error.to_string())
-                });
+            let Some(handle) = &held.handle else {
+                return Err(RunError::Validation("held child custody handle missing"));
+            };
+            let stopped = custody::stop(handle, StopReason::ExplicitCancellation)
+                .map_err(|error| error.to_string());
             return Ok(match stopped {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,

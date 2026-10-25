@@ -492,10 +492,11 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
             generation: started.generation,
         };
         // As hand-off holds it just before launching the guardian.
-        store.launched.borrow_mut().push(crate::db::Held {
+        store.hold_child(provenant_supervisor::custody::hold(
+            store.attempt_dir(run.run_id, id, false)?,
             scope,
-            directory: store.attempt_dir(run.run_id, id, false)?,
-        });
+            sealed,
+        ));
         // The lane rewrites the record, the launch summary and the stop.
         let mut record = store.record(id, &call)?;
         forge(&mut record);
@@ -559,10 +560,11 @@ fn held_stop_follows_the_handed_off_directory() -> TestResult {
         attempt: id,
         generation: started.generation,
     };
-    store.launched.borrow_mut().push(crate::db::Held {
+    store.hold_child(provenant_supervisor::custody::hold(
+        store.attempt_dir(run.run_id, id, false)?,
         scope,
-        directory: store.attempt_dir(run.run_id, id, false)?,
-    });
+        sealed,
+    ));
     let original = store
         .context
         .state_root
@@ -598,10 +600,124 @@ fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
     assert!(store.held_attempts().is_empty());
-    store.start(run.run_id, &Ready, &|_, _| Ok(Vec::new()), &call)?;
+    store.start_child(
+        run.run_id,
+        &run.request,
+        &Ready,
+        &|_, _| Ok(Vec::new()),
+        &call,
+    )?;
     assert_eq!(store.held_attempts(), vec![id]);
     let dir = store.attempt_dir(run.run_id, id, false)?;
     assert!(artifacts::read_sealed(&dir, "process-exit.json", RECORD_LIMIT)?.is_some());
+    let scope = store.launched.borrow()[0].scope;
+    let original = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let renamed = original.with_file_name(format!("{id}-renamed"));
+    std::fs::rename(&original, &renamed)?;
+    std::fs::DirBuilder::new().mode(0o700).create(&original)?;
+
+    assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
+    let request: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(renamed.join("cancel.json"))?)?;
+    assert_eq!(request["requester"], serde_json::to_value(sealed)?);
+    assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert!(std::fs::read_dir(&original)?.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let mut execution = context(temp.path())?;
+    execution.actor_id = sealed;
+    let store = RunStore::open(&execution, &call)?.with_sealed_requester(sealed);
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let directory = store.attempt_dir(run.run_id, id, false)?;
+    for index in 0..crate::db::HELD_CHILD_LIMIT {
+        store.hold_child(provenant_supervisor::custody::hold(
+            directory.try_clone()?,
+            provenant_supervisor::custody::Scope {
+                run: run.run_id,
+                attempt: AttemptId::from_bytes([u8::try_from(index + 32)?; 16]),
+                generation: 1,
+            },
+            sealed,
+        ));
+    }
+    let mut scope = store.launched.borrow()[0].scope;
+    // A replacement is allowed even at the cap. Its predecessor retains
+    // the scope needed for owner checks, but no longer retains a descriptor.
+    store.check_held_capacity(scope.attempt)?;
+    scope.generation += 1;
+    store.hold_child(provenant_supervisor::custody::hold(
+        directory.try_clone()?,
+        scope,
+        sealed,
+    ));
+    {
+        let held = store.launched.borrow();
+        assert_eq!(held[0].scope.generation, 1);
+        assert!(held[0].handle.is_none());
+        assert_eq!(
+            held.iter().filter(|held| held.handle.is_some()).count(),
+            crate::db::HELD_CHILD_LIMIT
+        );
+    }
+    assert_eq!(
+        store.cancel(scope.attempt, "stop", &call)?,
+        CancelReceipt::Requested
+    );
+    let request: serde_json::Value = serde_json::from_slice(
+        &artifacts::read_sealed(&directory, "cancel.json", RECORD_LIMIT)?.ok_or("missing stop")?,
+    )?;
+    assert_eq!(request["scope"], serde_json::to_value(scope)?);
+
+    let started = store.start_child(
+        run.run_id,
+        &run.request,
+        &Ready,
+        &|_, _| {
+            Err(RunError::Validation(
+                "holder context must not be built at capacity",
+            ))
+        },
+        &call,
+    )?;
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { attempt, reason, .. }]
+        if *attempt == id && reason.contains("held child directory limit reached"))
+    );
+    let record = store.record(id, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Rejected,
+            ..
+        }
+    ));
+    assert_eq!(record.provider_launched, Some(false));
+    assert!(!store.held_attempts().contains(&id));
+    assert!(artifacts::read_sealed(&directory, "launch.json", RECORD_LIMIT)?.is_none());
+    // Superseded scopes still prevent an owner forged in the run record.
+    let mut owner = store.run(run.run_id, &call)?;
+    owner.actor_id = provenant_core::ActorId::from_bytes([66; 16]);
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&owner)?, run.run_id.to_string()],
+    )?;
+    assert!(matches!(
+        store.run(run.run_id, &call),
+        Err(RunError::Validation("child record names another owner"))
+    ));
     Ok(())
 }
 
@@ -623,10 +739,11 @@ fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResu
         attempt: late,
         generation: started.generation,
     };
-    store.launched.borrow_mut().push(crate::db::Held {
+    store.hold_child(provenant_supervisor::custody::hold(
+        store.attempt_dir(batch.run_id, late, false)?,
         scope,
-        directory: store.attempt_dir(batch.run_id, late, false)?,
-    });
+        sealed,
+    ));
     let accepted = std::collections::BTreeSet::from([(queued, 1)]);
     assert!(store.stop_children(accepted, "stop", &call).is_empty());
     let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
@@ -666,14 +783,15 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
     };
     rename(&record)?;
     assert!(store.record(id, &call).is_ok());
-    store.launched.borrow_mut().push(crate::db::Held {
-        scope: provenant_supervisor::custody::Scope {
+    store.hold_child(provenant_supervisor::custody::hold(
+        store.attempt_dir(run.run_id, id, false)?,
+        provenant_supervisor::custody::Scope {
             run: run.run_id,
             attempt: id,
             generation: started.generation,
         },
-        directory: store.attempt_dir(run.run_id, id, false)?,
-    });
+        sealed,
+    ));
     let renamed = |result: Result<()>| {
         matches!(
             result,
