@@ -4,15 +4,15 @@
 //! host keeps only a placement record under `fabric/remote-runs/`, never a
 //! copy of the peer's run state.
 use super::{Condition, Edge, Fail, Reply, Status, condition_met, render_lanes, reply, state_name};
-use crate::{Cancel, Lanes, Output, Part, fabric::Context};
+use crate::{Cancel, Dispatch, Lanes, Output, Part, fabric::Context};
 use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, HostId, OperationId, Roots, RunId, TaskId,
     WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::{
     coordination::facade::{
-        AttemptTarget, FacadeError, OutputBytes, OutputInput, OutputPart, OutputResult,
-        RoutePreference, RunInput, SubmitInput, SubmittedTask,
+        AttemptTarget, FacadeError, NewWorktree, OutputBytes, OutputInput, OutputPart,
+        OutputResult, RoutePreference, RunInput, SubmitInput, SubmittedTask,
     },
     graph::AccessMode,
     hosts::{PeerAction, PeerResult},
@@ -56,6 +56,8 @@ pub(super) struct Batch {
     pub(super) concurrency: Option<u64>,
     pub(super) knobs: Vec<String>,
     pub(super) provider_timeout: u64,
+    /// A writer's worktree, created by the peer in its own clone.
+    pub(super) new_worktree: Option<NewWorktree>,
 }
 
 /// Where a run lives. The peer owns everything else about it.
@@ -140,6 +142,8 @@ fn peer_fail(error: FacadeError) -> Fail {
         FacadeError::Busy => (Status::Refused, "QUEUE_FULL"),
         FacadeError::ConfinementRefused => (Status::Refused, "REFUSED"),
         FacadeError::WorktreeMissing => (Status::Invalid, "WORKTREE_MISSING"),
+        FacadeError::BaseUnreachable => (Status::Refused, "BASE_UNREACHABLE"),
+        FacadeError::BranchExists => (Status::Refused, "BRANCH_EXISTS"),
         FacadeError::LaneDepth => (Status::Refused, "LANE_DEPTH"),
         FacadeError::OwnerUnavailable => (Status::Refused, "UNSUPPORTED"),
         FacadeError::Cancelled => (Status::Error, "CANCELLED"),
@@ -368,6 +372,34 @@ pub(super) fn unknown_host(host: &str) -> Fail {
     )
 }
 
+/// The worktree a peer writer asks the peer to create. One writer per
+/// worktree, so a manifest cannot share it.
+pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
+    if command.input.manifest.is_some() {
+        return Err(unsupported("a manifest with a peer writer"));
+    }
+    let (Some(branch), Some(base)) = (&command.branch, &command.base) else {
+        return Err(Fail::new(
+            Status::Invalid,
+            "WORKTREE_NOT_APPLICABLE",
+            "--worktree names a path on this host; a peer writer takes --branch and --base",
+        ));
+    };
+    if provenant_confinement::repo::GitRefName::branch(branch).is_err()
+        || provenant_confinement::repo::GitRevision::new(base).is_err()
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            "INVALID",
+            "invalid --branch or --base",
+        ));
+    }
+    Ok(NewWorktree {
+        base: base.clone(),
+        branch: branch.clone(),
+    })
+}
+
 pub(super) fn dispatch(
     edge: &Edge<'_>,
     host: &str,
@@ -384,13 +416,18 @@ pub(super) fn dispatch(
         .provider_timeout
         .checked_mul(1000)
         .ok_or_else(|| Fail::new(Status::Invalid, "INVALID", "provider timeout"))?;
+    let access = match batch.new_worktree {
+        Some(_) => AccessMode::WorktreeWrite,
+        None => AccessMode::ReadOnly,
+    };
     let tasks = batch
         .tasks
         .into_iter()
         .map(|task| SubmittedTask {
             account: task.account,
-            access: AccessMode::ReadOnly,
+            access,
             worktree: None,
+            new_worktree: batch.new_worktree.clone(),
             prompt: task.prompt,
             route: RoutePreference {
                 adapter: None,
@@ -423,6 +460,7 @@ pub(super) fn dispatch(
     if receipt.operation_id != batch.operation_id
         || receipt.targets.is_empty()
         || receipt.targets.iter().any(|t| t.host != Some(host))
+        || receipt.worktree.is_some() != (access == AccessMode::WorktreeWrite)
     {
         return Err(corrupt());
     }
@@ -463,6 +501,18 @@ pub(super) fn dispatch(
     if let Some(met) = met {
         data["condition_met"] = json!(met);
     }
+    // Undelivered commits stay in the peer's worktree; say where.
+    let human = match &receipt.worktree {
+        Some(worktree) => {
+            data["worktree"] =
+                json!({ "host": host, "path": worktree.path, "branch": worktree.branch });
+            format!(
+                "worktree {} {} (on the peer)\n{human}",
+                worktree.branch, worktree.path
+            )
+        }
+        None => human,
+    };
     Ok((data, format!("run {run_id}\n{human}"), met == Some(false)))
 }
 
