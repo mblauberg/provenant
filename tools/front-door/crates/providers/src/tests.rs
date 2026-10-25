@@ -475,6 +475,37 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
 }
 
 #[test]
+fn codex_oversized_command_output_is_skipped_but_other_oversize_fails_closed()
+-> Result<(), ProviderError> {
+    // Shape of run 358cbf47 (#1514): a 1.17 MB command_execution item.
+    let filler = "x".repeat(1_200_000);
+    let big = format!(
+        "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"item_20\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'cat src/main.rs'\",\"aggregated_output\":\"{filler}\",\"exit_code\":0,\"status\":\"completed\"}}}}\n"
+    );
+    let stream = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"t1\"}}\n{big}{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":2}}}}\n"
+    );
+    let mut state = codex::Codex.stream(None)?;
+    for chunk in stream.as_bytes().chunks(65_536) {
+        codex::Codex.observe(&mut state, chunk)?;
+    }
+    assert_eq!(
+        codex::Codex.finish(state, EXIT)?.status(),
+        OutcomeStatus::Success
+    );
+    // An oversized agent_message still fails closed.
+    let answer = format!(
+        "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i\",\"type\":\"agent_message\",\"text\":\"{filler}\"}}}}\n"
+    );
+    let mut state = codex::Codex.stream(None)?;
+    assert!(matches!(
+        codex::Codex.observe(&mut state, answer.as_bytes()),
+        Err(ProviderError::Overflow)
+    ));
+    Ok(())
+}
+
+#[test]
 fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 -> Result<(), ProviderError> {
     for raw in [
