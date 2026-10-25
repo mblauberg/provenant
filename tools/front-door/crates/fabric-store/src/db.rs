@@ -305,7 +305,12 @@ fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 fn companions(directory: &Directory, path: &std::path::Path, request: &Request<'_>) -> Result<()> {
-    for name in ["fabric.sqlite3", "fabric.sqlite3-wal", "fabric.sqlite3-shm"] {
+    for name in [
+        "fabric.sqlite3",
+        "fabric.sqlite3-wal",
+        "fabric.sqlite3-shm",
+        "fabric.sqlite3-journal",
+    ] {
         companion(request, path.join(name), || {
             directory.metadata_at(OsStr::new(name), false)
         })?;
@@ -317,9 +322,14 @@ fn companion(
     path: PathBuf,
     mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
 ) -> Result<()> {
-    // Mirrored in crates/run/src/db.rs::companion; keep unlink handling in sync.
+    // Mirrored in crates/run/src/db.rs::companion; keep metadata checks and
+    // unlink handling in sync.
     request.wait(|| match metadata() {
-        Ok(meta) if meta.kind == FileKind::Regular && meta.mode & 0o077 == 0 => {
+        Ok(meta)
+            if meta.kind == FileKind::Regular
+                && meta.mode & 0o077 == 0
+                && meta.uid == provenant_supervisor::fs::effective_uid() =>
+        {
             match meta.links {
                 1 => Ok(Some(())),
                 // SQLite's last connection can unlink WAL/SHM files while
@@ -367,6 +377,64 @@ mod tests {
         fn wait(&self, _: DurationMicros, _: &CancelToken) {
             self.0.set(self.0.get() + 1);
         }
+    }
+
+    #[test]
+    fn companion_refuses_another_owner() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let backoff = CountingWait::default();
+        let request = Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &cancel,
+            backoff: &backoff,
+        };
+        for name in [
+            "fabric.sqlite3",
+            "fabric.sqlite3-wal",
+            "fabric.sqlite3-shm",
+            "fabric.sqlite3-journal",
+        ] {
+            let metadata = Metadata {
+                uid: provenant_supervisor::fs::effective_uid().wrapping_add(1),
+                ..directory.create_new(OsStr::new(name))?.metadata()?
+            };
+            let path = temp.path().join(name);
+            assert!(matches!(
+                companion(&request, path.clone(), || Ok(metadata)),
+                Err(Error::UnsafePath(p)) if p == path
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn companions_refuse_a_stray_journal() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let path = temp.path().join("fabric.sqlite3-journal");
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let backoff = CountingWait::default();
+        let request = Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &cancel,
+            backoff: &backoff,
+        };
+        // Entering WAL can leave a valid rollback journal for recovery.
+        directory.create_new(OsStr::new("fabric.sqlite3-journal"))?;
+        std::fs::write(&path, b"rollback journal data")?;
+        companions(&directory, temp.path(), &request)?;
+        directory.unlink(OsStr::new("fabric.sqlite3-journal"))?;
+        std::os::unix::fs::symlink(temp.path().join("missing"), &path)?;
+        let error = companions(&directory, temp.path(), &request).unwrap_err();
+        assert!(matches!(&error, Error::UnsafePath(p) if p == &path));
+        assert!(error.to_string().contains("fabric.sqlite3-journal"));
+        Ok(())
     }
 
     #[test]
@@ -438,6 +506,10 @@ mod tests {
             },
             Metadata {
                 mode: 0o644,
+                ..safe
+            },
+            Metadata {
+                uid: safe.uid.wrapping_add(1),
                 ..safe
             },
         ] {
