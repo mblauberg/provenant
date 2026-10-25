@@ -188,10 +188,12 @@ final head and open a pull request after verifying it.
 | `check` | `config`, `install [--source ABS]`, `harness`, `release [--base OID --head OID]` and `writing PATHS… [--rules general\|academic\|legal]` | Each takes `--limit N` (1 to 100, default 50) and `--cursor TOKEN`. |
 | `internal supervise` | hidden | Launch handshake for run's scheduler and attempt guardian. Takes zero or five private descriptor numbers; `--json` refused. |
 
-`chair switch` refuses paths containing a single quote (`'`) or backslash (`\`)
-when building a handoff command, so quoting is safe in sh, bash, zsh and fish.
-An executable path containing a double quote also refuses because its settings
-JSON requires a backslash escape.
+`chair switch` quotes each handoff argument in single quotes and writes any
+apostrophe as a double-quoted `'`, which sh, bash, zsh and fish all read
+literally. It refuses a path containing a backslash (`\`), which fish treats as
+an escape inside single quotes. An executable path containing a single or
+double quote also refuses, because the hook command in the settings JSON would
+need a backslash escape.
 
 `worktree remove` takes either a `NAME` or `--merged`, never both, and `--discard`
 only with a `NAME`. `--merged` requires `--integration` (a branch or remote-tracking

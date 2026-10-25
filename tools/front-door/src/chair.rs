@@ -117,13 +117,26 @@ fn cached(roots: &Roots, key: &str) -> Option<QuotaSnapshot> {
     record.snapshot
 }
 fn quote(text: &str) -> Result<String, Error> {
-    // These characters have incompatible single-quote rules across shells.
-    if text.contains(['\'', '\\']) {
-        return Err(
-            "chair handoff cannot quote text containing a single quote or backslash".into(),
-        );
+    // Fish reads a backslash inside single quotes as an escape; other shells do not.
+    if text.contains('\\') {
+        return Err("chair handoff cannot quote text containing a backslash".into());
     }
-    Ok(format!("'{text}'"))
+    if text.is_empty() {
+        return Ok("''".into());
+    }
+    // Every supported shell reads a double-quoted apostrophe literally. Empty
+    // parts are skipped so no two single quotes are adjacent (zsh RC_QUOTES).
+    Ok(text
+        .split('\'')
+        .map(|part| {
+            if part.is_empty() {
+                String::new()
+            } else {
+                format!("'{part}'")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\"'\""))
 }
 fn terminal_path(path: &Path) -> Result<&str, Error> {
     path.to_str()
@@ -175,14 +188,6 @@ fn command_with_executable(
         "SessionStart":[{"hooks":[{"type":"command","command":hook("chair-start")?,"timeout":5}]}],
         "UserPromptSubmit":[{"hooks":[{"type":"command","command":hook("chair-prompt")?,"timeout":10}]}]
     }});
-    // Hook commands contain our own single-quote delimiters. Preserve them as
-    // double-quoted apostrophes between strict single-quoted JSON fragments.
-    let settings = settings
-        .to_string()
-        .split('\'')
-        .map(quote)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\"'\"");
     let prompt = format!(
         "Continue the chair handoff from checkpoint {}. Read it and its state/handoff file first. Inspect the listed Fabric lane IDs in the run store before acting; collect existing results and never re-run completed lanes. Preserve the originating authority limits.",
         checkpoint
@@ -192,7 +197,7 @@ fn command_with_executable(
         quote(terminal_path(&context.cwd)?)?,
         quote(terminal_path(target.directory())?)?,
         quote(terminal_path(context.roots.state.as_path())?)?,
-        settings,
+        quote(&settings.to_string())?,
         quote(&prompt)?
     ))
 }
@@ -594,7 +599,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir()?;
         let home = tmp.path().canonicalize()?;
-        let cwd = home.join("a b/$x");
+        let cwd = home.join("a b/$x's");
         std::fs::create_dir_all(&cwd)?;
         let context = Context {
             roots: RootInputs::new(home.clone(), cwd.clone()).resolve(&Resolver)?,
@@ -641,9 +646,11 @@ mod tests {
     }
 
     #[test]
-    fn chair_quote_refuses_shell_dependent_escapes() -> Result<(), super::Error> {
+    fn chair_quote_encodes_apostrophes_and_refuses_backslashes() -> Result<(), super::Error> {
         assert_eq!(super::quote("/a b/$x")?, "'/a b/$x'");
-        assert!(super::quote("/a'b").is_err());
+        assert_eq!(super::quote("/a'b")?, "'/a'\"'\"'b'");
+        assert_eq!(super::quote("'a''")?, "\"'\"'a'\"'\"\"'\"");
+        assert_eq!(super::quote("")?, "''");
         assert!(super::quote(r"/a\b").is_err());
         let settings = serde_json::json!({"command": "/a\"b"});
         assert!(super::quote(&settings.to_string()).is_err());
