@@ -202,14 +202,22 @@ home or tmp grants.
   read-only default), `local` (adds localhost and the Postgres socket) or
   `open` (adds any outbound, the writer default).
 - **Toolchains.** Lanes use the user's own toolchains in place. `~/.cargo` and
-  `~/.rustup` are readable with `CARGO_HOME`, `RUSTUP_HOME` and
-  `RUSTUP_AUTO_INSTALL=0`. The Cargo registry and Git caches, the pnpm and npm
-  stores and `~/.cache/node` are writable in place, so a lane can poison a
-  shared package cache; that risk is accepted for working builds. Executables
-  (`~/.cargo/bin`, `~/.rustup/toolchains`) are read and exec only, except
-  `~/.cache/node/corepack` and a writer's `--write-root` and
-  `domains.run.writer_writes` roots, which are also executable. Homebrew
-  prefixes are readable except `var/`.
+  `~/.rustup` are readable with `RUSTUP_HOME` and `RUSTUP_AUTO_INSTALL=0`.
+  No lane may write a store the host later runs unconfined: the Cargo registry
+  and Git caches and lock files, `~/Library/pnpm`, `~/Library/Caches/pnpm`,
+  `~/.npm` and `~/.cache/node` are never writable, because a poisoned
+  `build.rs`, planted `PNPM_HOME` executable or altered Corepack package would
+  run on the host's next build. A writer's cache instead holds private
+  `cargo-home`, `npm`, `pnpm-home`, `pnpm-store`, `pnpm-cache` and `corepack`
+  directories (with both the `npm_config_*` and `pnpm_config_*` store and
+  cache names set), so writers download cold. A read-only lane keeps a scratch
+  `CARGO_HOME` whose `registry` and `git` link to the shared stores read-only,
+  so offline builds use extracted sources, and reads and executes the host's
+  existing `~/.cache/node/corepack` without write. Executables
+  (`~/.cargo/bin`, `~/.rustup/toolchains`) are read and exec only, except the
+  Corepack cache and a writer's `--write-root` and `domains.run.writer_writes`
+  roots, which are also executable. Homebrew prefixes are readable except
+  `var/`.
 - **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
   `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
   grants.
