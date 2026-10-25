@@ -374,7 +374,18 @@ pub struct InstallPlan {
     actions: Vec<Action>,
     manual_includes: Vec<ManualInclude>,
 }
+/// Re-previews allowed after a live harness rewrites its own JSON file.
+const JSON_DRIFT_RETRIES: usize = 2;
 impl InstallPlan {
+    /// Whether `path` is a harness-owned JSON file that install merges keys
+    /// into, such as `.claude.json`, which a running harness rewrites freely.
+    fn merges_json_into(&self, path: &Path) -> bool {
+        path.extension().is_some_and(|ext| ext == "json")
+            && self.before.harness.owned.iter().any(|entry| {
+                matches!(entry.expected, OwnedValue::Selector { .. })
+                    && entry.path.to_path_buf().is_ok_and(|owned| owned == path)
+            })
+    }
     pub fn findings(&self) -> &[InstallFinding] {
         &self.before.harness.findings
     }
@@ -1209,6 +1220,31 @@ pub fn install(
         findings: plan.findings().to_vec(),
         dry_run: false,
     })
+}
+/// Preview and apply, repeating both up to twice when the only change since
+/// preview is a harness-owned JSON file install merges keys into. A running
+/// harness rewrites such files often; any other change still refuses.
+pub fn plan_and_install(
+    release: &Release,
+    targets: &Targets,
+    context: &InstallContext<'_>,
+    reporter: &mut dyn InstallReporter,
+    smoke: &dyn ReleaseSmoke,
+    dry_run: bool,
+) -> Result<InstallOutcome, InstallError> {
+    let mut retries = 0;
+    loop {
+        let snapshots = Snapshots::capture(release, targets, context.fs)?;
+        let plan = plan_install(release.clone(), targets.clone(), snapshots)?;
+        match install(&plan, context, reporter, smoke, dry_run) {
+            Err(InstallError::Drift(path))
+                if retries < JSON_DRIFT_RETRIES && plan.merges_json_into(&path) =>
+            {
+                retries += 1;
+            }
+            result => return result,
+        }
+    }
 }
 pub(crate) fn recheck(
     path: &Path,

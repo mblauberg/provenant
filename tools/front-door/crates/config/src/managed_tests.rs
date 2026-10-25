@@ -3175,3 +3175,97 @@ fn inspect_install_binds_changed_tampered_bytes_with_identical_metadata_and_find
     );
     assert_ne!(first.input_digest, second.input_digest);
 }
+
+/// Rewrites a file on early previews, as a live harness would between the
+/// plan and the apply.
+struct Racing {
+    path: PathBuf,
+    rewrites: usize,
+    previews: usize,
+}
+impl InstallReporter for Racing {
+    fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+        self.previews += 1;
+        if self.previews <= self.rewrites {
+            fs::write(&self.path, format!("{{\"startups\":{}}}", self.previews))?;
+        }
+        Ok(())
+    }
+}
+fn claude_fixture() -> Fixture {
+    let mut f = Fixture::new();
+    f.targets.harnesses.push(HarnessTarget {
+        harness: Harness::Claude,
+        mcp_file: f.home.join(".claude.json"),
+        hook_file: None,
+        skills_dir: f.home.join("claude/skills"),
+        instruction: None,
+    });
+    fs::write(f.home.join(".claude.json"), b"{}").unwrap();
+    f
+}
+#[test]
+fn live_harness_json_rewrite_between_preview_and_apply_is_retried() {
+    let f = claude_fixture();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut reporter = Racing {
+        path: f.home.join(".claude.json"),
+        rewrites: 2,
+        previews: 0,
+    };
+    plan_and_install(
+        &f.release(),
+        &f.targets,
+        &context(&clock, &cancel),
+        &mut reporter,
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert_eq!(reporter.previews, 3);
+    let merged = fs::read_to_string(f.home.join(".claude.json")).unwrap();
+    assert!(merged.contains("startups"), "{merged}");
+    assert!(merged.contains("mcpServers"), "{merged}");
+}
+#[test]
+fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
+    let f = claude_fixture();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut reporter = Racing {
+        path: f.home.join(".claude.json"),
+        rewrites: 10,
+        previews: 0,
+    };
+    let err = plan_and_install(
+        &f.release(),
+        &f.targets,
+        &context(&clock, &cancel),
+        &mut reporter,
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Drift(_)));
+    assert_eq!(reporter.previews, 3);
+
+    let f = claude_fixture();
+    fs::create_dir_all(&f.targets.bin_dir).unwrap();
+    let mut reporter = Racing {
+        path: f.targets.bin_dir.join("provenant"),
+        rewrites: 10,
+        previews: 0,
+    };
+    let err = plan_and_install(
+        &f.release(),
+        &f.targets,
+        &context(&clock, &cancel),
+        &mut reporter,
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Drift(_)));
+    assert_eq!(reporter.previews, 1);
+}
