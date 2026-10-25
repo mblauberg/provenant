@@ -10,7 +10,7 @@ resuming context; it is not a second source of task status.
 |---|---|---|
 | Mission goal, constraints, authority, user gates, and `STATUS` | User-owned goal or project scope | Reopen that owner before acting |
 | Active and queued work, task assignments, run outputs, and admission | Run and Fabric | `provenant lanes`, Fabric tasks, and `provenant output` |
-| Interrupted or orphaned work | Run | `provenant reconcile`, then `provenant resume` |
+| Interrupted or orphaned work | Run | `provenant reconcile`, then `fabric_run` `resume` |
 | Short context for one host session | Workflow session checkpoint, keyed by host session ID | SessionStart injects only that key, or explicit missing/stale status |
 
 Do not create or maintain a manual queue, item lease, fixed set of state files,

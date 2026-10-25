@@ -128,7 +128,7 @@ be aware that a repeated send repeats the pane effect.
 
 ## Send answer-bearing work
 
-Create the task with `provenant fabric task create`, then send its request
+Create the task with `fabric_task`'s `create` operation, then send its request
 with `fabric_mail`'s `send` operation and `task`. Give each mutation a unique
 `operation_id`; a retry reuses that ID and identical input. Replies use
 `reply_to` and identify the output artifact. A deadline in the run
@@ -220,8 +220,8 @@ means integration or detection is not yet reliable.
 
 For answer-bearing Fabric work, read the correlated reply with
 `fabric_mail`'s `read` operation (`after`, `limit`) and verify its artifact.
-When there is no local work, observe the project event stream with
-`provenant fabric events read --after SEQ --wait SECONDS`, then read the inbox
+When there is no local work, observe the project activity events with
+`fabric_events`'s `read` operation (`after`, `wait_ms`), then read the inbox
 again. Each wait has an explicit budget. A deadline does not cancel work;
 pane state remains advisory and never proves completion.
 

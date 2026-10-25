@@ -14,8 +14,7 @@ loop driver.
   `orchestrate`; read results with `provenant output`.
 - After an interruption, run `provenant reconcile --id RUN`, inspect the exact
   task and artifact, and resume the exact attempt with
-  `provenant resume RUN/TASK/ATTEMPT --operation-id ID (--prompt-file PATH |
-  --prompt-stdin)`. Preserve partial work and retry only missing or failed
+  `fabric_run`'s `resume` operation (`target: { attempt }`, `expected_generation`, `operation_id`, `prompt`). Preserve partial work and retry only missing or failed
   tasks within their owner's retry bounds.
 - Use native subagents for independent work when the governing orchestration
   contract allows it. Preserve task scope, write authority, artifact paths,

@@ -43,5 +43,5 @@ unavailable review legs with their reason. Decisions that need a durable
 record go to the existing project owner.
 
 A checkpoint is navigation context, not proof of completion or permission.
-After `provenant resume`, reconcile live tasks and reopen the cited evidence.
+After `fabric_run` `resume`, reconcile live tasks and reopen the cited evidence.
 Do not repeat completed work just because a new session lacks its transcript.

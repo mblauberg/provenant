@@ -43,8 +43,7 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
    not bypass a user gate, widen the build ceiling, or infer authority from a
    worker's result.
 6. When work is interrupted, use `provenant reconcile --id RUN`, then resume
-   the exact attempt with `provenant resume RUN/TASK/ATTEMPT --operation-id ID
-   (--prompt-file PATH | --prompt-stdin)`. Preserve partial outputs and verify
+   the exact attempt with `fabric_run`'s `resume` operation (`target: { attempt }`, `expected_generation`, `operation_id`, `prompt`). Preserve partial outputs and verify
    the target before retrying.
 7. Before compaction or a substantial handoff, save a bounded Markdown
    checkpoint for the actual host session with
