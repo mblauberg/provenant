@@ -30,7 +30,10 @@ Host builds use a fresh target directory. Confined writers use the separate
 verified worktree and repository identities. It also holds the lane's private
 Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry`,
 `~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
-a lane cache for a host build.
+a lane cache for a host build. `provenant worktree remove` deletes the caches
+of worktrees that no longer exist, and `provenant gc [--dry-run] [--idle-days N]`
+also removes caches idle for N days (default 7), sparing any whose worktree has a
+live writer.
 
 The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
 workspace's `target/release/provenant` without that variable. Pass
