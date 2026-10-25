@@ -60,6 +60,51 @@ fn register_pair(rig: &TestRig) -> Result {
     )
 }
 #[test]
+fn chair_switch_session_id_prefers_flag_then_code_then_legacy_environment() -> Result {
+    let mut rig = configured()?;
+    for (code_id, legacy_id, explicit_id, expected) in [
+        (Some("code-session"), None, None, "code-session"),
+        (
+            Some("code-session"),
+            Some("legacy-session"),
+            None,
+            "code-session",
+        ),
+        (None, Some("legacy-session"), None, "legacy-session"),
+        (
+            Some("code-session"),
+            Some("legacy-session"),
+            Some("explicit-session"),
+            "explicit-session",
+        ),
+    ] {
+        rig.env
+            .retain(|(key, _)| key != "CLAUDE_CODE_SESSION_ID" && key != "CLAUDE_SESSION_ID");
+        for (key, value) in [
+            ("CLAUDE_CODE_SESSION_ID", code_id),
+            ("CLAUDE_SESSION_ID", legacy_id),
+        ] {
+            if let Some(value) = value {
+                rig.env.push((key.into(), value.into()));
+            }
+        }
+        let mut args = vec!["chair", "switch", "--to", "spare", "--dry-run", "--json"];
+        if let Some(id) = explicit_id {
+            args.extend(["--session-id", id]);
+        }
+        let output = rig.command(&args)?;
+        assert_eq!(code(&output), 0);
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let checkpoint = value["data"]["checkpoint"].as_str().ok_or("checkpoint")?;
+        assert!(
+            checkpoint.ends_with(&format!("/{expected}.json")),
+            "{checkpoint}"
+        );
+    }
+    assert!(!rig.state.join("chair-switch").exists());
+    Ok(())
+}
+#[test]
 fn chair_dry_run_reports_registered_target_and_creates_no_checkpoint() -> Result {
     let mut rig = configured()?;
     let output = rig.command(&["chair", "switch", "--to", "spare", "--dry-run", "--json"])?;

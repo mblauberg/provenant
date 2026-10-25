@@ -51,8 +51,8 @@ The registry marks these knobs `wired`: `chair.auto_switch`,
 `review.cross_family`, `review.rereview_scope`, `review.polish` and
 `fabric.accept_handoff`. The other
 eight are advisory and do not alter Rust runtime behaviour. Use `config show`
-to see each knob's status and source. Install registrations with
-`provenant install --dry-run`
+to see each knob's status and source. Preview install registrations with
+`provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 
 ## Writer extra write paths
@@ -106,12 +106,12 @@ Claude chair switching is opt-in and has no daemon. Register each account with
 `provenant accounts register <label> --adapter claude --directory <dir>`.
 Registrations live in the selected state directory's `config.toml`, alongside
 optional quota metadata such as `--plan`, `--priority` and `--billing-anchor`.
-Each directory must already exist and be signed in separately. Labels and
-directories must be distinct, with no nested account directories. The current
-`CLAUDE_CONFIG_DIR` must match a registration;
-when unset, `~/.claude` may be registered as the source only. Targets must use
-fixed identities such as `~/.claude-<label>`; the rotating `~/.claude` directory
-is refused as a target. Credentials and settings are never copied between directories.
+Each Claude account directory must be exactly `~/.claude-<label>`, already exist
+and be signed in separately. Labels and directories must be distinct, with no
+nested account directories. The current `CLAUDE_CONFIG_DIR` must match a
+registration. When unset, `~/.claude` is the sign-in source only; it cannot be
+registered or used as a switch target. Credentials and settings are never copied
+between directories.
 
 ```sh
 provenant config set chair.switch_accounts '["work-spare","personal-spare"]'
@@ -124,8 +124,10 @@ provenant chair switch --to work-spare --session-id <host-session-id>
 `chair.auto_switch` defaults to `false`; `chair.switch_accounts` defaults to an
 empty list, which permits no targets. A manual switch bypasses the automatic
 trigger and enable flag, but still requires an allowed account with headroom.
-A real manual handoff requires `--session-id <host-session-id>` or
-`CLAUDE_SESSION_ID`, so retries cannot launch another successor for the same source.
+A real manual handoff requires `--session-id <host-session-id>` or an environment
+session ID: `CLAUDE_CODE_SESSION_ID` first, then `CLAUDE_SESSION_ID`. The flag
+takes precedence. `workflow session handoff` uses the same order. This keeps
+retries from launching another successor for the same source.
 A dry run reports the target, planned checkpoint path and exact launch command
 without writing a checkpoint or opening a pane.
 
