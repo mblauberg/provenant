@@ -724,6 +724,28 @@ mod tests {
         ]);
     }
     #[test]
+    fn disk_report_accepts_globals_and_has_no_mutation_flags() {
+        valid(&["disk", "report"]);
+        valid(&[
+            "--json",
+            "--state-dir",
+            "/fixture/state",
+            "disk",
+            "report",
+            "--project",
+            "/fixture/repo",
+        ]);
+        let ParseOutcome::Invocation(invocation) = parsed(&["disk", "report", "--json"]) else {
+            panic!("disk report should parse")
+        };
+        assert_eq!(invocation.leaf, "disk report");
+        assert!(matches!(invocation.command, Command::Disk(Disk::Report)));
+        invalid(&["disk"]);
+        invalid(&["disk", "delete"]);
+        invalid(&["disk", "report", "--force"]);
+        invalid(&["disk", "report", "--dry-run"]);
+    }
+    #[test]
     fn manifest_and_writer_authority_do_not_mix() {
         valid(&[
             "route",

@@ -93,6 +93,9 @@ pub enum Command {
     Worktree(Worktree),
     /// Remove orphaned and idle lane build caches
     Gc(Gc),
+    /// Inspect disk use without changing files
+    #[command(subcommand)]
+    Disk(Disk),
     /// Mine, verify and run benchmark tasks
     #[command(subcommand)]
     Bench(crate::bench::Bench),
@@ -523,6 +526,11 @@ pub enum Worktree {
     List,
     /// Remove a worktree, or all merged ones
     Remove(Remove),
+}
+#[derive(Debug, Subcommand)]
+pub enum Disk {
+    /// Report disk use and reclaim classifications without changing files
+    Report,
 }
 #[derive(Debug, Args)]
 pub struct Gc {

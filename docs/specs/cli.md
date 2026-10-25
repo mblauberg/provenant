@@ -2,6 +2,10 @@
 
 ## Purpose and ownership
 
+`disk report` adds a read-only storage inventory using the existing globals and
+result envelope. Its classes, JSON fields and measurement limits are specified
+in [Disk report](disk.md).
+
 People, skills, hooks and CI use one executable, `provenant`, to start work,
 inspect durable results and apply policy checks. The `cli` crate parses
 arguments, calls typed library operations and renders typed results; the binary
@@ -68,6 +72,7 @@ provenant
   telemetry stats | trace
   quota show | display | tick
   worktree create | list | remove
+  disk report
   workflow review | receipt (show | save) | session (save | show | handoff)
   check config | install | harness | release | writing
   hook claude (pre-tool-use | pre-compact | compact | chair-prompt | chair-start)
@@ -80,7 +85,7 @@ Global options are accepted before or after the subcommand:
 | Option | Meaning |
 | --- | --- |
 | `--help`, `--version` | Pure output, exit 0, except that `--help` on a hidden command (`internal` and its subcommands, `fabric peer`, `fabric peer-agent`) exits 2 as an unknown command. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `config show|set|unset` and `workflow` print pretty JSON; `hosts doctor` and the remaining leaves print their own text. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree`, `disk report` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `config show|set|unset` and `workflow` print pretty JSON; `hosts doctor` and the remaining leaves print their own text. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 
@@ -173,6 +178,7 @@ final head and open a pull request after verifying it.
 | `telemetry` | `stats [--usage] [--since] [--until] [--run-id] [--detail]`; `trace [--out FILE] [--since] [--run RUN]` | `trace --out` defaults to `provenant-trace.json` in the current directory. Semantics in [telemetry](telemetry.md). |
 | `worktree` | `create BRANCH [--base REV]`; `list`; `remove NAME [--discard]`; `remove --merged --integration REF (--branch NAME… \| --since OID)` | Semantics in [supervisor](supervisor.md#worktrees). |
 | `gc` | `[--dry-run] [--idle-days N]` | Removes lane cargo caches whose owner worktree is gone, or with no file written for N days (1 to 3650, default 7). Skips caches whose worktree has a live or unobservable writer. Reports removed paths and bytes freed; `--dry-run` deletes nothing. |
+| `disk` | `report` | Read-only storage inventory; see [disk](disk.md) for measurement limits and JSON fields. |
 | `fabric …` | Fabric's own clap subtree, mounted unchanged | Leaves and requests are in [fabric](fabric.md#cli-and-mcp-surfaces). The CLI supplies only the global options, envelope, exits and help entries. `fabric mcp [--client claude\|codex\|cursor\|agy\|opencode]` serves MCP on stdio. |
 | `workflow …` | Workflow's own clap subtree, mounted unchanged | `review --request FILE\|-`, `receipt show\|save`, `session save\|show` and `session handoff`; see [workflow](workflow.md#cli-and-hooks). |
 | `workflow session handoff` | `--to HOST --account LABEL [--note TEXT]… [--attach PATH]… [--prompt-file PATH] [--no-checkpoint] [--provider claude] [--model MODEL] [--wip \| --allow-dirty] [--dry-run] [--no-launch] [--session-id ID]` | Hands the chair or task session to a fresh Claude session on a peer host. When `--session-id` is absent, it reads `CLAUDE_CODE_SESSION_ID`, then `CLAUDE_SESSION_ID`. `--wip` conflicts with `--allow-dirty`, attachments total at most 512 KiB and `--provider` accepts only `claude`. The target host must enable `fabric.accept_handoff`. |

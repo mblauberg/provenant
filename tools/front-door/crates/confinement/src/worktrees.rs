@@ -375,13 +375,13 @@ fn record_live_path(states: &mut BTreeMap<PathBuf, WorkerState>, cwd: &Path) {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct GitWorktree {
-    path: PathBuf,
-    head: GitOid,
-    branch: Option<GitRefName>,
+pub(crate) struct GitWorktree {
+    pub(crate) path: PathBuf,
+    pub(crate) head: GitOid,
+    pub(crate) branch: Option<GitRefName>,
     locked: bool,
     prunable: bool,
-    bare: bool,
+    pub(crate) bare: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -396,7 +396,7 @@ struct WorktreeIdentity {
     branch: String,
 }
 
-fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<GitWorktree>, WorktreeError> {
+pub(crate) fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<GitWorktree>, WorktreeError> {
     let mut result = Vec::new();
     let mut fields: Vec<Vec<u8>> = Vec::new();
     for field in bytes.split(|byte| *byte == 0) {
@@ -1042,12 +1042,52 @@ pub fn list(
     Ok(result)
 }
 
-fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState {
+pub(crate) fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState {
     match (state, native) {
         (WorkerState::Live, _) | (_, WorkerState::Live) => WriterState::Live,
         (WorkerState::Unknown, _) | (_, WorkerState::Unknown) => WriterState::Unknown,
         (WorkerState::Free, WorkerState::Free) => WriterState::Free,
     }
+}
+
+/// Registration observation for disk reports. Missing or unsafe state stays
+/// unknown; existing writer locks are opened read-only and never created.
+pub(crate) fn disk_writer_state(
+    binding: &ProjectBinding,
+    project_state: &Directory,
+    path: &Path,
+    branch: Option<&str>,
+) -> WorkerState {
+    let observe = || -> Result<WorkerState, WorktreeError> {
+        let directory = project_state.open_verified_directory(&state_dir_name(path))?;
+        let bytes = directory.read_bounded(OsStr::new(IDENTITY), MAX_STATE_RECORD)?;
+        let identity: WorktreeIdentity =
+            serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
+        let root = Directory::open_anchor(path)?.metadata()?;
+        if identity.schema_version != WORKTREE_IDENTITY_SCHEMA
+            || !identity.active
+            || identity.project_id != binding.project_id()
+            || identity.root_device != root.device
+            || identity.root_inode != root.inode
+            || identity.path_digest != path_digest(path)
+            || Some(identity.branch.as_str()) != branch
+        {
+            return Err(WorktreeError::UnknownWriter);
+        }
+        let unreserved = || {
+            matches!(directory.metadata_at(OsStr::new(RESERVATION), false),
+            Err(error) if error.is_not_found())
+        };
+        if !unreserved() {
+            return Ok(WorkerState::Unknown);
+        }
+        match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
+            Ok(_guard) if unreserved() => Ok(WorkerState::Free),
+            Err(FsError::LockTimeout { .. }) => Ok(WorkerState::Live),
+            _ => Ok(WorkerState::Unknown),
+        }
+    };
+    observe().unwrap_or(WorkerState::Unknown)
 }
 
 /// Create a clean linked checkout at a pinned commit. A failed or killed

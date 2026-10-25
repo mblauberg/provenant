@@ -82,6 +82,24 @@ impl RunStore {
         context: &ExecutionContext,
         request: &Request<'_>,
     ) -> Result<Option<Self>> {
+        Self::open_read_only_mode(context, request, false)
+    }
+
+    /// Inspect the main database without SQLite locks or shared-memory writes.
+    /// WAL frames are deliberately excluded. Callers must treat an outstanding
+    /// WAL as an incomplete terminal-state index and use filesystem inventory.
+    pub fn open_disk_read_only(
+        context: &ExecutionContext,
+        request: &Request<'_>,
+    ) -> Result<Option<Self>> {
+        Self::open_read_only_mode(context, request, true)
+    }
+
+    fn open_read_only_mode(
+        context: &ExecutionContext,
+        request: &Request<'_>,
+        immutable: bool,
+    ) -> Result<Option<Self>> {
         request.retry(|| Ok(()))?;
         let mut root = Directory::root(true)?;
         for component in context.state_root.as_path().components() {
@@ -102,12 +120,43 @@ impl RunStore {
             Err(error) => return Err(error.into()),
         }
         companions(&root, "run.sqlite3")?;
-        let db = Connection::open_with_flags(
-            context.state_root.as_path().join("run.sqlite3"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        if immutable {
+            for name in ["run.sqlite3-wal", "run.sqlite3-journal"] {
+                match root.metadata_at(OsStr::new(name), false) {
+                    Ok(metadata) if metadata.size > 0 => {
+                        return Err(RunError::Validation(
+                            "run database has journal data; terminal state is unknown in the read-only disk report",
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        let path = context.state_root.as_path().join("run.sqlite3");
+        let db = if immutable {
+            use std::os::unix::ffi::OsStrExt;
+            let mut uri = String::from("file:");
+            for byte in path.as_os_str().as_bytes() {
+                uri.push_str(&format!("%{byte:02X}"));
+            }
+            uri.push_str("?mode=ro&immutable=1");
+            Connection::open_with_flags(
+                uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW
+                    | OpenFlags::SQLITE_OPEN_URI,
+            )?
+        } else {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )?
+        };
         db.busy_timeout(Duration::ZERO)?;
         if request.retry(|| version(&db))? == 0 {
             return Ok(None);

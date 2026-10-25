@@ -30,9 +30,9 @@ use crate::repo::{GitRefName, VerifiedWorktree};
 pub use provenant_records::run::NetworkAccess;
 
 const MAX_PATH_BYTES: usize = 4096;
-const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
-const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
-const LEGACY_CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v1\n";
+pub(crate) const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
+pub(crate) const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
+pub(crate) const LEGACY_CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v1\n";
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 const MAX_CACHE_DIRECTORY_ENTRIES: usize = 100_000;
 #[cfg(any(target_os = "macos", test))]
@@ -715,11 +715,11 @@ fn verify_detached_cache(
     Ok(cache)
 }
 
-fn is_cache_digest(name: &str) -> bool {
+pub(crate) fn is_cache_digest(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn cache_tombstone(name: &str) -> Option<(u64, u64, &str)> {
+pub(crate) fn cache_tombstone(name: &str) -> Option<(u64, u64, &str)> {
     let (hex, pid) = name
         .strip_prefix(".gc-")
         .and_then(|rest| rest.split_once('-'))?;
@@ -734,13 +734,13 @@ fn cache_tombstone(name: &str) -> Option<(u64, u64, &str)> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct CacheOwner {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
+pub(crate) struct CacheOwner {
+    pub(crate) path: PathBuf,
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
 }
 
-fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
+pub(crate) fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
     let mut digest = Sha256::new();
     digest.update(CARGO_CACHE_OWNER_PREFIX);
     digest.update(owner.device.to_le_bytes());
@@ -752,7 +752,7 @@ fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
         .collect()
 }
 
-fn read_cache_owner(
+pub(crate) fn read_cache_owner(
     cache: &dyn provenant_supervisor::fs::SafeDir,
     relative: &Path,
 ) -> Result<Option<CacheOwner>, PermissionError> {
@@ -831,6 +831,19 @@ fn cache_gc_reason(
     owner: &CacheOwner,
     policy: &CacheGcPolicy,
 ) -> Result<Option<CacheGcReason>, PermissionError> {
+    cache_gc_reason_with_newest(relative, owner, policy, || {
+        measure_cache(cache, relative, 0).map(|(_, newest)| newest)
+    })
+}
+
+/// Share GC eligibility with read-only inventories supplying their own bounded
+/// measurement. This helper observes the owner and never mutates the cache.
+pub(crate) fn cache_gc_reason_with_newest(
+    relative: &Path,
+    owner: &CacheOwner,
+    policy: &CacheGcPolicy,
+    newest_write_ns: impl FnOnce() -> Result<i128, PermissionError>,
+) -> Result<Option<CacheGcReason>, PermissionError> {
     use std::io;
 
     let reason = match std::fs::symlink_metadata(&owner.path) {
@@ -840,7 +853,7 @@ fn cache_gc_reason(
             let Some(threshold) = policy.idle_before_ns else {
                 return Ok(None);
             };
-            let (_, newest) = measure_cache(cache, relative, 0)?;
+            let newest = newest_write_ns()?;
             if newest >= threshold {
                 return Ok(None);
             }
