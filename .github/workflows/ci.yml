@@ -125,6 +125,20 @@ jobs:
       - name: Check formatting
         working-directory: tools/front-door
         run: cargo fmt --all --check
+      - name: Check isolated test features
+        working-directory: tools/front-door
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          # Separate invocations prevent workspace feature unification from hiding missing dependencies.
+          for crate in provenant-cli provenant-run provenant-supervisor; do
+            cargo check --locked -p "$crate" --features fixture
+            cargo check --locked -p "$crate" --all-targets --features fixture
+          done
+          cargo check --locked -p provenant-config --features test-support
+          cargo check --locked -p provenant-config --all-targets --features test-support
+          cargo check --locked -p provenant-providers --features recording
+          cargo check --locked -p provenant-providers --all-targets --features recording
       - name: Lint
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
