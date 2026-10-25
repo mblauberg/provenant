@@ -1117,7 +1117,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         "CONFLICT" | "OPERATION_CONFLICT" | "NONTERMINAL" => FacadeError::Conflict,
         "CANCELLED" => FacadeError::Cancelled,
         "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
-        "UNSUPPORTED" => FacadeError::OwnerUnavailable,
+        "UNSUPPORTED" => FacadeError::ContinuationUnsupported,
         _ => FacadeError::Io,
     }
 }
