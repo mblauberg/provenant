@@ -202,7 +202,10 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             &call,
         )
         .map_err(|error| error.to_string())?
-        .with_writer_registry(roots.state.as_path()),
+        .with_writer_registry(roots.state.as_path())
+        // Launch, ownership and cancellation of children use the requester
+        // sealed in this attempt's host-built context, never the lane's actor.
+        .with_sealed_requester(context.actor_id),
         context: run::ExecutionContext {
             state_root: child_state,
             project_id: context.project_id,
@@ -236,11 +239,13 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             .get("lanes.max_depth")
             .and_then(|knob| knob.value.as_u64())
             .ok_or("lanes.max_depth missing")?;
-        for id in session
-            .store
-            .queued_runs(&call)
-            .map_err(|error| error.to_string())?
-        {
+        // The lane can write every record this scan reads, so a read
+        // failure is reported, never fatal: the stop below must still run.
+        let queued = session.store.queued_runs(&call).unwrap_or_else(|error| {
+            launch_error = Some(error.to_string());
+            Vec::new()
+        });
+        for id in queued {
             let stop_reason = *reason
                 .lock()
                 .map_err(|_| "child launcher stop state poisoned")?;
@@ -252,10 +257,13 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                         | StopReason::SupervisorSignal
                 )
             ) {
-                session
-                    .store
-                    .refuse_queued(id, "parent stopped before child launch", &call)
-                    .map_err(|error| error.to_string())?;
+                if let Err(error) =
+                    session
+                        .store
+                        .refuse_queued(id, "parent stopped before child launch", &call)
+                {
+                    launch_error = Some(error.to_string());
+                }
                 continue;
             }
             let validated = match session.store.validate_child(
@@ -268,29 +276,33 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             ) {
                 Ok(validated) => validated,
                 Err(error) => {
-                    session
-                        .store
-                        .refuse_queued(id, &error.to_string(), &call)
-                        .map_err(|error| error.to_string())?;
+                    if let Err(error) = session.store.refuse_queued(id, &error.to_string(), &call) {
+                        launch_error = Some(error.to_string());
+                    }
                     continue;
                 }
             };
             // Accept refs before handoff: start can launch an earlier task
             // and then fail on a later one. Keep all scopes for cancellation.
-            for record in session
-                .store
-                .pending_attempts(id, &call)
-                .map_err(|error| error.to_string())?
-            {
+            let pending = match session.store.pending_attempts(id, &call) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    launch_error = Some(error.to_string());
+                    continue;
+                }
+            };
+            for record in pending {
                 let generation = if record.state == run::AttemptState::Queued {
-                    record
-                        .generation
-                        .checked_add(1)
-                        .ok_or("child custody generation exhausted")?
+                    record.generation.checked_add(1)
                 } else {
-                    record.generation
+                    Some(record.generation)
                 };
-                accepted.insert((record.attempt_id, generation));
+                match generation {
+                    Some(generation) => {
+                        accepted.insert((record.attempt_id, generation));
+                    }
+                    None => launch_error = Some("child custody generation exhausted".into()),
+                }
             }
             if let Err(error) =
                 launch_on_host(&session, id, &edge, &call, Some((launch, &validated)))
@@ -310,30 +322,11 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                         | StopReason::SupervisorSignal
                 )
             ) {
-                for (id, generation) in accepted {
-                    let record = match session.store.record(id, &call) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            launch_error = Some(error.to_string());
-                            continue;
-                        }
-                    };
-                    if matches!(record.state, run::AttemptState::Terminal { .. }) {
-                        continue;
-                    }
-                    let still_queued = record.state == run::AttemptState::Queued
-                        && record.generation.checked_add(1) == Some(generation);
-                    if record.generation != generation && !still_queued {
-                        launch_error = Some("accepted child generation changed".into());
-                        continue;
-                    }
-                    match session.store.cancel(id, "host parent stopped", &call) {
-                        Ok(run::CancelReceipt::Unobservable { reason }) => {
-                            launch_error = Some(reason)
-                        }
-                        Err(error) => launch_error = Some(error.to_string()),
-                        Ok(_) => {}
-                    }
+                for error in session
+                    .store
+                    .stop_children(accepted, "host parent stopped", &call)
+                {
+                    launch_error = Some(error);
                 }
             }
             return match launch_error {

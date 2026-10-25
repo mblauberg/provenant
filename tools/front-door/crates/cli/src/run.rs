@@ -980,7 +980,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             },
             flag_route.3.clone(),
             command.delivery_id,
-            None,
+            command.account.clone(),
             flag_delivery,
         ));
     }
@@ -1198,6 +1198,7 @@ pub fn launch(
 }
 /// `child` carries a lane's child launch: the inherited host context and the
 /// request `validate_child` returned, which is the only copy launched from.
+/// The session's store then carries the parent attempt's sealed requester.
 fn launch_on_host(
     session: &Session,
     run: RunId,
@@ -1236,13 +1237,12 @@ fn launch_on_host(
         }
     };
     let request_digest = request.digest().map_err(run::RunError::from)?;
-    let requester = session.store.run(run, call)?.actor_id;
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
         state_root: session.context.state_root.as_path().into(),
     };
-    let holder = |attempt: &run::AttemptRecord| {
+    let holder = |attempt: &run::AttemptRecord, requester| {
         let mut host = host.clone();
         if let Some(writer) = request
             .tasks

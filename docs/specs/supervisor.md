@@ -317,6 +317,12 @@ authority over unrelated Git actors.
 | `worktree remove --merged` | Needs explicit authority, a pinned integration ref (a local branch or a remote-tracking ref such as `origin/main`) and `--branch` or `--since`. Ordinary merges are proved by ancestry. A squash needs a recorded merged PR in this repository whose head OID equals the branch tip and whose merge OID is an ancestor of the integration tip. A `gh` failure or malformed output keeps the branch unless ancestry alone proves it. The integration branch and a branch at its tip are never pruned. The branch OID is rechecked and the ref is deleted with that expected old OID. Remote deletion is not offered. |
 | `hook claude pre-tool-use` | The lane-safety guard, a row in cli's `HookSpec` table. Stdin is bounded to 1 MiB. Unreadable, malformed, oversized or timed-out input emits deny JSON with exit 0, and only a failure to write the denial exits 2. |
 
+For each removed worktree, removal derives its lane cache from the verified
+worktree before Git deletes it, then deletes only that cache through the
+detach-and-verify path while holding writer exclusion. Cache cleanup failures
+emit a warning after the worktree has been removed. Removal leaves other
+orphaned caches and existing cleanup tombstones for `provenant gc` to sweep.
+
 Removal and pruning hold writer exclusion, recheck reservations and worker
 observations, and refuse live or unknown candidates. A post-merge hook passes
 only its just-merged scope. The guard forbids name- and pattern-based kills
@@ -370,7 +376,7 @@ byte-path encoding. Edge-built facts are `Serialize` only.
 | `ProcessObservation` | Atomic replace. A stale observation cannot establish death. |
 | `ProcessExit` | No-replace, with file and parent fsync. Failure keeps custody for retry. |
 | `WriterReservation` | Published atomically under the writer lock before spawn. It is cleared only after proved quiescence, quarantine and the canonical terminal commit, or an authorised recorded reconcile disposition. A missing or malformed record with conflicting run evidence refuses acquisition. |
-| `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. |
+| `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. A stop that finds an undecodable request, or one for another requester or an earlier generation, atomically replaces it and re-reads it, since the guardian would ignore it. A stop from a reattached handle never replaces a later generation's request. A stop from a held scope also replaces a later generation's request, which in a child directory can only be forged, and any symlink, FIFO or oversize entry, since the rename swaps the entry without following it. A directory named `cancel.json` still refuses the stop, and the lane can remove a request after it lands, so a lane can pre-empt or undo the host's stop. |
 | `QuarantineManifest`, `GitEvidence` | Evidence files are durable before the no-replace manifest, and partial capture claims no success. |
 
 Authoritative writes use held-directory `SafeFs` capabilities, exclusive 0600

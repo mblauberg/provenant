@@ -248,6 +248,9 @@ pub struct Dispatch {
     pub open_pr: bool,
     #[command(flatten)]
     pub route: RouteRequest,
+    /// Pin a registered account (key or label) instead of resolving one
+    #[arg(long)]
+    pub account: Option<String>,
     #[command(flatten)]
     pub access: Access,
     /// Provider timeout in seconds

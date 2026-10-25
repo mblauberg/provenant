@@ -641,7 +641,7 @@ fn start_writer(
     Ok(store.start_with_writer_lease(
         run,
         provider,
-        holder,
+        &|record, _| holder(record),
         &|directory, scope, binding| {
             provenant_supervisor::fixture::acquire_writer_with_binding(
                 directory,
@@ -953,6 +953,13 @@ fn wait_for_path(path: &Path, timeout: Duration) -> Result {
     Ok(())
 }
 
+fn pause(duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        thread::park_timeout(left);
+    }
+}
+
 struct ReleaseOnDrop(PathBuf);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -1054,9 +1061,36 @@ pub(super) fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
     Ok(value)
 }
 
-fn create_list_and_remove_a_managed_worktree() -> Result {
-    use std::os::unix::fs::PermissionsExt;
+fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBuf> {
+    use provenant_confinement::{
+        permissions::{WorktreeWriteAuthority, prepare_writer_directories},
+        repo::{GitRefName, verify_worktree},
+        utility::{UtilityBudget, UtilityRuntime},
+    };
+    use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
 
+    let runtime = UtilityRuntime::new(
+        std::sync::Arc::new(LocalFs),
+        fs::canonicalize("/usr/bin/git")?,
+        rig.state.join("utility-home"),
+    )?;
+    let executor = SystemExecutor::new(1)?;
+    let repo = runtime.open_repo(
+        &executor,
+        &rig.project,
+        UtilityBudget::bounded(Duration::from_secs(5))?,
+        &provenant_core::CancelToken::new(),
+    )?;
+    let worktree = verify_worktree(&repo, path)?;
+    let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
+    let authority = WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home)?;
+    prepare_writer_directories(&LocalFs, &worktree, &branch, &authority, &rig.home)?;
+    let cache = authority.cargo_cache().path.clone();
+    fs::write(cache.join("artifact"), b"lane build output")?;
+    Ok(cache)
+}
+
+fn create_list_and_remove_a_managed_worktree() -> Result {
     let rig = repository()?;
     let base = git(&rig, &["rev-parse", "HEAD"])?;
     let created = ok(
@@ -1083,18 +1117,20 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
             .iter()
             .any(|tree| tree["branch"] == "refs/heads/feature/topic" && tree["dirty"] == "clean")
     );
-    let cache_root = rig.home.join("Library/Caches/provenant-lane-cargo");
-    fs::create_dir_all(&cache_root)?;
-    let cache = cache_root.join("d".repeat(64));
-    fs::create_dir(&cache)?;
-    fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))?;
-    let owner = fs::canonicalize(rig.project.join(".worktrees/feature-topic"))?;
-    let identity = fs::metadata(&owner)?;
-    let mut owner_marker = b"provenant-lane-cargo-owner-v2\n".to_vec();
-    owner_marker.extend_from_slice(&std::os::unix::fs::MetadataExt::dev(&identity).to_le_bytes());
-    owner_marker.extend_from_slice(&std::os::unix::fs::MetadataExt::ino(&identity).to_le_bytes());
-    owner_marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
-    fs::write(cache.join(".provenant-worktree-owner"), owner_marker)?;
+    let cache = prepare_lane_cache(
+        &rig,
+        &rig.project.join(".worktrees/feature-topic"),
+        "feature/topic",
+    )?;
+    ok(&rig, &["worktree", "create", "feature/gone", "--json"])?;
+    let gone = rig.project.join(".worktrees/feature-gone");
+    let orphan = prepare_lane_cache(&rig, &gone, "feature/gone")?;
+    git(
+        &rig,
+        &["worktree", "remove", gone.to_str().ok_or("worktree path")?],
+    )?;
+    assert!(!gone.exists());
+    assert!(orphan.is_dir());
     let removed = ok(&rig, &["worktree", "remove", "feature/topic", "--json"])?;
     assert_eq!(
         removed["data"]["removed"]
@@ -1105,6 +1141,15 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
     );
     assert!(!rig.project.join(".worktrees/feature-topic").exists());
     assert!(!cache.exists(), "orphaned lane cache remains after removal");
+    assert!(
+        orphan.is_dir(),
+        "removing one worktree must preserve other orphaned caches"
+    );
+    assert_eq!(
+        fs::read(orphan.join("artifact"))?,
+        b"lane build output",
+        "removing one worktree must preserve other orphaned caches"
+    );
     assert_eq!(
         ok(&rig, &["worktree", "list", "--json"])?["data"]
             .as_array()
@@ -1112,6 +1157,8 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
             .len(),
         1
     );
+    ok(&rig, &["gc", "--json"])?;
+    assert!(!orphan.exists(), "gc must still sweep orphaned caches");
     rig.assert_legacy_unchanged()
 }
 
@@ -2367,6 +2414,7 @@ fn verify_lane_profile(
     // parent cannot read Codex credentials.
     let attempt_id = admit(&nested_frames)?;
     let store = provenant_run::RunStore::open(&child_context, &call)?;
+    let forged = provenant_core::ActorId::from_bytes([66; 16]);
     if cancel_child {
         let run = store.record(attempt_id, &call)?.run_id;
         wait_for_path(
@@ -2375,15 +2423,130 @@ fn verify_lane_profile(
             )),
             Duration::from_secs(8),
         )?;
-        host.provider_exited(
+        // The lane can write its child's store and attempt directory. It
+        // marks the child finished, renames the requester in its launch
+        // summary and plants a stop the guardian ignores. The host must still
+        // stop the child, from the scope and requester it held at hand-off.
+        let attempt = child.join(format!("runs/{run}/attempts/{attempt_id}"));
+        let mut finished = store.record(attempt_id, &call)?;
+        let mut sibling = finished.clone();
+        finished.state = provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Rejected,
+            exit_code: None,
+            finished_at: finished.queued_at,
+            reason: Some("rejected, says the lane".into()),
+        };
+        finished.started_at = None;
+        let mut result = serde_json::to_value(&finished.prompt)?;
+        result["path"]["path"] = format!("attempts/{attempt_id}/result.md").into();
+        finished.result = Some(serde_json::from_value(result)?);
+        rusqlite::Connection::open(child.join("run.sqlite3"))?.execute(
+            "UPDATE attempts SET record=?1, terminal=1 WHERE id=?2",
+            rusqlite::params![
+                provenant_records::CanonicalV1::bytes(&finished)?.as_bytes(),
+                attempt_id.to_string()
+            ],
+        )?;
+        let path = attempt.join("launch.json");
+        let mut summary: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
+        summary["requester"] = serde_json::to_value(forged)?;
+        fs::remove_file(&path)?;
+        fs::write(&path, serde_json::to_vec(&summary)?)?;
+        let scope = &summary["scope"];
+        let planted = serde_json::json!({
+            "schema_version": 1,
+            "scope": scope,
+            "request_id": format!("{run}.{attempt_id}.{}.cancel", scope["generation"]),
+            "requester": forged,
+            "reason": "explicit_cancellation",
+        });
+        fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
+        // Scan reads of lane-written rows once ended the host's launcher
+        // before its stop. First an undecodable attempt row, then a queued
+        // sibling whose run the lane renames, so the owner check refuses it.
+        let db = rusqlite::Connection::open(child.join("run.sqlite3"))?;
+        let owner: Vec<u8> = db.query_row(
+            "SELECT record FROM runs WHERE id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )?;
+        let (project, task): (String, String) = db.query_row(
+            "SELECT project, task FROM attempts WHERE id=?1",
+            [attempt_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let garbage = provenant_core::AttemptId::from_bytes([67; 16]);
+        db.execute(
+            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,x'00')",
+            rusqlite::params![garbage.to_string(), run.to_string(), project, task],
+        )?;
+        // Several of the launcher's 100 ms scans see it.
+        pause(Duration::from_millis(500));
+        db.execute("DELETE FROM attempts WHERE id=?1", [garbage.to_string()])?;
+        sibling.attempt_id = provenant_core::AttemptId::from_bytes([68; 16]);
+        sibling.state = provenant_run::AttemptState::Queued;
+        sibling.generation = 0;
+        sibling.attempt_number = 2;
+        sibling.revision = 1;
+        sibling.started_at = None;
+        let mut prompt = serde_json::to_value(&sibling.prompt)?;
+        prompt["path"]["path"] = prompt["path"]["path"]
+            .as_str()
+            .ok_or("prompt path")?
+            .replace(&attempt_id.to_string(), &sibling.attempt_id.to_string())
+            .into();
+        sibling.prompt = serde_json::from_value(prompt)?;
+        let mut renamed = store.run(run, &call)?;
+        renamed.actor_id = forged;
+        db.execute_batch("BEGIN")?;
+        db.execute(
+            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,?5)",
+            rusqlite::params![
+                sibling.attempt_id.to_string(),
+                run.to_string(),
+                project,
+                task,
+                provenant_records::CanonicalV1::bytes(&sibling)?.as_bytes()
+            ],
+        )?;
+        db.execute(
+            "UPDATE runs SET record=?1 WHERE id=?2",
+            rusqlite::params![
+                provenant_records::CanonicalV1::bytes(&renamed)?.as_bytes(),
+                run.to_string()
+            ],
+        )?;
+        db.execute_batch("COMMIT")?;
+        // Several of the launcher's 100 ms scans see it.
+        pause(Duration::from_millis(500));
+        // The launcher reports the refused read, after it stops the child.
+        let reported = host.provider_exited(
             &parent.encode()?,
             Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
+        );
+        // The forged terminal record stands, so the guardian's own exit is
+        // the evidence. Unstopped, the child would run to its wall deadline.
+        wait_for_path(&attempt.join("process-exit.json"), Duration::from_secs(8))?;
+        let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
+        assert_eq!(exit["stop_reason"], "explicit_cancellation", "{exit}");
+        let Err(provenant_supervisor::custody::CustodyError::Io(reported)) = reported else {
+            return Err(format!("launcher hid the refused read: {reported:?}").into());
+        };
+        assert!(
+            reported.to_string().contains("names another owner"),
+            "{reported}"
+        );
+        db.execute(
+            "DELETE FROM attempts WHERE id=?1",
+            [sibling.attempt_id.to_string()],
+        )?;
+        db.execute(
+            "UPDATE runs SET record=?1 WHERE id=?2",
+            rusqlite::params![owner, run.to_string()],
         )?;
     }
     let record = await_terminal(&store, attempt_id, &call)?;
-    if cancel_child {
-        assert_terminal_outcome(&record, provenant_run::Outcome::Cancelled)?;
-    }
     let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {
         return Err("child attempt was not terminal".into());
     };
@@ -2404,9 +2567,27 @@ fn verify_lane_profile(
             vec![confinement.home.join(".codex/auth.json")],
             "{reason}"
         );
+    }
+    if !cancel_child {
         assert_eq!(record.provider_launched, Some(true), "{reason}");
     }
-    assert_eq!(record.provider_launched, Some(true), "{reason}");
+    // The lane's operation keeps its own actor. The host launches for, and
+    // records as owner, the requester sealed in the parent's holder context.
+    let actor: String = rusqlite::Connection::open(child.join("run.sqlite3"))?.query_row(
+        "SELECT actor FROM operations WHERE run=?1",
+        [record.run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_ne!(actor, parent.actor_id.to_string());
+    assert_eq!(store.run(record.run_id, &call)?.actor_id, parent.actor_id);
+    assert_eq!(record.verified_owner, Some(parent.actor_id));
+    if !cancel_child {
+        let summary: Value = serde_json::from_slice(&fs::read(child.join(format!(
+            "runs/{}/attempts/{attempt_id}/launch.json",
+            record.run_id
+        )))?)?;
+        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
+    }
     let provider_state = child.join(format!(
         "runs/{}/attempts/{attempt_id}/provider-state",
         record.run_id

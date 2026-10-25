@@ -92,6 +92,7 @@ pub enum WorktreeError {
 /// Dependencies at the actual OS and utility seams. The caller supplies the
 /// binding and its `state/worktrees/<ProjectId>` directory.
 pub struct WorktreeContext<'a> {
+    pub home: &'a Path,
     pub repo: &'a VerifiedRepo,
     pub binding: &'a ProjectBinding,
     pub project_state: &'a dyn SafeDir,
@@ -1524,6 +1525,10 @@ fn remove_tree(
         }
         WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
     }
+    // A cache that cannot be derived must not block removal; warn and skip it.
+    let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
+        .map_err(|error| warn_cache_removal(&error))
+        .ok();
     let verified_path = locked.verified.path().to_path_buf();
     execute_mutation(
         context,
@@ -1534,6 +1539,14 @@ fn remove_tree(
     )?;
     context.repo.revalidate()?;
     tombstone_identity(&locked)?;
+    // Keep writer exclusion through cache detachment and verified deletion.
+    // Cleanup remains best-effort after Git has removed the worktree.
+    if let Some(cargo_cache) = cargo_cache
+        && let Err(error) =
+            crate::permissions::prune_worktree_cargo_cache(context.home, &cargo_cache.path)
+    {
+        warn_cache_removal(&error);
+    }
     let info = WorktreeInfo {
         path: canonical,
         branch: Some(branch.as_str().to_owned()),
@@ -1546,6 +1559,11 @@ fn remove_tree(
         info,
         _writer: writer,
     })
+}
+
+#[allow(clippy::print_stderr)]
+fn warn_cache_removal(error: &crate::permissions::PermissionError) {
+    eprintln!("warning: could not remove worktree lane cache: {error}");
 }
 
 /// Pins an integration ref given by name. A local branch wins, then a
@@ -2098,6 +2116,7 @@ mod lifecycle_tests {
 
         fn context(&self) -> WorktreeContext<'_> {
             WorktreeContext {
+                home: &self.fixture.home,
                 repo: &self.fixture.repo,
                 binding: &self.binding,
                 project_state: self.project_state.as_ref(),

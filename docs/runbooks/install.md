@@ -30,9 +30,10 @@ Host builds use a fresh target directory. Confined writers use the separate
 verified worktree and repository identities. It also holds the lane's private
 Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry`,
 `~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
-a lane cache for a host build. `provenant worktree remove` deletes the caches
-of worktrees that no longer exist, and `provenant gc [--dry-run] [--idle-days N]`
-also removes caches idle for N days (default 7) for the selected project's
+a lane cache for a host build. `provenant worktree remove` deletes only the
+removed worktree's own cache while holding its writer lock. Other orphaned
+caches remain until `provenant gc [--dry-run] [--idle-days N]`, which also
+removes caches idle for N days (default 7) for the selected project's
 worktrees, sparing live or unobservable writers. Existing owners outside that
 project are reported as kept (foreign). Before deletion, GC atomically renames
 each cache to a tombstone so a launching lane can create a fresh cache. Later

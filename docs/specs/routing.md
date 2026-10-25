@@ -178,9 +178,10 @@ guessed. Routing owns eligibility and run records the resolved label.
   when stored and probed organisations are both present and differ; an absent
   probe organisation never refuses. Codex with no registration uses its
   effective `CODEX_HOME`, otherwise `~/.codex`.
-- A per-task `account` field in a dispatch manifest or Fabric submission filters
-  the requested adapter's accounts before quota and readiness. It is not a
-  command flag or a route pin and never switches accounts on quota.
+- A per-task `account` field in a dispatch manifest or Fabric submission, or
+  the single-lane `dispatch --account` flag, filters the requested adapter's
+  accounts before quota and readiness. It is not a route pin and never
+  switches accounts on quota.
 - Each account is signed in by the user through the provider's own flow.
   Credentials are never copied between identity directories. A switch moves
   work to an account with its own headroom and never suppresses a limit signal.
@@ -331,12 +332,25 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   a child cannot continue an attempt. The host launches only the request it
   validated and refuses one whose digest changed after validation or whose
   re-read request no longer matches the digest sealed at hand-off. Invalid
-  proposals terminate as rejected before provider preparation.
-  Child storage is writable by the submitting lane, so it is not independent
-  evidence against that lane.
+  proposals terminate as rejected before provider preparation. A child
+  launches for its parent's requester, sealed in the host-built holder context,
+  never the actor its run record names. On start the host records that
+  requester as the run's actor, the attempt's verified owner and its admission
+  holder. The lane's operation keeps the lane's actor, which scopes its replay
+  and listing. Child storage is writable by the submitting lane, so it is not
+  independent evidence against that lane: the host's view refuses a run or
+  attempt it launched once its record names another owner.
 - The guardian stops its worker on observed provider exit. Parent cancellation,
-  deadline or supervisor signal cancels only the child scopes this worker
-  accepted; normal parent completion leaves their custody intact.
+  deadline or supervisor signal cancels only this worker's children; normal
+  parent completion leaves their custody intact. The host first stops every
+  child it handed to a guardian, including one launched after its last scan,
+  from the scope and requester it held in memory at hand-off, never from the
+  child's record or launch summary. It then stops the accepted children that
+  never reached a guardian, from their records. A failed scan read does not
+  end the worker before that stop. The stop request itself still lands in the
+  attempt directory, which the lane can write, so the lane can pre-empt it
+  (for example with a directory named `cancel.json`) or undo it after the
+  host writes it, and keep its child running.
 - Git is resolved once on the host (`PROVENANT_GIT` override, otherwise the
   fixed list preferring package-manager Git), canonicalised, pinned in provider
   and MCP environments, and the only Git path lanes may execute.

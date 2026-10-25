@@ -135,8 +135,11 @@ Route flags, shared by `dispatch`, `route resolve` and `bench`: one of
 `--model ADAPTER/ID` or `--route NAME`, with optional `--effort`,
 `--fallback ADAPTER/ID[,ADAPTER/ID]` (at most two, and not with a writer),
 `--confidential` and `--allow-free`. Routing owns what they mean
-([routing](routing.md)); no account pin, intent, reviewer, risk tier or
+([routing](routing.md)); no intent, reviewer, risk tier or
 classifier selector exists.
+
+`dispatch` alone takes `--account NAME`, pinning a registered account key or
+label as a manifest task's `account` does. It conflicts with `--manifest`.
 
 Access flags: `--mode read-only|worktree-write` (default read-only),
 `--worktree PATH`, repeatable `--read-root PATH` and `--write-root PATH`,
