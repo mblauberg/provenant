@@ -421,16 +421,19 @@ pub fn execution_state(
     Ok(state)
 }
 
-fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
+fn execution_context(edge: &Edge<'_>) -> Result<run::ExecutionContext, Fail> {
     let (roots, project_id, actor_id) =
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
-    let context = run::ExecutionContext {
+    Ok(run::ExecutionContext {
         state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
         actor_id,
         read_prompts: true,
-    };
+    })
+}
+fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
+    let context = execution_context(edge)?;
     Ok(Session {
         store: run::RunStore::open(&context, call)?
             .with_writer_registry(edge.roots.state.as_path()),
@@ -441,15 +444,7 @@ fn open_read_only(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
-    let (roots, project_id, actor_id) =
-        crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
-            .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
-    let context = run::ExecutionContext {
-        state_root: execution_state(&roots, edge.home, edge.assets)?,
-        project_id,
-        actor_id,
-        read_prompts: true,
-    };
+    let context = execution_context(edge)?;
     let store = run::RunStore::open_read_only(&context, call)?;
     Ok((context, store))
 }
@@ -2231,6 +2226,9 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
 
 /// A switch handoff is a snapshot of active lane IDs, never a parallel queue.
 pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec<String>), Fail> {
+    // Identity discovery has its own bounded Git and binding calls. Do not
+    // charge that setup to the short store-read budget, especially on first use.
+    let context = execution_context(edge)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = run::Request {
@@ -2239,11 +2237,15 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         budget: WaitBudget::cli(clock.mono_now(), 1)
             .map_err(|e| Fail::new(Status::Error, "TIME", e.to_string()))?,
     };
-    let session = open(edge, &call)?;
+    // A handoff only reads lanes. A fresh store has none; avoid paying for
+    // database creation, WAL setup and schema migrations just to discover that.
+    let Some(store) = run::RunStore::open_read_only(&context, &call)? else {
+        return Ok((context.project_id, Vec::new()));
+    };
     let mut lanes = Vec::new();
     let mut after = 0;
     loop {
-        let page = session.store.lanes(
+        let page = store.lanes(
             &run::LaneQuery {
                 targets: vec![],
                 all: false,
@@ -2272,7 +2274,7 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
             None => break,
         }
     }
-    Ok((session.context.project_id, lanes))
+    Ok((context.project_id, lanes))
 }
 
 #[cfg(test)]

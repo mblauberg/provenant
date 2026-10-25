@@ -99,11 +99,30 @@ impl RunStore {
         self.writer_registry = state.to_owned();
         self
     }
-    /// Opens an existing, initialised store without creating or changing files.
+    /// Opens an existing, initialised store without changing durable state.
+    /// SQLite may create or update WAL/shared-memory companions.
     /// A missing store or schema is an empty read; unsupported versions fail.
     pub fn open_read_only(
         context: &ExecutionContext,
         request: &Request<'_>,
+    ) -> Result<Option<Self>> {
+        Self::open_read_only_mode(context, request, false)
+    }
+
+    /// Inspect an existing store, including committed WAL frames. SQLite may
+    /// update read marks or create WAL/shared-memory companions of that store.
+    /// Never create a database, initialise a schema or recover a journal.
+    pub fn open_disk_read_only(
+        context: &ExecutionContext,
+        request: &Request<'_>,
+    ) -> Result<Option<Self>> {
+        Self::open_read_only_mode(context, request, true)
+    }
+
+    fn open_read_only_mode(
+        context: &ExecutionContext,
+        request: &Request<'_>,
+        disk_report: bool,
     ) -> Result<Option<Self>> {
         request.retry(|| Ok(()))?;
         let mut root = Directory::root(true)?;
@@ -125,8 +144,21 @@ impl RunStore {
             Err(error) => return Err(error.into()),
         }
         companions(&root, "run.sqlite3", request)?;
+        if disk_report {
+            match root.metadata_at(OsStr::new("run.sqlite3-journal"), false) {
+                Ok(metadata) if metadata.size > 0 => {
+                    return Err(RunError::Validation(
+                        "run database has rollback journal data; terminal state is unknown in the disk report",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let path = context.state_root.as_path().join("run.sqlite3");
         let db = Connection::open_with_flags(
-            context.state_root.as_path().join("run.sqlite3"),
+            path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,

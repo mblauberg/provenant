@@ -5,6 +5,7 @@ mod artifacts;
 mod controls;
 mod db;
 mod delivery;
+mod disk;
 mod holder;
 mod launch;
 mod ledger;
