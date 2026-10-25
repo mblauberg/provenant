@@ -18,6 +18,78 @@ const DIRECT: &[&str] = &[
     "toml_edit",
 ];
 
+// docs/specs/rust-workspace.md#crate-layering, without the provenant- prefix.
+const LAYERS: &[(&str, &[&str])] = &[
+    ("core", &[]),
+    ("records", &["core"]),
+    ("config", &["core", "records", "supervisor"]),
+    ("supervisor", &["core", "records"]),
+    ("confinement", &["core", "records", "config", "supervisor"]),
+    (
+        "providers",
+        &[
+            "core",
+            "records",
+            "config",
+            "confinement",
+            "quota",
+            "supervisor",
+        ],
+    ),
+    ("quota", &["records", "config"]),
+    ("telemetry", &["core", "records"]),
+    (
+        "routing",
+        &["core", "records", "config", "quota", "providers"],
+    ),
+    (
+        "run",
+        &["core", "records", "config", "supervisor", "confinement"],
+    ),
+    ("fabric-store", &["core", "records", "supervisor"]),
+    (
+        "fabric-runtime",
+        &["core", "records", "config", "supervisor", "fabric-store"],
+    ),
+    ("fabric-mcp", &["core", "records", "fabric-runtime"]),
+    ("workflow", &["core", "records", "supervisor"]),
+    (
+        "cli",
+        &[
+            "core",
+            "records",
+            "config",
+            "confinement",
+            "providers",
+            "quota",
+            "telemetry",
+            "routing",
+            "run",
+            "fabric-runtime",
+            "workflow",
+            "supervisor",
+        ],
+    ),
+    (
+        "provenant",
+        &[
+            "core",
+            "records",
+            "config",
+            "supervisor",
+            "confinement",
+            "providers",
+            "quota",
+            "run",
+            "fabric-store",
+            "fabric-runtime",
+            "fabric-mcp",
+            "workflow",
+            "cli",
+        ],
+    ),
+];
+
 fn read_manifest(path: &Path) -> Result<DocumentMut, Box<dyn Error>> {
     Ok(fs::read_to_string(path)?.parse()?)
 }
@@ -77,6 +149,138 @@ fn check_dependencies(table: &dyn TableLike, workspace: &DocumentMut) -> Result<
     for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
         if let Some(dependencies) = table.get(kind).and_then(Item::as_table_like) {
             check_table(dependencies, kind, workspace)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_internal_dependencies(
+    table: &dyn TableLike,
+    name: &str,
+    allowed: &[&str],
+    workspace: &DocumentMut,
+) -> Result<(), String> {
+    for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        let Some(dependencies) = table.get(kind).and_then(Item::as_table_like) else {
+            continue;
+        };
+        for (alias, declared) in dependencies.iter() {
+            let dependency = if declared.get("workspace").and_then(Item::as_bool) == Some(true) {
+                workspace["workspace"]["dependencies"]
+                    .get(alias)
+                    .ok_or_else(|| format!("missing workspace dependency: {alias}"))?
+            } else {
+                declared
+            };
+            let package = dependency
+                .get("package")
+                .and_then(Item::as_str)
+                .unwrap_or(alias);
+            let Some(internal) = package.strip_prefix("provenant-") else {
+                continue;
+            };
+            let dev_exception = kind == "dev-dependencies"
+                && (internal == name || (name == "fabric-mcp" && internal == "fabric-store"));
+            if (internal == "cli" && name != "provenant")
+                || !(allowed.contains(&internal) || dev_exception)
+            {
+                return Err(format!(
+                    "{name} {kind}: {alias} ({package}) is not permitted by the crate layering table"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_internal_edges(manifest: &DocumentMut, workspace: &DocumentMut) -> Result<(), String> {
+    let package = manifest["package"]["name"]
+        .as_str()
+        .ok_or("package name must be a string")?;
+    let name = package.strip_prefix("provenant-").unwrap_or(package);
+    let (_, allowed) = LAYERS
+        .iter()
+        .find(|(member, _)| *member == name)
+        .ok_or_else(|| format!("missing crate layering row for {package}"))?;
+    check_internal_dependencies(manifest.as_table(), name, allowed, workspace)?;
+    if let Some(targets) = manifest.get("target").and_then(Item::as_table_like) {
+        for (target, tables) in targets.iter() {
+            let tables = tables.as_table_like().ok_or("invalid target table")?;
+            check_internal_dependencies(tables, name, allowed, workspace)
+                .map_err(|error| format!("[{target}]: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn internal_edges_obey_the_layering_table() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = read_manifest(&root.join("Cargo.toml"))?;
+    for path in member_manifests(root, &workspace)? {
+        let manifest = read_manifest(&path)?;
+        check_internal_edges(&manifest, &workspace)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
+    let workspace: DocumentMut = "[workspace.dependencies]\nprovenant-run = { path = 'crates/run' }\nrunner = { package = 'provenant-run', path = 'crates/run' }".parse()?;
+    for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
+            for declaration in [
+                "provenant-run = { path = '../run' }",
+                "runner = { package = 'provenant-run', path = '../run' }",
+                "provenant-run.workspace = true",
+                "runner.workspace = true",
+            ] {
+                let manifest: DocumentMut = format!(
+                    "[package]\nname = 'provenant-routing'\n[{scope}{kind}]\n{declaration}"
+                )
+                .parse()?;
+                let error = check_internal_edges(&manifest, &workspace)
+                    .err()
+                    .ok_or("routing must not import run")?;
+                assert!(error.contains("provenant-run"), "{error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn internal_dev_exceptions_do_not_allow_production_edges() -> Result<(), Box<dyn Error>> {
+    let workspace: DocumentMut = "".parse()?;
+    for (member, dependency) in [("supervisor", "supervisor"), ("fabric-mcp", "fabric-store")] {
+        for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
+                let manifest: DocumentMut = format!(
+                    "[package]\nname = 'provenant-{member}'\n[{scope}{kind}]\nprovenant-{dependency} = {{ path = '../{dependency}' }}"
+                )
+                .parse()?;
+                assert_eq!(
+                    check_internal_edges(&manifest, &workspace).is_ok(),
+                    kind == "dev-dependencies",
+                    "{member} -> {dependency} in {scope}{kind}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn libraries_cannot_depend_on_cli() -> Result<(), Box<dyn Error>> {
+    let workspace: DocumentMut = "".parse()?;
+    for (member, _) in LAYERS.iter().filter(|(name, _)| *name != "provenant") {
+        for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            let manifest: DocumentMut = format!(
+                "[package]\nname = 'provenant-{member}'\n[{kind}]\nprovenant-cli = {{ path = '../cli' }}"
+            )
+            .parse()?;
+            assert!(check_internal_edges(&manifest, &workspace).is_err());
         }
     }
     Ok(())
