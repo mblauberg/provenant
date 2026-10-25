@@ -86,6 +86,19 @@ fn next_host(host: provenant_core::HostId) -> Result<provenant_core::HostId> {
     Err("test host ID has no successor".into())
 }
 
+fn configure_fixture_peer(rig: &TestRig, host: provenant_core::HostId) -> Result {
+    let config = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = if config.exists() {
+        std::fs::read_to_string(&config)?.parse()?
+    } else {
+        "schema_version=1\n".parse()?
+    };
+    doc["domains"]["fabric"]["peers"]["fixture"]["host"] = toml_edit::value(host.to_string());
+    doc["domains"]["fabric"]["peers"]["fixture"]["destination"] = toml_edit::value("fixture");
+    std::fs::write(config, doc.to_string())?;
+    Ok(())
+}
+
 #[test]
 fn hosts_probe_only_the_requested_page() -> Result {
     let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
@@ -194,13 +207,15 @@ fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
     )?;
     drop(db);
     let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
     let key = identity["data"]["federation"]["key"]
         .as_str()
         .ok_or("project key")?;
     let request = json!({
         "version": 1,
         "target_host": host,
-        "source_host": host,
+        "source_host": source,
         "agent": "fixture",
         "project": {"key": key, "common_dir": "repo/.git"},
         "action": {"action":"coordination","input":{
@@ -238,13 +253,15 @@ fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
     let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
     let key = identity["data"]["federation"]["key"]
         .as_str()
         .ok_or("project key")?;
     let request = json!({
         "version": 1,
         "target_host": host,
-        "source_host": host,
+        "source_host": source,
         "agent": "fixture",
         "project": {"key": key, "common_dir": "repo/.git"},
         "action": {"action":"landing_push","proof":{
@@ -277,6 +294,8 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
     let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
     let key = identity["data"]["federation"]["key"]
         .as_str()
         .ok_or("project key")?;
@@ -286,7 +305,7 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
     let request = json!({
         "version": 1,
         "target_host": host,
-        "source_host": host,
+        "source_host": source,
         "agent": "fixture",
         "project": {"key": key, "common_dir": "repo/.git"},
         "action": {"action":"run_statuses","targets":targets}
@@ -314,10 +333,11 @@ fn peer_wait_refuses_remote_fanout() -> Result {
     let identity = federated_identity(&mut rig)?;
     let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
     let remote = next_host(local)?;
+    configure_fixture_peer(&rig, remote)?;
     let request = json!({
         "version": 1,
         "target_host": local.to_string(),
-        "source_host": local.to_string(),
+        "source_host": remote.to_string(),
         "agent": "fixture",
         "project": {
             "key": identity["data"]["federation"]["key"],
@@ -398,6 +418,44 @@ fn peer_ingress_rejects_wrong_host_before_coordination_mutation() -> Result {
 }
 
 #[test]
+fn peer_ingress_refuses_the_target_host_as_source() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    configure_fixture_peer(&rig, host.parse()?)?;
+    let request = json!({
+        "version": 1,
+        "target_host": host,
+        "source_host": host,
+        "agent": "fixture",
+        "project": {"key": identity["data"]["federation"]["key"], "common_dir": "repo/.git"},
+        "action": {"action":"coordination","input":{
+            "domain":"mail","input":{"op":"read","after":null,"limit":10}
+        },"operation_id":null}
+    });
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+            "--in-process".into(),
+        ],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    // Validation failures exit before a PeerResponse is framed.
+    assert_eq!(code(&output), 3);
+    assert!(output.stdout.bytes.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("peer source host must be a configured peer other than this host")
+    );
+    assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let mut rig = TestRig::new()?;
     let moved = rig.home.join("repo");
@@ -414,7 +472,9 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let host = &identity["data"]["host"];
     let key = &identity["data"]["federation"]["key"];
     assert!(key.is_string());
-    let request = json!({"version":1,"target_host":host,"source_host":host,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
+    let source = next_host(host.as_str().ok_or("host")?.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
+    let request = json!({"version":1,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
     let input = serde_json::to_vec(&request)?;
     let args: Vec<OsString> = vec![
         "--state-dir".into(),
@@ -447,6 +507,8 @@ fn peer_frames_a_local_run_event_failure() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
     let host = &identity["data"]["host"];
+    let source = next_host(host.as_str().ok_or("host")?.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
     let key = &identity["data"]["federation"]["key"];
     std::fs::write(rig.state.join("run.sqlite3"), b"invalid SQLite database")?;
     std::fs::set_permissions(
@@ -454,7 +516,7 @@ fn peer_frames_a_local_run_event_failure() -> Result {
         std::fs::Permissions::from_mode(0o600),
     )?;
     let request = json!({
-        "version": 1, "target_host": host, "source_host": host, "agent": "worker",
+        "version": 1, "target_host": host, "source_host": source, "agent": "worker",
         "project": {"key": key, "common_dir": "repo/.git"},
         "action": {"action": "coordination", "operation_id": null,
             "input": {"domain": "events", "input": {
@@ -883,6 +945,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     );
 
     let remote_host = next_host(local_host)?;
+    configure_fixture_peer(&rig, remote_host)?;
     let call = provenant_run::Request {
         clock: &clock,
         budget: WaitBudget::cli(clock.mono_now(), 10)?,
@@ -900,7 +963,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let ingress_request = json!({
         "version": 1,
         "target_host": local_host.to_string(),
-        "source_host": local_host.to_string(),
+        "source_host": remote_host.to_string(),
         "agent": "fixture",
         "project": {"key": project_key_value, "common_dir": "repo/.git"},
         "action": {"action":"run_statuses","targets":attempts[..2]
@@ -1227,7 +1290,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let run_events_request = json!({
         "version": 1,
         "target_host": local_host.to_string(),
-        "source_host": local_host.to_string(),
+        "source_host": remote_host.to_string(),
         "agent": "fixture",
         "project": {"key": identity["data"]["federation"]["key"], "common_dir": "repo/.git"},
         "action": {"action":"run_events","after":0,"limit":event_limit}

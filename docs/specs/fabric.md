@@ -407,10 +407,10 @@ the SSH child, not the remote run.
 
 Requests carry the version, target and source hosts, the agent label and a
 home-relative locator bound to the `ProjectKey`. Ingress checks the source
-against its configured hosts and resolves its own `ProjectId`. Only local run
-events are ingested and other hosts are reported as unknown. The reply uses
-`unknown_hosts` for coverage gaps and `run_events_pending` when another page is
-available.
+against its configured hosts, refuses its own host ID and resolves its own
+`ProjectId`. Only local run events are ingested and other hosts are reported as
+unknown. The reply uses `unknown_hosts` for coverage gaps and `run_events_pending`
+when another page is available.
 
 **Remote mutations.** A mutation is prepared durably, marked sent before the
 transport and recorded committed or unknown afterwards. A repeated uncertain
