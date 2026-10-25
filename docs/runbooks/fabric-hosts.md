@@ -14,6 +14,7 @@ provenant help
 provenant fabric host list
 provenant hosts doctor
 provenant fabric peer
+provenant fabric peer-agent
 provenant dispatch --host workshop --mode read-only --help
 ```
 
@@ -22,7 +23,8 @@ probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
 general provider sign-in check. Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
 through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
-the fixed SSH protocol entrypoint. Read-only remote dispatch uses top-level
+the fixed SSH protocol entrypoint; the hidden `fabric peer-agent` command is the
+macOS LaunchAgent that runs it in the login session (see below). Read-only remote dispatch uses top-level
 `dispatch --host`; peer-host writers are refused. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
@@ -81,7 +83,40 @@ command="/absolute/path/to/provenant fabric peer",restrict ssh-ed25519 <public-k
 ```
 
 Verify that the receiving host can resolve the binary in this non-interactive
-context. Doctor uses a separate remote command, so a key forced to the peer
+context.
+
+### macOS peers and the login keychain
+
+A process started from an SSH session on macOS cannot read the login keychain
+(`security show-keychain-info` reports "User interaction is not allowed"), so
+`claude auth status` reports no login for every Claude identity and Claude
+routes fail with a login-required refusal. Codex is unaffected because it keeps
+its credential in a file.
+
+`provenant install` on a Mac, run for the account's own home and the default
+state root, writes `~/Library/LaunchAgents/dev.provenant.peer.plist` and
+(re)starts it in the GUI domain with `launchctl bootstrap gui/$(id -u)`. The
+agent runs `provenant fabric peer-agent`, which listens on
+`~/.local/share/provenant/v1/peer-agent/peer.sock` (directory `0700`, socket
+`0600`). Each `fabric peer` call over SSH forwards its request to that socket,
+and the agent runs it in a fresh `fabric peer --in-process` child inside the
+login session, where the keychain is readable. When the agent is not
+listening, `fabric peer` handles the request itself as before. A request that
+reached the agent is never retried in process; a lost reply surfaces as an
+error and, for a mutation, as `launch_unknown`.
+
+Re-running install is idempotent: it rewrites the plist only when it changed
+and restarts the agent so it serves the new binary. The plist captures the
+installer's `PATH`, so run install from a shell whose `PATH` finds `claude`
+and the other provider CLIs. Installs with another home or `--state-dir` skip
+the agent. The agent logs failed requests to
+`~/.local/share/provenant/v1/peer-agent/agent.log`.
+
+Check it with `provenant hosts doctor` locally or `provenant hosts doctor
+workshop` from the other host: the `peer agent` line reads `running`,
+`stopped` (plist present, socket not answering), `not_installed` or
+`unsupported` (not macOS). To remove it, run
+`launchctl bootout gui/$(id -u)/dev.provenant.peer` and delete the plist. Doctor uses a separate remote command, so a key forced to the peer
 entrypoint cannot also run remote doctor.
 
 `fabric peer` is a hidden machine entrypoint, not an interactive operator

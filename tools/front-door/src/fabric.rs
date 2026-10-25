@@ -444,14 +444,28 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
         ),
     }
 }
-pub fn peer(globals: &provenant_cli::Globals) -> u8 {
+pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let bytes = provenant_supervisor::sys::hook_io::read_stdin(
             MAX_FRAME,
             Instant::now() + std::time::Duration::from_secs(30),
         )?;
-        let request = decode_request(&bytes)?;
         let home = crate::roots::home()?;
+        if !in_process {
+            let assets = crate::roots::product_root()?;
+            let state = crate::roots::roots(globals, &assets, &home)?.state;
+            // Only an unreachable agent falls back; a sent request is never repeated.
+            if let crate::peer_agent::Forward::Replied(reply) =
+                crate::peer_agent::forward(state.as_path(), &bytes)?
+            {
+                provenant_supervisor::sys::hook_io::write_stdout(
+                    &reply,
+                    Instant::now() + std::time::Duration::from_secs(30),
+                )?;
+                return Ok(());
+            }
+        }
+        let request = decode_request(&bytes)?;
         let common = request.project.resolve(&home)?;
         if provenant_supervisor::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());

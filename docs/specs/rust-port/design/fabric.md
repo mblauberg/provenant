@@ -610,13 +610,26 @@ owner's established custody rules can stop it.
 ### Peers and Git
 
 Each configured peer is the same user's trusted host, accessed through system
-SSH, no listener. Supervisor captures bounded stdin/stdout/stderr using a fixed
+SSH, with no network listener. Supervisor captures bounded stdin/stdout/stderr using a fixed
 argv and deadline. The default remote command is `provenant fabric peer`; it
 accepts one versioned request, not a caller-supplied command string. The existing
 Fabric config can select an absolute SSH executable and, per peer, an absolute
 remote Provenant executable and a bounded connection timeout. SSH destination
 and executable overrides come only from validated config. Provider credentials
 stay on the executing host.
+On macOS a process started from SSH cannot read the login keychain, so Claude
+reports no login there. The installer therefore starts a per-user LaunchAgent,
+`dev.provenant.peer`, in the GUI domain (`fabric peer-agent`). It listens on a
+Unix socket in a `0700` `peer-agent/` directory under the default state root
+and relays each request to a fresh `fabric peer --in-process` child, so the
+request, its credential reads and the lanes it launches run in the login
+session. The SSH entrypoint forwards its frame when the agent accepts a
+connection and handles it in process otherwise. Only a refused or missing
+socket falls back: once sent, a request is never repeated, and a lost reply
+fails the call so a mutation reconciles as `launch_unknown`. A resident agent
+was chosen over a one-shot GUI-domain job per launch because it answers within
+the SSH call, leaves no job to clean up, and each request still runs the newly
+installed binary after `install` restarts it.
 Handshake verifies protocol major, host ID and cross-host ProjectKey. Version mismatch
 refuses writes and reports incompatible reads. Peer fan-out uses at most
 four transport threads, never holds a DB transaction, and never recursively fans
