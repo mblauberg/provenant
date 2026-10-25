@@ -80,7 +80,7 @@ Global options are accepted before or after the subcommand:
 | Option | Meaning |
 | --- | --- |
 | `--help`, `--version` | Pure output, exit 0. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree` and every `fabric` leaf print terse text: one `key=value` line per record. `config show` and `workflow` print pretty JSON, and other leaves print their own text. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree` and the `fabric` leaves other than `mcp` and `peer` print terse text: one `key=value` line per record. `config show|set|unset` and `workflow` print pretty JSON; `hosts doctor` and the remaining leaves print their own text. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 

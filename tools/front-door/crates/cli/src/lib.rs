@@ -81,10 +81,16 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 return ParseOutcome::Invalid { error, globals };
             }
             return match error.kind() {
-                clap::error::ErrorKind::DisplayHelp => ParseOutcome::Help {
-                    text: error.to_string(),
-                    catalog: scoped(catalog(&model), &help_scope(&model, &argv)),
-                    globals,
+                clap::error::ErrorKind::DisplayHelp => match help_scope(&model, &argv) {
+                    Some(scope) => ParseOutcome::Help {
+                        text: error.to_string(),
+                        catalog: scoped(catalog(&model), &scope),
+                        globals,
+                    },
+                    None => ParseOutcome::Invalid {
+                        error: CliError::Invalid("unknown help command".into()),
+                        globals,
+                    },
                 },
                 clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
                 _ => ParseOutcome::Invalid {
@@ -395,20 +401,28 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
     }
     Ok(())
 }
-/// The subcommand path named in argv, such as `provenant fabric mail`. Flags
-/// and values that are not subcommands are skipped.
-fn help_scope(model: &clap::Command, argv: &[OsString]) -> String {
+/// The subcommand path named before the first `--help`, such as
+/// `provenant fabric mail`. Flags are skipped, along with the values of the
+/// global `--state-dir` and `--project`. A hidden command is unknown.
+fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
     let mut scope = String::from("provenant");
     let mut current = model;
-    for arg in argv.iter().skip(1).take_while(|arg| *arg != "--") {
-        if let Some(child) = arg.to_str().and_then(|name| current.find_subcommand(name))
-            && !child.is_hide_set()
-        {
+    let mut words = argv
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--" && *arg != "--help");
+    while let Some(arg) = words.next() {
+        if arg == "--state-dir" || arg == "--project" {
+            words.next();
+        } else if let Some(child) = arg.to_str().and_then(|name| current.find_subcommand(name)) {
+            if child.is_hide_set() {
+                return None;
+            }
             scope = format!("{scope} {}", child.get_name());
             current = child;
         }
     }
-    scope
+    Some(scope)
 }
 /// Keep the named command and its descendants; `help` alone keeps all.
 fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
@@ -1004,6 +1018,19 @@ mod tests {
             vec!["provenant fabric mail send".to_owned()]
         );
         assert!(names(&["hosts", "--help", "--json"]).len() == 2);
+        assert_eq!(
+            names(&["--project", "hosts", "lanes", "--help", "--json"]),
+            vec!["provenant lanes".to_owned()]
+        );
+        assert_eq!(
+            names(&["hosts", "--help", "doctor", "--json"]).len(),
+            2,
+            "words after the first --help are ignored"
+        );
+        assert!(matches!(
+            parsed(&["fabric", "peer", "--help", "--json"]),
+            ParseOutcome::Invalid { .. }
+        ));
         assert!(matches!(
             parsed(&["help", "nope", "--json"]),
             ParseOutcome::Invalid { .. }
