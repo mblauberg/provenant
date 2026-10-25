@@ -67,12 +67,24 @@ impl ProviderOutcome {
 }
 pub(crate) type Decoder = fn(&[u8]) -> Result<Vec<ProviderEvent>, ProviderError>;
 const MAX_LINE_BYTES: usize = 1_048_576;
+/// An oversized Codex `command_execution` item (its `aggregated_output` echoes
+/// whatever a command printed) is not evidence; every other oversized line
+/// still fails closed. The item type sits in the first bytes of the frame.
+fn oversize_ignorable(adapter: &str, head: &[u8]) -> bool {
+    adapter == "codex"
+        && (head.starts_with(br#"{"type":"item.completed","item":{"id":""#)
+            || head.starts_with(br#"{"type":"item.started","item":{"id":""#))
+        && head[..head.len().min(256)]
+            .windows(26)
+            .any(|window| window == br#""type":"command_execution""#)
+}
 /// Bounded incremental framing and evidence reduction. Only decoded protocol
 /// positions can affect identity or completion; prose is never searched.
 pub struct StreamState {
     adapter: &'static str,
     decoder: Decoder,
     pending: Vec<u8>,
+    discarding: bool,
     retained_events: Vec<ProviderEvent>,
     session: Option<String>,
     model: Option<String>,
@@ -91,6 +103,7 @@ impl StreamState {
             adapter,
             decoder,
             pending: Vec::new(),
+            discarding: false,
             retained_events: Vec::new(),
             session: None,
             model: None,
@@ -125,6 +138,9 @@ impl StreamState {
         let mut events = Vec::new();
         for byte in bytes {
             if *byte == b'\n' {
+                if std::mem::take(&mut self.discarding) {
+                    continue;
+                }
                 let line = std::mem::take(&mut self.pending);
                 if line.is_empty() {
                     continue;
@@ -137,8 +153,16 @@ impl StreamState {
                         return Err(error);
                     }
                 }
+            } else if self.discarding {
             } else {
                 if self.pending.len() == MAX_LINE_BYTES {
+                    if oversize_ignorable(self.adapter, &self.pending) {
+                        // Tool output echoed back by the provider carries no
+                        // identity, answer or completion evidence: drop the line.
+                        self.discarding = true;
+                        self.pending.clear();
+                        continue;
+                    }
                     self.malformed = true;
                     self.pending.clear();
                     self.retained_events = events;
