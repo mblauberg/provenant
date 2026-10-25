@@ -1,6 +1,6 @@
 # Run store and bounded readers
 
-Step 1 supplies `run.sqlite3` at the selected `StateRoot`, with strict v1
+The store is `run.sqlite3` at the selected `StateRoot`, with strict v1
 records shared through `provenant_records::run`. It uses WAL, foreign keys,
 `FULL` synchronisation, bounded BUSY retries and one thread per connection.
 Unknown database and record versions refuse without upgrading them.
@@ -64,11 +64,6 @@ Tests inject roots and clocks directly and use isolated `/tmp` directories.
 The subprocess crash fixture supplies a temporary HOME, state and harness
 config paths through supervisor's executor. The CLI already owns the native
 isolated `TestRig` in `tests/support`; no second CLI rig is introduced here.
-
-The old run Rust modules, pending/Unicode helpers and run differential harness
-were already absent on this baseline. Shared Python leaves remain for their
-old dispatch, batch, control, provider, Fabric and finaliser importers, as listed
-in the execution-run design's deletion inventory. This crate never calls them.
 
 ## Dispatch, admission and the guardian holder
 

@@ -18,7 +18,8 @@ harness without rediscovering it from individual skills.
 
 The `provenant` binary is the CLI and composition edge. Fifteen crates under
 `tools/front-door/crates/` each own one decision, and a crate may depend only on
-the crates beneath it.
+the crates beneath it (the allowed maximum in the
+[workspace table](specs/rust-workspace.md#crate-layering); a crate may declare fewer).
 
 | Crate | Owns |
 |---|---|
@@ -76,7 +77,7 @@ default. `--state-dir` or `PROVENANT_STATE_DIR` selects another absolute root.
 | `runs/`, `run.sqlite3` | `run`: runs, attempts and output |
 | `worktrees/` | `supervisor` and `confinement`: writer leases and reservations |
 | `fabric/` | `fabric-store`: the Fabric database |
-| `quota/`, `routing/`, `projects/<id>/workflow/` | Their owning crates |
+| `quota/`, `routing/`, `workflow/projects/<id>/` | Their owning crates |
 | `usage.jsonl` | Local usage counters for `telemetry stats --usage` |
 
 Fabric MCP reaches the same run service as the CLI through the Fabric runtime.

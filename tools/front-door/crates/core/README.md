@@ -3,7 +3,7 @@
 Pure shared values for the [state spec](../../../../docs/specs/state.md).
 
 - Distinct generated identities accept 16 supplied bytes or 32 lowercase hex
-  digits. `OperationId` uses execution-run's caller-key grammar instead.
+  digits. `OperationId` uses the caller-key grammar in the [run spec](../../../../docs/specs/run.md) instead.
 - `GitOid` accepts full SHA-1/SHA-256 hex. Provenant `Digest` requires the full
   `sha256:` spelling and is a distinct type.
 - Cooperative `CancelToken` clones share a flag. Separate tokens stay independent.
@@ -26,14 +26,6 @@ Pure shared values for the [state spec](../../../../docs/specs/state.md).
 
 Core reads no environment, filesystem, entropy, clock or process state. Tests
 inject those observations; no test discovers the user's home or old state.
-
-## Decided removals
-
-The old root pointers, host slugging, path resolution/ignore-file effects,
-Python/V8 emulation, generated Unicode table, `pending` copies and differential
-oracle harness are deleted. Their domain owners implement the accepted design;
-there are no compatibility adapters. Shared Python root/host leaves remain
-until their last importer is removed in state slice 5.
 
 From `tools/front-door`, run `cargo fmt --all`,
 `cargo clippy -p provenant-core --all-targets -- -D warnings` and
