@@ -1,11 +1,11 @@
 use crate::*;
 use provenant_core::{CancelToken, Clock, DurationMicros, StateRoot, WaitBudget};
-use provenant_supervisor::fs::{Directory, FileKind};
+use provenant_supervisor::fs::{Directory, FileKind, Metadata};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::{
     ffi::OsStr,
     marker::PhantomData,
-    path::Component,
+    path::{Component, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -98,7 +98,7 @@ fn enable_wal(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The only blocking seam: called after rollback, with a bounded delay.
+/// The only blocking seam: called between retries, with a bounded delay.
 pub trait RetryWait {
     fn wait(&self, delay: DurationMicros, cancel: &CancelToken);
 }
@@ -133,6 +133,20 @@ impl Request<'_> {
         Ok(())
     }
     pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
+        self.wait(|| match action() {
+            Err(Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                Ok(None)
+            }
+            result => result.map(Some),
+        })
+    }
+    /// Retry an incomplete observation within the request's budget and cancellation.
+    fn wait<T>(&self, mut action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
         // The real elapsed cap also bounds a frozen/inaccurate injected clock.
         let started = Instant::now();
         let cap = Duration::from_micros(self.budget.remaining(self.clock.mono_now()).as_micros());
@@ -148,12 +162,7 @@ impl Request<'_> {
                 return Err(Error::Busy);
             }
             match action() {
-                Err(Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
-                    if matches!(
-                        code.code,
-                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                    ) =>
-                {
+                Ok(None) => {
                     let micros = u64::try_from(remaining.as_micros())
                         .unwrap_or(u64::MAX)
                         .min(delay);
@@ -161,7 +170,8 @@ impl Request<'_> {
                         .wait(DurationMicros::from_micros(micros), self.cancel);
                     delay = delay.saturating_mul(2).min(250_000);
                 }
-                result => return result,
+                Ok(Some(value)) => return Ok(value),
+                Err(error) => return Err(error),
             }
         }
     }
@@ -223,7 +233,7 @@ impl Store {
             Err(error) if error.is_exists() => {}
             Err(error) => return Err(error.into()),
         }
-        companions(&fabric, &path)?;
+        companions(&fabric, &path, request)?;
         let db = Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -267,7 +277,7 @@ impl Store {
                 break;
             }
         }
-        companions(&fabric, &path)?;
+        companions(&fabric, &path, request)?;
         Ok(store)
     }
     pub(crate) fn write<T>(
@@ -294,17 +304,35 @@ fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
-fn companions(directory: &Directory, path: &std::path::Path) -> Result<()> {
+fn companions(directory: &Directory, path: &std::path::Path, request: &Request<'_>) -> Result<()> {
     for name in ["fabric.sqlite3", "fabric.sqlite3-wal", "fabric.sqlite3-shm"] {
-        match directory.metadata_at(OsStr::new(name), false) {
-            Ok(meta)
-                if meta.kind == FileKind::Regular && meta.links == 1 && meta.mode & 0o077 == 0 => {}
-            Ok(_) => return Err(Error::UnsafePath(path.join(name))),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
+        companion(request, path.join(name), || {
+            directory.metadata_at(OsStr::new(name), false)
+        })?;
     }
     Ok(())
+}
+fn companion(
+    request: &Request<'_>,
+    path: PathBuf,
+    mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
+) -> Result<()> {
+    // Mirrored in crates/run/src/db.rs::companion; keep unlink handling in sync.
+    request.wait(|| match metadata() {
+        Ok(meta) if meta.kind == FileKind::Regular && meta.mode & 0o077 == 0 => {
+            match meta.links {
+                1 => Ok(Some(())),
+                // SQLite's last connection can unlink WAL/SHM files while
+                // another opener's stat is in flight. Re-stat the name;
+                // never accept the removed inode.
+                0 => Ok(None),
+                _ => Err(Error::UnsafePath(path.clone())),
+            }
+        }
+        Ok(_) => Err(Error::UnsafePath(path.clone())),
+        Err(error) if error.is_not_found() => Ok(Some(())),
+        Err(error) => Err(error.into()),
+    })
 }
 
 // The configured root may live on another local volume than `/`. Once there,
@@ -328,6 +356,150 @@ fn checked_directory(parent: &Directory, name: &OsStr, device: Option<u64>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_core::{MonoTime, TestClock};
+    use std::cell::Cell;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Default)]
+    struct CountingWait(Cell<usize>);
+    impl RetryWait for CountingWait {
+        fn wait(&self, _: DurationMicros, _: &CancelToken) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn companion_rechecks_unlinked_observations() -> TestResult {
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        for replaced in [false, true] {
+            let backoff = CountingWait::default();
+            let request = Request {
+                clock: &clock,
+                budget: WaitBudget::cli(clock.mono_now(), 1)?,
+                cancel: &cancel,
+                backoff: &backoff,
+            };
+            let temp = tempfile::tempdir()?;
+            let directory = Directory::open_anchor(temp.path())?;
+            let name = OsStr::new("fabric.sqlite3-shm");
+            let file = directory.create_new(name)?;
+            let removed = Metadata {
+                links: 0,
+                ..file.metadata()?
+            };
+            directory.unlink(name)?;
+            if replaced {
+                directory.create_new(name)?;
+            }
+            let mut observations = 0;
+            let result = companion(&request, temp.path().join(name), || {
+                observations += 1;
+                if observations == 1 {
+                    Ok(removed)
+                } else {
+                    directory.metadata_at(name, false)
+                }
+            });
+            assert!(result.is_ok(), "replaced={replaced}: {result:?}");
+            assert_eq!(observations, 2);
+            assert_eq!(backoff.0.get(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn companion_refuses_unsafe_metadata_after_an_unlink() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let path = temp.path().join("fabric.sqlite3-wal");
+        let safe = directory
+            .create_new(OsStr::new("fabric.sqlite3-wal"))?
+            .metadata()?;
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let backoff = CountingWait::default();
+        let request = Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &cancel,
+            backoff: &backoff,
+        };
+        for unsafe_metadata in [
+            Metadata { links: 2, ..safe },
+            Metadata {
+                kind: FileKind::Symlink,
+                ..safe
+            },
+            Metadata {
+                kind: FileKind::Directory,
+                ..safe
+            },
+            Metadata {
+                mode: 0o644,
+                ..safe
+            },
+        ] {
+            let mut observations = 0;
+            let result = companion(&request, path.clone(), || {
+                observations += 1;
+                Ok(if observations == 1 {
+                    Metadata { links: 0, ..safe }
+                } else {
+                    unsafe_metadata
+                })
+            });
+            assert!(matches!(result, Err(Error::UnsafePath(p)) if p == path));
+            assert_eq!(observations, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn companion_unlink_retry_preserves_wait_errors() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let path = temp.path().join("fabric.sqlite3-shm");
+        let removed = Metadata {
+            links: 0,
+            ..directory
+                .create_new(OsStr::new("fabric.sqlite3-shm"))?
+                .metadata()?
+        };
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let backoff = CountingWait::default();
+        let request = Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &cancel,
+            backoff: &backoff,
+        };
+        assert!(matches!(
+            companion(&request, path.clone(), || {
+                cancel.cancel();
+                Ok(removed)
+            }),
+            Err(Error::Cancelled)
+        ));
+
+        let cancel = CancelToken::new();
+        let clock = TestClock::new(clock.wall_now()?, MonoTime::from_micros(999_999));
+        let request = Request {
+            // Only the final microsecond remains when the retry starts.
+            budget: WaitBudget::cli(MonoTime::from_micros(0), 1)?,
+            clock: &clock,
+            cancel: &cancel,
+            backoff: &backoff,
+        };
+        assert!(matches!(
+            companion(&request, path, || Ok(removed)),
+            Err(Error::Busy)
+        ));
+        Ok(())
+    }
+
     #[test]
     fn refuses_a_vfs_that_cannot_enable_wal() {
         let db = Connection::open_in_memory().unwrap();
