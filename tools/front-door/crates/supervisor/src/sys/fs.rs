@@ -225,6 +225,125 @@ pub(crate) fn metadata_at(dir: &File, name: &OsStr, follow: bool) -> io::Result<
         mode: stat.st_mode as u32,
     })
 }
+/// APFS exclusive allocation. Unsupported filesystems omit this attribute.
+#[cfg(target_os = "macos")]
+pub(crate) fn private_size_at(dir: &File, name: &OsStr) -> io::Result<Option<u64>> {
+    const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+    const ATTR_CMNEXT_PRIVATESIZE: u32 = 8;
+    const FSOPT_ATTR_CMN_EXTENDED: libc::c_ulong = 0x20;
+    const FSOPT_NOFOLLOW: libc::c_ulong = 1;
+    // Darwin extended common attributes occupy forkattr in struct attrlist.
+    #[repr(C)]
+    struct AttrList {
+        bitmapcount: u16,
+        reserved: u16,
+        commonattr: u32,
+        volattr: u32,
+        dirattr: u32,
+        fileattr: u32,
+        forkattr: u32,
+    }
+    unsafe extern "C" {
+        fn getattrlistat(
+            fd: libc::c_int,
+            path: *const libc::c_char,
+            attrs: *mut AttrList,
+            buffer: *mut libc::c_void,
+            size: libc::size_t,
+            options: libc::c_ulong,
+        ) -> libc::c_int;
+    }
+    let name = string(name)?;
+    let mut attrs = AttrList {
+        bitmapcount: 5,
+        reserved: 0,
+        commonattr: ATTR_CMN_RETURNED_ATTRS,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: ATTR_CMNEXT_PRIVATESIZE,
+    };
+    let mut buffer = [0_u8; 32];
+    // SAFETY: borrowed fd, live NUL-terminated name and correctly sized writable
+    // attrlist/buffer survive the call. No pointer escapes or ownership changes.
+    // Queries are independent and errno is thread local. Flags are
+    // FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW, so final links are not followed.
+    let result = retry(|| unsafe {
+        getattrlistat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut attrs,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW,
+        )
+    });
+    match result {
+        Ok(_) => decode_private_size(&buffer),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOTSUP | libc::EINVAL | libc::ENOSYS)
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn decode_private_size(buffer: &[u8; 32]) -> io::Result<Option<u64>> {
+    // Darwin attribute replies use four-byte packing. Parse native bytes rather
+    // than imposing Rust's alignment on the returned attribute_set_t and u64.
+    let length = u32::from_ne_bytes(buffer[0..4].try_into().map_err(io::Error::other)?);
+    if length < 24 || length > buffer.len() as u32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid attribute reply length",
+        ));
+    }
+    let returned = u32::from_ne_bytes(buffer[20..24].try_into().map_err(io::Error::other)?);
+    if returned & 8 == 0 {
+        return Ok(None);
+    }
+    if length < 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated private size",
+        ));
+    }
+    let bytes = i64::from_ne_bytes(buffer[24..32].try_into().map_err(io::Error::other)?);
+    u64::try_from(bytes)
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative private size"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn private_size_at(_dir: &File, _name: &OsStr) -> io::Result<Option<u64>> {
+    Ok(None)
+}
+
+#[cfg(test)]
+mod private_size_tests {
+    use super::*;
+    #[test]
+    fn returned_attributes_control_private_size() -> io::Result<()> {
+        let mut reply = [0_u8; 32];
+        reply[..4].copy_from_slice(&32_u32.to_ne_bytes());
+        reply[24..32].copy_from_slice(&42_u64.to_ne_bytes());
+        assert_eq!(decode_private_size(&reply)?, None);
+        reply[20..24].copy_from_slice(&8_u32.to_ne_bytes());
+        assert_eq!(decode_private_size(&reply)?, Some(42));
+        reply[..4].copy_from_slice(&24_u32.to_ne_bytes());
+        assert!(decode_private_size(&reply).is_err());
+        reply[..4].copy_from_slice(&32_u32.to_ne_bytes());
+        reply[24..32].copy_from_slice(&(-1_i64).to_ne_bytes());
+        assert!(decode_private_size(&reply).is_err());
+        Ok(())
+    }
+}
+
 pub(crate) fn mkdir(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
     let name = string(name)?;
     // SAFETY: borrowed fd and NUL-terminated name stay live; mkdirat retains

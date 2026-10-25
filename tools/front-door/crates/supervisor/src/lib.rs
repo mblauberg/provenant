@@ -4,6 +4,7 @@
 #![deny(unsafe_code)]
 
 pub mod clock;
+pub mod disk;
 pub mod exec;
 pub mod fs;
 pub mod git;

@@ -462,6 +462,12 @@ impl Directory {
     pub fn available_bytes(&self) -> std::io::Result<u64> {
         crate::sys::resources::available_bytes(&self.file)
     }
+    /// Exclusive APFS allocation, or None when the filesystem omits it.
+    /// Observes one normal component without following its final symlink.
+    pub fn private_size_at(&self, name: &OsStr) -> Result<Option<u64>> {
+        let name = component(name)?;
+        os::private_size_at(&self.file, name).map_err(error("getattrlistat", &self.path.join(name)))
+    }
     pub fn open_verified_directory(&self, name: &OsStr) -> Result<Self> {
         let before = self.metadata_at(name, false)?;
         let child = self.open_directory(name)?;
@@ -502,6 +508,36 @@ impl Directory {
     /// Attempt one nonblocking acquisition with the same verified inode checks.
     pub fn try_lock(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
         self.lock_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
+    }
+
+    /// Observe a stable existing lock using a read-only descriptor. This never
+    /// creates a missing lock or changes its contents, mode or timestamps.
+    pub fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
+        let name = component(name)?;
+        if !name.as_bytes().ends_with(b".lock") {
+            return Err(FsError::InvalidLockName { name: name.into() });
+        }
+        let path = self.path.join(name);
+        let owner_uid = os::effective_uid();
+        verify_lock_directory(name, self.metadata()?, owner_uid)?;
+        let before = self.metadata_at(name, false)?;
+        let file = os::open_read(&self.file, name).map_err(error("open existing lock", &path))?;
+        let opened = file
+            .metadata()
+            .map(Metadata::from_std)
+            .map_err(error("fstat existing lock", &path))?;
+        let after = self.metadata_at(name, false)?;
+        verify_owner_lock_metadata(name, Some(before), opened, after, self.device, owner_uid)?;
+        match os::try_flock(&file, mode) {
+            Ok(()) => Ok(LockGuard { _file: file }),
+            Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                Err(FsError::LockTimeout {
+                    path,
+                    timeout: Duration::ZERO,
+                })
+            }
+            Err(source) => Err(error("flock existing lock", &path)(source)),
+        }
     }
 
     fn lock_with_timeout(
