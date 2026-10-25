@@ -103,13 +103,14 @@ enum MenuStyle {
             color.withAlphaComponent(mark == nil ? 0.25 : 1).setStroke()
             track.stroke()
             if mark == nil, let fraction, fraction > 0 {
-                let arc = NSBezierPath()
-                arc.appendArc(withCenter: center, radius: radius, startAngle: 90,
-                              endAngle: 90 - 360 * CGFloat(min(fraction, 1)), clockwise: true)
-                arc.lineWidth = line
-                arc.lineCapStyle = .round
-                color.setStroke()
-                arc.stroke()
+                if let context = NSGraphicsContext.current?.cgContext {
+                    context.addArc(center: center, radius: radius, startAngle: .pi / 2,
+                                   endAngle: .pi / 2 - 2 * .pi * CGFloat(min(fraction, 1)), clockwise: true)
+                    context.setLineWidth(line)
+                    context.setLineCap(.round)
+                    context.setStrokeColor(color.cgColor)
+                    context.strokePath()
+                }
             }
             if let glyph {
                 glyph.draw(in: NSRect(x: center.x - glyph.size.width / 2, y: center.y - glyph.size.height / 2,

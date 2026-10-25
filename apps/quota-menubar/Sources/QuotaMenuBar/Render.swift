@@ -66,7 +66,7 @@ enum Render {
 enum MenuMetrics {
     static let padding: CGFloat = 5
     static let row: CGFloat = 24, tallRow: CGFloat = 36, header: CGFloat = 26, separator: CGFloat = 11
-    static let iconCenter: CGFloat = 22.5, iconTitle: CGFloat = 37
+    static let iconCentre: CGFloat = 22.5, iconTitle: CGFloat = 37
     static let trailing: CGFloat = 18
     static let arrowColumn: CGFloat = 34          // after the title column, when an item has a submenu
     static let shortcutColumn: CGFloat = 62       // after the title column, when an item has a shortcut
@@ -216,7 +216,7 @@ private final class PreviewItem: NSView {
         if !spec.enabled { context?.setAlpha(0.4) }
         let lead = spec.icon == nil ? MenuStyle.inset : MenuMetrics.iconTitle
         if let image = spec.icon.flatMap(MenuStyle.image) {
-            let rect = NSRect(x: MenuMetrics.iconCenter - image.size.width / 2, y: (bounds.height - image.size.height) / 2,
+            let rect = NSRect(x: MenuMetrics.iconCentre - image.size.width / 2, y: (bounds.height - image.size.height) / 2,
                               width: image.size.width, height: image.size.height)
             if image.isTemplate { tinted(image, .labelColor).draw(in: rect) } else { image.draw(in: rect) }
         }
