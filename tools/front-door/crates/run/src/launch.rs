@@ -2,12 +2,12 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{ActorId, AttemptId, OperationId, RunId};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
 use rusqlite::{OptionalExtension, params};
-use std::{ffi::OsString, path::PathBuf};
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 /// An explicit dispatch argument wins over the effective profile default.
 pub fn concurrency(explicit: Option<u64>, profile: &HarnessProfile) -> u64 {
@@ -173,6 +173,33 @@ fn child_access_within(
 }
 
 impl RunStore {
+    /// Count lane-writable records, including terminal attempts. The task
+    /// index is untrusted and must not hide duplicate decoded task IDs.
+    fn child_attempts_per_task(
+        &self,
+        run: RunId,
+        call: &Request<'_>,
+    ) -> Result<BTreeMap<TaskId, u64>> {
+        call.retry(|| {
+            let mut query = self
+                .db
+                .prepare("SELECT record FROM attempts WHERE run=?1 AND project=?2")?;
+            let mut rows = query.query(params![
+                run.to_string(),
+                self.context.project_id.to_string()
+            ])?;
+            let mut counts = BTreeMap::new();
+            while let Some(row) = rows.next()? {
+                let raw: Vec<u8> = row.get(0)?;
+                let record: AttemptRecord = decode(&raw)?;
+                if record.run_id != run {
+                    return Err(RunError::Validation("child attempt run does not match"));
+                }
+                *counts.entry(record.task_id).or_insert(0) += 1;
+            }
+            Ok(counts)
+        })
+    }
     /// Validate lane-writable ingress against the host's recorded parent and
     /// its sealed task. A child never gains authority its parent lacks, and a
     /// lane cannot propose a writer or delivering child: the host has no
@@ -201,6 +228,13 @@ impl RunStore {
             return Err(RunError::Validation(
                 "a child run cannot continue an attempt",
             ));
+        }
+        if self
+            .child_attempts_per_task(run, call)?
+            .iter()
+            .any(|(id, count)| *count > 1 || !request.tasks.iter().any(|task| task.task_id == *id))
+        {
+            return Err(RunError::Validation("child task has more than one attempt"));
         }
         for task in &request.tasks {
             if task.writer.is_some() || task.deliver.is_some() {
@@ -423,6 +457,37 @@ impl RunStore {
             if record.state != AttemptState::Queued {
                 continue;
             }
+            let now = || {
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))
+            };
+            if child.is_some()
+                && self
+                    .child_attempts_per_task(run, call)?
+                    .get(&record.task_id)
+                    .is_some_and(|count| *count > 1)
+            {
+                let reason = "child task has more than one attempt";
+                match self.withdraw(
+                    id,
+                    AttemptState::Queued,
+                    Outcome::Rejected,
+                    reason,
+                    now()?,
+                    call,
+                ) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(RunError::Conflict) => continue,
+                    Err(error) => return Err(error),
+                }
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: reason.into(),
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
             let (task_index, task) = request
                 .tasks
                 .iter()
@@ -446,11 +511,6 @@ impl RunStore {
                 stdout = directory.join("stdout.log").display(),
                 stderr = directory.join("stderr.log").display(),
             );
-            let now = || {
-                call.clock
-                    .wall_now()
-                    .map_err(|_| RunError::Validation("wall clock"))
-            };
             let attempt = self.attempt_dir(record.run_id, id, false)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;

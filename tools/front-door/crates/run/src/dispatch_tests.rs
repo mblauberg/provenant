@@ -286,6 +286,260 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
 }
 
 #[test]
+fn host_refuses_child_with_extra_attempt_rows() -> TestResult {
+    for terminal in [false, true] {
+        for forged_task_index in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&context(temp.path())?, &call)?;
+            let parent = AttemptId::from_bytes([9; 16]);
+            let mut nested = input();
+            nested.request.lane_depth = Some(2);
+            nested.request.parent_attempt = Some(parent);
+            store.create(&nested, &call)?;
+            let mut extra = store.record(nested.attempts[0].attempt_id, &call)?;
+            extra.attempt_id = AttemptId::from_bytes([22; 16]);
+            extra.attempt_number = 2;
+            extra.prompt.path = artifacts::artifact_path(extra.attempt_id, "prompt.txt")?;
+            if terminal {
+                extra.state = AttemptState::Terminal {
+                    outcome: Outcome::Rejected,
+                    exit_code: None,
+                    finished_at: WallTime::from_micros(150)?,
+                    reason: Some("injected terminal row".into()),
+                };
+            }
+            let indexed_task = if forged_task_index {
+                TaskId::from_bytes([23; 16])
+            } else {
+                extra.task_id
+            };
+            insert_child_attempt(&store, &extra, indexed_task)?;
+            assert!(matches!(
+                store.validate_child(
+                    nested.run_id,
+                    parent,
+                    &input().request.tasks[0],
+                    1,
+                    2,
+                    &call,
+                ),
+                Err(RunError::Validation("child task has more than one attempt"))
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn host_refuses_child_attempt_records_outside_the_request() -> TestResult {
+    for wrong_run in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let parent = AttemptId::from_bytes([9; 16]);
+        let mut nested = input();
+        nested.request.lane_depth = Some(2);
+        nested.request.parent_attempt = Some(parent);
+        store.create(&nested, &call)?;
+        let mut attempt = store.record(nested.attempts[0].attempt_id, &call)?;
+        if wrong_run {
+            attempt.run_id = provenant_core::RunId::from_bytes([23; 16]);
+        } else {
+            attempt.task_id = TaskId::from_bytes([23; 16]);
+        }
+        // Keep the index columns unchanged: validation must inspect the record.
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(&attempt)?, attempt.attempt_id.to_string()],
+        )?;
+        let result = store.validate_child(
+            nested.run_id,
+            parent,
+            &input().request.tasks[0],
+            1,
+            2,
+            &call,
+        );
+        let expected = if wrong_run {
+            "child attempt run does not match"
+        } else {
+            "child task has more than one attempt"
+        };
+        assert!(matches!(result, Err(RunError::Validation(reason)) if reason == expected));
+    }
+    Ok(())
+}
+
+fn insert_child_attempt(
+    store: &RunStore,
+    record: &AttemptRecord,
+    indexed_task: TaskId,
+) -> TestResult {
+    store.db.execute(
+        "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        rusqlite::params![
+            record.attempt_id.to_string(),
+            record.run_id.to_string(),
+            record.project_id.to_string(),
+            indexed_task.to_string(),
+            crate::db::sql_int(record.attempt_number)?,
+            crate::db::sql_int(record.revision)?,
+            matches!(record.state, AttemptState::Terminal { .. }),
+            crate::db::bytes(record)?,
+        ],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn host_launches_one_attempt_per_child_task() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?
+        .with_sealed_requester(provenant_core::ActorId::from_bytes([2; 16]));
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut nested = input();
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    store.create(&nested, &call)?;
+    let validated = store.validate_child(
+        nested.run_id,
+        parent,
+        &input().request.tasks[0],
+        1,
+        2,
+        &call,
+    )?;
+    let mut extra = store.record(nested.attempts[0].attempt_id, &call)?;
+    extra.attempt_id = AttemptId::from_bytes([22; 16]);
+    extra.attempt_number = 2;
+    extra.prompt.path = artifacts::artifact_path(extra.attempt_id, "prompt.txt")?;
+    insert_child_attempt(&store, &extra, extra.task_id)?;
+    let fake = Fake::default();
+    let started = store.start_child(
+        nested.run_id,
+        &validated,
+        &fake,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert_eq!(fake.prepared.get(), 0);
+    assert_eq!(started.len(), 2);
+    for id in [nested.attempts[0].attempt_id, extra.attempt_id] {
+        assert!(started.iter().any(|result| matches!(result,
+            Started::Refused { attempt, reason, kind: RefusalKind::Preparation }
+            if *attempt == id && reason == "child task has more than one attempt"
+        )));
+        assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+        assert_eq!(store.record(id, &call)?.generation, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn host_refuses_extra_child_attempt_without_touching_held_attempt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let requester = provenant_core::ActorId::from_bytes([2; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(requester);
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut nested = input();
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    store.create(&nested, &call)?;
+    let validated = store.validate_child(
+        nested.run_id,
+        parent,
+        &input().request.tasks[0],
+        1,
+        2,
+        &call,
+    )?;
+    let id = nested.attempts[0].attempt_id;
+    let mut extra = store.record(id, &call)?;
+    let held = store.mark_starting(id, &route(), &[], None, &call)?;
+    hold_child_fixture(
+        &store,
+        store.attempt_dir(nested.run_id, id, false)?,
+        RunStore::scope(&held),
+        requester,
+    )?;
+    extra.attempt_id = AttemptId::from_bytes([22; 16]);
+    extra.attempt_number = 2;
+    extra.prompt.path = artifacts::artifact_path(extra.attempt_id, "prompt.txt")?;
+    insert_child_attempt(&store, &extra, extra.task_id)?;
+    let fake = Fake::default();
+    let started = store.start_child(
+        nested.run_id,
+        &validated,
+        &fake,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert!(matches!(started.as_slice(), [Started::Refused {
+        attempt, kind: RefusalKind::Preparation, ..
+    }] if *attempt == extra.attempt_id));
+    assert_eq!(fake.prepared.get(), 0);
+    assert_eq!(store.record(id, &call)?, held);
+    assert_eq!(
+        terminal(&store, extra.attempt_id, &call)?,
+        Outcome::Rejected
+    );
+    assert_eq!(store.held_attempts(), vec![id]);
+    assert!(store.launched.borrow()[0].handle.is_some());
+    Ok(())
+}
+
+#[test]
+fn host_launches_child_tasks_independently() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?
+        .with_sealed_requester(provenant_core::ActorId::from_bytes([2; 16]));
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut nested = two_tasks(2);
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    store.create(&nested, &call)?;
+    let validated = store.validate_child(
+        nested.run_id,
+        parent,
+        &input().request.tasks[0],
+        1,
+        2,
+        &call,
+    )?;
+    let handed_off = RefCell::new(Vec::new());
+    let started = store.start_child(
+        nested.run_id,
+        &validated,
+        &Ready,
+        &|record, _| {
+            handed_off.borrow_mut().push(record.task_id);
+            Err(RunError::Validation("fixture observed handoff"))
+        },
+        &call,
+    )?;
+    assert_eq!(started.len(), 2);
+    assert_eq!(
+        *handed_off.borrow(),
+        nested
+            .request
+            .tasks
+            .iter()
+            .map(|task| task.task_id)
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
 fn host_launches_only_the_validated_child_request() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
     let temp = tempfile::tempdir()?;
@@ -1027,6 +1281,7 @@ struct Fake {
     refuse: bool,
     observed: Option<RouteRecord>,
     decoded: Cell<usize>,
+    prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
 }
@@ -1038,6 +1293,7 @@ impl Providers for Fake {
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
+        self.prepared.set(self.prepared.get() + 1);
         assert!(paths.temporary.ends_with("tmp"));
         assert!(paths.temporary.is_dir());
         self.prompt.replace(prompt.into());
