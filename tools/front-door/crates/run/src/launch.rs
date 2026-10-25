@@ -602,10 +602,13 @@ impl RunStore {
                 .map_err(|e| local(&e))?;
         // Clone before acquiring custody: failure leaves no writer reservation.
         let held = if self.sealed_requester.is_some() {
-            Some(custody::hold(
-                reservation.directory().try_clone().map_err(|e| local(&e))?,
-                scope,
-                requester,
+            Some((
+                custody::hold(
+                    reservation.directory().try_clone().map_err(|e| local(&e))?,
+                    scope,
+                    requester,
+                ),
+                reservation.custody_metadata().map_err(|e| local(&e))?,
             ))
         } else {
             None
@@ -719,8 +722,8 @@ impl RunStore {
         };
         let capture = capture_plan(task);
         // Held before launch: an unconfirmed handoff may still have a guardian.
-        if let Some(held) = held {
-            self.hold_child(held);
+        if let Some((held, custody)) = held {
+            self.hold_child(held, custody);
         }
         custody::launch(
             OwnedLaunch {

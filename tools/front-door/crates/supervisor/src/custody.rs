@@ -1,7 +1,9 @@
 //! Guardian channels and persistent writer reservations. A PID is never a handle.
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::exec::{CapturedStream, Termination};
-use crate::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode, SafeDir};
+use crate::fs::{
+    Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode, SafeDir,
+};
 use crate::machine::StopReason;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, RunId, WaitBudget};
 use provenant_records::{Limits, decode_v1};
@@ -489,6 +491,11 @@ impl PublicationReservation {
         &self.directory
     }
 
+    /// Capture custody identity from the held lock, never a lane-writable name.
+    pub fn custody_metadata(&self) -> Result<Metadata> {
+        Ok(self.custody.metadata()?)
+    }
+
     pub fn prepare(
         directory: Directory,
         budget: WaitBudget,
@@ -628,6 +635,16 @@ pub struct CustodyHandle {
 impl CustodyHandle {
     pub fn scope(&self) -> Scope {
         self.scope
+    }
+
+    /// Observe guardian exit using the custody identity captured at hand-off.
+    /// Missing, replaced or unobservable locks retain the handle. The probe
+    /// opens through the held directory and releases its lock on return.
+    pub fn custody_released(&self, identity: &Metadata) -> bool {
+        self.directory
+            .try_lock_existing(OsStr::new("custody.lock"), LockMode::Exclusive)
+            .and_then(|guard| guard.metadata())
+            .is_ok_and(|metadata| metadata.same_identity(identity))
     }
 }
 #[derive(Debug)]

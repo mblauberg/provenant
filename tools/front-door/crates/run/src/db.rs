@@ -69,14 +69,16 @@ impl Request<'_> {
     }
 }
 // Leave room below macOS's common 256-descriptor soft limit for SQLite,
-// publication and guardian launch. Lane-writable terminal records cannot
-// authorise releasing these handles, so refuse further hand-offs at this cap.
-pub(crate) const HELD_CHILD_LIMIT: usize = 64;
+// publication, guardian launch and the one-descriptor custody probe. Reclaiming
+// exited guardians removes the lifetime limit without raising live FD pressure.
+// A small unit-test cap exercises reclamation without many filesystem syncs.
+pub(crate) const HELD_CHILD_LIMIT: usize = if cfg!(test) { 2 } else { 64 };
 
-/// Keep the scope after its handle is superseded: owner checks still need it.
+/// Keep the scope after supersession or guardian exit for owner checks.
 pub(crate) struct Held {
     pub(crate) scope: provenant_supervisor::custody::Scope,
     pub(crate) handle: Option<provenant_supervisor::custody::CustodyHandle>,
+    custody: Metadata,
 }
 
 /// One connection, one owning thread. Call budgets are supplied afresh and no
@@ -94,19 +96,43 @@ pub struct RunStore {
 }
 impl RunStore {
     pub(crate) fn check_held_capacity(&self, id: provenant_core::AttemptId) -> Result<()> {
-        let active = self
-            .launched
-            .borrow()
+        let mut launched = self.launched.borrow_mut();
+        let active = || {
+            launched
+                .iter()
+                .filter(|held| held.handle.is_some() && held.scope.attempt != id)
+                .count()
+        };
+        if active() < HELD_CHILD_LIMIT {
+            return Ok(());
+        }
+        for held in launched.iter_mut() {
+            if held
+                .handle
+                .as_ref()
+                .is_some_and(|handle| handle.custody_released(&held.custody))
+            {
+                held.handle = None;
+            }
+        }
+        if launched
             .iter()
             .filter(|held| held.handle.is_some() && held.scope.attempt != id)
-            .count();
-        if active >= HELD_CHILD_LIMIT {
-            return Err(RunError::Validation("held child directory limit reached"));
+            .count()
+            >= HELD_CHILD_LIMIT
+        {
+            return Err(RunError::Validation(
+                "held child custody limit reached; earlier children are still running",
+            ));
         }
         Ok(())
     }
 
-    pub(crate) fn hold_child(&self, handle: provenant_supervisor::custody::CustodyHandle) {
+    pub(crate) fn hold_child(
+        &self,
+        handle: provenant_supervisor::custody::CustodyHandle,
+        custody: Metadata,
+    ) {
         let scope = handle.scope();
         let mut launched = self.launched.borrow_mut();
         for held in launched
@@ -118,6 +144,7 @@ impl RunStore {
         launched.push(Held {
             scope,
             handle: Some(handle),
+            custody,
         });
     }
 

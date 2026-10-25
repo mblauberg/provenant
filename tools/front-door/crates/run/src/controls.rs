@@ -189,7 +189,9 @@ impl RunStore {
             .find(|held| held.scope.attempt == id)
         {
             let Some(handle) = &held.handle else {
-                return Err(RunError::Validation("held child custody handle missing"));
+                // The latest handle is dropped only after observing guardian
+                // exit. Earlier superseded generations cannot be selected.
+                return Ok(CancelReceipt::AlreadyTerminal);
             };
             let stopped = custody::stop(handle, StopReason::ExplicitCancellation)
                 .map_err(|error| error.to_string());

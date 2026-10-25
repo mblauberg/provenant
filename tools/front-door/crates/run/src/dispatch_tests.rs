@@ -13,6 +13,23 @@ use std::{
 };
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+fn hold_child_fixture(
+    store: &RunStore,
+    directory: Directory,
+    scope: provenant_supervisor::custody::Scope,
+    requester: provenant_core::ActorId,
+) -> TestResult {
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+    )?;
+    store.hold_child(
+        provenant_supervisor::custody::hold(directory, scope, requester),
+        custody.metadata()?,
+    );
+    Ok(())
+}
+
 #[test]
 fn nested_lane_depth_stops_at_the_configured_maximum() {
     assert!(matches!(next_lane_depth(0, 2), Ok(1)));
@@ -492,11 +509,12 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
             generation: started.generation,
         };
         // As hand-off holds it just before launching the guardian.
-        store.hold_child(provenant_supervisor::custody::hold(
+        hold_child_fixture(
+            &store,
             store.attempt_dir(run.run_id, id, false)?,
             scope,
             sealed,
-        ));
+        )?;
         // The lane rewrites the record, the launch summary and the stop.
         let mut record = store.record(id, &call)?;
         forge(&mut record);
@@ -560,11 +578,12 @@ fn held_stop_follows_the_handed_off_directory() -> TestResult {
         attempt: id,
         generation: started.generation,
     };
-    store.hold_child(provenant_supervisor::custody::hold(
+    hold_child_fixture(
+        &store,
         store.attempt_dir(run.run_id, id, false)?,
         scope,
         sealed,
-    ));
+    )?;
     let original = store
         .context
         .state_root
@@ -630,6 +649,172 @@ fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
 }
 
 #[test]
+fn held_children_reclaim_exited_custody_across_sequential_launches() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let mut execution = context(temp.path())?;
+    execution.actor_id = sealed;
+    let store = RunStore::open(&execution, &call)?.with_sealed_requester(sealed);
+    let mut runs = Vec::new();
+    let handoffs = Cell::new(0);
+    for index in 0..(crate::db::HELD_CHILD_LIMIT * 2 + 1) {
+        let mut run = input();
+        let byte = u8::try_from(index + 32)?;
+        run.run_id = provenant_core::RunId::from_bytes([byte; 16]);
+        run.attempts[0].attempt_id = AttemptId::from_bytes([byte; 16]);
+        run.operation_id = provenant_core::OperationId::parse(&format!("child-{index}"))?;
+        // Exercise real hand-off and reservation release without spawning a
+        // provider. Invalid capture publishes never-spawned evidence and drops
+        // the same custody guard a guardian would retain until exit.
+        run.request.tasks[0]
+            .profile
+            .knobs
+            .insert("lanes.silence_seconds".into(), 0.into());
+        store.create(&run, &call)?;
+        store.start_child(
+            run.run_id,
+            &run.request,
+            &Ready,
+            &|_, _| {
+                handoffs.set(handoffs.get() + 1);
+                Ok(Vec::new())
+            },
+            &call,
+        )?;
+        assert_eq!(handoffs.get(), index + 1, "child refused at capacity");
+        runs.push(run);
+    }
+    {
+        let held = store.launched.borrow();
+        assert_eq!(held.len(), runs.len());
+        assert!(held[0].handle.is_none());
+        assert!(
+            held.iter().filter(|held| held.handle.is_some()).count() <= crate::db::HELD_CHILD_LIMIT
+        );
+    }
+    let first = &runs[0];
+    assert_eq!(
+        store.cancel(first.attempts[0].attempt_id, "stop", &call)?,
+        CancelReceipt::AlreadyTerminal
+    );
+    assert!(
+        store
+            .stop_children(Default::default(), "stop", &call)
+            .is_empty()
+    );
+    // Reclamation must retain the owner's scope, even if the lane changes
+    // its record after the guardian has exited.
+    let mut owner = store.run(first.run_id, &call)?;
+    owner.actor_id = provenant_core::ActorId::from_bytes([66; 16]);
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&owner)?, first.run_id.to_string()],
+    )?;
+    assert!(matches!(
+        store.run(first.run_id, &call),
+        Err(RunError::Validation("child record names another owner"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn held_children_retain_busy_missing_and_recreated_custody_locks() -> TestResult {
+    use provenant_supervisor::custody::{PublicationReservation, Scope};
+    use std::ffi::OsStr;
+    for state in ["busy", "missing", "recreated", "symlink", "renamed"] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+        let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+        let run = input();
+        store.create(&run, &call)?;
+        let directory = store.attempt_dir(run.run_id, run.attempts[0].attempt_id, false)?;
+        let reservation =
+            PublicationReservation::prepare(directory.try_clone()?, call.budget, &cancel, &clock)?;
+        let identity = reservation.custody_metadata()?;
+        for index in 0..crate::db::HELD_CHILD_LIMIT {
+            store.hold_child(
+                provenant_supervisor::custody::hold(
+                    directory.try_clone()?,
+                    Scope {
+                        run: run.run_id,
+                        attempt: AttemptId::from_bytes([u8::try_from(index + 32)?; 16]),
+                        generation: 1,
+                    },
+                    sealed,
+                ),
+                identity,
+            );
+        }
+        let lock = OsStr::new("custody.lock");
+        let path = store.context.state_root.as_path().join(format!(
+            "runs/{}/attempts/{}",
+            run.run_id, run.attempts[0].attempt_id
+        ));
+        if state != "busy" && state != "renamed" {
+            // The lane is not constrained by the supervisor's refusal to
+            // unlink reserved lock names.
+            std::fs::remove_file(path.join("custody.lock"))?;
+        }
+        if state == "recreated" {
+            let replacement =
+                directory.try_lock(lock, provenant_supervisor::fs::LockMode::Exclusive)?;
+            assert!(!identity.same_identity(&replacement.metadata()?));
+        } else if state == "symlink" {
+            directory.try_lock(
+                OsStr::new("other.lock"),
+                provenant_supervisor::fs::LockMode::Exclusive,
+            )?;
+            std::os::unix::fs::symlink("other.lock", path.join("custody.lock"))?;
+        } else if state == "renamed" {
+            std::fs::rename(&path, path.with_file_name("renamed-attempt"))?;
+            std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        }
+        assert!(
+            matches!(
+                store.check_held_capacity(run.attempts[0].attempt_id),
+                Err(RunError::Validation(
+                    "held child custody limit reached; earlier children are still running"
+                ))
+            ),
+            "{state}"
+        );
+        assert!(
+            store
+                .launched
+                .borrow()
+                .iter()
+                .all(|held| held.handle.is_some()),
+            "{state}"
+        );
+        if state == "missing" {
+            assert!(
+                directory
+                    .metadata_at(lock, false)
+                    .is_err_and(|error| error.is_not_found())
+            );
+        }
+        drop(reservation);
+        if state == "busy" || state == "renamed" {
+            // The unchanged inode becomes releasable only after its owner
+            // drops the inherited custody guard.
+            store.check_held_capacity(run.attempts[0].attempt_id)?;
+            assert!(
+                store
+                    .launched
+                    .borrow()
+                    .iter()
+                    .all(|held| held.handle.is_none())
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -643,7 +828,8 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
     store.create(&run, &call)?;
     let directory = store.attempt_dir(run.run_id, id, false)?;
     for index in 0..crate::db::HELD_CHILD_LIMIT {
-        store.hold_child(provenant_supervisor::custody::hold(
+        hold_child_fixture(
+            &store,
             directory.try_clone()?,
             provenant_supervisor::custody::Scope {
                 run: run.run_id,
@@ -651,18 +837,21 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
                 generation: 1,
             },
             sealed,
-        ));
+        )?;
     }
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+    )?;
     let mut scope = store.launched.borrow()[0].scope;
     // A replacement is allowed even at the cap. Its predecessor retains
     // the scope needed for owner checks, but no longer retains a descriptor.
     store.check_held_capacity(scope.attempt)?;
     scope.generation += 1;
-    store.hold_child(provenant_supervisor::custody::hold(
-        directory.try_clone()?,
-        scope,
-        sealed,
-    ));
+    store.hold_child(
+        provenant_supervisor::custody::hold(directory.try_clone()?, scope, sealed),
+        custody.metadata()?,
+    );
     {
         let held = store.launched.borrow();
         assert_eq!(held[0].scope.generation, 1);
@@ -694,7 +883,7 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
     )?;
     assert!(
         matches!(started.as_slice(), [Started::Refused { attempt, reason, .. }]
-        if *attempt == id && reason.contains("held child directory limit reached"))
+        if *attempt == id && reason.contains("held child custody limit reached; earlier children are still running"))
     );
     let record = store.record(id, &call)?;
     assert!(matches!(
@@ -739,11 +928,12 @@ fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResu
         attempt: late,
         generation: started.generation,
     };
-    store.hold_child(provenant_supervisor::custody::hold(
+    hold_child_fixture(
+        &store,
         store.attempt_dir(batch.run_id, late, false)?,
         scope,
         sealed,
-    ));
+    )?;
     let accepted = std::collections::BTreeSet::from([(queued, 1)]);
     assert!(store.stop_children(accepted, "stop", &call).is_empty());
     let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
@@ -783,7 +973,8 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
     };
     rename(&record)?;
     assert!(store.record(id, &call).is_ok());
-    store.hold_child(provenant_supervisor::custody::hold(
+    hold_child_fixture(
+        &store,
         store.attempt_dir(run.run_id, id, false)?,
         provenant_supervisor::custody::Scope {
             run: run.run_id,
@@ -791,7 +982,7 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
             generation: started.generation,
         },
         sealed,
-    ));
+    )?;
     let renamed = |result: Result<()>| {
         matches!(
             result,

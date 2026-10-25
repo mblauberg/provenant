@@ -281,6 +281,20 @@ fn start(
     extra: &[OsString],
     plan: CapturePlan,
 ) -> Result<(CustodyLease, CustodyHandle)> {
+    let (writer, handle, _) = start_with_custody_identity(root, name, scenario, extra, plan)?;
+    Ok((writer, handle))
+}
+fn start_with_custody_identity(
+    root: &Path,
+    name: &str,
+    scenario: &str,
+    extra: &[OsString],
+    plan: CapturePlan,
+) -> Result<(
+    CustodyLease,
+    CustodyHandle,
+    provenant_supervisor::fs::Metadata,
+)> {
     let writer = root.join(format!("{name}-writer"));
     let attempt = root.join(format!("{name}-attempt"));
     std::fs::create_dir(&writer)?;
@@ -300,6 +314,7 @@ fn start(
         &cancel,
         &clock,
     )?;
+    let identity = publication.custody_metadata()?;
     let command = ProviderCommand {
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
@@ -325,7 +340,7 @@ fn start(
         plan,
         publication,
     )?;
-    Ok((writer, handle))
+    Ok((writer, handle, identity))
 }
 fn exited(handle: &CustodyHandle) -> Result<ExitObservation> {
     let clock = SystemClock::new();
@@ -548,6 +563,29 @@ fn live_provider_publishes_initial_checkpoint(root: &Path) -> Result<()> {
     assert!(checkpoint["provider"].is_object());
     assert_eq!(checkpoint["phase"], "running");
     assert_eq!(exit.stop_reason, None);
+    Ok(())
+}
+fn held_custody_is_released_only_after_guardian_exit(root: &Path) -> Result<()> {
+    for index in 0..3 {
+        let name = format!("custody-{index}");
+        let socket = root.join(format!("custody-{index}.sock"));
+        let listener = UnixListener::bind(&socket)?;
+        let (_writer, handle, identity) = start_with_custody_identity(
+            root,
+            &name,
+            "socket-blocked",
+            &[socket.into_os_string()],
+            CapturePlan::default(),
+        )?;
+        let mut provider = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+        byte(&mut provider, b'R')?;
+        assert!(!handle.custody_released(&identity));
+        let guardian = reservation_identity(&root.join(format!("{name}-writer")), "guardian")?;
+        stop(&handle, StopReason::ExplicitCancellation)?;
+        exited(&handle)?;
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+        assert!(handle.custody_released(&identity));
+    }
     Ok(())
 }
 fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
@@ -1840,6 +1878,10 @@ const CASES: &[Case] = &[
     (
         "writer_is_fenced_after_every_descriptor_closes",
         writer_is_fenced_after_every_descriptor_closes,
+    ),
+    (
+        "held_custody_is_released_only_after_guardian_exit",
+        held_custody_is_released_only_after_guardian_exit,
     ),
     (
         "normal_exit_and_terminal_beyond_capture_cap",
