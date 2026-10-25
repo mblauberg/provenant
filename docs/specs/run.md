@@ -121,10 +121,23 @@ contents, history and transcripts stay retained. Terminal commit also attempts
 best-effort removal of attempt-private `tmp/`. `reconcile` includes terminal
 attempts and retries only when no reservation remains, using directory-relative,
 no-follow, identity-checked traversal. Symlinks are unlinked rather than followed.
-It reports a leftover `tmp/` path and the removal error without failing the
-whole reconcile. Non-terminal attempts keep their temporary data. Default scans
-prioritise non-terminal work, then retained reservations and terminal attempts
-with leftover `tmp/`. No general retention or clean command exists.
+An unreadable worktree reservation blocks removal, including corrupt records
+and moved worktrees that fail the anchor check. Reconcile reports the leftover
+`tmp/` path and reason as `temporary_retained` without failing the whole
+reconcile. It omits terminal attempts with no `tmp/` and reports actual cleanup
+as `temporary_removed`. Non-terminal attempts keep their temporary data.
+Default scans prioritise non-terminal work, then retained reservations and
+terminal attempts indexed by a `tmp_retained` hint. Terminal commit sets the
+hint in its transaction and clears it after successful removal, so failed or
+interrupted cleanup stays discoverable. The hint is mutable bookkeeping;
+terminal records and their index fields remain immutable.
+
+The version 4 database upgrade checks existing terminal paths once, before its
+migration transaction, and clears the hint only for absent `tmp/`. Existing
+and unreadable paths remain flagged. The conservative default also covers
+in-flight attempts committed by an older connection. This backfill avoids a
+runtime discovery cursor and repeated scans of settled history. No general
+retention or clean command exists.
 
 Only this terminal, unreserved retry treats names below `tmp/`, including
 rustc incremental `*.lock` files, as disposable payload. Ordinary deletion
@@ -133,6 +146,9 @@ still refuses lock names outside that subtree. Stable owner locks such as
 unlinking and recreating them could let concurrent owners lock different inodes.
 Settlement keeps the ordinary lock-name protection until reconciliation can
 establish that no reservation remains.
+Reconcile checks worktree reservations before taking the attempt's writer lock.
+That attempt lock excludes read-only guardians and stays held during deletion;
+the worktree writer lock is not held during deletion.
 
 Nested submission uses a dedicated store under the submitting attempt, selected
 by `PROVENANT_RUN_STATE_DIR`, while identity and config stay on the original

@@ -24,7 +24,9 @@ pub(crate) fn remove_temporary_best_effort(
 }
 
 /// Reconcile alone may dispose of lock-named payloads after proving the
-/// attempt terminal and unreserved, while holding its writer exclusion lock.
+/// attempt terminal and unreserved. It checks worktree reservations first,
+/// then holds the attempt's writer lock, which excludes read-only guardians.
+/// It does not hold the worktree writer lock during deletion.
 /// The exception is rooted at the literal tmp entry, never the attempt itself.
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,

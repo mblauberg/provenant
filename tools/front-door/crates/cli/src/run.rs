@@ -1885,7 +1885,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                             ) {
                                 status = Status::Failed;
                             }
-                            human.push_str(&format!("{id} {}\n", state_tag(state)));
+                            human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
                             rows.push(json!({ "attempt_id": id, "found": state }));
                         }
                         data["recovered"] = Value::Array(rows);
@@ -2350,7 +2350,7 @@ mod tests {
     };
 
     #[test]
-    fn reconcile_reports_leftover_paths_and_reasons_without_terminal_controls() {
+    fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_controls() {
         let state = run::Reconciled::TemporaryRetained {
             path: PathBuf::from("/state/runs/run/attempts/attempt/tmp"),
             reason: "permission denied\n\x1b[31mretry later\x1b[0m".into(),

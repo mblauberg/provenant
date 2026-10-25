@@ -23,6 +23,10 @@ Attempt-private `tmp/` is disposable. Terminal commit attempts its removal;
 retained. It uses the existing no-follow, identity-checked deletion primitives
 and reports leftover paths and reasons without failing reconciliation for a
 removal error. Live and non-terminal attempts keep their temporary data.
+Unreadable worktree reservations block removal. Reconcile checks worktree
+reservations first, then holds the attempt's writer lock during deletion to
+exclude read-only guardians. It does not hold the worktree writer lock during
+deletion.
 
 Only the terminal, unreserved reconcile retry permits lock-named payloads
 inside the attempt's `tmp/`, including rustc incremental `*.lock` files.
