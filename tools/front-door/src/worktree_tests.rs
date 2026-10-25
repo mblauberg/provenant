@@ -1054,9 +1054,36 @@ pub(super) fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
     Ok(value)
 }
 
-fn create_list_and_remove_a_managed_worktree() -> Result {
-    use std::os::unix::fs::PermissionsExt;
+fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBuf> {
+    use provenant_confinement::{
+        permissions::{WorktreeWriteAuthority, prepare_writer_directories},
+        repo::{GitRefName, verify_worktree},
+        utility::{UtilityBudget, UtilityRuntime},
+    };
+    use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
 
+    let runtime = UtilityRuntime::new(
+        std::sync::Arc::new(LocalFs),
+        fs::canonicalize("/usr/bin/git")?,
+        rig.state.join("utility-home"),
+    )?;
+    let executor = SystemExecutor::new(1)?;
+    let repo = runtime.open_repo(
+        &executor,
+        &rig.project,
+        UtilityBudget::bounded(Duration::from_secs(5))?,
+        &provenant_core::CancelToken::new(),
+    )?;
+    let worktree = verify_worktree(&repo, path)?;
+    let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
+    let authority = WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home)?;
+    prepare_writer_directories(&LocalFs, &worktree, &branch, &authority, &rig.home)?;
+    let cache = authority.cargo_cache().path.clone();
+    fs::write(cache.join("artifact"), b"lane build output")?;
+    Ok(cache)
+}
+
+fn create_list_and_remove_a_managed_worktree() -> Result {
     let rig = repository()?;
     let base = git(&rig, &["rev-parse", "HEAD"])?;
     let created = ok(
@@ -1083,18 +1110,20 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
             .iter()
             .any(|tree| tree["branch"] == "refs/heads/feature/topic" && tree["dirty"] == "clean")
     );
-    let cache_root = rig.home.join("Library/Caches/provenant-lane-cargo");
-    fs::create_dir_all(&cache_root)?;
-    let cache = cache_root.join("d".repeat(64));
-    fs::create_dir(&cache)?;
-    fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))?;
-    let owner = fs::canonicalize(rig.project.join(".worktrees/feature-topic"))?;
-    let identity = fs::metadata(&owner)?;
-    let mut owner_marker = b"provenant-lane-cargo-owner-v2\n".to_vec();
-    owner_marker.extend_from_slice(&std::os::unix::fs::MetadataExt::dev(&identity).to_le_bytes());
-    owner_marker.extend_from_slice(&std::os::unix::fs::MetadataExt::ino(&identity).to_le_bytes());
-    owner_marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
-    fs::write(cache.join(".provenant-worktree-owner"), owner_marker)?;
+    let cache = prepare_lane_cache(
+        &rig,
+        &rig.project.join(".worktrees/feature-topic"),
+        "feature/topic",
+    )?;
+    ok(&rig, &["worktree", "create", "feature/gone", "--json"])?;
+    let gone = rig.project.join(".worktrees/feature-gone");
+    let orphan = prepare_lane_cache(&rig, &gone, "feature/gone")?;
+    git(
+        &rig,
+        &["worktree", "remove", gone.to_str().ok_or("worktree path")?],
+    )?;
+    assert!(!gone.exists());
+    assert!(orphan.is_dir());
     let removed = ok(&rig, &["worktree", "remove", "feature/topic", "--json"])?;
     assert_eq!(
         removed["data"]["removed"]
@@ -1105,6 +1134,15 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
     );
     assert!(!rig.project.join(".worktrees/feature-topic").exists());
     assert!(!cache.exists(), "orphaned lane cache remains after removal");
+    assert!(
+        orphan.is_dir(),
+        "removing one worktree must preserve other orphaned caches"
+    );
+    assert_eq!(
+        fs::read(orphan.join("artifact"))?,
+        b"lane build output",
+        "removing one worktree must preserve other orphaned caches"
+    );
     assert_eq!(
         ok(&rig, &["worktree", "list", "--json"])?["data"]
             .as_array()
@@ -1112,6 +1150,8 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
             .len(),
         1
     );
+    ok(&rig, &["gc", "--json"])?;
+    assert!(!orphan.exists(), "gc must still sweep orphaned caches");
     rig.assert_legacy_unchanged()
 }
 

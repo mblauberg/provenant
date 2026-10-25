@@ -55,11 +55,6 @@ pub(crate) enum Error {
 }
 
 #[allow(clippy::print_stderr)]
-fn warn_cache_sweep(error: &impl std::fmt::Display) {
-    eprintln!("warning: could not sweep orphaned lane caches: {error}");
-}
-
-#[allow(clippy::print_stderr)]
 fn note_kept_unmerged() {
     eprintln!(
         "note: the branch is not merged into the integration branch and was kept; pass --discard to delete it"
@@ -134,7 +129,7 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
     let assets = roots::product_root()?;
     let project = roots::selected_project(globals.project.as_deref(), true)?;
     let roots = roots::roots(globals, &assets, &project)?;
-    let result = with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
+    with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
         Ok(match command {
             Worktree::Create { branch, base } => Data::Created(worktrees::create(
                 context,
@@ -172,20 +167,7 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                 Data::Removed(removed)
             }
         })
-    })?;
-    if matches!(result, Data::Removed(_)) {
-        match roots::home() {
-            Ok(home) => {
-                if let Err(error) =
-                    provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(&home)
-                {
-                    warn_cache_sweep(&format!("{error}\n{}", gc_summary(&error.report)));
-                }
-            }
-            Err(error) => warn_cache_sweep(&error),
-        }
-    }
-    Ok(result)
+    })
 }
 
 #[derive(Serialize)]
@@ -358,7 +340,9 @@ pub(crate) fn with_context<T>(
     let worktrees_state = child(&state, "worktrees")?;
     let project_state = child(worktrees_state.as_ref(), &binding.project_id().to_string())?;
     let clock = SystemClock;
+    let home = roots::home()?;
     let context = WorktreeContext {
+        home: &home,
         repo: &repo,
         binding: &binding,
         project_state: project_state.as_ref(),
