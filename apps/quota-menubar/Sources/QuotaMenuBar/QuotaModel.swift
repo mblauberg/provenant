@@ -18,8 +18,8 @@ final class QuotaModel {
     private(set) var isRefreshing = false
     /// Lanes that may need attention, from `provenant lanes`; the panel classifies them against its own clock.
     private(set) var lanes: [Lane] = []
-    @ObservationIgnored private var lanesTimer: Timer?
     @ObservationIgnored private var readingLanes = false
+    @ObservationIgnored private var lanesReadAt: Date?
     /// The status item's content, replaced only when it changes.
     private(set) var label = MenuLabel()
     @ObservationIgnored private var timer: Timer?
@@ -44,7 +44,7 @@ final class QuotaModel {
     init() {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.timer?.invalidate(); self?.lanesTimer?.invalidate() }
+            MainActor.assumeIsolated { self?.timer?.invalidate(); self?.clock?.invalidate() }
         }
         center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.woke() }
@@ -60,20 +60,18 @@ final class QuotaModel {
         }
         network.start(queue: .main)
         loadCurrent()
-        refreshLanes()
-        let poll = Timer(timeInterval: 60, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshLanes() } }
-        poll.tolerance = 10
-        lanesTimer = poll
-        RunLoop.main.add(poll, forMode: .common)
     }
 
-    /// Reads the lane list on the quota refresh cadence: every tick and panel open, and once a minute between.
+    /// Reads the lane list only when the panel opens (nothing in the status item uses it), at most once every
+    /// 10 s and never two at once.
     private func refreshLanes() {
         guard !fixture, !readingLanes else { return }
+        if let at = lanesReadAt, Date.now.timeIntervalSince(at) < 10 { return }
         readingLanes = true
+        lanesReadAt = .now
         let cached = launcher
         Task {
-            let (resolved, outcome) = await Task.detached(priority: .utility) { CLI.lanes(cached) }.value
+            let (resolved, outcome) = await Task.detached(priority: .background) { CLI.lanes(cached) }.value
             readingLanes = false
             launcher = launcher ?? resolved
             switch outcome {
@@ -97,6 +95,7 @@ final class QuotaModel {
 
     /// A wake always ticks so the CLI can refresh due accounts.
     private func woke() {
+        relabel()
         waking = true
         tickOnceOnline()
     }
@@ -147,7 +146,6 @@ final class QuotaModel {
             if let rank = strength.firstIndex(of: trigger), rank > pending.flatMap(strength.firstIndex) ?? -1 { pending = trigger }
             return
         }
-        refreshLanes()
         isRefreshing = true
         let arguments = ["quota", "tick", "--trigger", trigger.rawValue, "--power", power.rawValue, "--json"]
         log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power.rawValue, privacy: .public)")
@@ -365,7 +363,7 @@ enum CLI {
     /// Pipes drain as data arrives, so neither can fill and block the child. At the limit the group gets SIGTERM
     /// and a full grace period, then SIGKILL; a pipe still held open after that is abandoned. Every wait here is
     /// bounded, and one waiter owns reaping the leader, however late it exits.
-    static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double) throws -> Output {
+    static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double, qos: qos_class_t = QOS_CLASS_UTILITY) throws -> Output {
         let out = Pipe(), err = Pipe(), shared = Shared(), drained = DispatchGroup()
         let exited = DispatchSemaphore(value: 0), released = DispatchSemaphore(value: 0), reaped = DispatchSemaphore(value: 0)
         var environment = ProcessInfo.processInfo.environment
@@ -385,6 +383,7 @@ enum CLI {
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF
                                                      | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
+        posix_spawnattr_set_qos_class_np(&attributes, qos)   // the CLI never competes with foreground work
         let argv = ([url.path] + arguments).map { strdup($0) } + [nil]
         let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { (argv + envp).forEach { free($0) } }
