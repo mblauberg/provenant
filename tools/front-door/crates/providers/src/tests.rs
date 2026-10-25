@@ -877,7 +877,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 || (id == "codex"
                     && (grant.path.starts_with("/fixture/home")
                         || grant.path == Path::new("/Library/Developer/CommandLineTools")
-                        || grant.path == Path::new("/private/etc/ssl/openssl.cnf")))
+                        || grant.path == Path::new("/private/etc/ssl")))
                 || [
                     "/fixture/provenant/bin/provenant",
                     "/fixture/git/bin/git",
@@ -1449,6 +1449,9 @@ fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
     for dir in ["/fixture/home/.cargo", "/fixture/home/.rustup"] {
         assert!(reads.iter().any(|path| path == dir), "{dir}");
     }
+    // Cargo downloads over TLS, so the system trust roots are readable.
+    #[cfg(target_os = "macos")]
+    assert!(reads.iter().any(|path| path == "/private/etc/ssl"));
     // The shared registry, Git checkouts and package cache locks are
     // writable; installed binaries and toolchains are not.
     for path in [
