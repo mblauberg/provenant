@@ -588,7 +588,7 @@ impl RunStore {
                         Err(error) if error.is_not_found() => {}
                         Err(error) => return Err(error.into()),
                     }
-                    artifacts::remove_temporary_best_effort(&attempt)?;
+                    artifacts::remove_unreserved_terminal_temporary(&attempt)?;
                     Ok(())
                 };
                 return Ok(match remove() {

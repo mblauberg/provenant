@@ -24,6 +24,12 @@ retained. It uses the existing no-follow, identity-checked deletion primitives
 and reports leftover paths and reasons without failing reconciliation for a
 removal error. Live and non-terminal attempts keep their temporary data.
 
+Only the terminal, unreserved reconcile retry permits lock-named payloads
+inside the attempt's `tmp/`, including rustc incremental `*.lock` files.
+Settlement keeps ordinary lock-name protection while reservations may remain.
+Stable owner locks outside `tmp/` remain protected: unlinking a lock and
+recreating its name could split writer exclusion across different inodes.
+
 ## Consequences
 
 - Existing project-specific retention rules remain authoritative.

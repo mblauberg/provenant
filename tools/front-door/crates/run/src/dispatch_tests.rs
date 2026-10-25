@@ -1299,19 +1299,17 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
     let temporary = store.temporary_path(id, &call)?;
-    // Stable lock names are refused by the existing remover, so the first
-    // best-effort removal fails without relying on host permission behaviour.
-    let blocker = temporary.join("blocker.lock");
-    std::fs::write(&blocker, "held")?;
+    // Settlement protects lock names while custody may still be retained.
+    // Reconcile must dispose of these build artefacts once custody clears.
+    let incremental = temporary.join("candidate-0/target/debug/incremental/x");
+    std::fs::create_dir_all(&incremental)?;
+    std::fs::write(incremental.join("s-1.lock"), "discard")?;
     let observed = exit();
     seal_exit(&store, &observed)?;
     store.publish_terminal(id, 1, &super::tests::publication(), &observed, &call)?;
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     assert!(temporary.is_dir());
 
-    std::fs::remove_file(blocker)?;
-    std::fs::create_dir_all(temporary.join("candidate-0/target"))?;
-    std::fs::write(temporary.join("candidate-0/target/build-output"), "discard")?;
     assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
     assert_eq!(
         store.reconcile(run.run_id, &Fake::default(), &call)?,
@@ -1320,6 +1318,58 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     assert!(!temporary.exists());
     assert!(store.open_runs(10, &call)?.is_empty());
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
+    Ok(())
+}
+
+#[test]
+fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
+    use provenant_supervisor::fs::{FsError, LockMode};
+    use std::ffi::OsStr;
+
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.withdraw(
+        id,
+        AttemptState::Queued,
+        Outcome::Cancelled,
+        "fixture",
+        WallTime::from_micros(150)?,
+        &call,
+    )?;
+    let temporary = store.temporary_path(id, &call)?;
+    std::fs::write(temporary.join("writer.lock"), "disposable payload")?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let run_dir = store.run_dir(run.run_id, false)?;
+    drop(attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?);
+    // The run lock may stay held while reconcile removes attempt payload.
+    let _held = run_dir.try_lock(OsStr::new("publication.lock"), LockMode::Exclusive)?;
+    let locks = [(&attempt, "writer.lock"), (&run_dir, "publication.lock")];
+    let before = locks
+        .iter()
+        .map(|(dir, name)| dir.metadata_at(OsStr::new(name), false))
+        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+
+    assert_eq!(
+        store.reconcile(run.run_id, &Fake::default(), &call)?,
+        vec![(id, Reconciled::Finished)]
+    );
+    assert!(!temporary.exists());
+    for ((dir, name), identity) in locks.into_iter().zip(before) {
+        assert!(matches!(
+            dir.unlink(OsStr::new(name)),
+            Err(FsError::ReservedLockName { .. })
+        ));
+        assert!(identity.same_identity(&dir.metadata_at(OsStr::new(name), false)?));
+    }
+    assert!(matches!(
+        run_dir.try_lock(OsStr::new("publication.lock"), LockMode::Exclusive),
+        Err(FsError::LockTimeout { .. })
+    ));
     Ok(())
 }
 
@@ -1344,7 +1394,11 @@ fn reconcile_reports_temporary_removal_failures_and_continues() -> TestResult {
     let retained = run.attempts[0].attempt_id;
     let removed = run.attempts[1].attempt_id;
     let temporary = store.temporary_path(retained, &call)?;
-    std::fs::write(temporary.join("blocker.lock"), "retain")?;
+    std::fs::write(temporary.join("payload"), "retain")?;
+    let _held = store.attempt_dir(run.run_id, retained, false)?.try_lock(
+        std::ffi::OsStr::new("writer.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+    )?;
     let removable = store.temporary_path(removed, &call)?;
     std::fs::write(removable.join("payload"), "discard")?;
 
@@ -1353,8 +1407,8 @@ fn reconcile_reports_temporary_removal_failures_and_continues() -> TestResult {
         (id, Reconciled::TemporaryRetained { path, reason }),
         (other, Reconciled::Finished),
     ] if *id == retained && *other == removed && *path == temporary
-        && reason.contains("blocker.lock")));
-    assert!(temporary.join("blocker.lock").exists());
+        && reason.contains("writer.lock")));
+    assert!(temporary.join("payload").exists());
     assert!(!removable.exists());
     assert_eq!(terminal(&store, retained, &call)?, Outcome::Cancelled);
     Ok(())
@@ -1393,7 +1447,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
                 &clock,
             )?);
         }
-        std::fs::write(temporary.join("keep"), "keep")?;
+        std::fs::write(temporary.join("keep.lock"), "keep")?;
         let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
         if reserved {
             assert!(
@@ -1403,7 +1457,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         } else {
             assert_eq!(found, vec![(id, Reconciled::Queued)]);
         }
-        assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "keep");
+        assert_eq!(std::fs::read_to_string(temporary.join("keep.lock"))?, "keep");
     }
     Ok(())
 }
@@ -1480,7 +1534,7 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
             symlink(&outside, &temporary)?;
         } else {
             std::fs::create_dir_all(temporary.join("candidate-0/target"))?;
-            symlink(&outside, temporary.join("candidate-0/target/outside"))?;
+            symlink(&outside, temporary.join("candidate-0/target/outside.lock"))?;
         }
         assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
         assert_eq!(

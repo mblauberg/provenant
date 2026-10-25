@@ -126,6 +126,14 @@ whole reconcile. Non-terminal attempts keep their temporary data. Default scans
 prioritise non-terminal work, then retained reservations and terminal attempts
 with leftover `tmp/`. No general retention or clean command exists.
 
+Only this terminal, unreserved retry treats names below `tmp/`, including
+rustc incremental `*.lock` files, as disposable payload. Ordinary deletion
+still refuses lock names outside that subtree. Stable owner locks such as
+`writer.lock`, `publication.lock` and the run store lock must keep their inodes:
+unlinking and recreating them could let concurrent owners lock different inodes.
+Settlement keeps the ordinary lock-name protection until reconciliation can
+establish that no reservation remains.
+
 Nested submission uses a dedicated store under the submitting attempt, selected
 by `PROVENANT_RUN_STATE_DIR`, while identity and config stay on the original
 root. A host-side worker launches only runs whose operation is accepted. See
