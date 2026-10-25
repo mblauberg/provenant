@@ -1,917 +1,446 @@
 # Supervisor and confinement
 
-Proposal for chair acceptance under [PORTING.md v7](rust-workspace.md).
-Author: `codex/gpt-6.1-sol@high` via Fabric. Source baseline:
-`1b3d48e4c549811ce3636edc30b047f36fd24ada`; also reuse the bounded OS APIs in
-[PR #1348](https://github.com/mblauberg/provenant/pull/1348), with the corrections
-below. The [cross-area decisions](README.md#cross-cutting-decisions) bind state,
-layout, commands, waits, records and hooks; cli owns the exact flag freeze.
-
-## Audit implementation notes
-
-The supervisor audit captures provider identity before exec with a bounded
-child/observer handshake, retries transient cleanup census failures and feeds
-cleanup/publication outcomes into the machine. CPU/cancellation and safety
-census observations stay at 100 ms; process checkpoints publish immediately and
-then at 1 s intervals, with unchanged-byte writes skipped. Routine identity and
-tracking updates atomically replace the reservation; the exit publisher's
-reservation commit hook is reserved for the final cleanup facts. Census retries
-and journal failures warn once per failure episode. The reservation's census
-completeness describes the latest observation; exit warnings retain prior journal
-failures. Terminal grace uses `root_flush_ms`; the unused private `terminal_ms`
-field is removed. See the crate's [crate notes](../../tools/front-door/crates/supervisor/README.md#spawn-polling-and-publication)
-for the remaining consumer wiring and platform limits. `PathIo`, strict utility
-text decoding and typed reconcile remain required APIs despite missing callers.
-
-## Purpose
-
 `provenant-supervisor` holds processes, output and kernel locks from launch
-through cleanup and durable exit publication. Its pure state machine orders
-exit, cancellation and deadlines; its syscall boundary grants authority only
-over processes it owns. `provenant-confinement` turns an authorised execution
-plan into filesystem, Git, network and provider permissions, checks evidence,
-and quarantines instruction changes. Together they prevent a failed write,
-a lost client or a mistaken process identity from killing a healthy lane,
-freeing a busy worktree or publishing an incomplete result. Worktree management
-and scratch settlement use these same capabilities. Run owns the run registry, admission,
-attempts, status, scheduling, retries and result semantics. `fabric-runtime`
-owns identity, coordination and federation routing (R2 as amended by the chair).
+through cleanup and durable exit publication. `provenant-confinement` turns an
+authorised execution plan into filesystem, Git, network and provider
+permissions, checks evidence and quarantines instruction changes. Together they
+ensure that a failed write, a lost client or a mistaken process identity cannot
+kill a healthy lane, free a busy worktree or publish an incomplete result.
 
-## Keep and remove
+The [cross-cutting decisions](README.md#cross-cutting-decisions) bind state,
+layout, commands, waits, records and hooks. [cli](cli.md) owns exact flags.
+The crate notes in
+[`crates/supervisor/README.md`](../../tools/front-door/crates/supervisor/README.md#spawn-polling-and-publication)
+cover consumer wiring and platform limits.
 
-Keep the custody invariants in the [supervisor spec](harness/rust-supervisor.md#structural-guarantees),
-subject to v7's abort profile and single Rust implementation:
+## Purpose and ownership
 
-- Register child observation before spawn, reset inherited signal dispositions
-  and masks, observe exit with `WNOWAIT`, clean up while the leader reserves its
-  PID/PGID, then consume its handle to reap. Never signal a reused identity.
-- Only `ProviderGroup::stop(StopReason)` can signal providers. Its closed reasons
-  are explicit cancellation, wall deadline, provider protocol
-  rejection, supervisor signal and post-terminal cleanup. Silence, CPU inactivity,
-  capture failure, ENOSPC and failed publication cannot construct a reason.
-- Natural exit observed in a tick wins over late cancellation/deadlines. Startup
-  progress includes any byte on either stream or observed CPU progress. There
-  is no StartupDeadline stop; the wall deadline bounds execution. Silence is
-  an observation, never a stalled verdict. Keep bounded CPU/tree probes.
-- One writer per registered linked worktree; custody and writer leases outlive
-  the requesting MCP call and any provider still writing. Lock files are stable
-  inodes and are never unlinked or explicitly unlocked while a duplicate lives.
-- Spare registered nested owners only with matching native identity, observed
-  ancestry and proof of the held custody description. An unlocked descriptor,
-  an environment token or a process name is insufficient. Preserve proven
-  sparing through incomplete census; never signal shared code-mode hosts or
-  sibling groups. Parents cancel registered children by request, not by PID.
-- Publish one terminal record with no-replace semantics after its referenced
-  files are durable. Publication returns custody on failure. An I/O warning
-  cannot change lifecycle state. A visible link followed by failed directory
-  sync means `durability_unconfirmed`, not an absent record to overwrite.
+Supervisor owns the process state machine, the syscall boundary, bounded
+execution, descriptor-relative filesystem access, locks and atomic publication.
+Confinement owns permission compilation, disclosure scanning and redaction,
+quarantine, safe Git evidence, output custody and worktree management. Neither
+owns the run registry, admission, attempts, scheduling, retries or result
+semantics; those belong to run ([run](run.md)). `fabric-runtime` owns identity,
+coordination and federation routing ([fabric](fabric.md)).
 
-Keep bounded utility execution, native process facts/CWD, descriptor-relative
-`SafeFs`, writer retry evidence, provider permission plans, instruction quarantine,
-protected-tip release checks, output installation/digest verification, safe Git
-evidence and scratch deletion at settlement. Their policy is specified below.
+All first-party `unsafe` code, FFI and post-fork code live in
+`supervisor::sys`. Each block documents validity, ownership, lifetime,
+concurrency and errors, and an independent second reviewer checks every block.
+Supervisor depends on core and records only. Confinement adds config and
+supervisor's safe API, and no library imports `cli`.
 
-The council's executed-command tally across transcripts found worktree create
-80, list 23, remove 15, check 2 and verify 0; clean 6 (including 2 help and
-2 merged-pruning calls), with no plan call; git-evidence and worker_liveness
-1 each; reap 5, all by PID; system ps 922. Searches, examples and heredocs were
-excluded. Keep worktree create/list/remove and merged pruning. Native process
-facts support custody internally; the occasional diagnostic calls do not need
-new commands. Arbitrary-PID reap is removed despite use because it cannot
-reserve process identity. Repository hooks and skills move to the frozen tree.
+## Boundaries
 
-| Remove or consolidate | Evidence and replacement |
-| --- | --- |
-| Python observer process, opaque staged bundles, duplicate canonical/legacy attempt files and digest sidecars | These are internal seams in `provider_exec.py`, `dispatch_run.py`, `run_lineage.py` and `lane/observer.rs`. All owners become Rust; Run's decoder sends typed events and records supplies one canonical terminal record. Retain the publication invariant, delete the transport. |
-| `Drop`-driven provider stopping and unbounded cleanup loops | `lane/group.rs` stops and polls in `Drop`; abort/SIGKILL bypass it. Explicit guardian ownership and a detached reaper replace it. A bookkeeping error must not trigger a destructor kill. |
-| Python/Node Unicode, locale-start strings, ps layout and subprocess error emulation | Existing supervisor `pending`, `ps`, `fabric_ps`, and confinement `python`/`pending` implement runtime parity. Native integer identity and typed errors serve the actual safety decisions; v7 R0 removes parity as a requirement. |
-| Whole-run retention and cleanup plans | Keep generated scratch deletion by the guardian at settlement. Drop clean plan/apply, CleanupPlan and its directory; history, captures and unclassified data remain retained. No `clean` verb survives. |
-| `worktree remove --force`, automatic dependency-tree cloning/linking | `worktree.py` can bypass live-writer checks and provision Node modules. A Rust product needs neither Node bootstrap nor a live-writer override. Keep clean linked-worktree creation/removal and merged-branch pruning only within supplied authority. |
-| Standalone writer lease, launch/exit wrappers and Git-evidence packet wrapper | `writer_lease.py`, `lane_launch.py`, `lane_exit.py`, `git_evidence_packet.py` duplicate decisions now shared by Run, confinement and workflow. Preserve their safety checks in library calls; run owns git_evidence_packet and completed-attempt facts, workflow owns review policy, and Fabric owns the landing lease. |
-| Cross-session transcript scanning and caller-supplied terminal-report CLI | `worker_liveness.py` correlates newest transcript by cwd and accepts an exit status from its caller; multiple workers make that correlation ambiguous. Keep native repo-scoped PID/start/CWD/CPU diagnostics, also consumed by custody and the documented direct-CLI fallback. Drop old-root transcript correlation under R1 and require owned wait evidence for managed terminal reports. |
-| System-ps replacement CLI | `bin/ps` and `ps.mjs` exist to work around process inspection in the old Python/Node paths. Internal callers use native `ProcessObserver`/`CwdObserver`; no general ps formatting/option emulation is needed. |
-| Arbitrary-PID/tree signalling from `reap` | `reap.py` rechecks a start string before `kill`, which does not reserve identity between check and signal on macOS. Replace it with recovery/cancellation by managed run ID; external workers must enter through Run to obtain custody. This is a deliberate restriction even where the old command was used. |
+Supervisor adds no run verbs and no MCP tools. Fabric's tools call run, whose
+top-level `cancel` and `reconcile` own control and recovery. Fabric's landing
+lease is separate from the writer lease, and neither the landing lease nor a
+driver lease substitutes for kernel writer custody.
 
-## Process and permission design
+Run composes confinement's output filter with supervisor's injected capture
+filter, so supervisor never imports confinement. Providers supply argv,
+environment, selected authentication inputs, a fixture-proven permission
+profile and bounded decoding into progress, terminal or `ProtocolRejected`
+events, with no signalling callback. Workflow supplies the integration ref,
+authorised branch pruning and protected-tip release. No area probes then kills
+a PID, or infers authority from a file containing a name. An unmanaged worker
+observed by a diagnostic is not adopted by PID and has no custody.
 
-`Run owner -> attempt guardian -> provider` preserves S2's custody. The guardian
-is a short-lived invocation of the same binary in its own session, with Run's
-provider decoder composed beside supervisor; supervisor imports neither Run nor
-providers. A private, bounded launch channel transfers the plan and duplicated
-writer lease, with an ownership acknowledgement before the parent disconnects.
-Secrets use memory/pipes and the child environment, never argv or disk. Hidden
-`internal supervise` takes no arguments and accepts only this handshake, which
-names Run's scheduler or guardian role, not a public raw launch spec.
-MCP cancellation stops a wait; explicit Run cancellation writes a scoped request.
+## Contract
 
-The guardian keeps the provider, attempt lock and writer-lease duplicate after
-a Run owner or MCP host dies, and publishes `process-exit.json`. The Run owner
-holds its lease through retries and settlement. If it dies, the reservation
-remains until recovery acquires the same writer exclusion and commits quarantine
-and the canonical terminal bundle; a process-exit file alone never frees a
-writer. If the guardian also dies, a persistent writer
-reservation fences acquisition until provider/group absence is proved. Free
-flock plus missing/unknown identity is insufficient, including death between
-spawn and identity publication. Recovery censuses the guardian-recorded session
-and PGID, with native identity checks; a changed boot identity also proves
-absence. If absence cannot be proved, Run's `reconcile` accepts a typed,
-recorded decision only with matching authority. It records actor, scope,
-generation, evidence and disposition before changing the fence; uncertainty
-alone never clears it. That decision permits no signal. Recovery signals only the
-unresolved descendants of a published exit, under the rule in the next paragraphs.
-Provider exec is gated on the guardian holding both leases and the durable
-pre-spawn reservation; a missing handoff acknowledgement is an unknown launch,
-never permission to launch again. Only guardian handoff may inherit duplicate
-lock descriptions. Provider exec closes every custody descriptor; no provider
-receives an unlockable writer lease. Run records reservation ownership across
-attempt generations and clears it only after the final settlement, not between
-retries. Unresolved descendant custody keeps the worktree fenced even after
-the leader has exited.
+### Custody invariants
+
+- Child observation is registered before spawn. Inherited signal dispositions
+  and masks are reset. Exit is observed with `WNOWAIT`, cleanup runs while the
+  leader still reserves its PID and PGID, and only then is the handle consumed
+  to reap. A reused identity is never signalled.
+- Only `ProviderGroup::stop(StopReason)` signals providers. The closed reasons
+  are explicit cancellation, wall deadline, provider protocol rejection,
+  supervisor signal and post-terminal cleanup. Silence, CPU inactivity, capture
+  failure, ENOSPC and failed publication cannot construct a reason.
+- A natural exit observed in a tick wins over late cancellation or deadlines.
+  Startup progress is any byte on either stream or observed CPU progress. There
+  is no startup deadline, and the wall deadline bounds execution. Silence is an
+  observation, never a stalled verdict.
+- One writer per registered linked worktree. Custody and writer leases outlive
+  the requesting call and any provider still writing. Lock files are stable
+  inodes, never unlinked and never explicitly unlocked while a duplicate lives.
+- A registered nested owner is spared only with matching native identity,
+  observed ancestry and proof of the held custody description. An unlocked
+  descriptor, an environment token or a process name is insufficient. Shared
+  code-mode hosts and sibling groups are never signalled, and parents cancel
+  registered children by request, not by PID.
+- One terminal record is published with no-replace semantics after the files it
+  references are durable. Failure returns custody. An I/O warning cannot change
+  lifecycle state. A visible link followed by a failed directory sync means
+  `durability_unconfirmed`, not an absent record to overwrite.
+
+### Process model
+
+`Run owner -> attempt guardian -> provider`. The guardian is a short-lived
+invocation of the same binary in its own session. A private, bounded launch
+channel transfers the plan and a duplicated writer lease, with an ownership
+acknowledgement before the parent disconnects. Secrets travel in memory, pipes
+and the child environment, never argv or disk. Hidden `internal supervise`
+takes no arguments and accepts only this handshake.
 
 The pure machine has Prepared, Running, TerminalGrace, Stopping, Cleaning,
-Exited and Published phases. Each OS-loop turn observes `WNOWAIT` before stop
-requests. Defaults are 500 ms descendant grace and 2 s root flush; Run supplies
-bounded wall/terminal budgets. Signal errors remain failed deliveries.
-Linux subreaping and process-wide signal setup run only in the guardian;
-macOS uses kqueue plus SIGCHLD. Explicit cleanup precedes consuming reap; abort
-or `Drop` is never a provider cleanup mechanism.
+Exited and Published phases. Each turn observes `WNOWAIT` before stop requests.
+Defaults are a 500 ms descendant grace and a 2 s root flush, and run supplies
+the wall and terminal budgets. Linux subreaping and process-wide signal setup
+happen only in the guardian, and macOS uses kqueue plus SIGCHLD. Abort and
+`Drop` are never a cleanup mechanism.
 
-On macOS, quiescence requires the provider to be reaped and two complete
-libproc census snapshots at least 20 ms apart. Libproc enumerates all PIDs;
-foreign-UID services that deny full BSD records use the short BSD record plus
-the public `KERN_PROC_PID` start-time prefix. Two matching native reads bracket
-PID/ppid/group/status/session and start time; failed or racing reads remain
-unknown and make the snapshot incomplete. Both must contain no other
-process in the provider's session or process group and no surviving identity
-or descendant (ppid edges checked against native start-time identity) from the
-guardian's recorded census history. Each tick prunes identities proved absent
-or replaced; overflow or incomplete proof keeps the attempt fenced.
-The provider inherits the writer lease's open file description. After the
-requester closes its copy on acknowledged handoff, the guardian closes its own
-copy without unlocking and attempts a fresh nonblocking writer lock on the
-original device/inode. Success proves no surviving descendant retains the
-inherited lease description; the new guard remains held through terminal
-publication. Failure keeps the durable reservation fenced.
-A concurrent `acquire_recovery`/`acquire_writer` waiter can win the
-drop-to-`try_lock` gap, conservatively fencing an otherwise clean run.
-The exit's `settlement_evidence` records
+The guardian keeps the provider, the attempt lock and the writer-lease
+duplicate after a run owner or MCP host dies, and publishes `process-exit.json`.
+Provider exec is gated on the guardian holding both leases and the durable
+pre-spawn reservation. A missing handoff acknowledgement is an unknown launch
+and never permission to launch again. Provider exec closes every custody
+descriptor, so no provider holds an unlockable writer lease. Run records
+reservation ownership across attempt generations and clears it only after final
+settlement. Unresolved descendant custody keeps the worktree fenced after the
+leader exits.
+
+**Quiescence.** On macOS the provider must be reaped and two complete libproc
+census snapshots at least 20 ms apart must show no other process in its session
+or group and no surviving identity from the guardian's census history (ppid
+edges are checked against native start-time identity). Failed or racing reads
+stay unknown and make the snapshot incomplete. Linux needs two identical
+complete per-thread kernel children snapshots. Overflow or incomplete proof
+keeps the attempt fenced. After the requester closes its copy, the guardian
+closes its own copy of the inherited lease without unlocking and tries a fresh
+non-blocking writer lock on the original inode. Success proves no descendant
+retains the lease. The exit's `settlement_evidence` is one of
 `darwin_census_and_custody_lease`, `linux_kernel_children`, `never_spawned`,
-`orphans_ended`, `leftover_not_proven` or `unresolved`. Linux requires two identical complete per-thread kernel children
-snapshots, including stable thread membership, before cleanup settlement.
-The Linux global census skips rows whose process group or session is 0 (host
-kernel tasks and container shims; never a descendant of the guardian's
-session); a direct observation of such a PID stays unknown.
+`orphans_ended`, `leftover_not_proven` or `unresolved`.
 
-Every confined provider launch's seatbelt profile also allows one Mach lookup
+**Escapees.** Every confined launch's seatbelt profile allows one Mach lookup
 name unique to the attempt, `dev.provenant.attempt.<attempt id>`, which no
 service answers. A seatbelt sandbox is inherited and cannot be dropped, so a
-descendant that detaches before any census samples its parent edge still
-carries it. On macOS, post-terminal cleanup treats a live process outside the
-provider and any spared owner as an escapee when `sandbox_check` reports it
-sandboxed, allowed to look that name up, and denied an unrelated control name
-(the control excludes system daemons whose sandboxes allow lookups broadly). It
-joins the tracked set, so cleanup cannot settle while it lives, and receives
-TERM then KILL after the descendant grace, each time after re-observing its
-full identity. This needs only a readable nested-child registry, or, where none is wired
-(production), the host reporting that the attempt's nested child store
-(`children/<attempt id>` under the state root) holds no nested run (the lane's
-MCP creates the store at startup, so its existing proves nothing: no `runs/`
-entries and no row in its read-only `runs` table); a run there, or a failed
-read, mean no signal and the escapee stays unresolved.
-macOS cannot prove a registered owner's custody, so that owner stays protected
-(as do its descendants) while other escapees are still ended. A signal to a provider that
-is already gone (ESRCH) is neither recorded nor warned about. A survivor is published in `unresolved_pids`. An unconfined
-launch is the residual: libproc cannot reconstruct that missing history. Every
-production launch is confined; Linux has no confinement backend and does not
-use the check. Census observations never grant
-arbitrary PID or process-group signal authority; only the unreaped provider,
-kernel-confirmed adopted children and attempt-sandbox escapees may receive signals. The one exception
-is the provider's own group: while the provider leader is unreaped (a live
-process or a `WNOWAIT` zombie, either of which reserves the PGID) the guardian
-sends TERM, then KILL after the descendant grace, to that group, which the
-provider leads by construction. This happens on explicit cancellation,
-including a cancel that lands after the provider exited, and on every natural
-exit during cleanup, so a same-group background child (`npm run dev &`) cannot
-outlive the attempt. A member that left the group is never
-signalled; cleanup that ends with such tracked descendants possibly alive
-publishes their PIDs in the exit's `unresolved_pids`, and reconcile reports
-them as `escaped` (still fenced) rather than a bare `uncertain`. The exit also
-carries `unresolved_identities`, the same descendants with boot and native start
-time, recorded when they are found.
-After publishing an unresolved exit the guardian stays alive, holding the
-leader, and keeps running cleanup: it polls for cancellation and for the group
-emptying. On cancel it signals the group (TERM, grace, KILL; a reaped leader
-needs a live `kill(-pgid, 0)` probe first) unless a spared or protected owner
-shares the group. When cleanup then proves quiescence it makes the reservation
-resolved and replaces `process-exit.json` once with the settled facts (the only
-replace of that file); a supervisor signal ends the wait, but only after one
-more bounded cleanup pass (TERM, the descendant grace, KILL), so the guardian
-never leaves `unresolved` without trying the marked-escapee stop first.
+detached descendant still carries it. On macOS, post-terminal cleanup treats a
+live process outside the provider and any spared owner as an escapee when
+`sandbox_check` reports it sandboxed, allowed to look that name up and denied an
+unrelated control name. It joins the tracked set and receives TERM, then KILL
+after the grace, each time after its full identity is re-observed. If the nested
+child store cannot be read or holds a nested run, nothing is signalled and the
+escapee stays unresolved. macOS cannot prove a registered owner's custody, so
+that owner and its descendants stay protected. Census observations never grant
+signal authority. Only the unreaped provider, kernel-confirmed adopted children
+and attempt-sandbox escapees may be signalled, plus the provider's own process
+group while its leader is unreaped (on explicit cancellation, including one that
+lands after exit, and on every natural exit during cleanup). Members that left
+the group are never signalled, and survivors are published in `unresolved_pids`
+and `unresolved_identities`. An unconfined launch is the residual that libproc
+cannot reconstruct. Every production launch is confined, and Linux has no
+confinement backend.
 
-When the guardian is gone anyway, reconcile (and `cancel`, which runs it for a
-run whose request has no live actor) takes the writer lock without waiting. If
-it cannot, a guardian or lease inheritor still holds custody: reconcile reports
-`escaped` while a named pid is alive (signal-0 probe only) and `held` otherwise.
-If it can, `Recovery::end_orphans` re-observes each named pid and sorts it:
-- gone, a zombie, or now a different process (PID reuse): nothing to do;
-- proven: the live boot, pid and native start time equal the recorded identity,
-  or, for a pid recorded without one, macOS reports it inside the attempt's
-  sandbox. It receives TERM, then KILL after a bounded wait, each time after
-  re-reading its full identity, so a recycled PID is never signalled;
-- unproven: never signalled, and named in the settled exit.
-The recovery then resolves the reservation and replaces `process-exit.json`
-once with `unresolved_cleanup` false and `settlement_evidence` of
-`orphans_ended`, or `leftover_not_proven` when any pid stayed unproven (its pids
-remain in `unresolved_pids`). A proven process that survives KILL leaves the
-exit unresolved and reconcile reports `escaped`. Run then commits the settled
-exit as usual; `leftover_not_proven` makes a non-successful outcome `lost`, and
-a success keeps its outcome with the leftover pid in the reason.
+**Unresolved exits.** After publishing an unresolved exit the guardian stays
+alive holding the leader and keeps cleaning. On cancel it signals the group
+(TERM, grace, KILL) unless a spared owner shares it. When cleanup proves
+quiescence it resolves the reservation and replaces `process-exit.json` once
+with the settled facts, the only replace of that file. A supervisor signal
+ends the wait only after one more bounded cleanup pass.
 
+**Orphan recovery.** If the guardian is gone, `reconcile` (and `cancel` for a
+run with no live actor) takes the writer lock without waiting. If it cannot, a
+guardian or lease inheritor still holds custody, and reconcile reports
+`escaped` while a named pid is alive (signal 0 only) and `held` otherwise. If it
+can, `Recovery::end_orphans` re-observes each named pid. A gone, zombie or
+reused pid needs nothing. A pid whose boot, pid and native start time match the
+record (or, with no recorded identity, that macOS reports inside the attempt's
+sandbox) receives TERM then KILL after a bounded wait. Anything else is never
+signalled and is named in the settled exit. The result is `orphans_ended`, or
+`leftover_not_proven` when a pid stayed unproven. A proven process that survives
+KILL leaves the exit unresolved and reported as `escaped`. Run then commits the
+settled exit, and `leftover_not_proven` makes a non-successful outcome `lost`.
 
-Reuse S2's machine/census/capture, `SafeFs` and #1348's `Executor`, raw outcome,
-strict text decoding, private direct-child custody, CWD, append/lock and marker APIs. Correct
-#1348 before its consumers land:
+If absence cannot be proved, run's `reconcile` accepts a typed recorded decision
+only with matching authority, recording actor, scope, generation, evidence and
+disposition before it changes the fence. Uncertainty alone never clears a
+fence, and the decision permits no signal.
 
-- Each stream is `Capture { limit }`, `Discard`, or `Tee { limit, sink }`.
-  Discard has no pipe; Tee uses a bounded nonblocking queue. Full/failed sinks
-  record loss without stalling capture. Remove discard booleans plus optional
-  sinks. Defaults: 8 MiB retained per stream, maximum 64 MiB, frame cap 64 KiB.
-  Decode before retention truncation; a terminal frame beyond the cap matters.
-  An oversized protocol frame is explicit decoder loss, never a fabricated
-  terminal event or an I/O-derived stop request.
-- `timed_out` means a deadline caused TERM to be delivered to a still-owned
-  child. Natural exit followed by pipe-drain deadline sets `drain_truncated`,
-  not `timed_out`; overflow has a separate cause. Preserve Exit versus Signal,
-  byte totals, truncated frames and decoder-queue loss.
-- Darwin CWD `proc_pidinfo == 0` means Gone without consulting stale errno.
-  Retry negative EINTR; distinguish permission, unsupported, short-record and
-  malformed-path failures. CWD never grants signal authority.
-- Utility final-wait exhaustion transfers its owned Child to a detached reaper
-  thread and returns `CleanupPending`. One bounded per-process queue reserves
-  capacity before spawn and polls children fairly; admission refuses when full.
-  No unbounded `Drop` wait or discarded Child. Providers remain in the guardian;
-  utility handles have direct-child authority only.
-- Move all syscalls/unsafe from `src/lane/{mod,group,platform,files}.rs` into
-  `supervisor::sys`, including `Command::new`. Safe provider/utility handles
-  expose neither raw owning descriptors nor numeric-PID grants. Delete
-  `execve_strict` in `src/exec.rs`, the Python delegation shim, and remove
-  `clap` from supervisor's `Cargo.toml`; argument parsing belongs to cli.
+### Bounded execution
 
-Lock acquisition takes core `WaitBudget` and `CancelToken`, deriving a monotonic
-deadline once at entry. Delete `LockOptions.timeout: None` in `fs/path_io.rs`.
-Poll `flock(LOCK_NB)` through the safe lock API, waiting only up to the lesser
-of the next poll and remaining deadline; retry EINTR within that budget. An
-expired deadline returns `LockTimeout`, cancellation returns `Cancelled`, and
-observation failure stays unknown. Never enter a blocking flock syscall. A
-zero budget makes one nonblocking attempt. A deadline bounds acquisition, not
-lease lifetime: expiry never revokes custody, steals a lease or unlinks its
-stable inode. Lock ordering is run custody, repository metadata, writer
-reservation, attempt publication, then children journal; recovery never holds
-a later lock while waiting for an earlier one. Metadata mutators probe the
-writer nonblockingly and release the metadata lock before any retry wait.
-No SQLite transaction spans a lock wait.
-
-### Safe syscall wrappers
-
-All unsafe blocks, FFI declarations, raw-pointer/descriptor conversions and
-post-fork callbacks live in `supervisor::sys`. Each documents validity,
-ownership, lifetime, concurrency and errors; an independent second reviewer
-checks every block (R7). Safe handles own descriptors exactly once and expose
-no raw custody capability. The wrapper inventory covers existing sys/lane
-calls and the retained implementation:
-
-| Wrapper / native calls | Invariants |
-| --- | --- |
-| Child observation: `waitid(WNOWAIT)`, `waitpid` | Observe only owned children; initialise/read siginfo only on success, retry EINTR within budget, preserve the unreaped leader through cleanup, reap last and once. |
-| Signalling: `kill`/`killpg` | Only an owned, still-reserved PGID or direct-child handle plus StopReason can deliver a signal. Reject caller-supplied PIDs, zero/all targets and reused identities; ESRCH/EPERM are distinct. Census never grants signal authority. |
-| Spawn/exec: `setsid`, `execve`, `fcntl`, `open`, `close` | Preallocate NUL-terminated argv/env and null-terminated pointer arrays before fork; keep buffers and passed descriptors alive through exec. Post-fork code uses only async-signal-safe calls, no allocation/locks; preserve the exec-error pipe. Only acknowledged guardian handoff inherits custody; providers close it. |
-| Descriptor sweep: `syscall(close_range, CLOEXEC)`, Linux `getdents64`, Darwin `getdirentries64` (raw syscall 344) | Inspect the actual post-fork table with fixed buffers; bounds-check record lengths/alignment and fd numbers, set CLOEXEC, then allow only explicit descriptors. Fail launch on incomplete sweep; never use allocating readdir after fork. |
-| Signal setup: `sigfillset`, `sigemptyset`, `sigaddset`, `sigprocmask`, `sigaction`, `signal` | Guardian owns process-wide installation, saved actions/mask and handler lifetime; reset inherited dispositions/masks before exec. Handler only writes a byte to a live nonblocking self-pipe and preserves errno. Restore before pipe close; no Rust allocation/locks in handler. |
-| Linux `prctl` | Only the dedicated guardian changes subreaper state; check GET/SET errors and restore prior state after child cleanup. No process-wide changes in shared MCP/CLI hosts. |
-| Event loop: `kqueue`, `kevent`, `pipe`, `poll`, `read`, `write` | Own CLOEXEC/nonblocking fds; register observation before spawn, use live bounded arrays, initialise only returned events/bytes and bound EINTR retries by WaitBudget. Pipe saturation loses a wakeup byte, never custody; recheck child state every turn. |
-| Native census: `proc_listallpids`, `proc_pidinfo`, `proc_pidfdinfo`, `sysctl`, `sysconf`, `mach_timebase_info` | Check ABI flavour, alignment, returned size/capacity and integer conversion; native boot/start/session/PGID and ancestry stay distinct from display names. Zero CWD result is Gone; permission/short reads are Unknown. Bound census growth; validate timebase denominator and use integer CPU units. Held-lock flags require matching description/inode and monotonic no-unlock ownership. |
-| Held-path I/O: `openat`, `fstatat`, `fstat`, `mkdirat`, `unlinkat`, `symlinkat`, `readlinkat`, `linkat`, `futimens` | Live parent fd, single validated NUL-free component, explicit no-follow policy; check type/owner/link count and device/inode. Create private exclusive files; do not unlink locks or traverse mutable foreign directories. Link publication must not replace; metadata never proves custody alone. |
-| Atomic publication: `renameat`, `renameat2`, `renameatx_np` | Same verified filesystem/parents; Replace versus NoReplace explicit (exchange only for an authorised caller). NoReplace never degrades to replace; sync file then parents and distinguish visible-but-unsynced publication. |
-| Directory iteration: `fdopendir`, `readdir`, `closedir` | Transfer one fresh fd exactly once to DIR; serial owner copies each bounded name before next read, distinguishes EOF/errno, closes once. Used outside post-fork code only. |
-| Lock: `flock` | Stable regular owner-controlled inode, nonblocking acquisition only; poll within WaitBudget/CancelToken, no public unlock of a shared description, no TTL stealing. |
-| Entropy: `getentropy` | Live exclusive buffer at most 256 bytes; failure refuses name/token creation, no predictable fallback. |
-| Pipe capacity: `fpathconf`, `ioctl`, `fcntl`; fixture socket `setsockopt` | Valid owned fd, matching request/ABI buffer and checked positive sizes; failed capacity probes report loss/unknown, never block a provider. Socket tuning is fixture-only. |
-| Errno: `__error`, `__errno_location` | Read/write the current thread's live errno slot immediately; preserve it across signal handlers and distinguish readdir EOF from failure. No pointer escapes. |
-
-Delete parity-only `newlocale`, `freelocale`, `strftime_l`, `localtime_r` and
-`gmtime_r` wrappers in `sys/process.rs` and `sys/lane_files.rs`. Core's `jiff`
-clock supplies timestamps; no locale or Python-start-string emulation remains.
+- Each stream is `Capture { limit }`, `Discard` or `Tee { limit, sink }`.
+  Discard has no pipe, and Tee uses a bounded non-blocking queue whose loss is
+  recorded without stalling capture. Defaults: 8 MiB retained per stream, 64
+  MiB maximum, a 64 KiB frame cap. Frames are decoded before retention
+  truncation. An oversized protocol frame is explicit decoder loss, never a
+  fabricated terminal event.
+- `timed_out` means a deadline caused TERM to a still-owned child. A natural exit
+  followed by a pipe-drain deadline sets `drain_truncated` instead. Exit versus
+  signal, byte totals and decoder loss are preserved.
+- A Darwin CWD `proc_pidinfo` of 0 means Gone without consulting errno. CWD
+  never grants signal authority.
+- Utility final-wait exhaustion hands the owned child to a detached reaper and
+  returns `CleanupPending`. One bounded queue reserves capacity before spawn.
+  Utility handles carry direct-child authority only.
+- Lock acquisition takes core `WaitBudget` and `CancelToken`, derives one
+  monotonic deadline and polls `flock(LOCK_NB)`, retrying EINTR within the
+  budget. Expiry returns `LockTimeout`, cancellation returns `Cancelled`, and a
+  blocking `flock` is never entered. A deadline bounds acquisition, not lease
+  lifetime: it never revokes custody or steals a lease. Lock ordering is run
+  custody, repository metadata, writer reservation, attempt publication, then
+  children journal. No SQLite transaction spans a lock wait.
 
 ### Permission policy
 
 Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)`, explicit
-read and write roots and a network level. Hold verified path anchors;
-reject traversal, symlinked state/lock leaves, credential roots and broad home
-or tmp grants. Writers may change their linked tree, private Git index/HEAD/COMMIT_EDITMSG/AUTO_MERGE/merge state/ORIG_HEAD,
-objects, exactly their branch/ref lock/reflog, the private and common
-`FETCH_HEAD` files and the common `packed-refs.lock`. Keep `.git`, `commondir`,
-`gitdir`, `config.worktree`, `objects/info`, other refs, provider configuration
-and protected instructions immutable. Network is a level: `provider` (the
-profile's API endpoints only, the read-only default), `local` (adds localhost
-bind, inbound and outbound plus the Postgres socket) or `open` (adds any
-outbound, the writer default). Real projects build, test and fetch packages, so
-writers get network by default rather than per named grant. Read-only execution
-uses declared reads and private scratch.
+read and write roots and a network level, holding verified path anchors. It
+rejects traversal, symlinked state or lock leaves, credential roots and broad
+home or tmp grants.
 
-Lanes run the user's own toolchains in place, because private copies broke
-real builds (rustup shims need the real `RUSTUP_HOME`; pnpm needs its store and
-symlinks). `~/.cargo` and `~/.rustup` are readable and `RUSTUP_HOME` points
-at the latter, with `RUSTUP_AUTO_INSTALL=0`. No lane may write a store the host
-later runs unconfined: `~/.cargo/registry`, `~/.cargo/git`, Cargo's lock
-files, `~/Library/pnpm`, `~/Library/Caches/pnpm`, `~/.npm` and
-`~/.cache/node` are never granted writable, because a poisoned `build.rs`,
-planted `PNPM_HOME` executable or altered Corepack package would run on the
-host's next build. Instead the lane cache (a writer's
-`Library/Caches/provenant-lane-cargo/<sha256>`, or a read-only lane's scratch)
-holds private copies: `CARGO_HOME=<cache>/cargo-home`, `npm_config_cache=<cache>/npm`,
-`PNPM_HOME=<cache>/pnpm-home`, `npm_config_store_dir=<cache>/pnpm-store`,
-`npm_config_cache_dir=<cache>/pnpm-cache` (with the `pnpm_config_*` twins pnpm 12
-reads) and `COREPACK_HOME=<cache>/corepack`. Writers download into them, so they
-start cold. Read-only lanes keep a scratch `CARGO_HOME` whose `registry` and
-`git` link to the shared stores, read-only, so offline builds use extracted
-sources, and read and exec the host's existing `~/.cache/node/corepack` without
-write. On macOS `/private/etc/ssl` (TLS trust roots and `openssl.cnf`) is read-only so Cargo can download crates. Executables stay immutable: `~/.cargo/bin` and
-`~/.rustup/toolchains` are read and exec only. The one exception is
-the Corepack cache (a writer's `<cache>/corepack`, or a read-only lane's host
-`~/.cache/node/corepack`), which is also executable, because Corepack runs the
-package managers it downloads from there. The other exception is a writer's
-`--write-root` and `domains.run.writer_writes` roots, which are also executable
-for writer lanes, because a build run there (a `CARGO_TARGET_DIR` outside the
-worktree) executes the build scripts it compiles; lanes can already run code
-they write in the worktree, so this adds no capability. Lanes also read Git's
-default XDG global files, `~/.config/git/ignore` and `~/.config/git/attributes`
-(when present, with no credentials), because Cargo's built-in Git library
-fails hard listing a path dependency when it cannot read them. Homebrew prefixes are readable
-except `var/` (service data). `--write-root` adds project paths outside the
-worktree, such as a repository's `.agent-run` lock directory; roots must be
-uncensused, noncredential and clear of Git directories, secrets, scratch,
-private state and protected roots. Whatever else a profile grants, reads and
-writes are denied last for `~/.ssh`, `~/.aws`, `~/.kube`, `~/.secrets`,
-`~/Monero`, `~/Archives/git-preservation` and Cargo's `credentials` files.
-Cargo's `config.toml` stays readable because Cargo refuses an unreadable one.
+- **Git.** Writers may change their linked tree, the private Git index, HEAD,
+  COMMIT_EDITMSG, AUTO_MERGE, merge state and ORIG_HEAD, objects (pack writes,
+  not `objects/info`), exactly their branch ref, lock and reflog, the private
+  and common `FETCH_HEAD` and the common `packed-refs.lock`. `.git`,
+  `commondir`, `gitdir`, `config.worktree`, other refs, packed refs, common
+  config, remote-tracking refs and their reflogs, provider configuration and
+  protected instructions stay immutable. The push guard trusts
+  `refs/remotes/<remote>/HEAD` to identify the default branch. Common
+  `info/exclude` is read-only.
+- **Network.** A level: `provider` (the profile's API endpoints only, the
+  read-only default), `local` (adds localhost and the Postgres socket) or
+  `open` (adds any outbound, the writer default).
+- **Toolchains.** Lanes use the user's own toolchains in place. `~/.cargo` and
+  `~/.rustup` are readable with `RUSTUP_HOME` and `RUSTUP_AUTO_INSTALL=0`.
+  No lane may write a store the host later runs unconfined: the Cargo registry
+  and Git caches and lock files, `~/Library/pnpm`, `~/Library/Caches/pnpm`,
+  `~/.npm` and `~/.cache/node` are never writable, because a poisoned
+  `build.rs`, planted `PNPM_HOME` executable or altered Corepack package would
+  run on the host's next build. A writer's cache instead holds private
+  `cargo-home`, `npm`, `pnpm-home`, `pnpm-store`, `pnpm-cache` and `corepack`
+  directories (with both the `npm_config_*` and `pnpm_config_*` store and
+  cache names set), so writers download cold. A read-only lane keeps a scratch
+  `CARGO_HOME` whose `registry` and `git` link to the shared stores read-only,
+  so offline builds use extracted sources, and reads and executes the host's
+  existing `~/.cache/node/corepack` without write. Executables
+  (`~/.cargo/bin`, `~/.rustup/toolchains`) are read and exec only, except the
+  Corepack cache and a writer's `--write-root` and `domains.run.writer_writes`
+  roots, which are also executable. Homebrew prefixes are readable except
+  `var/`.
+- **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
+  `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
+  grants.
+- **Writer cache.** Setup derives exactly
+  `$HOME/Library/Caches/provenant-lane-cargo/<sha256>` from the canonical
+  worktree and common Git paths and their device and inode identities, for
+  confined lanes only. It is created under writer custody by no-follow
+  traversal, must belong to the effective user with mode 0700, and is rechecked
+  at compilation. Hard links stay denied, and symlinks are allowed where a lane
+  may write except in provider and private state. With the macOS Command Line
+  Tools installed, the recipe selects them with `DEVELOPER_DIR` and `SDKROOT`,
+  and writers can execute the selected Git's `libexec/git-core`. Without the
+  tools, macOS Rust builds are not supported.
+- **Delivery.** A writer `TaskRequest` may carry `deliver: {remote, branch,
+  open_pr}`. Run binds the remote's single push URL and the lane branch under
+  writer custody and fetches before launch. After a complete, identity-verified
+  successful exit and terminal confinement checks, the host holder pushes the
+  final commit OID to `refs/heads/<branch>`, fetches it back and requires it to
+  equal the lane head, sets the branch's upstream config and optionally runs
+  `gh pr create --head <branch> --fill`. Host commands run from the protected
+  primary root, helper and config paths exclude the writer worktree, shell SSH
+  overrides and opaque shell credential helpers are refused, and hooks,
+  fsmonitor, implicit tag pushes and submodule pushes are off. The credential
+  discovery environment travels only on the private guardian handoff pipe, and
+  URLs with embedded credentials are refused. Cancelled, failed, stopped and
+  recovered attempts never start delivery. A sealed start marker prevents
+  repeating the external effect, and terminal publication keeps a typed
+  delivered, failed-stage or interrupted receipt.
+- **Profiles and backends.** The providers owner loads and verifies profile
+  fixtures into typed data. Profiles allow only the selected account mechanism
+  and the lane's own continuation transcript. Unsupported or nested
+  confinement fails prelaunch as `ConfinementUnavailable` and never silently
+  widens access. `ConfinementBackend` has `probe` and `compile`, macOS SBPL is
+  one module, and a new backend or provider profile is data or one module.
+  A retained profile needs an enforcing backend and fixtures, and Linux fake
+  providers do not certify a real profile.
 
-Writer setup also derives exactly
-`$HOME/Library/Caches/provenant-lane-cargo/<sha256>` from the canonical
-worktree and common Git paths plus the held worktree, private Git and common Git
-device/inode identities. This separates same-named and recreated worktrees and
-reserves the namespace for confined lanes, never host builds.
-`WorktreeWriteAuthority::for_worktree` takes the host home;
-`Anchors.home` independently binds that home at compilation. The authority's
-digest covers the cache as well as Git grants. Before collecting anchors, the
-host calls `prepare_writer_directories` under writer custody. It creates only
-missing derived directories, including nested branch/reflog parents and the
-single cache, by no-follow traversal. The cache and its lane-only parent must
-belong to the effective user and have mode 0700, including existing directories;
-setup refuses mismatches without changing their owner or mode. Compilation
-rechecks the held cache's owner and mode. The cache gets read/write authority,
-with the same overlap and hard-link checks as provider state. No parent
-`Caches` or sibling cache grant is added. Hard links stay denied (`file-link`).
-Symlink creation is allowed where a lane may write, since package managers
-need it, except in provider state and private state, which the host reads back.
-Nested provider setup and launch run in the parent guardian's host-side worker,
-using each child's own grants. The
-holder's provider-exit callback joins that worker before descendant cleanup;
-errors become warnings and never provider stop reasons. Host-launched child
-guardians are siblings of the provider and retain their own custody; they do
-not enter its descendant sparing registry. The host holder forwards explicit
-parent stop requests to its own accepted child scopes. See routing.md
-for the queued submission path.
+**Disclosure and redaction.** Disclosure scanning is bounded (10,000 files, 64
+MiB) and one streaming redactor handles known secret values, credential URLs and
+token patterns, with overlap across chunks. Prompt-training routes refuse
+overlap with protected prompt, cwd or read roots. Budget exhaustion refuses
+disclosure, and an exception needs run's scope-bound authority, never prompt
+text. Output is redacted before captures, diagnostics or JSON reach disk, raw
+protocol bytes stay in bounded memory, and the inherited environment is never
+persisted. A redactor failure discards the affected output and records a
+content-free error.
 
-Shell-capable Claude writers use the same Rust recipe as Codex, with
-`CARGO_TARGET_DIR` inside the exact lane cache.
-On macOS with CLT installed, the recipe selects
-`/Library/Developer/CommandLineTools` with `DEVELOPER_DIR` and its macOS SDK
-with `SDKROOT`. That one installation is readable; its `usr/bin` subtree
-is executable, and writers also execute its `usr/libexec/git-core` helpers.
-Writers read and execute the selected Git installation's `libexec/git-core`
-when present, including a resolved Homebrew Git keg without a Node installation.
-This lets the compiler/linker load `libxcrun.dylib` and SDK
-resources without a read or write grant to Xcode apps or CLT's parent.
-Without CLT, this recipe promises no macOS Rust build support. Shell Git is
-host-selected and linked (Claude shell lanes: wrapped by a config-pinning script) at `scratch/bin/git`; the exact selected executable
-and non-system linked libraries remain immutable. The required macOS lane
-preparation regression checks Git and builds/runs a test crate through the
-compiled Claude writer profile using a cloned immutable toolchain and isolated
-home. It does not prove a live provider's Bash or environment scrubbing.
+**Quarantine.** After confirmed quiescence, quarantine holds the writer lease
+and archives protected disk, index and HEAD patches, blobs and digests before
+restoring anything. Only attributable ordinary `.agents/` edits are restored
+automatically. Policy or control-file changes, concurrent edits or
+unaccountable history need review: evidence is kept, a terminal failure is
+published, and unrelated work and history are untouched. A tracked symlink at a
+protected path (mode 120000, such as `CLAUDE.md -> AGENTS.md`) is evidence whose
+bytes are the link target, read with `readlink` and checked against the
+committed blob, never followed. Protected-tip verification returns a pinned SHA,
+and workflow or chair authority releases that exact tip separately.
 
-For #1255 the design's other-ref/config restriction takes precedence over the
-issue's proposed shared-file grants: changing `packed-refs` can change every
-packed branch, and common `config`/`config.lock` cannot be narrowed to one
-`branch.<name>` section. Remote-tracking refs, packed refs and common config
-therefore remain host-owned. The push guard trusts
-`refs/remotes/<remote>/HEAD` to identify the default branch; letting a writer
-change it would bypass default-branch push refusals. Remote refs and their
-reflogs stay immutable. Writers can write the exact private and common
-`FETCH_HEAD` paths, but fetches that update remote refs still require the host.
-Linked-worktree Git resolves `FETCH_HEAD` into the private Git directory. The existing objects
-grant includes pack writes, excluding `objects/info`. The exact common
-`packed-refs.lock` permits loose-ref deletion; `packed-refs` itself remains
-read-only, so that lock cannot replace it. The
-common Git `info/exclude` file is an exact read-only grant for status and build
-fingerprinting. A writer `TaskRequest` may explicitly carry
-`deliver: {remote, branch, open_pr}`. Run binds the configured remote's single
-push URL and lane branch under writer custody, then fetches before provider
-launch. After a complete, identity-verified successful writer exit and terminal
-confinement checks, the live host holder pushes the final commit OID to
-`refs/heads/<branch>`, fetches that destination into its remote-tracking ref,
-and requires it to equal the lane's final head. It sets the lane branch's
-`remote`, `merge` and `pushRemote` config and verifies upstream and status
-before optionally running `gh pr create --head <branch> --fill` for the bound
-repository. Host commands run from the protected primary root with the lane's
-Git directory, so relative credential helpers cannot select lane files. Helper
-search paths and configuration paths exclude the writer worktree; shell SSH
-overrides and opaque shell credential helpers are refused before dispatch.
-Plain executable helpers and gh's standard credential helper remain supported.
-Hooks, fsmonitor, implicit tag pushes and submodule pushes are disabled.
+**Safe Git.** Evidence uses a trusted executable, typed operations, literal
+pathspecs after `--`, bounded execution and a sanitised environment: Git
+redirection and config injection are removed, and hooks, fsmonitor, textconv,
+external diff, pager and lazy fetch are off. Common and private directories and
+registration are verified, and copied gitfiles and alternate object stores
+cannot vouch for protected history. Base and head OIDs are pinned once. NUL
+status, selected paths, diff digest and before and after tracked fingerprints
+are kept. Selected untracked content, changed HEAD, index or content, a timeout
+or truncation refuses complete evidence. `confinement::run_utility` offers
+workflow and run a closed set of Git (status, rev-parse, diff, log, worktree,
+merge-base) and `gh` (PR, issue, check) reads with validated repository and IDs,
+pinned executables and a bounded budget, and no shell, arbitrary argv or write
+verbs.
 
-The host's normal credential discovery environment travels only on the private
-guardian handoff pipe, separately from the provider environment. Embedded HTTP
-URL credentials are refused rather than exposed as process arguments. Neither
-provider prose nor generic terminal recovery can start delivery. Cancelled,
-failed, stopped and recovered attempts never initiate it. A sealed start marker
-prevents repeating external effects after interruption; terminal publication
-retains a typed delivered, failed-stage or interrupted receipt and the selected
-head for chair pickup. The local bare-remote conformance test covers host fetch,
-linked-worktree commit, push, tracking/upstream verification, receipt publication
-and interrupted delivery without a second push. Live host credential and PR
-acceptance remains a chair gate for #1246 and #1255.
+### Worktrees
 
-The providers owner loads and verifies profile fixtures, then constructs the typed
-profile data consumed by confinement. Provider profiles contain fixture-proven
-runtime-state/authentication exceptions;
-only the selected account mechanism and own continuation transcript are allowed.
-No unrelated credential homes or other sessions. Compose provider-native
-controls with macOS sandbox-exec when needed; unsupported/nested confinement
-fails prelaunch as `ConfinementUnavailable`, never silently broadens access.
-Linux fake-provider tests do not establish real-provider confinement: a retained
-profile needs an enforcing backend and fixtures or its mode is refused.
-`ConfinementBackend` has `probe` and `compile`; macOS SBPL is one backend
-module. Provider-profile policy is typed data (roots, tool writes, network
-level and runtime exceptions), not branches in a monolithic compiler. A new backend
-implements this trait in one module without changing provider lifecycle code.
+Create, checkout, remove and prune share a repository-scoped worktree and ref
+lock. Writer admission holds it while it verifies registration and publishes its
+reservation, and removal holds it through a fresh Git worktree census and the
+checked-out-branch refusal. This serialises managed checkouts and grants no
+authority over unrelated Git actors.
 
-Confinement also owns bounded disclosure scanning (10,000 files/64 MiB) and one
-streaming redactor for known secret values, credential URLs and token patterns.
-Prompt-training routes refuse protected prompt/cwd/read-root overlap.
-Budget exhaustion refuses disclosure; an exception requires Run's explicit
-scope-bound authority, never text in a prompt. Chunk overlap prevents boundary
-leaks. Redact before captures/diagnostics/JSON reach disk; raw protocol bytes
-stay only in bounded memory. Never persist the inherited environment. Redactor
-failure discards affected output and records a content-free error.
+| Command | Contract |
+|---|---|
+| `worktree create` | Create a clean linked tree on a new or existing branch under a verified `.worktrees/`. It returns the path, branch and pinned base, and provisions no dependencies. |
+| `worktree list` | Repository-scoped path, branch and head, dirty state and writer state (free, live or unknown). |
+| `worktree remove NAME [--discard]` | Refuses the primary, a dirty tree and a live writer, and has no force. An unknown writer is accepted when its lease is free and the tree is clean. It deletes the branch when its commits are contained in the integration branch, and `--discard` also deletes an unmerged one and returns its head. |
+| `worktree remove --merged` | Needs explicit authority, a pinned integration ref (a local branch or a remote-tracking ref such as `origin/main`) and `--branch` or `--since`. Ordinary merges are proved by ancestry. A squash needs a recorded merged PR in this repository whose head OID equals the branch tip and whose merge OID is an ancestor of the integration tip. A `gh` failure or malformed output keeps the branch unless ancestry alone proves it. The integration branch and a branch at its tip are never pruned. The branch OID is rechecked and the ref is deleted with that expected old OID. Remote deletion is not offered. |
+| `hook claude pre-tool-use` | The lane-safety guard, a row in cli's `HookSpec` table. Stdin is bounded to 1 MiB. Unreadable, malformed, oversized or timed-out input emits deny JSON with exit 0, and only a failure to write the denial exits 2. |
 
-After confirmed quiescence, quarantine holds the writer lease and archives
-protected disk/index/HEAD patches, blobs and digests before restoration.
-Automatically restore only attributable ordinary `.agents/` edits. Policy or
-control-file changes, concurrent edits or unaccountable history require review;
-retain evidence and publish a terminal failure, without resetting unrelated
-work or rewriting history. A tracked symlink at a protected path (mode 120000,
-such as `CLAUDE.md -> AGENTS.md`) is protected evidence whose bytes are the link
-target, read with readlink and checked against the committed blob; it is never
-followed, and a retargeted, removed or retyped link is archived and reviewed
-like any changed control file. Protected-tip verification returns a pinned SHA;
-workflow/chair authority separately releases that exact tip.
+Removal and pruning hold writer exclusion, recheck reservations and worker
+observations, and refuse live or unknown candidates. A post-merge hook passes
+only its just-merged scope. The guard forbids name- and pattern-based kills
+(`pkill`, `killall`, pattern-fed `kill` or `xargs`) and cleanup racing an owned
+writer. Its bounded shell-token inspection is advisory defence around direct
+harness commands, and OS confinement and owned handles enforce isolation.
+Unknown or too-deep shell constructs are never certified safe, and the guard
+does not claim to parse every shell language.
 
-Safe Git uses a trusted executable, typed operations, literal pathspecs after
-`--`, bounded execution and a sanitised environment: remove Git redirection and
-config injection; disable hooks, fsmonitor, textconv, external diff, pager and
-lazy fetch for evidence. Verify common/private directories and registration;
-copied gitfiles and alternate object stores cannot vouch for protected history.
-Pin base/head OIDs once, retain NUL status, selected paths, diff digest and
-before/after tracked fingerprints. Selected untracked content, changed
-HEAD/index/content, timeout or truncation refuses complete evidence. Output
-installation uses held-parent paths and verifies digest/device/inode.
+### Records and state
 
-Create/checkout/remove/prune share a repository-scoped worktree/ref lock;
-writer admission also holds it while verifying registration and publishing its
-reservation. Hold it through removal and ref deletion, including a fresh Git
-worktree census and checked-out-branch refusal. This serialises managed
-cross-worktree checkouts; it does not grant authority over unrelated Git actors.
-Worktree removal/pruning holds writer exclusion, rechecks reservations and
-repo-scoped native worker observations, and refuses live or unknown candidates.
-Pruning requires explicit merged-ref authority and a pinned integration tip.
-Ancestry proves ordinary merges; squash proof needs a recorded merged PR in
-this repository whose exact head OID equals the current branch tip and whose
-merge OID is an ancestor of the integration tip. `--since OID` selects only
-merges reachable from the pinned integration tip and not reachable from that
-pinned bound; require the bound to be an ancestor of the tip. This graph delta
-also scopes ancestry-proven branch tips. gh failure/malformed/incomplete output keeps
-the branch unless ancestry alone proves it. Never prune the integration branch
-or a branch at its tip. Recheck the branch OID and remove the ref with that
-expected old OID, so a new commit invalidates pruning. CLI's post-merge hook
-passes only its just-merged scope; it cannot trigger an unscoped repository sweep.
-
-## Commands and MCP
-
-The [cross-area decisions](README.md#cross-cutting-decisions) own the command
-contract, wait budgets, run verbs and `HookSpec`. CLI supplies its JSON envelope,
-1 MiB result cap, exits and exact flags; this area defines none separately.
-Diagnostics stay on redacted stderr. Supervisor adds no run verbs or MCP tools;
-Fabric's tools call Run, whose top-level `cancel` and `reconcile` own control
-and recovery. Fabric's landing lease is separate from the writer lease.
-
-| Command / handler | Contract |
-| --- | --- |
-| `worktree create BRANCH` | New or existing branch, optional `--base` for a new branch only; global `--project` selects the repository; create a clean linked tree under verified `.worktrees/`, return path, branch and pinned base. No Node provisioning. |
-| `worktree list` | Repo-scoped path, branch/head, dirty state and writer state free/live/unknown. |
-| `worktree remove NAME [--discard]` / `worktree remove --merged` | Refuse primary, dirty or live writers; an unknown writer is accepted when its lease is free and the tree is clean; no force. NAME matches a branch or a directory name, deletes its branch when its commits are contained in the primary's integration branch; `--discard` also deletes an unmerged one, with its head returned. Merged pruning requires explicit authority, a pinned integration ref (a local branch or a remote-tracking ref such as `origin/main`, with containment checked against it), and exactly one of `--branch NAME…` or `--since OID` under cli's frozen flags, and covers branches with no worktree. Recheck OID before ref deletion; a scoped post-merge hook cannot sweep other branches. Remote deletion is not offered (no network or credentials in confined Git). |
-| `hook claude pre-tool-use` | Lane-safety handler registered in cli's `HookSpec` table. Bound stdin to 1 MiB; allow/non-Bash emits empty stdout/0, deny uses recorded harness decision JSON/0. Unreadable, malformed, oversized or timed-out guard input emits deny JSON with exit 0. Only failure to write the denial uses blocking exit 2 and content-free stderr. Installer consumes the same table. |
-
-Drop worktree check/verify/prune, clean plan/apply, git evidence and run workers.
-Checks register findings under `check`'s binding subjects; workflow uses pinned
-Git evidence and tip verification as library calls. The guardian deletes
-scratch at settlement; no `clean` command survives.
-
-Keep lane-safety's prohibition on name/pattern-based kills (`pkill`, `killall`,
-pattern-fed kill/xargs) and worktree cleanup racing an owned writer. Its bounded
-shell-token inspection is advisory defence around direct harness commands;
-OS confinement and owned handles enforce provider isolation. Unknown/too-deep
-shell constructs cannot be certified safe for destructive operations. There
-is no claim to parse all shell languages or infer authority from a prompt.
-
-## Records and state
-
-State supplies the verified `StateRoot` from the binding State root and Layout
-rows: default `~/.local/share/provenant/v1`, with `--state-dir ABS` overriding
-`PROVENANT_STATE_DIR`. No XDG selection or old-root fallback. One root serves
-the host; ProjectId is metadata on runs. No old state or reservation is adopted.
-
-The run-owned tree is the shared execution-run contract (paths relative to root):
+Paths are relative to the state root:
 
 ```text
-run.sqlite3                    # run's atomic admission, operations, registry/status
-run.sqlite3-wal / -shm
+run.sqlite3                    # run's admission, operations, registry and status
 runs/<RunId>/
-  request.json                 # immutable canonical submission/prompt digests
-  owner.json                   # supervisor-issued scheduler custody reference
+  request.json                 # immutable canonical submission and prompt digests
+  owner.json                   # scheduler custody reference
   custody.lock
   children/{journal.lock,<ChildId>.json}
   attempts/<AttemptId>/
-    prompt.txt                 # run-owned immutable submitted prompt
-    result.md                  # run-owned sealed result, including failure
+    prompt.txt  result.md      # run-owned, immutable once sealed
     custody.lock
     launch.json                # redacted summary
     process.json               # replaceable observation
-    cancel.json                # sole supervisor-consumed cancellation request
-    process-exit.json           # immutable exit/cleanup evidence
-    stdout.log                 # sole bounded redacted stdout wire capture
-    stderr.log                 # sole bounded redacted stderr capture
+    cancel.json                # the only supervisor-consumed cancellation request
+    process-exit.json          # immutable exit and cleanup evidence
+    stdout.log  stderr.log     # bounded, redacted captures
     reserve                    # 64 KiB publication headroom
-    provider-state/            # retained history; no credentials
-    quarantine/                # retained patches/blobs and manifest
+    provider-state/            # retained history, no credentials
+    quarantine/                # retained patches, blobs and manifest
     scratch/                   # disposable launch staging only
 worktrees/<ProjectId>/
-  worktrees.lock               # repository worktree/ref mutations
+  worktrees.lock
   <WorktreeId>/{identity.json,writer.lock,reservation.json}
 ```
 
-`worktrees/<ProjectId>/` is supervisor/confinement's top-level subtree in state's
-layout terms; linked trees themselves remain repository resources. Run owns
-its store, request, prompt, result and terminal facts; Fabric indexes IDs
-without copying lifecycle truth. Structured run events live in SQLite, with
-no duplicate capture. Owner references contain no PID-derived authority.
+Run owns its store, request, prompt, result and terminal facts, and Fabric
+indexes IDs without copying lifecycle truth. Owner references hold no
+PID-derived authority. All records use records' serde envelopes with
+`schema_version: 1`. Writers refuse unknown versions and fields, and read-only
+observers tolerate added fields within v1. JSON is bounded to 1 MiB (the
+ephemeral launch message 2 MiB, process exit 16 KiB). OS paths stay
+`PathBuf` or `OsString` until the records boundary and use records' explicit
+byte-path encoding. Edge-built facts are `Serialize` only.
 
-Only generated sandbox profiles and disposable staging enter scratch. The
-guardian deletes classified scratch after settlement, confirmed quiescence,
-quarantine and durable canonical Run terminal publication, while retaining
-writer exclusion. Recovery applies the same rule. Never recursively delete
-above scratch or stage history/transcripts there; retain unknown or
-unclassified content. Provider history stays in provider-state; never copy
-credentials into either subtree. Managed worktree removal is separate.
+| Record | Write rule |
+|---|---|
+| `ProcessIdentity` | Host and boot identity, PID and native start stamp, plus group leader identity. Display time grants no authority, and absence, denial and unsupported stay distinct. |
+| `LaunchSummary` | Resolved route, executable identity, permission-plan digest, worktree identity, environment names and budgets, with sensitive argv redacted and no prompt or values. It is never replayable launch authority. |
+| `ProcessObservation` | Atomic replace. A stale observation cannot establish death. |
+| `ProcessExit` | No-replace, with file and parent fsync. Failure keeps custody for retry. |
+| `WriterReservation` | Published atomically under the writer lock before spawn. It is cleared only after proved quiescence, quarantine and the canonical terminal commit, or an authorised recorded reconcile disposition. A missing or malformed record with conflicting run evidence refuses acquisition. |
+| `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. |
+| `QuarantineManifest`, `GitEvidence` | Evidence files are durable before the no-replace manifest, and partial capture claims no success. |
 
-All records use records' serde envelopes with `schema_version: 1`; refuse
-unknown versions and unknown fields for launch, cancellation, reservations,
-release evidence. Read-only observations permit added fields
-within v1; writers emit only their declared version. JSON is bounded to 1 MiB
-except the ephemeral launch message (2 MiB); process exit is at most 16 KiB with
-omission counts. IDs and relative paths are validated newtypes; OS paths remain
-`PathBuf`/`OsString` until the records boundary. Non-text OS bytes use records'
-explicit byte-path encoding, never Python surrogate emulation. Durations,
-byte counts, native start stamps and clock values are integers.
+Authoritative writes use held-directory `SafeFs` capabilities, exclusive 0600
+temporaries in 0700 directories, full writes, file sync, atomic rename or
+no-replace publication and a parent sync. Lock and custody leaves must be
+regular, single-link and owner-controlled. A directory writable by another live
+actor cannot be made safe by check-then-unlink, so deletion refuses it.
 
-| Record | Required contents and write rule |
-| --- | --- |
-| `ProcessIdentity` | Host/boot identity, PID and native start stamp (Linux ticks; Darwin seconds/useconds), plus group leader identity. Wall-clock display time grants no authority. Absence, permission denial and unsupported observation remain distinct. |
-| `LaunchSummary` | Run/task/attempt IDs, exact resolved route, executable identity, permission-plan digest, cwd/worktree identity, environment names, stream policies and budgets. Redact sensitive argv values; omit prompt and environment values. Atomic replace before spawn where possible; it is never replayable launch authority. |
-| `ProcessObservation` | Guardian/provider identity, phase, last output/CPU/tree observations, completeness, capture totals, custody state and bounded errors. Atomic replace; stale observations cannot establish death. |
-| `ProcessExit` | Exit/signal or never-spawned cause, stop request and delivered signals, terminal observation, reaped/spared identities, capture/decoder loss and prior I/O warnings. No-replace, file+parent fsync; retain custody for retry on failure. Its own publication durability is an API/observation outcome, never a self-certifying field in immutable bytes. |
-| `WriterReservation` | Worktree device/inode, verified Git location, branch/base OID, run/attempt IDs, guardian identity/session/PGID, launch generation and unresolved-cleanup bit. Atomic publication under writer lock before spawn; clear only after proved quiescence, quarantine and canonical Run terminal commit, or the authorised recorded reconcile disposition, under writer exclusion. A missing/malformed record with conflicting run evidence refuses acquisition. |
-| `CancelRequest` / `ChildRegistration` | Request ID, target run/attempt generation, reason and requester; child run ID/token and parent attempt. Atomic no-replace request/registration; journal lock orders child registration against parent's terminal commit. Stale generations cannot cancel a later attempt. |
-| `QuarantineManifest` / `GitEvidence` | Pinned OIDs, selected byte-paths, before/after fingerprints, file digests, view/restore status. Evidence files durable before no-replace manifest publication; no claim of success on partial capture. |
+**Settlement.** After its canonical terminal transaction and quarantine commit,
+run publishes `terminal-commit.json` and `quarantine/manifest.json`, then
+`release.json` carrying both digests over the exact raw bytes, all with the run,
+attempt and generation scope and `schema_version: 1`. Supervisor's
+`custody::publish_release` owns that byte format, called by the guardian holder
+after run's commit, and `Holder::admit` runs before spawn (a refusal publishes a
+never-spawned exit and releases custody). Supervisor checks the attempt inode
+and custody lock, verifies both digests and scopes and syncs before it mints
+`SettlementCommit`. That receipt permits classified scratch deletion and fence
+clearing under writer exclusion, and a missing or invalid attestation keeps the
+fence. Scratch holds only sandbox profiles and staging, is deleted with a
+no-follow walk that refuses mounts and links, skips drift and never uses age
+alone as eligibility, and unclassified content is retained.
 
-Stored records deserialize only at validated storage edges. Edge-built facts
-implement `Serialize` only; consumers cannot construct them from arbitrary JSON.
+## External contracts
 
-All authoritative writes use held-directory `SafeFs` capabilities, exclusive
-0600 temporaries in 0700 owner directories, full writes, file sync, atomic
-rename/no-replace publication and parent sync. Lock/custody leaves must be
-regular, single-link, owner-controlled files. Following reads are explicit
-#1348 `ReadOptions` operations for trusted inputs, never custody opens. A
-candidate directory writable by another live actor cannot be made safe with a
-check-then-unlink; deletion refuses it. Scratch deletion holds run/worktree
-exclusion through its no-follow walk, refuses mounts/links/root replacement
-and skips drift. Age alone is never eligibility.
-
-Before spawn Run checks its disk-admission floor; supervisor allocates a 64 KiB
-reserve. On publication ENOSPC, unlink the reserve and retry once, with no
-provider signal. If storage still fails, retain custody and the bounded outcome
-in the guardian, return publication-pending to the caller and retry on bounded
-backoff. Recovery never fabricates a provider exit from silence or a missing
-file. Complete evidence cannot be guaranteed after simultaneous process loss
-and permanent storage failure; report unconfirmed and fence the writer rather
-than publish invented terminal success.
-
-## Library boundary
-
-Signatures match the run draft's supervisor table. Core owns `WaitBudget`
-and `CancelToken`; each wait derives one monotonic deadline, never an unbounded
-None path. Libraries return typed `thiserror` failures (Refused, Busy,
-UnknownIdentity, InvalidRecord, Cancelled, CleanupPending, I/O); the table shows
-success values. CLI/MCP renders them. Supervisor imports core/records only;
-confinement adds config and supervisor's safe OS API. No library imports cli.
-
-| API | Contract and consumer |
-| --- | --- |
-| `machine::step(State, Event, Tick) -> (State, Vec<Effect>)` | Pure OS-driver decisions with explicit clocks/delivery outcomes. Silence/I/O cannot construct StopReason. |
-| `launch(OwnedLaunch, CapturePlan, PublicationReservation) -> CustodyHandle` | Run passes verified plan, attempt custody and controlled writer-lease handoff in OwnedLaunch, with its startup handshake WaitBudget/CancelToken. PublicationReservation reserves destination/headroom before spawn. Acknowledgement transfers obligation to guardian; failure returns handles or unresolved-handoff token. Run retains run/writer custody through retries/settlement. Handle is a channel, never a PID grant. |
-| `observe(handle, WaitBudget, &CancelToken) -> Observation` | Run/Fabric observe Live/Exited/Unknown and publication state. Reader cancellation ends observation, retaining custody. |
-| `stop(handle, StopReason) -> StopReceipt` | Run maps an authorised generation-bound cancel to ExplicitCancellation, wall expiry to WallDeadline, provider rejection to ProtocolRejected; guardian signal and post-terminal cleanup use their closed reasons. Durable attempt-bound request/receipt; guardian alone signals. Acknowledgement does not prove death; channel loss is unknown. |
-| `recover(CustodyRef) -> Reattached\|Exited\|Unknown` | Run supplies a validated stored custody reference with bounded observation context. Verify guardian session/PGID and native identity; free lock alone proves nothing. Unknown preserves fence pending authorised typed reconcile. Recovery never kills by PID. |
-| `acquire_custody(RunRef, WaitBudget, &CancelToken)`; `acquire_writer(VerifiedWorktree, ReservationPermit, WaitBudget, &CancelToken)` | Opaque custody, controlled duplicate handoff, lock plus reservation checks; no TTL takeover or SQLite access. Fabric supplies graph permits. |
-| `exec::Executor::execute(ExecOptions)`; `run_text`; `pid::{CwdObserver,SystemCwdObserver}` | Bounded utility execution/strict UTF-8 and stream enums. Direct-child custody stays private to Executor; CWD observations grant no signal authority. |
-| `fs::{SafeFs,SafeDir,SafeFile,PathIo}`; `lock(Mode, WaitBudget, &CancelToken) -> LockGuard` | Config, confinement, fabric-store and workflow use held-directory bounded/following reads, append and nonblocking lock polling. No public unlock of a shared custody description. |
-| `publish(SafeDir, Name, Bytes, PublishMode::{Replace,NoReplace}) -> Publication` | Sync file, atomically publish, sync directory. Returns Durable, VisibleDurabilityUnconfirmed or pre-publication error. NoReplace conflict preserves existing bytes; reconcile generation/digest and retry sync, retaining custody. |
-| `confinement::run_utility(UtilityRead, VerifiedRepo, UtilityBudget, &CancelToken) -> ExecOutcome` | Workflow and run's git_evidence_packet replacement use fixed Git/gh reads via Executor. Closed Git status/rev-parse/diff/log/worktree/merge-base and gh PR/issue/check operations; validated repo/IDs, fixed fields, sanitised env/pinned executables. No shell/arbitrary argv/API/write verbs. Budget bounds wall/grace/reap/streams; truncation refuses evidence. Secret auth never enters argv/logs. |
-| `ConfinementBackend::{probe,compile}` | `probe(BackendContext) -> Availability`; `compile(PlanPermissions, ProviderProfile, Anchors) -> ConfinedLaunch`. SBPL is one module, provider policy is data. Providers/Run receive enforcement and digest, never stop authority. |
-| `verify_worktree`; `Git::evidence`; `verify_tip`; `quarantine`; `OutputCustody::{install,verify}`; `scan_disclosure`; `Redactor` | Run/workflow consume verified paths, pinned GitOid/evidence and safe outputs. Workflow supplies exact protected-tip release authority. |
-| `confinement::worktrees::{create,list,remove}`; `settle_scratch` | CLI/Fabric services and guardian settlement; remove supports scoped merged pruning. Supervisor supplies OS/locks, confinement supplies policy. |
-
-Required from state/config: fresh verified StateRoot, ActorId/ProjectId/WorkScope, GitOid
-(SHA-1 and SHA-256), WaitBudget/CancelToken, integer clocks and jiff clock,
-byte-path encoding, canonical digests, bounded versioned serde records and
-resolved policy/profile settings. Help/root resolution starts neither
-OS driver nor database. Records owns content; supervisor owns atomic effects.
-
-Confinement's utility facade preserves R2: workflow depends on confinement,
-which depends on supervisor; workflow does not gain a direct supervisor edge.
-Mutating Git worktree/ref operations use separate typed confinement services
-with explicit authority. A utility handle cannot stop a provider or a sibling.
-Run composes confinement's output filter with supervisor's injected capture
-filter trait, so supervisor never imports confinement. Decode bounded protocol
-frames in memory before redacting retained bytes.
-
-Required from providers: argv/environment plus selected authentication inputs,
-a fixture-proven permission profile and bounded decoding into Progress,
-Terminal or closed ProtocolRejected events; no Python observer or signalling
-callback. Run (`run.md`) owns atomic admission/operation
-insertion in its durable store, the run registry,
-attempts, status, retry generations, child registration, cancel scope, settlement
-and the single terminal bundle.
-It commits referenced evidence before its terminal marker and returns custody
-on error. Dirty/changed/unreadable writer evidence prevents automatic retry;
-silence never proves an untouched tree.
-
-`fabric-runtime` (`fabric.md`) owns identity and federation routing,
-supplies graph reservation permits and consumes ID-scoped registry/status/output/
-cancel through Run. Its store may index Run IDs but owns no competing run
-registry or lifecycle status. Transport cancellation
-only ends its wait. Workflow supplies integration ref, authorised branch pruning
-and protected-tip releases. No area independently probes then kills a PID or
-infers authority from a file containing a name. Run deletes `lease.py` with
-the run-directory contract; Fabric keeps its landing lease. Neither the old
-driver lease nor the landing lease substitutes for kernel writer custody.
-
-Replace direct-PID reap guidance in `docs/runbooks/shell-pitfalls.md` and
-`skills/orchestrate/references/{lane-safety,direct-cli-fallback,worker-liveness}.md`
-with Run-managed launch/cancel. An observed unmanaged worker is diagnostic only;
-its owning harness controls cancellation. Provenant neither adopts it by PID
-nor pretends a diagnostic row gives it custody.
-
-## External contracts and fixtures
-
-Provider wire forms, harness hooks, `SKILL.md`, MCP and Git remain fixed under R0.
-Our launch/receipt/CLI formats change freely; no Python/Node oracle or reader.
-The external hook/Git/OS recording directories below do not yet exist at this
-baseline: they are required build inputs, not evidence already collected.
+Provider wire forms, harness hook protocols, Git, `SKILL.md` and MCP are fixed
+by their owners; Provenant's own launch, receipt and CLI formats are not.
 
 | External contract | Fixture and assertion |
-| --- | --- |
-| Provider argv/env, streams, results and continuation | Sanitised real streams in `tests/fixtures/fabric-context/{claude,codex,cursor,opencode,agy}.jsonl` seed decoder tests. Providers owns version/provenance manifests and missing launch/permission/continuation recordings. Assert typed events beyond capture cap and no credential persistence. `fabric-v1/provider-*.json` are owned receipts, not provider-wire recordings. |
-| Harness Bash pre-tool hook | CLI records real tool/session/cwd stdin and allow/deny stdout/exit under `tests/fixtures/external/hooks/`. `test_lane_safety.py` supplies scenarios, not recordings. Assert broad-kill denial, malformed-input handling and nesting bounds. Other harness mappings/installation stay with CLI. |
-| Git porcelain/OIDs/worktrees/ref/index/patch forms | Capture system-Git version plus raw NUL worktree/status/diff/index output under `tests/fixtures/external/git/`, including SHA-1/SHA-256 and linked trees. Also run temporary-repository tests for evidence races and redirects. |
-| `SKILL.md` and MCP | records owns R6's tracked frontmatter subset fixtures; confinement protects instruction bytes without another YAML reader. fabric-mcp owns recorded JSON-RPC 2.0 stdio/cancellation fixtures; integration proves clean stdout and retained custody after cancelled waiters. |
-| OS and sandbox interfaces | Linux/macOS handshake fixtures record platform/backend and operation allowed/denied, not generated SBPL text equality. Fake providers cannot certify a real profile. Missing external recordings block that profile's support; live-provider capture needs user authority. |
+|---|---|
+| Provider argv, streams, results and continuation | Sanitised real streams under `tests/fixtures/fabric-context/` seed the decoder tests, with typed events beyond the capture cap and no credential persistence. The providers crate owns the version manifests. |
+| Harness Bash pre-tool hook | Recorded tool, session and cwd stdin with allow and deny stdout and exit under `tests/fixtures/external/hooks/` (broad-kill denial, malformed input, nesting bounds). |
+| Git porcelain, OIDs, worktrees, refs, index and patches | Raw NUL worktree, status and diff output from the system Git, including SHA-1 and SHA-256 and linked trees (`crates/confinement/tests/fixtures/external`), plus temporary-repository tests for evidence races and redirects. |
+| OS and sandbox interfaces | Handshake fixtures record the platform, backend and which operations were allowed or denied, not the generated SBPL text. Fake providers cannot certify a real profile, and a missing recording blocks that profile's support. |
 
-## Tests and acceptance
+## Failure and recovery semantics
 
-Follow [R9](rust-workspace.md#tests): beside-module unit tests
-use explicit clocks and injected observations. Cover transitions/idempotence,
-natural-exit precedence, unknown identities, failed signals, stale generations,
-registration versus publication, integer/size bounds, secret chunk splits,
-path aliases and scratch classification/drift. Delete tests of shapes that the
-new enums, capabilities and compiler make impossible.
+- Storage exhaustion. Before spawn, run checks its disk-admission floor and
+  supervisor allocates the 64 KiB reserve. On ENOSPC at publication the reserve
+  is released and the write retried once, with no provider signal. If storage
+  still fails, the guardian keeps custody and the bounded outcome, reports
+  publication pending and retries with backoff. Recovery never invents a
+  provider exit from silence or a missing file. After simultaneous process loss
+  and permanent storage failure, evidence is reported unconfirmed and the
+  writer fenced rather than published as success.
+- A dirty, changed or unreadable writer tree prevents automatic retry, and
+  silence never proves an untouched tree.
+- Typed errors are `Refused`, `Busy`, `UnknownIdentity`, `InvalidRecord`,
+  `Cancelled`, `CleanupPending` and I/O. A macOS descendant that escapes and
+  reparents before the first census cannot be attributed safely, and no
+  environment guess or uncertain signal compensates. Healthy-process
+  signalling, weakened confinement or lost publication escalates to the user.
 
-Binary integration drives public commands and MCP against isolated fake
-providers and temporary repositories. Every test sets temporary HOME,
-StateRoot/PROVENANT_STATE_DIR, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL,
-GIT_CONFIG_NOSYSTEM=1 and every harness config path (including CLAUDE_CONFIG_DIR
-and CODEX_HOME) before starting children;
-no test reads the real install, old state, global Git config or harness settings.
-Old-root sentinels must remain untouched. Cover launch/wait/cancel/recover,
-worktree contention, disclosure, Git evidence, quarantine and settlement.
+## Deliberate cuts
 
-Supervisor exposes a `fixture` module behind a dev-only feature, never enabled
-in release/install products. Each crate's process tests, including workflow,
-use a `harness=false` integration test target whose main dispatches scenario
-arguments before running its suite, re-executing `current_exe()` for children.
-No extra binary or test crate is added; libtest never parses scenario arguments.
-The fixture module owns scenario dispatch/handshakes, fake providers and lock
-holders, with the only scoped `#[allow(clippy::disallowed_methods)]` permitting
-`Command::new` to re-exec that test executable. Production has no exception;
-signals/descriptor setup use supervisor's safe APIs. Binary integration tests
-launch the real command/MCP through supervisor's safe runner, using the
-binary package's `CARGO_BIN_EXE_provenant` path; only self-re-exec uses the
-fixture module's scoped `Command::new` allow.
-Use Fabric's small in-house snapshot helper if needed; no `insta` dependency.
-Test fixed Git/gh argv and arbitrary-operation refusal, lock budgets/cancellation,
-and both publication modes including post-rename sync failure.
+| Cut | Reason |
+|---|---|
+| Arbitrary-PID `reap` | A start-string check before `kill` does not reserve identity between check and signal on macOS; recovery and cancellation go through run by managed run ID |
+| `Drop`-driven provider stopping and unbounded cleanup loops | Abort and SIGKILL bypass `Drop`, and a bookkeeping error must not trigger a destructor kill; an explicit guardian and a detached reaper replace them |
+| `worktree remove --force` and automatic dependency cloning or linking | Force bypasses live-writer checks, and the product needs no Node bootstrap |
+| `worktree check`, `verify` and `prune`, `clean` plan and apply, and a git-evidence command | Checks register under `check`, workflow uses evidence as library calls, and the guardian deletes scratch at settlement; no `clean` verb survives |
+| Cross-session transcript scanning and a caller-supplied terminal-report command | Correlating the newest transcript by cwd is ambiguous with several workers; managed reports need owned wait evidence |
+| A system-`ps` replacement and Python or Node emulation (locale, start strings, ps layout, error text) | Native identity and typed errors serve the safety decisions |
+| A standalone writer lease and launch and exit wrappers | Their safety checks live in library calls, and Fabric owns the landing lease |
+| Opaque staged bundles and duplicate legacy attempt files and digest sidecars | One canonical terminal record carries the publication invariant |
+| A startup deadline stop and stall verdicts | Silence is an observation, and the wall deadline bounds execution |
 
-Linux and macOS process tests use FIFO/socket handshakes and observed EOF,
-not sleeps. Rebuild the custody scenarios from `tests/lane_conformance/` and
-`test_issue_697_custody.py` before deleting their old subjects:
+## Verification
 
-- Fast exit before watch; inherited ignored SIGCHLD/masks; prelaunch, live and
-  late cancellation; any stdout/stderr byte or CPU progress, and a silent
-  healthy provider through the former startup limit; terminal stdin EOF;
-  cap followed by terminal frame; decoder/sink failure; PID reuse.
-- TERM-resistant provider, setsid grandchildren, nested owners, unlocked-lock
-  impostor, shared hosts/siblings and incomplete census. Parent/MCP death leaves
-  the guardian and lease live; double-owner death fences the orphan. Exercise
-  session/PGID census and authorised/unauthorised typed reconcile decisions. Race two
-  recoverers and a late publisher; retain one complete terminal record.
-- Inject ENOSPC at capture/progress/publication, reserve retry and post-link
-  fsync; assert no healthy-provider signal, retained custody and observable
-  pending publication. Deadline/pipe-drain races, Darwin CWD zero with stale
-  errno, detached reaper transfer/admission and Capture/Discard/Tee each have
-  direct process fixtures.
-- Sandbox probes try credential/config/protected reads, ref/index/gitfile
-  redirects, hard-link/symlink/root swaps, denied IPC/network and outside writes.
-  Quarantine failure preserves unrelated work and evidence; every cleanup race
-  retains transcripts, telemetry, captures, quarantine and live/unknown runs. Exercise
-  backend probe/compile refusal and adding a policy profile as data.
+Tests use explicit clocks and injected observations, FIFO or socket handshakes
+and observed EOF rather than sleeps, and canonicalised macOS temp paths
+(`/var` versus `/private/var`). Every integration test sets a temporary HOME,
+state root, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM=1`
+and every harness config path before it starts children.
 
-Canonicalise macOS temp paths (`/var` versus `/private/var`). A macOS descendant
-that escapes/reparents before the first census cannot be safely attributed;
-never compensate with environment guesses or uncertain signals. Locally run
-fmt/clippy and touched-crate/targeted tests. CI runs Linux workspace tests and
-macOS release plus process/custody tests, and remaining Python/TS subjects.
-Unsafe gets a second reviewer; the chair owns cross-family design acceptance.
-Healthy-process signalling, weakened confinement or lost publication escalates
-under R11. Live-provider recordings require user authority.
+| Where | What it proves |
+|---|---|
+| `crates/supervisor/src` unit tests and `custody_tests.rs` | State-machine transitions, natural-exit precedence, unknown identities, failed signals, stale generations, integer and size bounds, capture and discard modes, lock budgets and cancellation, both publication modes including post-rename sync failure |
+| `crates/supervisor/tests/custody.rs`, `process.rs`, `publication.rs` | Fast exit before watch, inherited ignored SIGCHLD and masks, prelaunch, live and late cancellation, a silent healthy provider, stdin EOF, a terminal frame after the cap, PID reuse, a TERM-resistant provider, `setsid` grandchildren, nested owners, an unlocked-lock impostor, shared hosts, incomplete census, parent death leaving guardian and lease live, racing recoverers and late publishers, injected ENOSPC and post-link fsync with retained custody and no healthy-provider signal |
+| `crates/confinement/src` tests and `tests/fixtures/external` | Credential, config and protected reads; ref, index and gitfile redirects; hard-link, symlink and root swaps; denied IPC and network; outside writes; secret chunk splits; scratch classification and drift; quarantine failure preserving unrelated work; backend probe and compile refusal; fixed Git and `gh` argv with arbitrary operations refused |
+| `tools/front-door/tests/worktree_driver.rs`, `dispatch_provider.rs`, `fake_provider.rs` | The public worktree commands and launch, wait, cancel and recover through the built binary against isolated fake providers and temporary repositories |
 
-### Run settlement attestations
-
-After its canonical terminal transaction and quarantine commit, Run durably
-publishes private v1 `terminal-commit.json` and `quarantine/manifest.json`, with
-exact `scope` (run, attempt, generation), `schema_version: 1`, and `kind` equal
-to `canonical_terminal` and `quarantine_manifest`, respectively. It then
-publishes `release.json` with the same scope/version and `terminal_digest` and
-`quarantine_digest` as `CanonicalV1::file_digest` values over the exact raw
-artifact bytes. These attestations are bounded to 1 MiB each, reject unknown
-fields and duplicates, and remain excluded from provider mutation. Run owns
-and protects their directories and publication order. Supervisor checks the
-original attempt inode and custody lock, verifies both digests and scopes,
-and syncs held files/directories before minting `SettlementCommit`. That
-receipt permits classified scratch settlement and fence clearing under writer
-exclusion; an absent or invalid attestation retains the fence.
-
-Decision (run steps 2+3): supervisor owns the attestation byte format as
-`custody::publish_release(attempt, scope)`, which the guardian holder calls
-after Run's terminal commit, so Run does not duplicate it. The holder also
-gets `Holder::admit(context, attempt)` before spawn. A refusal publishes a
-never-spawned exit and releases custody without starting the provider.
-
-## Deletions and build order
-
-Counts are `wc -l` at the source baseline above, not the older supervisor
-spec's test-body estimates. Every path below is removed with its Rust subject;
-shared caller conversion is coordinated with its named owner, without adapters.
-Counts include tests/helpers, not just product code.
-
-| Whole file(s), relative to directory shown | Lines per file |
-| --- | ---: |
-| `skills/orchestrate/scripts/`: `process_info.py`, `worker_liveness.py`, `writer_lease.py` | 452; 435; 245 |
-| Same directory: `provider_confinement.py`, `trusted_git.py`, `agy_home.py` | 1,085; 112; 268 |
-| Same directory: `instruction_quarantine.py`, `lane_protection.py`, `output_custody.py`, `secret_scan.py` | 202; 202; 224; 223 |
-| Same directory: `lane_launch.py`, `lane_exit.py`, `bin/ps`, `attempt_storage.py` | 190; 130; 188; 176 |
-| `skills/_shared/`: `custody.py`, `bounded_process.py` | 327; 230 |
-| `scripts/`: `worktree.py`, `worktree` (Python wrapper), `clean.py`, `reap.py` | 982; 7; 953; 258 |
-| `tests/`: `test_process_info.py`, `test_worker_liveness.py`, `test_bounded_process.py` | 286; 466; 294 |
-| Same directory: `test_lane_launch.py`, `test_lane_exit.py`, `test_worktree_policy.py` | 191; 106; 1,018 |
-| Same directory: `test_clean.py`; `tests/support/confinement.py` | 1,526; 8 |
-| `tests/lane_conformance/`: `__init__.py`, `conftest.py`, `fake_provider.py`, `support.py` | 1; 66; 130; 256 |
-| Same directory: `test_seed.py`, `test_s2_capture.py`, `test_s2_lifecycle.py`, `test_s2_rust_faults.py` | 90; 28; 185; 119 |
-
-Whole-file subtotal: **11,659 Python lines**. Fabric alone counts
-`process-identity.ts` (392), `ps.mjs` (20) and `process-reaping.test.ts` (278); cli
-counts `lane_safety_guard.py` (456); run counts `scripts/git_evidence.py` (341),
-`tests/test_git_evidence.py` (346) and `git_evidence_packet.py` (88). None is in
-this subtotal. Remove `tests/lane_conformance/README.md` with its suite, and
-rewrite its custody
-invariants into the Rust integration/process tests first. Shared custody and
-bounded execution helpers disappear with their last Rust consumer conversion;
-Fabric owns the process-identity/ps caller rewrites, not a new process engine.
-
-These mixed files lose the relevant subjects/helpers with the owning build
-PR, then disappear entirely when their other Rust owner lands. Their full-file
-counts identify the deletion surface; **none** is added to the subtotal above.
-
-| Shared file(s) | Whole-file lines; replacement/deletion owner |
-| --- | --- |
-| `skills/orchestrate/scripts/provider_exec.py`; `provider_observer.py` | 2,760; 175. Supervisor replaces capture/census/process loop, confinement replaces permission/instruction helpers; providers owns decoding/plans and deletes the remainder. |
-| Same directory: `run_lineage.py`; `dispatch_run.py`; `run_worker_detached.py` | 656; 2,483; 254. Run/Fabric replace custody, cancellation, writer leases, reaping and detached launch; Run owns scheduling/receipts. |
-| Same directory: `stall_watchdog.py`; `log_reducer.py` | 190; 204. Run keeps observational progress and bounded output reduction; remove duplicate liveness/secret helpers with their callers. |
-| `tests/test_provider_exec.py`; `test_dispatch_run.py`; `test_cf_dispatch_git_custody.py` | 9,272; 7,255; 211. Remove process/confinement/lease/evidence subjects here; providers/Run delete their remaining subjects, without porting monkeypatch seams. |
-| `tests/test_issue_697_custody.py`; `test_lane_safety.py` | 507; 515. Replace custody/path/process safety in Rust; Run owns finaliser tests, CLI owns pre-push and hook-install subjects. |
-| `skills/session/scripts/cleanup_run_artifacts.py`; `tests/test_run_artifact_cleanup.py` | 202; 199. Workflow retires scaffold cleanup with run-directory removal; guardian settlement owns scratch deletion, with no second cleanup engine. |
-| `tests/test_exec_layout.py`; `test_batch_run.py` | 158; 1,397. Remove orphan cleanup/process cases; Run owns layout/scheduling remainder. |
-| `tests/test_provider_observer.py`; `test_log_reducer.py`; `tests/lane_stub.py`; `tests/support/proc.py` | 145; 248; 161; 84. providers/Run replace observer/reduction fixtures; remove stub/process helper when their last old test disappears. |
-| `runtime/fabric/src/json-subprocess.ts`; `runtime/fabric/tests/json-subprocess.test.ts` | 107; 55. Fabric uses supervisor Executor; deletes Node child helper and its subjects. |
-| `runtime/fabric/tests/helpers/fixture-processes.ts`; `runtime/fabric/tests/fixture-processes.test.ts` | 68; 74. Fabric replaces shared Node process fixtures with Rust fixtures. |
-| `runtime/fabric/tests/host-liveness.test.ts`; `execution-lifecycle.test.ts`; `execution-pruning.test.ts`; `named-sessions.test.ts` | 92; 2,555; 375; 677. Fabric removes process/unknown-identity/pruning subjects and owns the remaining session/runtime tests. |
-| `runtime/fabric/tests/lane-reader.test.ts`; `runtime/fabric/tests/lanes-cli.test.ts` | 212; 259. Run/Fabric replace orphan-reap and watchdog-process subjects with Rust integration cases; Fabric/CLI deletes the TS files with its remaining reader/command subjects. |
-| `scripts/node-workspace-preflight.mjs`; `scripts/node-workspace-provision.py`; `tests/test_node_workspace_preflight.py`; `tests/test_node_workspace_provision.py` | 119; 130; 173; 207. Remove worktree bootstrap here; CLI/CI owns deleting these shared Node lifecycle helpers and tests when their remaining CI/package callers disappear. |
-
-Retire supervisor `pending.rs`, `test_support.rs`, ps/fabric_ps presentation and
-Python differential helpers/tests; retain only useful native observation code
-from `process_info`/`worker_liveness`. Retire confinement `pending.rs`,
-`pending/python_unicode.rs`, `python.rs` and Python-oracle tests in its modules.
-Move/reuse S2 Rust rather than count the move as new code. Rehome the inert
-cli worktree/clean/reap/git_evidence/lane_safety and workflow custody/writer_lease
-copies into the owners above; delete their old modules and parity-only tests.
-R0 also removes their oracle generators/golden judges with those subjects;
-CLI owns shared port-tooling deletion. No schema/Unicode emulation is retained.
-
-Measured S1-S3: **+19,155 net Rust lines including tests**: S1
-**+2,564** (#1370), S2 **+6,248** (#1379), S3 **+10,343** against main
-`90c4a1affdd86997ded4b0541a4c2c8d74eda82f`. S3's library and config binding
-contain **11,084 Rust lines including tests**, above the roughly 6,000-line
-target. The chair accepts this size after the shared-helper and dead-code
-cuts: no behaviour-preserving route reaches 6,000 while retaining confinement's
-hostile-filesystem and escape coverage. The original +4,000 estimate omitted
-much of the native custody and permission coverage, while last-importer gates
-defer Python deletion savings. Every build PR reports measured `Net lines:`;
-do not double-count shared-file totals as this area's savings.
-No build step installs the binary, reads old state, adds a selector, or leaves a
-Python/TS adapter. Each step removes its source, subject tests, dead helpers and
-inert emulation in the same PR; still-Python callers wait for their owning Rust
-area rather than gaining a bridge.
-
-The first three steps land Rust primitives, not early deletion of leaves still
-imported by Python. The last-importer matrix below gates deletions in the
-coupled run controls/facade steps 4+5; no adapters are added while waiting.
-
-| PR-sized step | Land and delete together |
-| --- | --- |
-| S1. Safe OS owner | Reuse #1348; correct streams, timeout/CWD, reaper and `SafeFs`. Move lane unsafe into sys; land the wrapper inventory, bounded locks/publication and fixture module. Delete parity wrappers, `execve_strict` and supervisor `clap`. Old Python leaves remain with their old subjects. Explicit S2 exemptions in `legacy_lane`: census-based numeric-PID kills in `group.rs` and Python start-string emulation (`files.rs::canonical_start`, `fixtures.rs` `localtime_r`/`strftime`). |
-| S2. Provider custody | Move S2 machine/census/capture; land guardian handoff, persistent reservation, scratch settlement and exit publication. Rebuild custody tests before deleting conformance subjects. Replace the S1-exempt numeric-PID census kills and remove `canonical_start` plus fixture `localtime_r`/`strftime` start-string emulation here. Run owns old launch/control caller removal in R4+R5. |
-| S3. Permissions, evidence and worktrees | Land the confinement library: backend trait/SBPL, redactor, Git/output custody, quarantine, tip verification and create/list/remove with merged pruning. Config binds a random host-local project ID under lock. Delete confinement emulation and obsolete Rust command copies; surviving Python helpers wait for R4+R5's last importer. CLI step 4 (area bindings) wires worktree/cleanup onto the frozen Clap model and updates hooks/skills; S3 leaves the existing command and hook in place. |
-| R4+R5. Run controls/facade deletion PR | Run's steps 4+5 remove provider/control/finaliser importers with their owners; delete each leaf and subject tests only when its matrix gate is met. Run cuts scaffold and git_evidence_packet; Fabric/cli/workflow delete/count their own files. No tests of deleted subjects survive and no Python bridge lands. |
-
-Direct production importers/callers of counted leaves are listed below;
-subject tests retire with the leaf. R2+R3 are run's dispatch/batch removal;
-R4+R5 are its coupled controls/facade/finaliser removal. A gate includes all
-named outside-area callers, even if that moves the leaf's deletion later.
-Primitives land in S1–S3; old-subject leaves stay until that gate, without a
-bridge to Rust.
-
-| Leaf | Importers/callers and last-importer deletion gate |
-| --- | --- |
-| `bounded_process.py` | `dispatch_run.py`, `batch_run.py` (R2+R3), `capabilities.py` (CLI), and dynamic loaders `scripts/fabric_lanes.py`, `scripts/fabric_git.py`, `scripts/fabric_hosts.py`; R4+R5 after CLI/Fabric retire every remaining caller. |
-| `custody.py` | `batch_run.py`, `dispatch_preflight.py`, `dispatch_run.py`, `layout.py`, `run_controls.py`, `run_dir_finalize.py`, `run_lineage.py`, `run_records.py`, `stall_watchdog.py`, workflow's `review_plan.py` and dynamic loader `scripts/fabric_git.py` (11). Confinement deletes at R4+R5 only after workflow/Fabric also retire their imports. |
-| `provider_confinement.py` | `provider_exec.py`; `cf_dispatch.py`, `dispatch_preflight.py`, `dispatch_run.py`, `utility.py` and `agy_home.py` also reach `provider_exec.provider_confinement`, with `utility_output_hook.py` reaching it through `utility.provider_exec`. R4+R5 only after every direct and facade caller retires, never S3 alone. |
-| `process_info.py` | `dispatch_run.py`, `layout.py`, `memory_admission.py`, `provider_exec.py`, `run_lineage.py`, `worker_liveness.py`, `bin/ps`; `clean.py` dynamically loads it and `agy_home.py` stages it. R4+R5 after clean/worktree, provider shim and diagnostic callers retire. |
-| `worker_liveness.py`, `bin/ps` | Direct CLI/skill diagnostic invocations; `bin/ps` imports `process_info.py` and `agy_home.py` stages both. Retire the shim with providers and R4+R5's managed controls and updated fallback/worker-liveness guidance. |
-| `writer_lease.py` | `dispatch_run.py`, `dispatch_preflight.py`, `batch_run.py`, `provider_exec.py`; R4+R5 removes last `provider_exec.py` importer. |
-| `secret_scan.py` | `dispatch_run.py`, `dispatch_preflight.py`, `batch_run.py`, `log_reducer.py`, `stall_watchdog.py`; R4+R5 after output/liveness callers retire. |
-| `output_custody.py` | `cf_dispatch.py`, `fabric_records.py`, `instruction_quarantine.py`, `provider_exec.py`; R4+R5 after providers/Fabric replace all four. |
-| `trusted_git.py` | `lane_protection.py`, `provider_confinement.py`, `provider_exec.py`; R4+R5 after all three retire. |
-| `attempt_storage.py` | `dispatch_run.py`, `provider_exec.py`; `clean.py` dynamically loads it. R4+R5 after provider and cleanup callers retire. |
-| `lane_launch.py`, `lane_exit.py` | `provider_exec.py` imports both; `lane_launch.py` imports `lane_exit.py` and dynamically calls `run_records.py`. Delete together at R4+R5 with `provider_exec.py` and that cancellation call. |
-| `agy_home.py`, `instruction_quarantine.py` | `provider_exec.py`; R4+R5 after providers retire it. |
-| `lane_protection.py` | `worktree.py`, Fabric CLI and orchestrate skill invoke it; R4+R5 after frozen worktree/hook callers replace these entrypoints. |
-| `scripts/worktree.py`, `scripts/worktree` | `node-workspace-provision.py` imports; `fabric_hosts.py`, `fabric_git.py` and `dispatch_preflight.py` load; `cf_dispatch.py` and the wrapper execute. R4+R5 after CLI/Fabric/state replace all callers and merged-pruning policy lands. |
-| `clean.py`, `reap.py` | CLI entrypoints and hook/skill callers; `worktree.py` dynamically loads `clean.py`. R4+R5 after CLI switches merged pruning and Run replaces reap with reconcile/cancel. |
-
-A step may be split by safe filesystem/utility, custody, permissions or worktree
-policy module. Old leaves serve only their old subjects until the coupled caller
-cut; no selector or second public launch path is introduced.
-Every build PR reports measured `Net lines:` across Python, TS and Rust,
-including deletions and tests. Design acceptance precedes those build PRs;
-opening this design PR does not accept it or arm auto-merge.
-
-The rehome/reuse list above, including native `process_info`/`worker_liveness` and `sys/process/darwin.rs`, is recoverable from `e0613438` after deletion from this skeleton.
+Unsafe blocks get a second reviewer. CI runs the Linux workspace tests and the
+macOS release and process and custody tests. Live-provider recordings need the
+user's authority.
