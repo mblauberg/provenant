@@ -1,7 +1,7 @@
 use crate::*;
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
 use provenant_supervisor::fs::{
-    Directory, FileKind, FsError, LockGuard, LockMode, verify_directory_identity,
+    Directory, FileKind, FsError, LockGuard, LockMode, Metadata, verify_directory_identity,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::{
@@ -28,6 +28,20 @@ pub struct Request<'a> {
 }
 impl Request<'_> {
     pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
+        self.wait(|| match action() {
+            Err(RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                Ok(None)
+            }
+            result => result.map(Some),
+        })
+    }
+    /// Retry an incomplete observation within the call's budget and cancellation.
+    fn wait<T>(&self, mut action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
         let started = Instant::now();
         let cap = Duration::from_micros(self.budget.remaining(self.clock.mono_now()).as_micros());
         let mut delay = Duration::from_millis(1);
@@ -44,16 +58,12 @@ impl Request<'_> {
                 return Err(RunError::Contention);
             }
             match action() {
-                Err(RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
-                    if matches!(
-                        code.code,
-                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                    ) =>
-                {
+                Ok(None) => {
                     std::thread::park_timeout(delay.min(remaining));
                     delay = (delay * 2).min(Duration::from_millis(10));
                 }
-                result => return result,
+                Ok(Some(value)) => return Ok(value),
+                Err(error) => return Err(error),
             }
         }
     }
@@ -101,7 +111,7 @@ impl RunStore {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        companions(&root, "run.sqlite3")?;
+        companions(&root, "run.sqlite3", request)?;
         let db = Connection::open_with_flags(
             context.state_root.as_path().join("run.sqlite3"),
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -149,7 +159,7 @@ impl RunStore {
                 Ok(())
             })?;
         }
-        companions(&store.root, "run.sqlite3")?;
+        companions(&store.root, "run.sqlite3", request)?;
         Ok(store)
     }
     pub(crate) fn write<T>(
@@ -237,7 +247,7 @@ pub(crate) fn open_database(
         Err(e) if e.is_exists() => {}
         Err(e) => return Err(e.into()),
     }
-    companions(&root, name)?;
+    companions(&root, name, request)?;
     let db = Connection::open_with_flags(
         path.join(name),
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -270,20 +280,37 @@ pub(crate) fn private(directory: &Directory) -> Result<()> {
     }
     Ok(())
 }
-fn companions(directory: &Directory, base: &str) -> Result<()> {
+fn companions(directory: &Directory, base: &str, request: &Request<'_>) -> Result<()> {
     for suffix in ["", "-wal", "-shm", "-journal"] {
-        match directory.metadata_at(OsStr::new(&format!("{base}{suffix}")), false) {
-            Ok(m)
-                if m.kind == FileKind::Regular
-                    && m.links == 1
-                    && m.mode & 0o077 == 0
-                    && m.uid == provenant_supervisor::fs::effective_uid() => {}
-            Ok(_) => return Err(RunError::UnsafePath),
-            Err(e) if e.is_not_found() => {}
-            Err(e) => return Err(e.into()),
-        }
+        companion(request, || {
+            directory.metadata_at(OsStr::new(&format!("{base}{suffix}")), false)
+        })?;
     }
     Ok(())
+}
+fn companion(
+    request: &Request<'_>,
+    mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
+) -> Result<()> {
+    request.wait(|| match metadata() {
+        Ok(m)
+            if m.kind == FileKind::Regular
+                && m.mode & 0o077 == 0
+                && m.uid == provenant_supervisor::fs::effective_uid() =>
+        {
+            match m.links {
+                1 => Ok(Some(())),
+                // SQLite's last connection can unlink WAL/SHM files while
+                // another opener's stat is in flight, outside our setup
+                // lock. Re-stat the name; never accept the removed inode.
+                0 => Ok(None),
+                _ => Err(RunError::UnsafePath),
+            }
+        }
+        Ok(_) => Err(RunError::UnsafePath),
+        Err(e) if e.is_not_found() => Ok(Some(())),
+        Err(e) => Err(e.into()),
+    })
 }
 pub(crate) fn bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
     let bytes = provenant_records::CanonicalV1::bytes(record)?;
@@ -306,4 +333,124 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> 
 
 pub(crate) fn sql_int(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| RunError::Validation("integer exceeds SQLite range"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn companion_rechecks_unlinked_observations() -> TestResult {
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let request = crate::tests::call(&clock, &cancel);
+        for replaced in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let directory = Directory::open_anchor(temp.path())?;
+            let name = OsStr::new("run.sqlite3-shm");
+            let file = directory.create_new(name)?;
+            let removed = Metadata {
+                links: 0,
+                ..file.metadata()?
+            };
+            directory.unlink(name)?;
+            if replaced {
+                directory.create_new(name)?;
+            }
+            let mut observations = 0;
+            companion(&request, || {
+                observations += 1;
+                if observations == 1 {
+                    Ok(removed)
+                } else {
+                    directory.metadata_at(name, false)
+                }
+            })?;
+            assert_eq!(observations, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn companion_refuses_unsafe_metadata_after_an_unlink() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let safe = directory
+            .create_new(OsStr::new("run.sqlite3-wal"))?
+            .metadata()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let request = crate::tests::call(&clock, &cancel);
+        for unsafe_metadata in [
+            Metadata { links: 2, ..safe },
+            Metadata {
+                kind: FileKind::Symlink,
+                ..safe
+            },
+            Metadata {
+                kind: FileKind::Directory,
+                ..safe
+            },
+            Metadata {
+                mode: 0o644,
+                ..safe
+            },
+            Metadata {
+                uid: safe.uid.wrapping_add(1),
+                ..safe
+            },
+        ] {
+            let mut observations = 0;
+            let result = companion(&request, || {
+                observations += 1;
+                Ok(if observations == 1 {
+                    Metadata { links: 0, ..safe }
+                } else {
+                    unsafe_metadata
+                })
+            });
+            assert!(matches!(result, Err(RunError::UnsafePath)));
+            assert_eq!(observations, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn companion_unlink_retry_preserves_wait_errors() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let removed = Metadata {
+            links: 0,
+            ..directory
+                .create_new(OsStr::new("run.sqlite3-shm"))?
+                .metadata()?
+        };
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let request = crate::tests::call(&clock, &cancel);
+        assert!(matches!(
+            companion(&request, || {
+                cancel.cancel();
+                Ok(removed)
+            }),
+            Err(RunError::Cancelled)
+        ));
+
+        let cancel = CancelToken::new();
+        let request = Request {
+            // Only the final microsecond remains when the retry starts.
+            budget: WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
+            clock: &provenant_core::TestClock::new(
+                clock.wall_now()?,
+                provenant_core::MonoTime::from_micros(999_999),
+            ),
+            cancel: &cancel,
+        };
+        assert!(matches!(
+            companion(&request, || Ok(removed)),
+            Err(RunError::Contention)
+        ));
+        Ok(())
+    }
 }
