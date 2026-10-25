@@ -29,8 +29,9 @@ reservations first, then holds the attempt's writer lock during deletion to
 exclude read-only guardians. It does not hold the worktree writer lock during
 deletion.
 
-Only the terminal, unreserved reconcile retry permits lock-named payloads
-inside the attempt's `tmp/`, including rustc incremental `*.lock` files.
+Two holders permit lock-named payload disposal: the terminal, unreserved
+reconcile retry inside the attempt's `tmp/`, including rustc incremental
+`*.lock` files, and cache GC (#1591) inside a verified detached cache tree.
 Settlement keeps ordinary lock-name protection while reservations may remain.
 Stable owner locks outside `tmp/` remain protected: unlinking a lock and
 recreating its name could split writer exclusion across different inodes.
