@@ -2,7 +2,7 @@
 //! Fake providers and resources stand in for adapters and the host.
 use super::tests::{call, clock, context, exit, input, route};
 use super::*;
-use provenant_core::{AttemptId, CancelToken, TaskId, WallTime};
+use provenant_core::{AttemptId, CancelToken, RunId, TaskId, WallTime};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::{
     custody::ExitObservation, exec::Termination, fs::Directory, sys::resources::MemorySample,
@@ -121,25 +121,40 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         (&writing, None, None, "read-only child of writer parent"),
         (
             &read_only,
-            Some("/project/.worktrees/child"),
+            Some(writer("/project/.worktrees/child")),
             None,
             "writer child of read-only parent",
         ),
         (
             &writing,
-            Some("/project/.worktrees/parent"),
+            Some(writer("/project/.worktrees/parent")),
             None,
             "writer child in its parent's worktree",
         ),
         (
             &writing,
-            Some("/project/.worktrees/other"),
+            Some(writer("/project/.worktrees/other")),
             None,
             "writer child in a sibling worktree",
         ),
         (
+            &writing,
+            Some(WriterRequest {
+                project: "/other-project".into(),
+                worktree: "/other-project/.worktrees/child".into(),
+            }),
+            None,
+            "writer child in another project",
+        ),
+        (
             &delivering,
-            Some("/project/.worktrees/parent"),
+            None,
+            Some(deliver("feature", false)),
+            "delivery child without a writer",
+        ),
+        (
+            &delivering,
+            Some(writer("/project/.worktrees/parent")),
             Some(deliver("feature", false)),
             "delivery child within parent grant",
         ),
@@ -151,11 +166,22 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         let mut nested = input();
         nested.request.lane_depth = Some(2);
         nested.request.parent_attempt = Some(parent);
-        nested.request.tasks[0].writer = child_writer.map(writer);
+        nested.request.tasks[0].writer = child_writer;
         nested.request.tasks[0].deliver = child_delivery;
         let proposes_writer =
             nested.request.tasks[0].writer.is_some() || nested.request.tasks[0].deliver.is_some();
+        // create() rejects delivery without a writer, but a lane can bypass
+        // it by rewriting its store. Exercise validate_child independently.
+        let delivery_only = if nested.request.tasks[0].writer.is_none() {
+            nested.request.tasks[0].deliver.take()
+        } else {
+            None
+        };
         let record = store.create(&nested, &call)?;
+        if let Some(delivery) = delivery_only {
+            nested.request.tasks[0].deliver = Some(delivery);
+            rewrite_child_request(&store, record.run_id, &nested.request, &call)?;
+        }
         let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
         if proposes_writer {
             assert!(
@@ -804,6 +830,74 @@ fn host_launches_child_tasks_independently() -> TestResult {
             .map(|task| task.task_id)
             .collect::<Vec<_>>()
     );
+    Ok(())
+}
+
+#[test]
+fn host_refuses_writer_child_after_request_rewrite() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?
+        .with_sealed_requester(provenant_core::ActorId::from_bytes([7; 16]));
+    let parent_task = input().request.tasks[0].clone();
+    let mut nested = input();
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    let record = store.create(&nested, &call)?;
+    let validated = store.validate_child(record.run_id, parent, &parent_task, 1, 2, &call)?;
+
+    // Rewrite both lane-writable copies so the host's validated digest is
+    // the remaining boundary against adding writer authority before launch.
+    let mut swapped = validated.clone();
+    swapped.tasks[0].writer = Some(WriterRequest {
+        project: "/project".into(),
+        worktree: "/project/.worktrees/child".into(),
+    });
+    rewrite_child_request(&store, record.run_id, &swapped, &call)?;
+    let fake = Fake::default();
+    assert!(matches!(
+        store.start_child(
+            record.run_id,
+            &validated,
+            &fake,
+            &|_, _| unreachable!(),
+            &call
+        ),
+        Err(RunError::Validation(
+            "child request changed after validation"
+        ))
+    ));
+    assert_eq!(fake.prepared.get(), 0);
+    assert_ne!(
+        store
+            .record(nested.attempts[0].attempt_id, &call)?
+            .provider_launched,
+        Some(true)
+    );
+    Ok(())
+}
+
+fn rewrite_child_request(
+    store: &RunStore,
+    run: RunId,
+    request: &CanonicalRequest,
+    call: &Request<'_>,
+) -> TestResult {
+    store.run_dir(run, false)?.atomic_write(
+        std::ffi::OsStr::new("request.json"),
+        ".swap-",
+        &crate::db::bytes(request)?,
+        provenant_supervisor::fs::PublishMode::Replace,
+    )?;
+    let mut record = store.run(run, call)?;
+    record.request_digest = request.digest()?;
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&record)?, run.to_string()],
+    )?;
+    assert_eq!(&store.request(run, call)?, request);
     Ok(())
 }
 
