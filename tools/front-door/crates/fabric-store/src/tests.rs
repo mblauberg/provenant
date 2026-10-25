@@ -1171,6 +1171,21 @@ fn empty_legacy_import_upgrades_and_leaves_no_trace() {
 }
 
 #[test]
+fn empty_committed_peer_response_upgrades_unchanged() {
+    let f = Fixture::new();
+    let store = f.open();
+    seed_records(&f, &store);
+    downgrade_to_six(&store, "UPDATE peer_operations SET response=X'';");
+    drop(store);
+    let store = f.open();
+    let response: Vec<u8> = store
+        .db
+        .query_row("SELECT response FROM peer_operations", [], |r| r.get(0))
+        .unwrap();
+    assert!(response.is_empty());
+}
+
+#[test]
 fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
     let reference = r#"json('{"id":"i","project":"p","source":"s"}')"#;
     let cases = [
@@ -1198,7 +1213,21 @@ fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
         (
             "messages",
             format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.conversation',\
+                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
+            ),
+        ),
+        (
+            "messages",
+            format!(
                 "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.reply_to',\
+                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
+            ),
+        ),
+        (
+            "messages",
+            format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.task',\
                  json_object('reference',{reference},'scope','legacy')) AS BLOB);"
             ),
         ),
