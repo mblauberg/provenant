@@ -1129,6 +1129,37 @@ pub fn plan_install(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let mut legacy = match &targets.legacy_checkout {
+        Some(checkout) => Some(provenant_records::LegacyInstall {
+            checkout: AbsolutePath::new(checkout)?,
+            home: AbsolutePath::new(&targets.home)?,
+            manifest_digest: crate::legacy::manifest_digest(),
+            git_hooks_dir: targets
+                .git_hooks_dir
+                .as_deref()
+                .map(AbsolutePath::new)
+                .transpose()?,
+        }),
+        None => snapshots.receipt.as_ref().and_then(|r| r.legacy.clone()),
+    };
+    if let Some(legacy) = &mut legacy
+        && snapshots.receipt.as_ref().is_some_and(|previous| {
+            previous.legacy.as_ref().is_some_and(|old| {
+                old.git_hooks_dir == legacy.git_hooks_dir
+                    && previous
+                        .entries
+                        .iter()
+                        .any(|entry| entry.selector == "git-hook:pre-push")
+            })
+        })
+        && !entries
+            .iter()
+            .any(|entry| entry.selector == "git-hook:pre-push")
+    {
+        // Once ownership ends, the edited launcher is user state. Keep the
+        // other legacy audits, but stop auditing its former hooks directory.
+        legacy.git_hooks_dir = None;
+    }
     let receipt = InstallReceipt {
         schema_version: 1,
         source_digest: release.manifest.source_digest,
@@ -1140,19 +1171,7 @@ pub fn plan_install(
         harnesses,
         harness_targets: resolved_targets.into_values().collect(),
         entries,
-        legacy: match &targets.legacy_checkout {
-            Some(checkout) => Some(provenant_records::LegacyInstall {
-                checkout: AbsolutePath::new(checkout)?,
-                home: AbsolutePath::new(&targets.home)?,
-                manifest_digest: crate::legacy::manifest_digest(),
-                git_hooks_dir: targets
-                    .git_hooks_dir
-                    .as_deref()
-                    .map(AbsolutePath::new)
-                    .transpose()?,
-            }),
-            None => snapshots.receipt.as_ref().and_then(|r| r.legacy.clone()),
-        },
+        legacy,
     };
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
     let bytes = provenant_records::encode(&receipt)?;

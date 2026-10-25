@@ -403,6 +403,9 @@ fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migrat
                 .iter()
                 .any(|entry| entry.selector == "git-hook:pre-push")
         );
+        for _ in 0..2 {
+            install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        }
         let inspection = inspect_install(
             &f.targets,
             Some(&f.release()),
@@ -413,14 +416,7 @@ fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migrat
         )
         .unwrap();
         assert!(inspection.error.is_none());
-        assert!(
-            !inspection
-                .findings
-                .iter()
-                .any(|finding| finding.rule == "owned_entry_drift"),
-            "{:?}",
-            inspection.findings
-        );
+        assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
         let other = f.home.join("other-checkout");
         let hooks = other.join(".git/hooks");
         fs::create_dir_all(&hooks).unwrap();
@@ -430,6 +426,8 @@ fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migrat
         f.targets.git_hooks_dir = Some(hooks.clone());
         install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
         assert!(hooks.join("pre-push").is_file());
+        uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+        assert!(!hooks.join("pre-push").exists());
         if missing {
             assert!(!launcher.exists());
         } else {
@@ -3291,6 +3289,16 @@ fn foreign_git_hooks_are_preserved_and_reported() {
         } else {
             assert_eq!(fs::read(&path).unwrap(), b"personal hook\n");
         }
+        f.targets.legacy_checkout = None;
+        f.targets.git_hooks_dir = None;
+        install(
+            &f.plan(),
+            &context(&clock, &cancel),
+            &mut Reporter::default(),
+            &Smoke,
+            false,
+        )
+        .unwrap();
         assert!(
             inspect_install(
                 &f.targets,
@@ -3303,7 +3311,7 @@ fn foreign_git_hooks_are_preserved_and_reported() {
             .unwrap()
             .findings
             .iter()
-            .any(|f| f.path.to_path_buf().unwrap() == path)
+            .any(|f| f.rule == "legacy_hook_conflict" && f.path.to_path_buf().unwrap() == path)
         );
     }
 }
