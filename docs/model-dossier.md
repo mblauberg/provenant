@@ -14,7 +14,8 @@ entries and say which ones you reasoned from.
 Read it before choosing a model. Prefer what it says. Depart from it when the
 work calls for something else, and say why in the receipt.
 
-All five adapters are enabled by default. `provenant route list` does not probe; readiness is decided at dispatch.
+All five adapters are enabled by default. `provenant route list` does not
+probe; readiness is decided at dispatch.
 
 ## Advisory only
 
@@ -51,7 +52,8 @@ those. This file only helps you pick among what they already allow.
 
 ### Checking the live catalogue
 
-The bundled Rust catalogue owns route availability and resolution. Use
+The bundled Rust catalogue owns route definitions and resolution; dispatch
+decides availability. Use
 `provenant route list` to inspect named routes and `provenant route resolve`
 to check a route or exact model. This dossier records advisory preferences;
 it does not set aliases, weights or admissibility.

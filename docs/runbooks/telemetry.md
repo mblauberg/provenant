@@ -46,8 +46,8 @@ counters.
 refreshes due accounts; use `--trigger` and `--power` to record why the
 refresh ran and the current power source. `provenant quota display
 [--headline auto|5h|weekly] [--icon most_constrained|ACCOUNT]` sets the menu
-bar choices, then shows quota. `provenant telemetry stats --usage` reports local invocation counts.
-Quota is admission advice; a reset or bookkeeping failure never grants
+bar choices, then shows quota. `provenant telemetry stats --usage` reports local invocation
+counts. Quota is admission advice; a reset or bookkeeping failure never grants
 permission to stop a healthy provider.
 
 ## Routing

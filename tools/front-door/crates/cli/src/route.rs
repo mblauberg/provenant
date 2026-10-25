@@ -14,7 +14,7 @@ use std::{collections::BTreeSet, io, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Route {
-    /// Show effective models, pools, pacing and readiness.
+    /// Show the catalogue, pools, configured weights and pacing policy.
     List(RouteListRequest),
     /// Resolve a named route or exact model for preview.
     Resolve(RouteRequest),
@@ -29,7 +29,7 @@ pub enum Route {
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
-    /// Limit models and pool members to this adapter.
+    /// Limit models, named routes and pool members to this adapter.
     #[arg(long)]
     pub adapter: Option<String>,
     /// Show only this effective pool.
