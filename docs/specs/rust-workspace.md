@@ -22,16 +22,23 @@ responsibility or edges lands in this table in the same PR.
 | config | Config loading/precedence, profiles, installation and managed-file rules | core, records, supervisor's safe filesystem API |
 | supervisor | Sans-IO process state machine, syscall boundary, capture, custody-safe OS handles | core, records |
 | confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, supervisor's safe OS API |
-| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota |
-| quota | Quota windows, reset schedules, refresh scheduling and admission advice | core, records, config |
-| telemetry | Pure terminal-attempt usage/cost reduction and price schema | core, records, config |
+| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota, supervisor |
+| quota | Quota windows, reset schedules, refresh scheduling and admission advice | records, config |
+| telemetry | Pure terminal-attempt usage/cost reduction and price schema | core, records |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
-| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing |
+| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement |
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
-| fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, run, fabric-store |
+| fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime; fabric-store in tests only, to check store error rendering |
-| workflow | Delivery/review validators, session, tracker and writing tools | core, records, config, confinement, supervisor's safe filesystem API |
-| cli | Argument parsing and output/exit rendering for all commands | Libraries above as needed; no library imports cli |
+| workflow | Delivery/review validators, session, tracker and writing tools | core, records, supervisor's safe filesystem API |
+| cli | Argument parsing and output/exit rendering for all commands | core, records, config, confinement, providers, quota, telemetry, routing, run, fabric-runtime, workflow, supervisor |
+| provenant | Binary composition, install identity and process-level setup | core, records, config, supervisor, confinement, providers, quota, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
+
+The workspace policy test enforces these edges for normal, build and dev
+dependencies, including target-specific tables. Dev-dependencies may also name
+the crate itself for its `fixture` feature, and fabric-mcp may depend on
+fabric-store in tests as listed above. No library may depend on cli; only the
+root package `provenant` may import it.
 
 The package `provenant` composes `cli` and `fabric-mcp` and owns install
 identity and process-level setup. `help` and root resolution stay cheap: no
