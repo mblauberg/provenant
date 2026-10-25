@@ -178,6 +178,13 @@ impl ToolCall {
     /// supplies a field path for serde's structural errors at the MCP edge.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
         let mut arguments = arguments;
+        if let Some(operation) = schema::sole_operation(name)
+            && let Some(object) = arguments.as_object_mut()
+        {
+            object
+                .entry("op")
+                .or_insert_with(|| Value::String(operation.to_owned()));
+        }
         let operation_id =
             match schema::tool_kind(name) {
                 Some(

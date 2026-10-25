@@ -10,6 +10,7 @@ mod hooks;
 mod hosts;
 mod install;
 mod overflow;
+mod peer_agent;
 mod quota_live;
 mod release_smoke;
 mod roots;
@@ -329,7 +330,10 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             globals,
         ),
         Command::Fabric(provenant_cli::Fabric::Mcp { client }) => fabric::mcp(client, globals),
-        Command::Fabric(provenant_cli::Fabric::Peer) => fabric::peer(globals),
+        Command::Fabric(provenant_cli::Fabric::Peer { in_process }) => {
+            fabric::peer(globals, in_process)
+        }
+        Command::Fabric(provenant_cli::Fabric::PeerAgent) => peer_agent::serve(globals),
         Command::Fabric(provenant_cli::Fabric::Host(_)) => fabric::hosts(globals),
         Command::Fabric(provenant_cli::Fabric::Events(provenant_cli::fabric::Events::Read {
             page,

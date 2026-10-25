@@ -18,7 +18,9 @@ pub enum ProviderError {
     UnknownIdentity,
     #[error(
         "claude reports no login for this config directory; run `claude auth login` there once \
-         interactively, or over SSH unlock the login keychain first (`security unlock-keychain`)"
+         interactively, or over SSH unlock the login keychain first (`security unlock-keychain`); \
+         on a macOS peer, `provenant install` starts the dev.provenant.peer LaunchAgent so peer \
+         requests run in the login session (check with `provenant hosts doctor`)"
     )]
     LoginRequired,
     #[error("launch path is not absolute or lies outside the plan's roots")]

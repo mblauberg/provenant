@@ -40,7 +40,14 @@ pub enum Fabric {
     #[command(subcommand)]
     Host(Host),
     #[command(hide = true)]
-    Peer,
+    Peer {
+        /// Handle the request in this process; never forward to the peer agent
+        #[arg(long)]
+        in_process: bool,
+    },
+    /// Serve peer requests from the login session (macOS LaunchAgent)
+    #[command(hide = true)]
+    PeerAgent,
     /// Run and track task graphs
     #[command(subcommand)]
     Graph(Graph),
@@ -531,7 +538,8 @@ impl Fabric {
             Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
             Self::Host(_) => return "fabric host list".into(),
-            Self::Peer => return "fabric peer".into(),
+            Self::Peer { .. } => return "fabric peer".into(),
+            Self::PeerAgent => return "fabric peer-agent".into(),
             Self::Graph(Graph::Run { .. }) => return "fabric graph run".into(),
             Self::Graph(Graph::Cancel { .. }) => return "fabric graph cancel".into(),
             Self::Graph(Graph::Resume { .. }) => return "fabric graph resume".into(),
@@ -641,7 +649,8 @@ fn execute(
         | Fabric::Mcp { .. }
         | Fabric::Host(_)
         | Fabric::Graph(_)
-        | Fabric::Peer
+        | Fabric::Peer { .. }
+        | Fabric::PeerAgent
         | Fabric::Landing(Landing::Push { .. } | Landing::Reconcile { .. }) => {
             return Err(EdgeError::Invalid);
         }

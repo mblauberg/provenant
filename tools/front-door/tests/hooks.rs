@@ -60,7 +60,7 @@ fn bash_guard_denies_process_control_and_bad_input() -> Result {
         host["result"]
             .as_str()
             .ok_or("recorded host result")?
-            .contains(provenant_confinement::shell_command::DENY_REASON)
+            .contains("process control is refused")
     );
     let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
     input["tool_input"]["command"] = "pkill -f claude".into();

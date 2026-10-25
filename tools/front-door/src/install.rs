@@ -218,6 +218,8 @@ struct InstallData {
     outcome: Option<InstallOutcome>,
     completed: Vec<Action>,
     remaining: Vec<Action>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_agent: Option<super::peer_agent::Installed>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -225,6 +227,7 @@ impl InstallData {
             outcome: None,
             completed: Vec::new(),
             remaining: Vec::new(),
+            peer_agent: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
@@ -237,6 +240,7 @@ impl InstallData {
             outcome: Some(outcome),
             completed,
             remaining: Vec::new(),
+            peer_agent: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -249,6 +253,7 @@ impl InstallData {
                 outcome: None,
                 completed: completed.clone(),
                 remaining: remaining.clone(),
+                peer_agent: None,
             },
             _ => Self::empty(),
         }
@@ -339,6 +344,7 @@ fn context<'a>(
 fn output_install(
     command: &str,
     result: Result<InstallOutcome, InstallError>,
+    peer_agent: Option<super::peer_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
     match result {
@@ -406,9 +412,14 @@ fn output_install(
                     "manual include required: add {include} to {path}\n"
                 ));
             }
+            if let Some(agent) = &peer_agent {
+                human.push_str(&format!("peer agent: {}\n", agent.describe()));
+            }
             let read_only = outcome.dry_run;
+            let mut data = InstallData::success(outcome);
+            data.peer_agent = peer_agent;
             super::emit(
-                &CommandResult::new(command, Outcome::Ok, InstallData::success(outcome)),
+                &CommandResult::new(command, Outcome::Ok, data),
                 globals,
                 &human,
                 read_only,
@@ -526,6 +537,9 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
             );
         }
     };
+    let program = targets.bin_dir.join("provenant");
+    let state = targets.roots.state.as_path().to_path_buf();
+    let home = targets.home.clone();
     let mut reporter = PreviewReporter;
     let result = cli::install::execute_install(
         &args,
@@ -535,7 +549,14 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         &smoke,
         env!("PROVENANT_TARGET_TRIPLE"),
     );
-    output_install("install", result, globals)
+    // The release is installed first; the agent then serves the new binary.
+    let peer_agent = match &result {
+        Ok(outcome) if !outcome.dry_run => {
+            Some(super::peer_agent::install(&program, &state, &home))
+        }
+        _ => None,
+    };
+    output_install("install", result, peer_agent, globals)
 }
 
 pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 {
@@ -556,6 +577,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     output_install(
         "uninstall",
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),
+        None,
         globals,
     )
 }

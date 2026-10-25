@@ -212,7 +212,7 @@ satisfied as the run grammar states. Two shorthands recur:
 | `config show` | `config show [--task-class NAME]` | config `load` → `ResolvedConfig` | Optional task-class preset; secrets redacted. |
 | `config set` | `config set NAME VALUE` | config `edit_config` | `NAME` is `profile` or a registry knob; `null` clears a nullable knob. Unknown knobs list close matches. Prints the config read back. |
 | `config unset` | `config unset KNOB` | config `edit_config` | Removes the `[knobs]` override. |
-| `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. State's grammar stands. |
+| `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. On macOS, an install for the account's home and default state root then writes and restarts the `dev.provenant.peer` LaunchAgent and reports it as `peer_agent`. State's grammar stands. |
 | `uninstall` | `uninstall --harness NAME…` | config `uninstall` | At least one harness; unchanged owned entries only. |
 | `route list` | `route list [--adapter ADAPTER] [--pool POOL]` | routing `RouteListQuery { adapter, pool }` | Unpaged bounded catalogue; no probe. |
 | `route resolve` | `route resolve ROUTE` | routing `RouteRequest` with a read-only `RoutingContext` | Pure; no admission or state write. |
@@ -331,7 +331,8 @@ line with `hookSpecificOutput.hookEventName="PreToolUse"`,
 cannot be written, exit 2 with a bounded stderr block reason as Claude's
 blocking-error fallback; recorded fixtures must verify both paths. Allow emits
 nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
-“Direct process control is refused. Use `provenant cancel TARGET` for owned
+“Pattern and group process control is refused; targeted `kill [-SIGNAL] PID`
+with literal PIDs above 1 is allowed. Use `provenant cancel TARGET` for owned
 work.” Transport failures name the bounded-input error without echoing input.
 Confinement/custody remain authoritative even when a hook is absent.
 
@@ -339,11 +340,11 @@ The same handler then applies the workflow guard rules (#1319) to the simple
 commands the shell-command lexer reports, so there is no second parser. Rule
 ids are compiled: `stash` (bare `git stash`, `stash pop`, `stash push` without
 `-m`), `reset-hard`, `clean-force`, `force-push` (`--force`, `-f`, `+ref`;
-`--force-with-lease` passes), `no-verify`, `primary-checkout` (`git switch`, and
+`--force-with-lease` passes), `no-verify` (opt-in), `primary-checkout` (`git switch`, and
 `git checkout` of a branch or revision, when the directory is a repository
 whose `.git` is a directory; `git checkout -- PATH` passes) and `sleep-poll`
 (`sleep` of 5 s or more). Each denial carries a one-line remedy. Config is the
-closed `[domains.guard]` section, `deny = [rule ids]`, all on by default;
+closed `[domains.guard]` section, `deny = [rule ids]`, all on by default except `no-verify`;
 omitting an id disables that rule and an unknown id is a schema error. Unreadable
 config keeps every rule on. Input the lexer cannot parse is denied by the
 process-control check above, not by these rules. Codex and OpenCode have no
@@ -748,8 +749,11 @@ A custom remote bin directory is not resolved by this diagnostic. Do not silentl
 results when a remote host cannot answer.
 
 Registration reads the same status. A negative login bit refuses with a message that
-names the step (log in once interactively, or unlock the login keychain over SSH)
-rather than reporting an unknown identity; a locked keychain reports the same bit.
+names the step (log in once interactively, unlock the login keychain over SSH, or
+on a macOS peer install the login-session peer agent) rather than reporting an
+unknown identity; a locked keychain reports the same bit. Doctor also reports
+that agent as `peer_agent`: `running`, `stopped`, `not_installed` or
+`unsupported` off macOS; reports from older builds omit it.
 
 Doctor runs `claude auth status --json`, never a prompt. It emits only identity
 labels and typed states: `signed_in`, `signed_out`,
