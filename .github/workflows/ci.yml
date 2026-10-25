@@ -64,7 +64,6 @@ jobs:
   docs:
     name: Harness asset checks
     runs-on: ubuntu-latest
-    needs: rust
     timeout-minutes: 15
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
@@ -148,12 +147,11 @@ jobs:
           tool: cargo-nextest@0.9.149
       - name: Run workspace tests
         working-directory: tools/front-door
-        run: cargo nextest run --profile ci --workspace --locked
-      - name: Run provider recording policy tests
+        run: cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording
+      # Cargo does not include example tests in the default nextest selection.
+      - name: Run provider recording example test
         working-directory: tools/front-door
         run: |
-          cargo test --locked -p provenant-providers --features recording --lib provider_recipes_cannot_write_user_configuration
-          cargo test --locked -p provenant-providers --features recording --lib claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools
           cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
       - name: Upload test results
         if: always()
@@ -212,47 +210,57 @@ jobs:
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: front-door-ci-macos
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest@0.9.149
       - name: Run macOS supervisor custody tests
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: cargo test -p provenant-supervisor -p provenant-confinement --locked
+        run: cargo nextest run --profile ci --locked -p provenant-supervisor -p provenant-confinement
       - name: Run dispatch confinement integration tests
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: |
-          lane_status=0
-          cargo test --test worktrees --locked -- --exact lane_prepare_isolates_nested_state || lane_status=$?
-          reader_status=0
-          cargo test --test worktrees --locked -- --exact read_only_dispatch_applies_bound_git_and_project_writes || reader_status=$?
-          writer_status=0
-          cargo test --test worktrees --locked -- --exact writer_dispatch_uses_lane_cache_and_narrow_provider_state || writer_status=$?
-          if [ "$lane_status" -ne 0 ] || [ "$reader_status" -ne 0 ] || [ "$writer_status" -ne 0 ]; then
-            exit 1
-          fi
-          cargo test --test worktrees --locked -- --exact writer_dispatch_edits_a_linked_worktree
-          cargo test --test worktrees --locked -- --exact second_writer_is_refused_while_first_holds_the_worktree
-          cargo test --test worktrees --locked -- --exact writer_terminal_refuses_sequencer_state
-          cargo test --test worktrees --locked -- --exact writer_production_plan_denies_outside_writes
-          cargo test --test worktrees --locked -- --exact writer_reconcile_refuses_unfinished_cherry_pick_and_releases
+        run: >-
+          cargo nextest run --profile ci --locked --test worktrees
+          -E 'test(=lane_prepare_isolates_nested_state)
+          | test(=read_only_dispatch_applies_bound_git_and_project_writes)
+          | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
+          | test(=writer_dispatch_edits_a_linked_worktree)
+          | test(=second_writer_is_refused_while_first_holds_the_worktree)
+          | test(=writer_terminal_refuses_sequencer_state)
+          | test(=writer_production_plan_denies_outside_writes)
+          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases)'
       - name: Run provider dispatch integration tests
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: cargo test --test dispatch_provider --locked
+        run: cargo nextest run --profile ci --locked --test dispatch_provider
       - name: Run menu bar tests
         working-directory: apps/quota-menubar
         run: swift test
-      # No target cache: install builds from a clean target, and cached
+      # Use a separate uncached target: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
         working-directory: tools/front-door
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
         run: |
           cargo build --release --locked -p provenant --bin provenant
 
       - name: Package release and preview isolated installation
         working-directory: tools/front-door
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
         run: |
           cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
           mkdir -p "$RUNNER_TEMP/home"

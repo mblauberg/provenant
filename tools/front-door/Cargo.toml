@@ -101,6 +101,9 @@ serde_json = { workspace = true }
 toml_edit = { workspace = true }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = "z"
 lto = true
