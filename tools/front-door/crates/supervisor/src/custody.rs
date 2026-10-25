@@ -837,6 +837,12 @@ pub enum SettlementEvidence {
     NeverSpawned,
     LinuxKernelChildren,
     DarwinCensusAndCustodyLease,
+    /// Recovery found the guardian gone and every named leftover process
+    /// absent or ended after proving it belonged to the attempt.
+    OrphansEnded,
+    /// Recovery settled the attempt but named processes it could not prove
+    /// belong to it. They were never signalled and stay in `unresolved_pids`.
+    LeftoverNotProven,
 }
 /// Bounded, immutable OS facts. No field certifies its own publication durability.
 #[derive(Clone, Debug, Serialize)]
@@ -857,6 +863,9 @@ pub struct ProcessExit {
     pub unresolved_cleanup: bool,
     /// PIDs of tracked descendants still possibly alive when cleanup gave up.
     pub unresolved_pids: Vec<i64>,
+    /// The same descendants with boot and native start time, so recovery after
+    /// the guardian is gone can prove a PID still names the process found.
+    pub unresolved_identities: Vec<ProcessIdentity>,
     pub settlement_evidence: SettlementEvidence,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
@@ -885,6 +894,7 @@ impl ProcessExit {
             terminal_observed: false,
             unresolved_cleanup: false,
             unresolved_pids: vec![],
+            unresolved_identities: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
@@ -1702,6 +1712,9 @@ impl Recovery {
         Ok(())
     }
 }
+
+mod orphans;
+pub use orphans::OrphanReport;
 
 #[cfg(test)]
 #[path = "custody_tests.rs"]

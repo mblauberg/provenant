@@ -1740,6 +1740,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                 .bind_cancel(&command.operation_id, &bound, &call)?;
             let mut receipts = Vec::new();
             let mut human = String::new();
+            let mut requested = false;
             for id in selected {
                 // One failure must not hide the receipts already earned.
                 let receipt = request(&clock, &cancel)
@@ -1749,6 +1750,10 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                         if matches!(receipt, run::CancelReceipt::Unobservable { .. }) {
                             status = Status::Failed;
                         }
+                        requested |= matches!(
+                            receipt,
+                            run::CancelReceipt::Requested | run::CancelReceipt::AlreadyRequested
+                        );
                         human.push_str(&format!("{id} {}\n", state_tag(&receipt)));
                         json!({ "attempt_id": id, "receipt": receipt })
                     }
@@ -1761,6 +1766,42 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                 receipts.push(row);
             }
             let mut data = json!({ "operation_id": command.operation_id, "receipts": receipts });
+            if requested {
+                // A request has no actor once the guardian is gone, so recover
+                // the run now: ending proven orphans and settling is the same
+                // path `reconcile` takes, and a live guardian is left alone.
+                let registry = Registry {
+                    roots: Some(edge.roots),
+                    home: Some(edge.home),
+                    assets: Some(edge.assets),
+                    cwd: Some(edge.cwd),
+                    state_root: Some(session.context.state_root.as_path()),
+                    project_id: Some(session.context.project_id),
+                    host: None,
+                };
+                let recovered = request(&clock, &cancel)
+                    .and_then(|call| Ok(session.store.reconcile(target.run, &registry, &call)?));
+                match recovered {
+                    Ok(found) => {
+                        let mut rows = Vec::new();
+                        for (id, state) in &found {
+                            if matches!(
+                                state,
+                                run::Reconciled::Uncertain { .. } | run::Reconciled::Escaped { .. }
+                            ) {
+                                status = Status::Failed;
+                            }
+                            human.push_str(&format!("{id} {}\n", state_tag(state)));
+                            rows.push(json!({ "attempt_id": id, "found": state }));
+                        }
+                        data["recovered"] = Value::Array(rows);
+                    }
+                    Err(fail) => {
+                        status = Status::Failed;
+                        human.push_str(&format!("recovery error: {}\n", fail.message));
+                    }
+                }
+            }
             if let Some(seconds) = command.wait {
                 let (lanes, rendered, timed_out) =
                     wait_lanes(&session, &targets, Condition::All, seconds, edge)?;

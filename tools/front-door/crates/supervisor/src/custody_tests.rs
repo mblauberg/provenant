@@ -49,6 +49,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         terminal_observed: true,
         unresolved_cleanup: true,
         unresolved_pids: vec![],
+        unresolved_identities: vec![],
         settlement_evidence: SettlementEvidence::Unresolved,
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),
