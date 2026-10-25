@@ -29,13 +29,13 @@ provenant route resolve --model ADAPTER/ID --effort LEVEL
 
 The bundled catalogue defines weighted `utility`, `junior`, `senior`,
 `principal`, `writing` and `design` pools. The resolver draws among ready
-positive-weight members by weight multiplied by provider pacing. Pacing policy
-and factor reporting are wired, but the factor is currently 1.0 pending
-quota-aware pacing. Zero-weight members are ordered fallbacks. Operation ID
-and task index seed the draw so retries repeat the same choice. The utility pool uses Claude Haiku@low at
-weight 4, Codex Luna@low at weight 2, then the two OpenCode `*-free` models at
-weight 1 each. Free members require `--allow-free` (default false); Agy Gemini
-Flash is a paid subscription model and is never marked free.
+positive-weight members by weight multiplied by provider pacing.
+`route list` shows configured weights and pacing policy; dispatch applies the
+pacing factor and decides readiness. Zero-weight members are ordered
+fallbacks. Operation ID and task index seed the draw so retries repeat the
+same choice. The utility pool uses Claude Haiku@low at weight 4, Codex Luna@low
+at weight 2, then the two OpenCode `*-free` models at weight 1 each. Free
+members require `--allow-free` (default false); Agy Gemini Flash is a paid subscription model and is never marked free.
 `--confidential` excludes training or unclassified members and fallbacks. The
 Rust Fabric task schema has no per-task `confidential` field. For an explicit
 eligibility check, use `provenant route resolve --route NAME --confidential`.
@@ -47,8 +47,8 @@ observation and the activation, disclosure and confinement checks permit it.
 There is no classifier or synonym inference. The bundled Rust catalogue owns
 default pool membership and weights; `[routing]` in the state root's
 `config.toml` overrides pools and provider pacing. To change routing, run
-`provenant route set` or `provenant route pacing`. A Fabric submission carries one route preference;
-the task schema rejects unknown fields.
+`provenant route set` or `provenant route pacing`. A Fabric submission carries
+one route preference; the task schema rejects unknown fields.
 
 Run `provenant help route` for flags. Named routes and
 exact model selectors are mutually exclusive. Explicit fallbacks use
@@ -95,10 +95,11 @@ access. Prefer per-dispatch controls over global provider configuration edits.
 
 ## Default stack & fallback chains
 
-Use `provenant dispatch` with a prompt file or stdin, operation ID, route and
-explicit access settings. A writer needs a registered linked worktree and
-one active writer. Do not launch providers directly to bypass confinement.
-Consult `provenant help dispatch` for current flags and bounded timeout limits.
+Use `fabric_submit` with an `operation_id` and `tasks`; each task takes
+`prompt` (the brief inline), `route`, `timeout_ms` (1000 to 14400000), and
+optionally `access` and `worktree`. A writer needs a registered linked worktree
+and one active writer. Do not launch providers directly to bypass confinement.
+The tool schema is the authority for fields and timeout limits.
 Rust run owns retries, admission and terminal publication; providers owns wire
 mechanics.
 

@@ -18,7 +18,8 @@ or chrome://tracing; no collector is needed.
 tools, including installed units with zero calls. Omit `--since` for all retained
 calls; dates and RFC3339 timestamps also work. Counts cover this host's
 `usage.jsonl` and `usage.jsonl.1` under the selected Provenant state directory.
-The report includes its own call on the next invocation.
+A fresh host counts nothing until the state root exists. The report includes its
+own call on the next invocation.
 
 Each CLI invocation records `cli.verb`, its canonical verb path, exit code,
 duration in milliseconds and UTC timestamp. Parse failures use `parse`, help
@@ -36,9 +37,8 @@ MCP rotation runs on existing workers, keeping it off the event loop. At
 cap. Reports read without locks, tolerate a missing `.1`, and skip malformed
 or incomplete lines. A concurrent rotation can make a report approximate.
 Only two logs are retained, so a 30-day query can cover less than 30 days on a
-busy host. Set `PROVENANT_USAGE_STATE_DIR` to isolate counters from the main
-state directory, as integration tests do. No config, provider or run-store
-state is created by these counters.
+busy host. No config, provider or run-store state is created by these
+counters.
 
 ## Quota
 
@@ -46,11 +46,11 @@ state is created by these counters.
 refreshes due accounts; use `--trigger` and `--power` to record why the
 refresh ran and the current power source. `provenant quota display
 [--headline auto|5h|weekly] [--icon most_constrained|ACCOUNT]` sets the menu
-bar choices, then shows quota. `provenant telemetry stats --usage` reports local invocation counts.
-Quota is admission advice; a reset or bookkeeping failure never grants
+bar choices, then shows quota. `provenant telemetry stats --usage` reports local invocation
+counts. Quota is admission advice; a reset or bookkeeping failure never grants
 permission to stop a healthy provider.
 
 ## Routing
 
-`provenant route list` shows cached availability. Select a route or exact model
+`provenant route list` shows the catalogue and pools. Select a route or exact model
 on dispatch and retain the resolved route from the attempt record.

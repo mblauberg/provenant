@@ -30,7 +30,9 @@ its head, which recovers it with `git branch NAME HEAD` while Git still holds
 the objects.
 
 Confinement validates repository identity and refuses primary, dirty
-and live writers. An unknown writer is accepted when its lease is free and the
+and live writers. `worktree list` reports a tree whose only changes are
+ignored files as `ignored`; removal refuses it like a dirty tree, and a
+session hand-off treats it as clean. An unknown writer is accepted when its lease is free and the
 tree is clean. It reports `git_operation_in_progress` and refuses
 removal when the worktree's private Git directory contains an unfinished
 cherry-pick, revert, rebase, merge or sequencer operation, even if the index
@@ -64,6 +66,8 @@ Host builds must use separate target directories outside this lane namespace;
 see the [release build example](runbooks/install.md#build-a-staged-release).
 
 ## Writer dispatch
+
+Agents use `fabric_submit`; this is the terminal path for a shell without MCP.
 
 ```sh
 provenant dispatch --operation-id OP --model ADAPTER/MODEL \
@@ -106,7 +110,7 @@ authority for that exact reservation:
    call `settle_reconciled`. Both paths hold the writer lock while settling
    classified scratch and clearing the reservation.
 
-The CLI does not expose this clearance yet: `--abandon-uncertain` still refuses.
+The CLI does not expose this clearance yet.
 When custody is lost without a durable exit, this revision cannot create the
 required terminal receipt, so the fence cannot yet be cleared. Retain it and use
 a fresh registered worktree. A failed provider or an unfinished Git operation

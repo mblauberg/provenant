@@ -80,10 +80,21 @@ Repeat the account registration for each account, with a unique label and
 `quota tick` afterwards to initialise quota state.
 
 Review every planned change before applying it; a failed preview prevents
-writes. `--dry-run` creates no state root, lock or receipt. Hooks default off.
+writes. `--dry-run` creates no state root, lock or receipt. A first install
+leaves hooks disabled unless requested. Re-install without `--hooks` keeps
+ownership of previously installed hooks, including the legacy Git pre-push
+launcher, and refreshes unchanged entries for the new installation. Edited
+hooks and launchers stay in place, leave the receipt and produce findings.
+Missing launchers also leave the receipt. The legacy checkout flag need not
+be repeated. `--hooks off` removes unchanged owned hooks and relinquishes
+modified ones, reporting them. Explicit `--hooks on` refuses an edited Claude
+hook; use `--hooks off` to relinquish its ownership before reinstalling.
+The receipt records one legacy checkout. Remove or relinquish its pre-push
+launcher with `--hooks off` before migrating another checkout.
 `--hooks on` registers hooks for each selected harness that has a
-fixture-backed hook specification (Claude today) and refuses only when none
-does. Unmanaged paths are preserved, and conflicts are refused unless
+fixture-backed hook specification (Claude today). At least one selected
+harness must have a specification. Unmanaged paths are preserved, and
+conflicts are refused unless
 `--adopt-existing` is given for files that match exactly.
 
 To install into a further Claude config directory, rerun
@@ -96,12 +107,27 @@ applies to Codex with `CODEX_HOME`.
 selectors of every recorded target, without repair. Reapply `install` after
 resolving a partial-write error.
 
+On macOS, an install into this account's default state root also manages
+`~/Library/LaunchAgents/dev.provenant.peer.plist`. The dry-run and install
+report name its action, and the receipt records its exact contents and mode.
+Symlinked plist paths or parents are refused. The agent's PATH contains the
+fixed system directories, the install bin directory and existing absolute
+directories holding resolved Claude, Codex and Git executables, when known.
+It does not inherit the shell's other PATH entries.
+An exact plist from the earlier installer is recognised for upgrade or
+uninstall using its recorded binary path and state root. Modified or unknown
+plists are preserved and block install. To recover, move the named plist
+aside, run `launchctl bootout gui/$UID/dev.provenant.peer`, then rerun install.
+
 To remove an installation, run
 `provenant --state-dir "$STATE" uninstall --harness claude`. It removes only
 unchanged owned entries and keeps the state and release assets. It never
 recursively deletes a checkout, state root or release. With `CLAUDE_CONFIG_DIR`
 or `CODEX_HOME` set, uninstall removes only that directory's target; without
 it, every recorded target of the harness.
+Removing the last recorded target also boots out the peer LaunchAgent and
+removes its unchanged plist. A modified plist is kept and reported; its
+service is left running. A failed bootout keeps the plist for a retry.
 
 `build.rs` stamps the source and asset digests, and the packaging example
 produces the typed `release.json`. The CLI grammar is described in

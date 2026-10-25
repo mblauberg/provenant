@@ -25,6 +25,8 @@ pub use provenant_fabric_store::{
 
 #[derive(Debug, Error)]
 pub enum CoordinationError {
+    #[error("coordination mutations are not allowed inside a lane")]
+    LaneMutation,
     #[error(transparent)]
     Peer(#[from] crate::hosts::PeerError),
     #[error("invalid coordination input: {0}")]
@@ -45,6 +47,9 @@ pub enum CoordinationError {
     ResponseEncoding(#[source] serde_json::Error),
     #[error("Fabric store operation failed")]
     Store(#[source] provenant_fabric_store::Error),
+    /// The store refused an upgrade; its message names the data and remedy.
+    #[error(transparent)]
+    UpgradeRefused(provenant_fabric_store::Error),
     #[error("clock operation failed")]
     Time(#[from] provenant_core::TimeError),
 }
@@ -52,6 +57,7 @@ pub enum CoordinationError {
 impl CoordinationError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::LaneMutation => "lane_coordination_refused",
             Self::Peer(error) => error.code(),
             Self::InvalidInput(_) | Self::Input(_) => "invalid_input",
             Self::Time(_) => "state_corrupt",
@@ -60,6 +66,7 @@ impl CoordinationError {
             Self::Busy => "busy",
             Self::Entropy(_) | Self::EntropyEncoding => "io",
             Self::ResponseEncoding(_) => "state_corrupt",
+            Self::UpgradeRefused(_) => "upgrade_refused",
             Self::Store(error) => match error {
                 provenant_fabric_store::Error::NotFound => "not_found",
                 provenant_fabric_store::Error::Conflict
@@ -74,6 +81,7 @@ impl CoordinationError {
                 | provenant_fabric_store::Error::SchemaVersion(_)
                 | provenant_fabric_store::Error::UnversionedDatabase
                 | provenant_fabric_store::Error::Encode(_) => "state_corrupt",
+                provenant_fabric_store::Error::LegacyImportData { .. } => "upgrade_refused",
                 _ => "io",
             },
         }
@@ -85,6 +93,9 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
         match error {
             provenant_fabric_store::Error::Busy => Self::Busy,
             provenant_fabric_store::Error::Cancelled => Self::Cancelled,
+            error @ provenant_fabric_store::Error::LegacyImportData { .. } => {
+                Self::UpgradeRefused(error)
+            }
             other => Self::Store(other),
         }
     }
@@ -561,14 +572,14 @@ impl CoordinationApi for LocalCoordination<'_> {
                     sender: self.actor,
                     recipients,
                     conversation: None,
-                    legacy_output_path: None,
                     kind,
                     body,
                     artifacts,
                     reply_to,
                     task,
                     created_at: self.clock.wall_now()?,
-                    legacy: None,
+                    legacy_output_path: (),
+                    legacy: (),
                 };
                 self.store.send(&message, &request)?;
                 Ok(MailResult::Sent { id })
@@ -619,7 +630,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     expires_at: None,
                     created_at: now,
                     updated_at: now,
-                    legacy: None,
+                    legacy: (),
                 };
                 self.store.create_task(&task, &request)?;
                 Ok(TaskResult::Created { task })
@@ -1147,6 +1158,24 @@ mod tests {
         assert_eq!(
             CoordinationError::Time(provenant_core::TimeError::WallRange).code(),
             "state_corrupt"
+        );
+    }
+
+    #[test]
+    fn refused_upgrade_has_its_own_code_and_names_the_data() {
+        let error = CoordinationError::from(provenant_fabric_store::Error::LegacyImportData {
+            table: "tasks",
+            rows: 2,
+        });
+        assert_eq!(error.code(), "upgrade_refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("2 row(s) of legacy import data in table tasks"),
+            "{text}"
+        );
+        assert_eq!(
+            facade::FacadeError::from_code(error.code(), None).code(),
+            "upgrade_refused"
         );
     }
 

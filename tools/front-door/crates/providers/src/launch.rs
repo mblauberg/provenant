@@ -62,7 +62,7 @@ pub struct PrepareInput<'a> {
     pub prompt: &'a Prompt,
     pub continuation: Option<&'a Continuation>,
     pub grant_digest: &'a str,
-    /// Canonical path of the provider CLI recorded by preflight.
+    /// Canonical path of the provider CLI resolved at dispatch.
     pub executable: &'a Path,
     /// The user's home directory.
     pub home: &'a Path,

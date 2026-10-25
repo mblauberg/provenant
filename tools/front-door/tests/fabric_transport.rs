@@ -8,6 +8,15 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+/// Schema-bearing tools (identity, submit) report errors in text only.
+fn text_error_code(result: &Value) -> &str {
+    assert!(result.get("structuredContent").is_none(), "{result}");
+    result["content"][0]["text"]
+        .as_str()
+        .and_then(|text| text.split_once(':'))
+        .map_or("", |(code, _)| code)
+}
+
 fn mcp(rig: &TestRig, frames: &[Value]) -> Result<Vec<Value>> {
     let mut input = Vec::new();
     if frames
@@ -79,8 +88,12 @@ fn next_host(host: provenant_core::HostId) -> Result<provenant_core::HostId> {
 
 #[test]
 fn hosts_probe_only_the_requested_page() -> Result {
-    let mut rig = TestRig::new()?;
+    let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
     let identity = federated_identity(&mut rig)?;
+    let cli = rig.command(&["hosts", "--json"])?;
+    assert_eq!(code(&cli), 0);
+    let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
+    assert_eq!(cli["data"].as_array().ok_or("CLI host list")?.len(), 1);
     let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
     let project_key = identity["data"]["federation"]["key"]
         .as_str()
@@ -127,15 +140,25 @@ fn hosts_probe_only_the_requested_page() -> Result {
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
                 "name":"fabric_hosts","arguments":{"op":"list","after":local.to_string(),"limit":1}
             }}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"fabric_hosts","arguments":{"after":second.to_string(),"limit":1}
+            }}),
         ],
     )?;
     let hosts = &replies
         .iter()
         .find(|reply| reply["id"] == 1)
-        .ok_or("hosts")?["result"]["structuredContent"];
+        .ok_or("hosts")?["result"]["structuredContent"]["hosts"];
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true);
+    assert_eq!(
+        replies
+            .iter()
+            .find(|reply| reply["id"] == 2)
+            .ok_or("empty hosts")?["result"]["structuredContent"],
+        json!({"hosts":[]})
+    );
     let calls = std::fs::read_to_string(calls)?;
     let calls = calls
         .lines()
@@ -598,7 +621,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         run::{CanonicalRequest, RequestedRoute, TaskRequest},
     };
     use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
-    let mut rig = TestRig::new()?;
+    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
     let identity = federated_identity(&mut rig)?;
     let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
     let actor = ActorId::parse(identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?)?;
@@ -838,7 +861,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
 
     let project_key: provenant_fabric_runtime::identity::CrossHostProjectKey =
         serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
-    let response = provenant_fabric_runtime::hosts::PeerResponse {
+    let status_record = records[0].clone();
+    let mut response = provenant_fabric_runtime::hosts::PeerResponse {
         version: 1,
         host: remote_host,
         project: project_key,
@@ -902,6 +926,52 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             .is_some_and(|targets| targets.len() == 2)
     }));
 
+    response.result = provenant_fabric_runtime::hosts::PeerResult::Run(Box::new(
+        provenant_fabric_runtime::runs::RunResult::Status {
+            attempt: status_record,
+        },
+    ));
+    std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+    let replies = mcp(&rig, &attempts[..2].iter().enumerate().map(|(index, attempt)| json!({
+        "jsonrpc":"2.0","id":index+1,"method":"tools/call","params":{
+            "name":"fabric_run","arguments":{"op":"status","target":{"host":remote_host.to_string(),"attempt":attempt.to_string()}}
+        }
+    })).collect::<Vec<_>>())?;
+    let matching = &replies.iter().find(|r| r["id"] == 1).ok_or("matching")?["result"];
+    assert_ne!(matching["isError"], true, "{matching}");
+    let mismatch = &replies.iter().find(|r| r["id"] == 2).ok_or("mismatch")?["result"];
+    assert_eq!(
+        mismatch["structuredContent"]["code"], "state_corrupt",
+        "{mismatch}"
+    );
+
+    for (returned, expected) in [
+        (Some("local-stop"), "launch_unknown"),
+        (None, "launch_unknown"),
+        (Some("unrelated"), "state_corrupt"),
+    ] {
+        response.result = provenant_fabric_runtime::hosts::PeerResult::Error {
+            code: "launch_unknown".into(),
+            operation_id: returned.map(OperationId::parse).transpose()?,
+        };
+        std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+        let replies = mcp(
+            &rig,
+            &[json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name":"fabric_run","arguments":{"op":"cancel","operation_id":"local-stop","target":{"host":remote_host.to_string(),"attempt":attempt.to_string()}}
+                }
+            })],
+        )?;
+        let result = &replies.iter().find(|r| r["id"] == 1).ok_or("error")?["result"];
+        assert_eq!(result["structuredContent"]["code"], expected, "{result}");
+        if expected == "launch_unknown" {
+            assert_eq!(result["structuredContent"]["operation_id"], "local-stop");
+        } else {
+            assert!(result["structuredContent"]["operation_id"].is_null());
+        }
+    }
+
     let event_limit = {
         let store = provenant_run::RunStore::open(&context, &call)?;
         let events = store.events(0, 64, None, &call)?;
@@ -941,6 +1011,146 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
 }
 
 #[test]
+fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Result {
+    for (depth, child_store) in [(Some("1"), true), (None, true), (Some("1"), false)] {
+        let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
+        let identity = rig.command(&["fabric", "identity", "--json"])?;
+        assert_eq!(code(&identity), 0);
+        let parent = "11111111111111111111111111111111";
+        let child_state = rig.state.join("children").join(parent);
+        std::fs::create_dir_all(&child_state)?;
+        std::fs::set_permissions(
+            rig.state.join("children"),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        std::fs::set_permissions(&child_state, std::fs::Permissions::from_mode(0o700))?;
+        for (key, value) in &mut rig.env {
+            if key == "PROVENANT_AGENT_LABEL" {
+                *value = format!("lane-{parent}").into();
+            }
+        }
+        rig.env
+            .push((provenant_run::PARENT_ATTEMPT_ENV.into(), parent.into()));
+        if child_store {
+            rig.env.push((
+                provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
+                child_state.clone().into(),
+            ));
+        }
+        if let Some(depth) = depth {
+            rig.env
+                .push((provenant_run::LANE_DEPTH_ENV.into(), depth.into()));
+        }
+        let calls = [
+            (
+                "fabric_mail",
+                json!({"op":"send","recipients":["11111111111111111111111111111111"],"kind":"note","body":"injected","artifacts":[],"operation_id":"lane-mail"}),
+            ),
+            (
+                "fabric_mail",
+                json!({"op":"mark_read","through":1,"operation_id":"lane-read"}),
+            ),
+            (
+                "fabric_task",
+                json!({"op":"create","objective":"injected","operation_id":"lane-task"}),
+            ),
+            (
+                "fabric_task",
+                json!({"op":"update","proof":{"task":parent,"generation":1,"token":vec![0;16]},"objective":"injected","operation_id":"lane-task-update"}),
+            ),
+            (
+                "fabric_claim",
+                json!({"op":"acquire","scope":{"kind":"issue","key":"lane"},"lease_ms":1000,"operation_id":"lane-claim"}),
+            ),
+            (
+                "fabric_landing",
+                json!({"op":"acquire","reference":"refs/heads/main","expected":"1111111111111111111111111111111111111111","candidate":"2222222222222222222222222222222222222222","lease_ms":1000,"operation_id":"lane-land"}),
+            ),
+            (
+                "fabric_events",
+                json!({"op":"note","note":"injected","operation_id":"lane-note"}),
+            ),
+        ];
+        let mut frames = calls.iter().enumerate().map(|(id, (tool, arguments))| {
+            json!({"jsonrpc":"2.0","id":id+1,"method":"tools/call","params":{"name":tool,"arguments":arguments}})
+        }).collect::<Vec<_>>();
+        frames.extend([
+            json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"fabric_mail","arguments":{"op":"read","limit":10}}}),
+            json!({"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"fabric_identity","arguments":{}}}),
+        ]);
+        if depth.is_some() && child_store {
+            frames.push(json!({"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"lane-child","tasks":[{"prompt":"read only","route":{"adapter":"codex","model":"gpt-6.1-sol"},"timeout_ms":1000}],"concurrency":1}}}));
+        }
+        let replies = mcp(&rig, &frames)?;
+        for id in 1..=calls.len() {
+            let result = &replies.iter().find(|r| r["id"] == id).ok_or("mutation")?["result"];
+            assert_eq!(result["isError"], true, "{result}");
+            assert_eq!(
+                result["structuredContent"]["code"], "lane_coordination_refused",
+                "{result}"
+            );
+        }
+        for id in [100, 102]
+            .into_iter()
+            .chain((depth.is_some() && child_store).then_some(101))
+        {
+            let result = &replies.iter().find(|r| r["id"] == id).ok_or("allowed")?["result"];
+            assert_ne!(result["isError"], true, "{result}");
+        }
+        let identity = &replies.iter().find(|r| r["id"] == 102).ok_or("identity")?["result"]["structuredContent"];
+        assert_eq!(identity["inbox"]["agent"], format!("lane-{parent}"));
+        if depth.is_some() && child_store {
+            assert!(child_state.join("runs").is_dir());
+        }
+        assert!(!rig.state.join("runs").exists());
+        let output = rig.command(&[
+            "fabric",
+            "task",
+            "create",
+            "--objective",
+            "injected",
+            "--operation-id",
+            "lane-cli-task",
+            "--json",
+        ])?;
+        assert_ne!(code(&output), 0);
+        let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(
+            result["error"]["code"], "lane_coordination_refused",
+            "{result}"
+        );
+        // A peer frame names its own agent, so lanes may not serve one. The
+        // forwarding path must refuse before it connects to the agent socket.
+        let agent = rig.state.join("peer-agent");
+        std::fs::create_dir_all(&agent)?;
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))?;
+        let listener = std::os::unix::net::UnixListener::bind(agent.join("peer.sock"))?;
+        listener.set_nonblocking(true)?;
+        for args in [
+            &["fabric", "peer", "--in-process"][..],
+            &["fabric", "peer"],
+            &["fabric", "peer-agent"],
+        ] {
+            let output = rig.command(args)?;
+            assert_eq!(code(&output), 3, "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr.bytes)
+                    .contains("coordination mutations are not allowed inside a lane"),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            listener.accept().map(|_| ()).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::WouldBlock)
+        );
+        drop(listener);
+        std::fs::remove_dir_all(&agent)?;
+        rig.assert_legacy_unchanged()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn mcp_refuses_nested_submission_above_max_depth_before_placement() -> Result {
     let mut rig = TestRig::new()?;
     // The host binds the project before a read-only lane looks it up.
@@ -961,10 +1171,7 @@ fn mcp_refuses_nested_submission_above_max_depth_before_placement() -> Result {
     )?;
     let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
     assert_eq!(result["isError"], true);
-    assert_eq!(
-        result["structuredContent"]["code"], "lane_depth",
-        "{result}"
-    );
+    assert_eq!(text_error_code(result), "lane_depth", "{result}");
     assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()
 }
@@ -1057,7 +1264,7 @@ fn submission_does_not_advertise_unsupported_inputs() -> Result {
     )?;
     let call = reply.iter().find(|reply| reply["id"] == 2).ok_or("call")?;
     assert_eq!(call["result"]["isError"], true, "{call}");
-    assert_eq!(call["result"]["structuredContent"]["code"], "invalid_input");
+    assert_eq!(text_error_code(&call["result"]), "invalid_input");
     rig.assert_legacy_unchanged()
 }
 
@@ -1593,7 +1800,7 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
     assert!(rig.root.join("peer-state/runs").exists());
     let writer = &replies.iter().find(|r| r["id"] == 2).ok_or("writer")?["result"];
     assert_eq!(writer["isError"], true, "{writer}");
-    assert_eq!(writer["structuredContent"]["code"], "owner_unavailable");
+    assert_eq!(text_error_code(writer), "owner_unavailable");
 
     let replies = mcp(
         &rig,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::tools::ToolCall;
+use crate::tools::{InvalidInput, ToolCall};
 use regex::Regex;
 use serde_json::{Map, Number, Value, json};
 use std::{fs, path::Path};
@@ -437,6 +437,14 @@ fn compare(
         "unexpected generated case at {tool} {path}: {value}"
     );
     if valid {
+        let wire = &catalogue()
+            .iter()
+            .find(|wire| wire["name"] == tool)
+            .expect("wire tool")["inputSchema"];
+        assert!(
+            accepts(wire, wire, value),
+            "wire rejects valid call at {tool} {path}: {value}"
+        );
         counts.0 += 1;
     } else {
         counts.1 += 1;
@@ -578,7 +586,7 @@ fn walk(
 #[test]
 fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
     let mut counts = (0, 0);
-    for tool in catalogue() {
+    for tool in strict_catalogue() {
         let name = tool["name"].as_str().expect("tool name");
         let root = &tool["inputSchema"];
         let operations = root["oneOf"]
@@ -595,6 +603,140 @@ fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
     assert!(
         counts.0 > 0 && counts.1 > counts.0,
         "insufficient generated probes: {counts:?}"
+    );
+}
+
+#[test]
+fn wire_schema_has_no_dangling_or_single_use_defs() {
+    fn refs(root: &Value, node: &Value, counts: &mut std::collections::BTreeMap<String, usize>) {
+        match node {
+            Value::Object(fields) => {
+                if let Some(pointer) = fields.get("$ref").and_then(Value::as_str) {
+                    let name = pointer
+                        .strip_prefix("#/$defs/")
+                        .expect("root definition reference");
+                    let definition = root
+                        .pointer(pointer.strip_prefix('#').unwrap())
+                        .expect("resolved reference");
+                    let count = counts.entry(name.to_owned()).or_default();
+                    *count += 1;
+                    if *count == 1 {
+                        refs(root, definition, counts);
+                    }
+                }
+                for (key, child) in fields {
+                    if key != "$defs" {
+                        refs(root, child, counts);
+                    } else {
+                        assert!(std::ptr::eq(node, root), "nested definitions");
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    refs(root, child, counts);
+                }
+            }
+            _ => {}
+        }
+    }
+    for tool in catalogue() {
+        let root = &tool["inputSchema"];
+        let mut counts = std::collections::BTreeMap::new();
+        refs(root, root, &mut counts);
+        if let Some(defs) = root.get("$defs").and_then(Value::as_object) {
+            assert!(!defs.is_empty(), "empty definitions in {}", tool["name"]);
+            for name in defs.keys() {
+                assert!(
+                    counts.get(name).is_some_and(|count| *count >= 2),
+                    "unused or single-use {name} in {}",
+                    tool["name"]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn wire_strings_carry_only_type_and_max_length() {
+    fn check(node: &Value) {
+        match node {
+            Value::Object(fields) => {
+                if fields.get("type").and_then(Value::as_str) == Some("string") {
+                    assert!(!fields.contains_key("minLength"));
+                    assert!(!fields.keys().any(|key| key.starts_with("x-provenant-")));
+                    assert_ne!(
+                        fields.get("pattern").and_then(Value::as_str),
+                        Some(r"^[^\u0000]*$")
+                    );
+                }
+                for child in fields.values() {
+                    check(child);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    check(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    for tool in catalogue() {
+        check(tool);
+    }
+}
+
+#[test]
+fn tool_schema_size_is_bounded() {
+    // Measured compact tool bytes plus 10%, rounded up.
+    let bounds = [
+        ("fabric_identity", 1_526),
+        ("fabric_mail", 2_686),
+        ("fabric_task", 2_430),
+        ("fabric_events", 860),
+        ("fabric_claim", 2_404),
+        ("fabric_landing", 2_222),
+        ("fabric_submit", 2_572),
+        ("fabric_run", 1_954),
+        ("fabric_graph", 922),
+        ("fabric_output", 1_513),
+        ("fabric_hosts", 370),
+    ];
+    assert_eq!(catalogue().len(), bounds.len());
+    let mut total = 0;
+    for ((name, bound), tool) in bounds.into_iter().zip(catalogue()) {
+        assert_eq!(tool["name"], name);
+        let size = serde_json::to_vec(tool).unwrap().len();
+        assert!(size <= bound, "{name}: {size} bytes exceeds {bound}");
+        assert!(size <= 3_072, "{name}: {size} bytes exceeds hard cap");
+        total += size;
+    }
+    assert!(total <= 18 * 1024, "catalogue: {total} bytes");
+}
+
+#[test]
+fn relaxed_wire_text_still_reports_strict_invalid_paths() {
+    let wire = &catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_events")
+        .unwrap()["inputSchema"];
+    for note in ["", "\0", &"é".repeat(32_769)] {
+        let value = json!({"op":"note", "note":note});
+        assert!(accepts(wire, wire, &value));
+        assert!(
+            matches!(ToolCall::parse("fabric_events", value), Err(InvalidInput::Arguments { path }) if path == "arguments.note")
+        );
+    }
+    let value = json!({"op":"note", "note":"\0"});
+    assert_eq!(
+        invalid_path("fabric_events", &value).as_deref(),
+        Some("arguments.note")
+    );
+    let value = json!({"op":"send", "recipients":["00000000000000000000000000000001"], "kind":"note", "body":"body", "artifacts":[{"digest":null, "path":{"encoding":"utf8", "path":"\0"}}]});
+    assert_eq!(
+        invalid_path("fabric_mail", &value).as_deref(),
+        Some("arguments.artifacts[0].path.path")
     );
 }
 
@@ -641,15 +783,96 @@ fn output_schema_lists_only_supported_parts() {
         json!(["stdout", "stderr"])
     );
     for tool in catalogue() {
-        assert!(tool["outputSchema"].is_object() || tool["outputSchema"].is_array());
+        let supported = matches!(
+            tool["name"].as_str(),
+            Some("fabric_identity" | "fabric_submit")
+        );
+        assert_eq!(tool.get("outputSchema").is_some(), supported);
+        if supported {
+            assert_eq!(tool["outputSchema"]["type"], "object");
+        }
     }
-    assert!(
-        output["outputSchema"]["oneOf"]
-            .as_array()
-            .expect("output variants")
+}
+
+#[test]
+fn published_output_schemas_accept_real_runtime_records() {
+    use provenant_core::{AttemptId, HostId, OperationId, ProjectId};
+    use provenant_fabric_runtime::{
+        coordination::facade::AttemptTarget,
+        identity::{Address, CrossHostProjectKey, FederatedProject, Identity},
+        runs::{PeerWorktree, SubmissionReceipt},
+    };
+    use provenant_records::AbsolutePath;
+
+    let host = HostId::from_bytes([1; 16]);
+    let mut identity = Identity {
+        project: ProjectId::from_bytes([2; 16]),
+        host,
+        inbox: Address::new(host, "schema-test").unwrap(),
+        client: "codex".into(),
+        cwd: AbsolutePath::new(Path::new("/repo/worktree")).unwrap(),
+        common_dir: AbsolutePath::new(Path::new("/repo/.git")).unwrap(),
+        federation: None,
+    };
+    let mut receipt = SubmissionReceipt {
+        operation_id: OperationId::parse("schema-test").unwrap(),
+        targets: vec![AttemptTarget {
+            attempt: AttemptId::from_bytes([3; 16]),
+            host: None,
+        }],
+        worktree: None,
+    };
+    let output_schema = |name| {
+        &catalogue()
             .iter()
-            .any(|variant| variant["properties"]["kind"]["const"] == "chunk")
-    );
+            .find(|tool| tool["name"] == name)
+            .unwrap()["outputSchema"]
+    };
+    let check = |name, value: Value| {
+        let schema = output_schema(name);
+        assert!(accepts(schema, schema, &value), "{name}: {value}");
+    };
+    check("fabric_identity", serde_json::to_value(&identity).unwrap());
+    check("fabric_submit", serde_json::to_value(&receipt).unwrap());
+    identity.federation = Some(FederatedProject {
+        key: CrossHostProjectKey::from_home(Path::new("/"), Path::new("/repo/.git")).unwrap(),
+        project: ProjectId::from_bytes([4; 16]),
+    });
+    receipt.targets[0].host = Some(host);
+    receipt.worktree = Some(PeerWorktree {
+        path: "/repo/.worktrees/feat/schema-test".into(),
+        branch: "feat/schema-test".into(),
+    });
+    check("fabric_identity", serde_json::to_value(&identity).unwrap());
+    check("fabric_submit", serde_json::to_value(&receipt).unwrap());
+}
+
+#[test]
+fn peer_worktree_requests_are_not_mcp_submit_inputs() {
+    use provenant_fabric_runtime::coordination::facade::SubmitInput;
+
+    let schema = &catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_submit")
+        .unwrap()["inputSchema"];
+    for new_worktree in [
+        json!({"base":"main","branch":"feat/peer-writer"}),
+        Value::Null,
+    ] {
+        let input = json!({
+            "op":"submission", "operation_id":"peer-writer", "tasks":[{
+                "prompt":"work", "route":{}, "timeout_ms":1000,
+                "access":"worktree_write", "new_worktree":new_worktree
+            }]
+        });
+        // Peer ingress still deserialises the shared wire type.
+        assert!(serde_json::from_value::<SubmitInput>(input.clone()).is_ok());
+        assert!(!accepts(schema, schema, &input));
+        assert!(matches!(
+            ToolCall::parse("fabric_submit", input),
+            Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].new_worktree"
+        ));
+    }
 }
 
 #[test]

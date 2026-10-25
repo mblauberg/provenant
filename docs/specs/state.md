@@ -55,7 +55,8 @@ owns account eligibility, and run records the resolved account label.
 | Runs | `<state>/runs/<RunId>/` and run's top-level registry store |
 | Worktree custody | `<state>/worktrees/<ProjectId>/`; supervisor and confinement own locks, leases and reservations |
 | Fabric | `<state>/fabric/`; fabric-store owns its database |
-| Other owners | `<state>/workflow/projects/<ProjectId>/{deliveries,sessions}`, `<state>/quota/`, `<state>/routing/` |
+| Other owners | `<state>/workflow/projects/<ProjectId>/{deliveries,sessions}`, `<state>/quota/` |
+| Usage counters | `<state>/usage.jsonl`, `usage.jsonl.1` and `usage.lock`; appended only when the root already exists |
 | Scratch | `<state>/tmp/`; operation-scoped, never a whole-root purge |
 
 There is no telemetry ledger subtree. `telemetry stats` reduces run's terminal
@@ -69,8 +70,9 @@ path component. Resolve existing ancestor aliases and append only a normal
 missing tail, because lexical checks cannot protect filesystem access. Do not
 open old-root contents to test containment.
 
-Reads, help and `root` create no state. Mutations initialise explicitly with
-directories 0700, files 0600 and executables 0755. Config never opens SQLite.
+Reads, help and `root` create no state, though they still append to an existing
+root's usage log. Mutations initialise explicitly with directories 0700, files
+0600 and executables 0755. Config never opens SQLite.
 Each owner uses supervisor's locks and publication; no whole-root sweeper
 exists.
 
@@ -187,7 +189,7 @@ re-apply instruction. Harness changes are printed before they are applied
 | --- | --- |
 | `root` | Prints the absolute release root as one line, so `$(provenant root)/skills/...` works. No Git, SQLite, state creation or provider probes. |
 | `config show\|set\|unset`, `check config` | Effective configuration and origins, knob edits, and validation findings. |
-| `install [--dry-run]` | Requires `--source ABS` (a staged release) and one or more `--harness NAME` (`claude`, `codex`, `cursor`, `agy`, `opencode`). Optional `--bin-dir`, `--hooks on\|off` (default off), `--adopt-existing`, `--legacy-checkout ABS`. Validates every destination and prints every replace, remove and create before writing. Dry-run creates no root, lock or receipt. |
+| `install [--dry-run]` | Requires `--source ABS` (a staged release) and one or more `--harness NAME` (`claude`, `codex`, `cursor`, `agy`, `opencode`). Optional `--bin-dir`, `--hooks on\|off` (omission preserves hook ownership; disabled on first install), `--adopt-existing`, `--legacy-checkout ABS`. Validates every destination and prints every replace, remove and create before writing. Dry-run creates no root, lock or receipt. |
 | `check install` | Optional `--source ABS`. Compares the installed binary, assets, receipt and owned harness selectors without repair. |
 | `uninstall` | Explicit `--harness NAME`. Removes unchanged owned entries only and keeps state, release assets, user skills, config and the running binary. |
 
@@ -232,6 +234,33 @@ Install replaces only the selected targets and carries the rest over, and
 `check install` verifies every recorded target. Uninstall selects the target
 matching the environment's home, or else every recorded target of the harness.
 No cross-file or cross-host atomicity is claimed.
+
+Omitting `--hooks` on re-install retains and refreshes the selected target's
+unchanged owned hook registrations and the shared legacy Git pre-push launcher.
+Edited hooks and launchers are preserved, relinquished from the receipt and
+reported. The receipt's legacy record names each relinquished Git hook in
+`relinquished_hooks`, so `check install` stops auditing that hook while other
+legacy hooks in the same directory stay audited. Missing launchers also leave
+the receipt. The legacy checkout flag
+need not be repeated. Explicit `--hooks on` refuses edited Claude hooks and
+names `--hooks off` as recovery. Explicit `--hooks off` removes exact owned
+matches, relinquishes modified entries and reports them.
+
+On macOS, installation into the account's default state root also owns
+`~/Library/LaunchAgents/dev.provenant.peer.plist`. The plist participates in
+the preview, receipt and `check install`. Publication refuses symlinks at
+the plist or any parent, stages with `O_NOFOLLOW | O_EXCL`, then renames.
+Its PATH starts with `/usr/bin:/bin:/usr/sbin:/sbin`, followed by the absolute
+install bin directory and existing absolute directories holding resolved
+Claude, Codex and Git executables, when known. Empty and relative entries are
+excluded. Uninstall of the last recorded target boots out the service before
+removing an exact receipt match. A modified plist and its service are kept
+and reported; failed bootout leaves the plist owned for retry.
+The earlier installer's unreceipted plist is recognised only when its complete
+bytes match the historical template for the validated receipt's binary path
+and state root, with mode 0600 or 0644. Upgrade replaces it with the sanitised
+rendering and records ownership; uninstall can remove it directly. Unknown
+or modified historical plists are preserved.
 
 ### Harness registry
 
@@ -341,7 +370,7 @@ from its own checkout.
 | Kiro registration | No observed use. |
 | `_shared`, JavaScript workflows, old link layouts | Retained skills are replaced individually; exact retired links are removed by the legacy manifest. Custom skill contents and old receipts are not read. |
 | Runtime provisioning and Codex skill overrides | The product needs no Python, Node or daemon. Another tool's skill preferences are left alone. |
-| Telemetry ledger and generic import | Telemetry reduces run records. Fabric alone owns any read-only import and its receipt. |
+| Telemetry ledger and generic import | Telemetry reduces run records. Nothing imports old state; an old Fabric store is left untouched. |
 | Configuration includes, interpolation, automatic migration | Executable or implicit configuration cannot be audited. |
 
 ## Verification

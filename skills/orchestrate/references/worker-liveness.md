@@ -11,14 +11,24 @@ not prove death. Copy the attempt's resolved route exactly.
 
 ## Cancel
 
-Use `provenant cancel RUN/TASK --operation-id ID --reason TEXT` only within
-current authority. Cancellation is scoped to that target. Supervisor keeps
-custody and writer exclusion through terminal publication and settlement.
+Use `fabric_run`'s `cancel` operation (`target: { attempt }`, `operation_id`)
+only within current authority. A terminal without MCP uses `provenant cancel
+RUN[/TASK[/ATTEMPT]] --operation-id ID [--reason TEXT]`: RUN/TASK/ATTEMPT
+cancels one attempt like `fabric_run`, and RUN/TASK cancels every attempt of
+the task. A remote placement ignores `--reason`. Supervisor keeps custody and
+writer exclusion through terminal publication and settlement.
 Never signal a PID inferred from a stale record or an empty observation.
 
 ## Detached work
 
 Run owns detached custody and recovery. Use `provenant reconcile --id RUN` for
-recovery. Resume an attempt with `provenant resume RUN/TASK/ATTEMPT
---operation-id ID (--prompt-file PATH | --prompt-stdin)` and an authorised
-prompt for continuation.
+recovery. Resume an attempt with `fabric_run`'s `resume` operation (`target: {
+attempt }`, `expected_generation: 0`, `operation_id`, `prompt`).
+`expected_generation` counts earlier continuations, so pass 0; it is not the
+attempt record's `generation`. On `Conflict`, read the target's `fabric_run`
+`status`. If its `state` is not `terminal`, wait and retry. If you are retrying
+your own resume, repeat it with the same `operation_id`, prompt and target; the
+replay returns the existing continuation, including on a peer. Otherwise use
+`fabric_run` `list` (local host only) and target the attempt whose `retry_of` is
+the target. Use a fresh `operation_id` only when the ID was reused with a
+different prompt. Use an authorised prompt for continuation.

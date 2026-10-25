@@ -1584,7 +1584,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &home,
             "fixture".as_ref(),
             &directory,
-            &rig.root,
         )?;
         if adapter == "claude" {
             claude_key.clone_from(&key);
@@ -1699,7 +1698,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 home: &home,
                 user: "fixture".as_ref(),
                 config_dir: &home.join(".claude-fixture"),
-                scratch: &paths.scratch,
             },
             &provenant_providers::identity::RegisteredAccount::new(
                 "claude",
@@ -1848,10 +1846,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             .iter()
             .find(|reply| reply["id"] == 1)
             .ok_or("MCP reply")?["result"];
-        assert_eq!(
-            result["structuredContent"]["code"], "lane_depth",
-            "{result}"
-        );
+        assert_eq!(mcp_error_code(result), "lane_depth", "{result}");
         assert!(!roots.state.as_path().join("tmp/results").exists());
         assert!(
             rig.state
@@ -2080,7 +2075,8 @@ pub(crate) fn lane_provider() -> Result {
         reply
             .iter()
             .find(|reply| reply["id"] == 1)
-            .ok_or("stripped MCP reply")?["result"]["structuredContent"]["code"],
+            .map(|reply| mcp_error_code(&reply["result"]))
+            .ok_or("stripped MCP reply")?,
         "invalid_input"
     );
     // Exercise the same publisher used by CLI overflow under confinement.
@@ -2257,7 +2253,8 @@ fn verify_lane_profile(
         replies
             .iter()
             .find(|reply| reply["id"] == 1)
-            .ok_or("confined MCP reply")?["result"]["structuredContent"]["code"],
+            .map(|reply| mcp_error_code(&reply["result"]))
+            .ok_or("confined MCP reply")?,
         "lane_depth"
     );
     // Admission below the limit must also open the isolated child store under
@@ -2430,8 +2427,15 @@ fn verify_lane_profile(
     );
     host.provider_exited(&parent.encode()?, None)?;
     fs::write(state.join("config.toml"), config(1))?;
-    // The parent store's own git-home is the host's, from preparing this lane.
+    // The child store's git-home is the in-lane fabric context's own, not the
+    // host's: its preparation keeps its git home under the host root.
     assert!(child.join("tmp/git-home").is_dir());
+    // Host probes leave no directory or lease behind once the child launched.
+    let probes: Vec<_> = fs::read_dir(state)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("probe-"))
+        .collect();
+    assert!(probes.is_empty(), "{probes:?}");
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),
@@ -2498,4 +2502,16 @@ impl Executor for FixtureCredential {
             elapsed_micros: 0,
         })
     }
+}
+
+/// Identity and submit report errors in text; other tools keep structured codes.
+fn mcp_error_code(result: &Value) -> &str {
+    result["structuredContent"]["code"]
+        .as_str()
+        .unwrap_or_else(|| {
+            result["content"][0]["text"]
+                .as_str()
+                .and_then(|text| text.split_once(':'))
+                .map_or("", |(code, _)| code)
+        })
 }

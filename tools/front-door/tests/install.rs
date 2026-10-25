@@ -17,7 +17,10 @@ impl ReleaseSmoke for FixtureSmoke {
     }
 }
 fn staged(rig: &TestRig) -> Result<PathBuf> {
-    let stage = rig.root.join("staged");
+    staged_named(rig, "staged", b"synthetic release")
+}
+fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
+    let stage = rig.root.join(name);
     fs::create_dir_all(stage.join("bin"))?;
     fs::create_dir_all(stage.join("skills/example"))?;
     let skill = b"---\nname: example\ndescription: fixture\n---\n";
@@ -26,7 +29,7 @@ fn staged(rig: &TestRig) -> Result<PathBuf> {
     let version = VersionInfo {
         source_digest: source_digest(&[SourceInput {
             name: "fixture.rs",
-            bytes: b"synthetic release",
+            bytes: identity,
         }])?,
         asset_digest: source_digest(&[SourceInput {
             name: "skills/example/SKILL.md",
@@ -80,6 +83,32 @@ fn args(stage: &Path, dry: bool) -> Vec<std::ffi::OsString> {
         args.push("--dry-run".into());
     }
     args
+}
+
+fn inspect_installed(rig: &TestRig, stage: &Path) -> Result<provenant_config::InstallInspection> {
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.environment_state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&LocalFs)?;
+    let targets =
+        provenant_config::Targets::new(roots, &rig.home, &[provenant_records::Harness::Claude]);
+    let release = Release::read(stage, env!("PROVENANT_TARGET_TRIPLE"), &LocalFs)?;
+    let manifest = release.manifest();
+    let smoke = FixtureSmoke(VersionInfo {
+        source_digest: manifest.source_digest,
+        asset_digest: manifest.asset_digest,
+        target: manifest.target.clone(),
+        toolchain: manifest.toolchain.clone(),
+        record_schema_version: 1,
+        config_schema_version: 1,
+    });
+    Ok(provenant_config::inspect_install(
+        &targets,
+        Some(&release),
+        env!("PROVENANT_TARGET_TRIPLE"),
+        &LocalFs,
+        &smoke,
+        &CancelToken::new(),
+    )?)
 }
 #[test]
 fn check_install_source_failures_keep_the_typed_outcome() -> Result {
@@ -462,6 +491,197 @@ fn recorded_legacy_hooks_replace_in_place_and_keep_herdr_during_dry_run() -> Res
         herdr_before["hooks"]["SessionStart"][0]
     );
     rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -> Result {
+    for (explicit_off, modified) in [(false, false), (true, false), (true, true)] {
+        let rig = TestRig::new()?;
+        let first = staged(&rig)?;
+        let second = staged_named(&rig, "new-release", b"new release")?;
+        let legacy = rig.root.join("legacy");
+        let init = rig.execute(
+            Path::new("/usr/bin/git"),
+            &["init", "-q", legacy.to_str().ok_or("legacy")?],
+            None,
+        )?;
+        assert_eq!(code(&init), 0);
+        std::os::unix::fs::symlink(
+            legacy.join("scripts/hooks/pre-push"),
+            legacy.join(".git/hooks/pre-push"),
+        )?;
+        let output = rig.command(&[
+            "install",
+            "--source",
+            first.to_str().ok_or("first")?,
+            "--harness",
+            "claude",
+            "--hooks",
+            "on",
+            "--legacy-checkout",
+            legacy.to_str().ok_or("legacy")?,
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        let settings = rig.root.join("claude/settings.json");
+        let git_hook = legacy.join(".git/hooks/pre-push");
+        let before = fs::read(&settings)?;
+        let output = rig.command(&[
+            "install",
+            "--source",
+            second.to_str().ok_or("second")?,
+            "--harness",
+            "claude",
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        assert_eq!(fs::read(&settings)?, before);
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(rig.state.join("install/receipt.json"))?)?;
+        let entries = receipt["entries"].as_array().ok_or("entries")?;
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["selector"] == "git-hook:pre-push")
+        );
+        assert!(entries.iter().any(|entry| {
+            entry["selector"]
+                .as_str()
+                .is_some_and(|selector| selector.starts_with("hook:"))
+        }));
+        let launcher = fs::read(&git_hook)?;
+        fs::write(&git_hook, b"changed\n")?;
+        let checked = inspect_installed(&rig, &second)?;
+        assert!(checked.error.is_none());
+        assert!(checked.findings.iter().any(|finding| {
+            finding.rule == "owned_entry_drift"
+                && finding
+                    .path
+                    .to_path_buf()
+                    .is_ok_and(|path| path == git_hook)
+        }));
+        fs::write(&git_hook, launcher)?;
+        let command = fs::read_to_string(&settings)?;
+        assert!(command.contains("'hook' 'claude' 'pre-tool-use'"));
+        if explicit_off {
+            // The recorded launcher remains authorised inside the checkout
+            // when migration flags are repeated and the stable bin moves.
+            let moved = rig.root.join("new-bin");
+            let output = rig.command(&[
+                "install",
+                "--source",
+                second.to_str().ok_or("second")?,
+                "--harness",
+                "claude",
+                "--bin-dir",
+                moved.to_str().ok_or("bin")?,
+                "--legacy-checkout",
+                legacy.to_str().ok_or("legacy")?,
+                "--json",
+            ])?;
+            assert_eq!(
+                code(&output),
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stdout.bytes)
+            );
+            let settings_text = fs::read_to_string(&settings)?;
+            assert!(settings_text.contains(moved.join("provenant").to_str().ok_or("binary")?));
+            assert!(
+                fs::read_to_string(&git_hook)?
+                    .contains(moved.join("provenant").to_str().ok_or("binary")?)
+            );
+            if modified {
+                fs::write(&git_hook, b"user modified launcher\n")?;
+            }
+            let output = rig.command(&[
+                "install",
+                "--source",
+                second.to_str().ok_or("second")?,
+                "--harness",
+                "claude",
+                "--hooks",
+                "off",
+                "--bin-dir",
+                moved.to_str().ok_or("bin")?,
+                "--legacy-checkout",
+                legacy.to_str().ok_or("legacy")?,
+                "--json",
+            ])?;
+            assert_eq!(
+                code(&output),
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stdout.bytes)
+            );
+            if modified {
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+                assert!(
+                    report["data"]["outcome"]["findings"]
+                        .as_array()
+                        .ok_or("findings")?
+                        .iter()
+                        .any(|finding| finding["rule"] == "relinquished_modified_entry")
+                );
+            }
+        } else {
+            let receipt_before = fs::read(rig.state.join("install/receipt.json"))?;
+            let other = rig.root.join("another-legacy");
+            let init = rig.execute(
+                Path::new("/usr/bin/git"),
+                &["init", "-q", other.to_str().ok_or("other")?],
+                None,
+            )?;
+            assert_eq!(code(&init), 0);
+            std::os::unix::fs::symlink(
+                other.join("scripts/hooks/pre-push"),
+                other.join(".git/hooks/pre-push"),
+            )?;
+            let refused = rig.command(&[
+                "install",
+                "--source",
+                second.to_str().ok_or("second")?,
+                "--harness",
+                "claude",
+                "--hooks",
+                "on",
+                "--legacy-checkout",
+                other.to_str().ok_or("other")?,
+                "--json",
+            ])?;
+            assert_ne!(code(&refused), 0);
+            assert_eq!(
+                fs::read(rig.state.join("install/receipt.json"))?,
+                receipt_before
+            );
+            assert!(other.join(".git/hooks/pre-push").is_symlink());
+            let checked = inspect_installed(&rig, &second)?;
+            assert!(checked.error.is_none());
+            assert!(checked.findings.is_empty());
+            let output = rig.command(&["uninstall", "--harness", "claude", "--json"])?;
+            assert_eq!(
+                code(&output),
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stdout.bytes)
+            );
+        }
+        assert_eq!(git_hook.exists(), modified);
+        let retained = fs::read_to_string(&settings)?;
+        assert!(!retained.contains("'hook' 'claude'"));
+        rig.assert_legacy_unchanged()?;
+    }
+    Ok(())
 }
 
 #[test]

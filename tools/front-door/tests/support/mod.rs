@@ -73,7 +73,7 @@ impl TestRig {
     pub fn new() -> Result<Self> {
         // Outside the checkout: a rig beneath it lets cargo in a confined lane
         // probe find (and fail to read) the workspace manifest and config above.
-        Self::in_directory(Path::new("/tmp"))
+        Self::in_directory(&std::env::temp_dir())
     }
     pub fn in_directory(parent: &Path) -> Result<Self> {
         Self::with_object_format(parent, "sha1")
@@ -104,7 +104,6 @@ impl TestRig {
             ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
             ("GIT_CONFIG_SYSTEM", root.join("git-system")),
             ("PROVENANT_STATE_DIR", state.clone()),
-            ("PROVENANT_USAGE_STATE_DIR", root.join("usage-state")),
             ("PROVENANT_ROOT", project.clone()),
             ("TMPDIR", root.clone()),
         ]
@@ -153,10 +152,6 @@ impl TestRig {
             .into());
         }
         Ok(rig)
-    }
-    pub fn enable_usage(&mut self) {
-        self.env
-            .retain(|(key, _)| key != "PROVENANT_USAGE_STATE_DIR");
     }
     pub fn command(&self, args: &[&str]) -> Result<ExecOutcome> {
         let mut arguments = vec![

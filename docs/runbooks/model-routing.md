@@ -1,8 +1,9 @@
 # Model routing
 
-Run `provenant route list` to inspect the catalogue, effective pool weights,
-pacing factors and cached availability. Use `provenant --json route list` for
-records, `--adapter NAME` to narrow it, or `--pool NAME` for one pool. Resolve a pool with
+Run `provenant route list` to inspect the catalogue, configured pool weights
+and pacing policy; pacing and readiness apply at dispatch. Use
+`provenant --json route list` for records, `--adapter NAME` to narrow it, or
+`--pool NAME` for one pool. Resolve a pool with
 `provenant route resolve --route NAME`, or select an exact model with
 `--model ADAPTER/ID` and optional `--effort LEVEL`.
 
@@ -42,8 +43,8 @@ member with `provenant route set POOL MODEL [--weight N] [--effort E]
 restore a bundled pool with `provenant route reset POOL`. Set provider pacing
 with `provenant route pacing PROVIDER pace|spend|max`. These edits are stored
 under `[routing]` in the selected state's `config.toml`. Catalogue presence
-does not establish adapter availability; inspect readiness and the resolved
-route recorded for the attempt.
+does not establish adapter availability; readiness is decided at dispatch, so
+inspect the resolved route recorded for the attempt.
 
 Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.
 

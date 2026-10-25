@@ -9,6 +9,7 @@ use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
 };
+use provenant_fabric_runtime::hosts::plain_text;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
@@ -1425,27 +1426,32 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 .as_ref()
                 .and_then(|r| r.account_label.as_deref())
                 .unwrap_or("unknown");
+            // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{} {state} {route} account={account}{}\n",
+                "{}/{}/{} {state} {} account={}{}\n",
                 lane.run_id,
                 lane.task_id,
                 lane.attempt_id,
+                plain_text(&route, usize::MAX),
+                plain_text(account, usize::MAX),
                 reason
                     .as_deref()
-                    .map(|r| format!(" ({r})"))
+                    .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
                     .unwrap_or_default()
             ));
             for skipped in &lane.skipped_routes {
                 human.push_str(&format!(
                     "  skipped {} {:?}: {}\n",
-                    skipped.route, skipped.kind, skipped.detail
+                    plain_text(&skipped.route, usize::MAX),
+                    skipped.kind,
+                    plain_text(&skipped.detail, usize::MAX)
                 ));
             }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
                     "  delivery {}:{} {:?} head={}\n",
-                    delivery.remote,
-                    delivery.branch,
+                    plain_text(&delivery.remote, usize::MAX),
+                    plain_text(&delivery.branch, usize::MAX),
                     delivery.state,
                     delivery
                         .head
@@ -2007,13 +2013,6 @@ fn reconcile_inner(
     edge: &Edge<'_>,
     fenced: &mut bool,
 ) -> Result<(Value, String), Fail> {
-    if command.abandon_uncertain {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "abandoning uncertain custody is not available in this build",
-        ));
-    }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let session = open(edge, &request(&clock, &cancel)?)?;
@@ -2340,6 +2339,63 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+
+    #[test]
+    fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {
+        let reason = "\x1b[31mreason\x1b[0m";
+        let account = "\x1b]0;account\x07";
+        let detail = "skip\n\r\t\u{0008}\u{202e}detail";
+        let remote = "or\x1bigin";
+        let branch = "main\u{009b}line";
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "peer-lane-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "applied_route": {"model":"fixture/\x1b[32mmodel","account_label":account},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"terminal","outcome":"failed","exit_code":1,"finished_at":now,"reason":reason},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            },
+            "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
+            "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
+        }))?;
+        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert_eq!(
+            human,
+            format!(
+                "{}/{}/{} failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
+                RunId::from_bytes([2; 16]),
+                TaskId::from_bytes([4; 16]),
+                AttemptId::from_bytes([1; 16])
+            )
+        );
+        assert!(!human.chars().any(|c| c.is_control() && c != '\n'));
+        assert!(!human.contains('\u{202e}'));
+        assert_eq!(data["lanes"][0]["reason"], json!(reason));
+        assert_eq!(data["lanes"][0]["account"], json!(account));
+        assert_eq!(
+            data["lanes"][0]["skipped_routes"][0]["detail"],
+            json!(detail)
+        );
+        assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
+        assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
+        Ok(())
+    }
     #[test]
     fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
