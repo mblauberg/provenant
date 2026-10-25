@@ -1618,6 +1618,67 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
 }
 
 #[test]
+fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
+    for prepared in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        let temporary = store.temporary_path(id, &call)?;
+        store.mark_starting(id, &route(), &[], None, &call)?;
+        let custody = context
+            .state_root
+            .as_path()
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join("lane");
+        std::fs::create_dir_all(&custody)?;
+        let held = provenant_supervisor::fixture::acquire_writer(
+            Directory::open_anchor(&custody)?,
+            RunStore::scope(&store.record(id, &call)?),
+            call.budget,
+            &cancel,
+            &clock,
+        )?;
+        let _held = if prepared {
+            drop(held);
+            None
+        } else {
+            Some(held)
+        };
+        store.withdraw(
+            id,
+            AttemptState::Starting,
+            Outcome::Rejected,
+            "fixture",
+            WallTime::from_micros(150)?,
+            &call,
+        )?;
+        assert!(!temporary.exists());
+        assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
+        let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+        if prepared {
+            assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
+            assert!(store.writer_fences()?.is_empty());
+            assert!(store.open_runs(10, &call)?.is_empty());
+        } else {
+            assert!(
+                matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]
+                if *attempt == id && reason.contains("chair recovery required"))
+            );
+            assert_eq!(store.writer_fences()?.len(), 1);
+            assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
+        }
+        assert!(!temporary.exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -1654,6 +1715,11 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     )?;
     let temporary = store.temporary_path(id, &call)?;
     std::fs::write(temporary.join("keep"), "keep")?;
+    // An unreadable sibling must not hide this attempt's readable reservation.
+    let corrupt = custody.with_file_name("corrupt");
+    std::fs::create_dir_all(&corrupt)?;
+    std::fs::write(corrupt.join("reservation.json"), b"corrupt")?;
+    assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
     assert!(
         matches!(store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
         [(attempt, Reconciled::Uncertain { reason })]

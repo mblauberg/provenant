@@ -527,24 +527,6 @@ impl RunStore {
             .state_root
             .as_path()
             .join(format!("runs/{}/attempts/{id}/tmp", record.run_id));
-        let attempt = match self
-            .attempt_dir(record.run_id, id, false)
-            .and_then(|attempt| {
-                attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
-                Ok(attempt)
-            }) {
-            Ok(attempt) => attempt,
-            Err(RunError::Filesystem(error)) if error.is_not_found() => {
-                self.set_temporary_retained(id, false, call)?;
-                return Ok(None);
-            }
-            Err(error) => {
-                return Ok(Some(Reconciled::TemporaryRetained {
-                    path,
-                    reason: error.to_string(),
-                }));
-            }
-        };
         let listing = match self.writer_fence_listing() {
             Ok(listing) => listing,
             Err(error) => {
@@ -554,18 +536,6 @@ impl RunStore {
                 }));
             }
         };
-        // An unreadable reservation cannot establish absence of
-        // custody for this attempt, so leave temporary data alone.
-        if let Some(issue) = listing.issues.first() {
-            return Ok(Some(Reconciled::TemporaryRetained {
-                path,
-                reason: format!(
-                    "writer reservation unreadable at {}: {}",
-                    issue.reservation.display(),
-                    issue.reason
-                ),
-            }));
-        }
         let retained = listing
             .reservations
             .into_iter()
@@ -590,6 +560,36 @@ impl RunStore {
                 }));
             }
             None => {}
+        }
+        let attempt = match self
+            .attempt_dir(record.run_id, id, false)
+            .and_then(|attempt| {
+                attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
+                Ok(attempt)
+            }) {
+            Ok(attempt) => attempt,
+            Err(RunError::Filesystem(error)) if error.is_not_found() => {
+                self.set_temporary_retained(id, false, call)?;
+                return Ok(None);
+            }
+            Err(error) => {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: error.to_string(),
+                }));
+            }
+        };
+        // An unreadable reservation cannot establish absence of
+        // custody for this attempt, so leave temporary data alone.
+        if let Some(issue) = listing.issues.first() {
+            return Ok(Some(Reconciled::TemporaryRetained {
+                path,
+                reason: format!(
+                    "writer reservation unreadable at {}: {}",
+                    issue.reservation.display(),
+                    issue.reason
+                ),
+            }));
         }
         let remove = || -> Result<()> {
             match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
