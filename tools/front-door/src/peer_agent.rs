@@ -586,8 +586,10 @@ mod tests {
         let held: Vec<UnixStream> = (0..CONCURRENT)
             .map(|_| UnixStream::connect(&socket).unwrap())
             .collect();
+        // Until the server has accepted every held connection, a probe may be
+        // served (and fail, as the test binary is not provenant), so retry.
         for _ in 0..200 {
-            if forward(&state, b"x").unwrap() == Forward::Busy {
+            if matches!(forward(&state, b"x"), Ok(Forward::Busy)) {
                 break;
             }
             std::thread::park_timeout(Duration::from_millis(25));
