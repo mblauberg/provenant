@@ -2138,3 +2138,14 @@ fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
     assert_eq!(entry.check_org(None).unwrap(), None);
     assert!(entry.check_org(Some("b")).is_err());
 }
+#[test]
+fn codex_ignores_web_search_items_with_repeated_members() -> Result<(), ProviderError> {
+    let mut stream = codex::Codex.stream(None)?;
+    let raw = b"{\"type\":\"item.started\",\"item\":{\"id\":\"item_1\",\"type\":\"web_search\",\"id\":\"exec-1\",\"query\":\"\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"web_search\",\"id\":\"exec-1\",\"query\":\"q\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n";
+    codex::Codex.observe(&mut stream, raw)?;
+    assert_eq!(
+        codex::Codex.finish(stream, EXIT)?.status(),
+        OutcomeStatus::Success
+    );
+    Ok(())
+}
