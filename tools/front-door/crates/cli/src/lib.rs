@@ -935,6 +935,21 @@ mod tests {
                 .iter()
                 .any(|arg| arg.name == "wait" && arg.bounds == Some((1, 14400)))
         }));
+        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "reconcile", "--json"])
+        else {
+            panic!("reconcile help")
+        };
+        assert!(!text.contains("--abandon-uncertain"));
+        let reconcile = catalog
+            .commands
+            .iter()
+            .find(|command| command.command == "provenant reconcile");
+        assert!(reconcile.is_some_and(|command| {
+            !command
+                .arguments
+                .iter()
+                .any(|arg| arg.name == "abandon_uncertain")
+        }));
     }
     #[cfg(unix)]
     #[test]

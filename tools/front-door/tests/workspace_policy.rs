@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, TableLike};
 
-// ADR 0028 decision 3 and PORTING R6. tempfile is checked separately below.
+// ADR 0028 decision 3 and docs/specs/rust-workspace.md#dependencies. tempfile is checked separately below.
 const DIRECT: &[&str] = &[
     "clap",
     "jiff",

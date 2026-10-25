@@ -799,6 +799,28 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 + 1;
             expected.splice(index..index, ["DEVELOPER_DIR", "SDKROOT"]);
         }
+        if id == "codex"
+            && ["/opt/homebrew", "/usr/local"]
+                .iter()
+                .any(|prefix| Path::new(prefix).join("bin/node").exists())
+        {
+            let index = expected
+                .iter()
+                .position(|key| *key == "GIT_CONFIG_GLOBAL")
+                .expect("git env");
+            expected.splice(
+                index..index,
+                [
+                    "npm_config_cache",
+                    "PNPM_HOME",
+                    "npm_config_store_dir",
+                    "pnpm_config_store_dir",
+                    "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
+                    "COREPACK_HOME",
+                ],
+            );
+        }
         assert_eq!(keys, expected, "{id}");
         assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
         assert!(
@@ -1450,7 +1472,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
 }
 
 #[test]
-fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
+fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_stores() {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let plan = read_only_plan("/fixture", Some("login"));
@@ -1466,7 +1488,6 @@ fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
         .unwrap();
     let env = |key: &str| spec.env.iter().find(|(k, _)| k == key).unwrap().1.clone();
     assert_eq!(env("CARGO_TARGET_DIR"), "/fixture/scratch/target");
-    assert_eq!(env("CARGO_HOME"), "/fixture/home/.cargo");
     assert_eq!(env("RUSTUP_HOME"), "/fixture/home/.rustup");
     assert_eq!(env("RUSTUP_AUTO_INSTALL"), "0");
     let paths = |grants: &[provenant_confinement::permissions::PathGrant]| {
@@ -1476,32 +1497,28 @@ fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
             .collect::<Vec<_>>()
     };
     let reads = paths(&spec.profile.spec.runtime_reads);
-    let writes = paths(&spec.profile.spec.tool_writes);
     for dir in ["/fixture/home/.cargo", "/fixture/home/.rustup"] {
         assert!(reads.iter().any(|path| path == dir), "{dir}");
     }
     // Cargo downloads over TLS, so the system trust roots are readable.
     #[cfg(target_os = "macos")]
     assert!(reads.iter().any(|path| path == "/private/etc/ssl"));
-    // The shared registry, Git checkouts and package cache locks are
-    // writable; installed binaries and toolchains are not.
-    for path in [
-        "/fixture/home/.cargo/registry",
-        "/fixture/home/.cargo/git",
-        "/fixture/home/.cargo/.package-cache",
-        "/fixture/home/.cargo/.global-cache",
-    ] {
-        assert!(writes.iter().any(|write| write == path), "{path}");
+    // Shared Cargo stores are never writable; Cargo downloads into its own
+    // lane-private home. Installed binaries and toolchains stay read-only.
+    assert!(spec.profile.spec.tool_writes.is_empty());
+    assert_eq!(env("CARGO_HOME"), "/fixture/scratch/cargo-home");
+    // The registry and Git checkouts are linked read-only, never granted.
+    for name in ["registry", "git"] {
+        assert!(
+            spec.setup.iter().any(|step| matches!(
+                step,
+                crate::launch::SetupStep::Symlink { link, target }
+                    if link == &std::path::Path::new("/fixture/scratch/cargo-home").join(name)
+                        && target == &std::path::Path::new("/fixture/home/.cargo").join(name)
+            )),
+            "{name}"
+        );
     }
-    assert!(!writes.iter().any(|path| path.contains("/bin")
-        || path.contains(".rustup")
-        || path.contains("credentials")));
-    assert!(
-        !spec
-            .setup
-            .iter()
-            .any(|step| matches!(step, crate::launch::SetupStep::Symlink { link, .. } if link.starts_with("/fixture/scratch/cargo-home")))
-    );
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
@@ -1516,9 +1533,101 @@ fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
     }
 }
 
+fn covers(grant: &provenant_confinement::permissions::PathGrant, path: &std::path::Path) -> bool {
+    use provenant_confinement::permissions::PathScope;
+    match grant.scope {
+        PathScope::Exact => grant.path == path,
+        PathScope::Subtree => path.starts_with(&grant.path),
+    }
+}
+
+#[test]
+fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let shared = [
+        ".cargo/registry",
+        ".cargo/registry/src/index/crate-1.0/build.rs",
+        ".cargo/git",
+        ".cargo/git/checkouts/repo/build.rs",
+        ".cargo/.package-cache",
+        ".cargo/.global-cache",
+        "Library/pnpm",
+        "Library/pnpm/pnpm",
+        "Library/Caches/pnpm",
+        ".npm",
+        ".npm/_cacache/content",
+        ".cache/node",
+        ".cache/node/corepack",
+    ];
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        // Claude shares the same launch helpers; its account setup needs
+        // identities, so its writer lane is covered by its own test.
+        if id != "codex" {
+            continue;
+        }
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let launch = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                std::path::Path::new("/fixture/repo"),
+                None,
+            ))?;
+            let spec = &launch.profile.spec;
+            let writable: Vec<_> = spec
+                .tool_writes
+                .iter()
+                .chain(&spec.state_writes)
+                .chain(
+                    spec.authentication
+                        .iter()
+                        .flat_map(|auth| &auth.in_place_writes),
+                )
+                .collect();
+            for relative in shared {
+                let path = std::path::Path::new("/fixture/home").join(relative);
+                assert!(
+                    !writable.iter().any(|grant| covers(grant, &path)),
+                    "{id} {access:?}: {}",
+                    path.display()
+                );
+            }
+            let env = |key: &str| {
+                launch
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| std::path::PathBuf::from(v))
+            };
+            let cache = match access {
+                Access::ReadOnly => std::path::PathBuf::from("/fixture/scratch"),
+                _ => "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
+            };
+            assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
+            // Node variables appear only where a Homebrew Node exists.
+            for (key, leaf) in [
+                ("npm_config_cache", "npm"),
+                ("PNPM_HOME", "pnpm-home"),
+                ("npm_config_store_dir", "pnpm-store"),
+                ("pnpm_config_store_dir", "pnpm-store"),
+                ("npm_config_cache_dir", "pnpm-cache"),
+                ("pnpm_config_cache_dir", "pnpm-cache"),
+            ] {
+                if let Some(value) = env(key) {
+                    assert_eq!(value, cache.join(leaf), "{id} {access:?} {key}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderError> {
-    use provenant_confinement::permissions::{PathGrant, PathScope};
     let cases: &[(&str, &[&str])] = &[
         (
             "claude",
@@ -1573,10 +1682,6 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             ],
         ),
     ];
-    let covers = |grant: &PathGrant, path: &std::path::Path| match grant.scope {
-        PathScope::Exact => grant.path == path,
-        PathScope::Subtree => path.starts_with(&grant.path),
-    };
     let prompt = Prompt::new("fixture prompt".into());
     for &(id, forbidden) in cases {
         let adapter = REGISTRY
@@ -1943,7 +2048,10 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
         ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
-        ("CARGO_HOME", "/fixture/home/.cargo"),
+        (
+            "CARGO_HOME",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
+        ),
         (
             "CARGO_TARGET_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
@@ -1971,16 +2079,9 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             "{path}"
         );
     }
-    // The shared registry is writable in place; the compiler hard-denies
-    // Cargo credentials.
-    assert!(
-        launch
-            .profile
-            .spec
-            .tool_writes
-            .iter()
-            .any(|g| g.path == Path::new("/fixture/home/.cargo/registry"))
-    );
+    // No shared toolchain store is writable; the compiler hard-denies Cargo
+    // credentials.
+    assert!(launch.profile.spec.tool_writes.is_empty());
     // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
     // wrapper that sets it, and its directory is executable.
     assert!(launch.setup.iter().any(|step| matches!(

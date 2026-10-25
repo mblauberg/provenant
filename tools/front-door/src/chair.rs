@@ -400,10 +400,19 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
     let result = (|| -> Result<Value, Error> {
         let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
         let context = Context::new(globals, &cwd)?;
-        let id = match session_id.or_else(|| std::env::var("CLAUDE_SESSION_ID").ok()) {
+        let id = match session_id.or_else(|| {
+            std::env::var("CLAUDE_CODE_SESSION_ID")
+                .or_else(|_| std::env::var("CLAUDE_SESSION_ID"))
+                .ok()
+        }) {
             Some(id) => id,
             None if dry_run => "dry-run".into(),
-            None => return Err("a real switch requires --session-id or CLAUDE_SESSION_ID".into()),
+            None => {
+                return Err(
+                    "a real switch requires --session-id, CLAUDE_CODE_SESSION_ID or CLAUDE_SESSION_ID"
+                        .into(),
+                );
+            }
         };
         let input = Input {
             hook_event_name: "manual".into(),

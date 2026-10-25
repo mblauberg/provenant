@@ -427,6 +427,7 @@ pub fn report(
         next_due_unix_seconds,
         report_path: path,
         display: crate::Display::default(),
+        display_icon_warning: None,
     })
 }
 

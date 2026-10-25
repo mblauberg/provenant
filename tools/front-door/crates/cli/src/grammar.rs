@@ -1,4 +1,4 @@
-//! Frozen CLI-owned grammar. Owner subtrees mount only when their owners land.
+//! CLI-owned grammar with mounted owner subtrees.
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
 pub use provenant_records::Harness;
@@ -89,6 +89,8 @@ pub enum Command {
     /// Create, list and remove worktrees
     #[command(subcommand)]
     Worktree(Worktree),
+    /// Remove orphaned and idle lane build caches
+    Gc(Gc),
     /// Mine, verify and run benchmark tasks
     #[command(subcommand)]
     Bench(crate::bench::Bench),
@@ -454,7 +456,7 @@ pub struct Reconcile {
     #[arg(long)]
     pub id: Vec<RunId>,
     /// Abandon uncertain custody (not available in this build)
-    #[arg(long, requires = "id")]
+    #[arg(long, requires = "id", hide = true)]
     pub abandon_uncertain: bool,
 }
 #[derive(Debug, Subcommand)]
@@ -522,6 +524,15 @@ pub enum Worktree {
     List,
     /// Remove a worktree, or all merged ones
     Remove(Remove),
+}
+#[derive(Debug, Args)]
+pub struct Gc {
+    /// Report what would be removed without deleting anything
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Also remove caches with no file written for this many days
+    #[arg(long, default_value = "7", value_parser = clap::value_parser!(u64).range(1..=3650))]
+    pub idle_days: u64,
 }
 #[derive(Debug, Args)]
 pub struct Remove {

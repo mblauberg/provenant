@@ -363,9 +363,55 @@ pub fn worktree_cargo_cache(
     Ok(grant)
 }
 
+/// Why a lane cache was (or would be) removed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheGcReason {
+    /// The recorded owner worktree incarnation no longer exists.
+    Orphaned,
+    /// Nothing under the cache was written since the idle threshold.
+    Idle,
+}
+
+/// What a lane cache sweep removes besides orphans.
+#[derive(Clone, Debug, Default)]
+pub struct CacheGcPolicy {
+    /// Also remove caches whose newest write is older than this many nanoseconds
+    /// since the epoch. `None` removes orphans only.
+    pub idle_before_ns: Option<i128>,
+    /// Report without deleting.
+    pub dry_run: bool,
+    /// Canonical owner worktrees with a live or unobservable writer; never removed.
+    pub protected_owners: std::collections::BTreeSet<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CacheGcEntry {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub reason: CacheGcReason,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CacheGcReport {
+    pub dry_run: bool,
+    pub removed: Vec<CacheGcEntry>,
+    pub bytes_freed: u64,
+}
+
 /// Remove only marked lane caches whose recorded worktree incarnation is absent.
 /// A sweep can race a lane preparing its cache only if the lane forged its own marker.
 pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, PermissionError> {
+    gc_worktree_cargo_caches(home, &CacheGcPolicy::default()).map(|report| report.removed.len())
+}
+
+/// Sweep the lane cache root: orphaned caches always, idle ones when the policy
+/// sets a threshold. Entries must be hex-named directories directly under the
+/// root and are opened without following symlinks.
+pub fn gc_worktree_cargo_caches(
+    home: &Path,
+    policy: &CacheGcPolicy,
+) -> Result<CacheGcReport, PermissionError> {
     use provenant_supervisor::fs::LocalFs;
     use std::io;
 
@@ -373,14 +419,27 @@ pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, Permis
     let cache_root = home.join("Library/Caches/provenant-lane-cargo");
     match std::fs::symlink_metadata(&cache_root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return Ok(0),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Ok(_) => {
+            return Ok(CacheGcReport {
+                dry_run: policy.dry_run,
+                ..CacheGcReport::default()
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(CacheGcReport {
+                dry_run: policy.dry_run,
+                ..CacheGcReport::default()
+            });
+        }
         Err(error) => return Err(PermissionError::CacheSweepIo(error)),
     }
     let root = LocalFs
         .open_anchor(&cache_root)
         .map_err(PermissionError::Filesystem)?;
-    let mut removed = 0;
+    let mut report = CacheGcReport {
+        dry_run: policy.dry_run,
+        ..CacheGcReport::default()
+    };
     let mut failures = Vec::new();
     for entry in root.entries().map_err(PermissionError::Filesystem)? {
         let name = match entry {
@@ -390,9 +449,12 @@ pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, Permis
                 continue;
             }
         };
-        match prune_worktree_cache(root.as_ref(), &name) {
-            Ok(true) => removed += 1,
-            Ok(false) => {}
+        match prune_worktree_cache(root.as_ref(), &cache_root, &name, policy) {
+            Ok(Some(entry)) => {
+                report.bytes_freed = report.bytes_freed.saturating_add(entry.bytes);
+                report.removed.push(entry);
+            }
+            Ok(None) => {}
             Err(error) => failures.push(format!("{:?}: {error}", name)),
         }
     }
@@ -401,34 +463,36 @@ pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, Permis
             failures.join("; "),
         )));
     }
-    Ok(removed)
+    Ok(report)
 }
 
 fn prune_worktree_cache(
     root: &dyn provenant_supervisor::fs::SafeDir,
+    cache_root: &Path,
     name: &OsStr,
-) -> Result<bool, PermissionError> {
+    policy: &CacheGcPolicy,
+) -> Result<Option<CacheGcEntry>, PermissionError> {
     use std::io;
 
     let Some(digest) = name.to_str() else {
-        return Ok(false);
+        return Ok(None);
     };
     if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Ok(false);
+        return Ok(None);
     }
     let metadata = match root.metadata_at(name, false) {
         Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
-        Ok(_) => return Ok(false),
-        Err(error) if error.is_not_found() => return Ok(false),
+        Ok(_) => return Ok(None),
+        Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(PermissionError::Filesystem(error)),
     };
     if metadata.uid != provenant_supervisor::fs::effective_uid() || metadata.mode & 0o7777 != 0o700
     {
-        return Ok(false);
+        return Ok(None);
     }
     let cache = match root.open_verified_directory(name) {
         Ok(cache) => cache,
-        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(PermissionError::Filesystem(error)),
     };
     let marker_name = OsStr::new(CARGO_CACHE_OWNER);
@@ -440,35 +504,35 @@ fn prune_worktree_cache(
         {
             metadata
         }
-        Ok(_) => return Ok(false),
-        Err(error) if error.is_not_found() => return Ok(false),
+        Ok(_) => return Ok(None),
+        Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(PermissionError::Filesystem(error)),
     };
     if marker_meta.size > 8192 {
-        return Ok(false);
+        return Ok(None);
     }
     let mut marker = Vec::with_capacity(marker_meta.size as usize);
     let file = match cache.open_read(marker_name) {
         Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(PermissionError::Filesystem(error)),
     };
     if let Err(error) = file.take(8193).read_to_end(&mut marker) {
         return Err(PermissionError::CacheSweepIo(error));
     }
     if marker.len() > 8192 {
-        return Ok(false);
+        return Ok(None);
     }
     if marker.starts_with(LEGACY_CARGO_CACHE_OWNER_PREFIX) {
-        return Ok(false);
+        return Ok(None);
     }
     if !marker.starts_with(CARGO_CACHE_OWNER_PREFIX) {
-        return Ok(false);
+        return Ok(None);
     }
     let owner_bytes = &marker[CARGO_CACHE_OWNER_PREFIX.len()..];
     // Legacy markers have no inode identity, so retain them rather than guess.
     if owner_bytes.len() <= 16 {
-        return Ok(false);
+        return Ok(None);
     }
     let (identity, path_bytes) = owner_bytes.split_at(16);
     let recorded_device = u64::from_le_bytes(
@@ -482,7 +546,7 @@ fn prune_worktree_cache(
             .map_err(|_| PermissionError::InvalidFixture)?,
     );
     if path_bytes.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let owner = PathBuf::from(OsString::from_vec(path_bytes.to_vec()));
     if !owner.is_absolute()
@@ -490,20 +554,67 @@ fn prune_worktree_cache(
             .components()
             .any(|part| matches!(part, Component::ParentDir))
     {
-        return Ok(false);
+        return Ok(None);
     }
-    match std::fs::symlink_metadata(&owner) {
+    let reason = match std::fs::symlink_metadata(&owner) {
         Ok(metadata) if metadata.dev() == recorded_device && metadata.ino() == recorded_inode => {
-            return Ok(false);
+            let Some(threshold) = policy.idle_before_ns else {
+                return Ok(None);
+            };
+            if policy.protected_owners.contains(&owner) {
+                return Ok(None);
+            }
+            let (_, newest) = measure_cache(cache.as_ref(), 0)?;
+            if newest >= threshold {
+                return Ok(None);
+            }
+            CacheGcReason::Idle
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => CacheGcReason::Orphaned,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => CacheGcReason::Orphaned,
         Err(error) => return Err(PermissionError::CacheSweepIo(error)),
+    };
+    let (bytes, _) = measure_cache(cache.as_ref(), 0)?;
+    if !policy.dry_run {
+        remove_cache_contents(cache.as_ref())?;
+        drop(cache);
+        root.rmdir(name).map_err(PermissionError::Filesystem)?;
     }
-    remove_cache_contents(cache.as_ref())?;
-    drop(cache);
-    root.rmdir(name).map_err(PermissionError::Filesystem)?;
-    Ok(true)
+    Ok(Some(CacheGcEntry {
+        path: cache_root.join(name),
+        bytes,
+        reason,
+    }))
+}
+
+/// Disk bytes and the newest modification time (ns since the epoch) under a
+/// cache, without following symlinks.
+fn measure_cache(
+    directory: &dyn provenant_supervisor::fs::SafeDir,
+    depth: usize,
+) -> Result<(u64, i128), PermissionError> {
+    if depth >= MAX_CACHE_SWEEP_DEPTH {
+        return Err(PermissionError::CacheSweepDepth);
+    }
+    let mut bytes = 0_u64;
+    let mut newest = 0_i128;
+    for entry in directory.entries().map_err(PermissionError::Filesystem)? {
+        let name = entry.map_err(PermissionError::Filesystem)?;
+        let metadata = directory
+            .metadata_at(&name, false)
+            .map_err(PermissionError::Filesystem)?;
+        bytes = bytes.saturating_add(metadata.allocated.max(metadata.size));
+        newest = newest.max(metadata.modified_ns);
+        if metadata.kind == FileKind::Directory {
+            let child = directory
+                .open_verified_directory(&name)
+                .map_err(PermissionError::Filesystem)?;
+            let (child_bytes, child_newest) = measure_cache(child.as_ref(), depth + 1)?;
+            bytes = bytes.saturating_add(child_bytes);
+            newest = newest.max(child_newest);
+        }
+    }
+    Ok((bytes, newest))
 }
 
 fn remove_cache_contents(
@@ -4163,6 +4274,60 @@ mod tests {
         assert!(error.to_string().contains(&"a".repeat(64)));
         assert!(deep.is_dir());
         assert!(!ordinary.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn lane_cache_gc_removes_orphaned_and_idle_and_spares_live_and_recent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&cache_root)?;
+        let mut caches = Vec::new();
+        for (letter, name) in [("a", "gone"), ("b", "idle"), ("c", "live")] {
+            let cache = cache_root.join(letter.repeat(64));
+            std::fs::create_dir(&cache)?;
+            std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::write(cache.join("artifact"), b"0123456789")?;
+            let owner = home.join(name);
+            std::fs::create_dir(&owner)?;
+            let identity = std::fs::metadata(&owner)?;
+            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+            marker.extend_from_slice(&identity.dev().to_le_bytes());
+            marker.extend_from_slice(&identity.ino().to_le_bytes());
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
+            caches.push((cache, owner));
+        }
+        std::fs::remove_dir(&caches[0].1)?;
+        let mut policy = CacheGcPolicy {
+            idle_before_ns: Some(i128::MAX),
+            dry_run: true,
+            protected_owners: [caches[2].1.clone()].into(),
+        };
+
+        let dry = gc_worktree_cargo_caches(home, &policy)?;
+        assert_eq!(dry.removed.len(), 2);
+        assert!(caches.iter().all(|(cache, _)| cache.is_dir()));
+
+        policy.dry_run = false;
+        let report = gc_worktree_cargo_caches(home, &policy)?;
+        let reasons: Vec<_> = report.removed.iter().map(|e| e.reason).collect();
+        assert!(reasons.contains(&CacheGcReason::Orphaned));
+        assert!(reasons.contains(&CacheGcReason::Idle));
+        assert!(report.bytes_freed >= 20);
+        assert!(!caches[0].0.exists());
+        assert!(!caches[1].0.exists());
+        assert!(caches[2].0.is_dir(), "protected owner keeps its cache");
+
+        // A recent cache is kept when the threshold predates its writes.
+        policy.idle_before_ns = Some(0);
+        policy.protected_owners.clear();
+        assert!(gc_worktree_cargo_caches(home, &policy)?.removed.is_empty());
+        assert!(caches[2].0.is_dir());
         Ok(())
     }
 }

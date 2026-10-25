@@ -1,6 +1,6 @@
 # `provenant-records`
 
-Shared durable-record boundaries for the Rust port:
+Shared durable-record boundaries for the front door:
 
 - bounded, duplicate-safe JSON decoding and strict schema-version-one headers;
 - bounded JSONC tokenization with original source spans;

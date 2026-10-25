@@ -11,17 +11,48 @@ Profiles are `balanced`, `economy` and `rigorous`; task-class presets include
 `provenant config show --task-class mechanical` and override a wired knob for
 one run with `provenant dispatch --knob NAME=VALUE`.
 
+## Precedence and stamps
+
+The header requires `schema_version = 1`. `profile` selects `balanced`,
+`economy` or `rigorous`, and a missing file selects defaults; a malformed or
+unsupported file fails. Knob overrides live in a `[knobs]` table:
+
+```toml
+schema_version = 1
+profile = "economy"
+```
+
+A knob in `[knobs]` wins over the profile preset, which wins over the registry
+default. There is no project JSON overlay or `PROVENANT_KNOB_*` environment
+layer. `config set|unset|show` read and write this file, and `config show
+[--task-class NAME]` reports each value and its source. Dispatch accepts
+repeated `--knob NAME=VALUE`, and `fabric_submit` accepts `knobs:
+["NAME=VALUE"]`; these validated overrides win over configuration and
+task-class presets. Each sealed task and attempt records the profile name,
+task class, effective knob values and exact dispatch overrides, and
+continuations keep that stamp.
+
+Batch concurrency resolves `lanes.max_concurrency` from the base profile, so
+task-class values do not apply. The registry default is 8, and an explicit
+`--concurrency N` or Fabric `concurrency` wins.
+
+## Knob registry
+
 `config/harness-knobs.json` owns the workflow knob registry and presets.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
-are not a second source for the workflow knob values.
+are not a second source for the workflow knob values. The binary embeds the
+registry at build time and `config set` validates against it. Skill-read knobs
+(review, repair, council, writing and summary policy) take effect when the
+skill reads `provenant config show`.
 
 The registry marks these knobs `wired`: `chair.auto_switch`,
 `chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,
 `lanes.max_concurrency`, `lanes.max_depth`, `review.extra_reviewers`,
-`review.cross_family`, `review.rereview_scope` and `review.polish`. The other
+`review.cross_family`, `review.rereview_scope`, `review.polish` and
+`fabric.accept_handoff`. The other
 eight are advisory and do not alter Rust runtime behaviour. Use `config show`
-to see each knob's status and source. Install registrations with
-`provenant install --dry-run`
+to see each knob's status and source. Preview install registrations with
+`provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 
 ## Writer extra write paths
@@ -65,6 +96,9 @@ most_constrained|<account>]` writes `[domains.quota.display]` and returns the
 quota report. Reports carry a top-level `display` block and a per-row `display`
 block (`id`, `name`, `hidden`, `order`, `headline`). Hidden accounts and order
 are not applied by the CLI; the app does that.
+If `display.icon` names an unregistered account, `quota show` reports a
+`display_icon_warning` field in JSON and one warning line in human output.
+The report uses `most_constrained` for the icon without changing config.
 
 ## Chair account switching
 
@@ -72,12 +106,12 @@ Claude chair switching is opt-in and has no daemon. Register each account with
 `provenant accounts register <label> --adapter claude --directory <dir>`.
 Registrations live in the selected state directory's `config.toml`, alongside
 optional quota metadata such as `--plan`, `--priority` and `--billing-anchor`.
-Each directory must already exist and be signed in separately. Labels and
-directories must be distinct, with no nested account directories. The current
-`CLAUDE_CONFIG_DIR` must match a registration;
-when unset, `~/.claude` may be registered as the source only. Targets must use
-fixed identities such as `~/.claude-<label>`; the rotating `~/.claude` directory
-is refused as a target. Credentials and settings are never copied between directories.
+Each Claude account directory must be exactly `~/.claude-<label>`, already exist
+and be signed in separately. Labels and directories must be distinct, with no
+nested account directories. The current `CLAUDE_CONFIG_DIR` must match a
+registration. When unset, `~/.claude` is the sign-in source only; it cannot be
+registered or used as a switch target. Credentials and settings are never copied
+between directories.
 
 ```sh
 provenant config set chair.switch_accounts '["work-spare","personal-spare"]'
@@ -90,8 +124,10 @@ provenant chair switch --to work-spare --session-id <host-session-id>
 `chair.auto_switch` defaults to `false`; `chair.switch_accounts` defaults to an
 empty list, which permits no targets. A manual switch bypasses the automatic
 trigger and enable flag, but still requires an allowed account with headroom.
-A real manual handoff requires `--session-id <host-session-id>` or
-`CLAUDE_SESSION_ID`, so retries cannot launch another successor for the same source.
+A real manual handoff requires `--session-id <host-session-id>` or an environment
+session ID: `CLAUDE_CODE_SESSION_ID` first, then `CLAUDE_SESSION_ID`. The flag
+takes precedence. `workflow session handoff` uses the same order. This keeps
+retries from launching another successor for the same source.
 A dry run reports the target, planned checkpoint path and exact launch command
 without writing a checkpoint or opening a pane.
 

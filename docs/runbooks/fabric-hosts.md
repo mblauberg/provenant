@@ -1,11 +1,8 @@
 # Fabric hosts
 
-Status: current Rust operator surface
-
 Fabric uses bounded SSH calls and host-owned state. Each host keeps its own
-provider sign-ins. The [accepted specification](../specs/fabric-hosts.md)
-records the original requirements; the [Rust Fabric design](../specs/rust-port/design/fabric.md)
-owns the replacement boundaries.
+provider sign-ins. The [Fabric design](../specs/fabric.md#peer-hosts) owns the
+peer model and boundaries.
 
 ## Commands
 
@@ -26,8 +23,8 @@ general provider sign-in check. Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
 through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
 the fixed SSH protocol entrypoint; the hidden `fabric peer-agent` command is the
-macOS LaunchAgent that runs it in the login session (see below). Remote dispatch uses top-level
-`dispatch --host`. The Rust CLI grammar lives in
+macOS LaunchAgent that runs it in the login session (see below). Remote
+dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
@@ -125,8 +122,7 @@ entrypoint cannot also run remote doctor.
 command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 `tools/front-door/crates/fabric-runtime/src/hosts.rs` own the wire format.
 Requests bind source and target host IDs and a project locator. The transport
-bounds frames to 1 MiB and refuses identity or version mismatches. Do not send
-the retired `{protocol_version, verb, params}` envelope.
+bounds frames to 1 MiB and refuses identity or version mismatches.
 
 ## Dispatch and recovery
 
@@ -181,8 +177,7 @@ Other limits on a peer run:
 shows the operation ID, route and access controls. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and
 `reconcile`. Targets follow the
-Rust grammar `RUN[/TASK[/ATTEMPT]]`; do not reuse the retired `id@host`
-selectors or `fabric fetch` workflow.
+grammar `RUN[/TASK[/ATTEMPT]]`.
 
 The peer transport does not silently fall back to local placement. A mutation
 whose reply is lost can return `launch_unknown`; retain its operation ID and
@@ -196,6 +191,23 @@ version, reachability and frame failures.
 peer. The peer starts a fresh Claude session from a hand-off prompt; no
 transcript moves. The command sends one `session_handoff` peer request, so a
 key restricted to `fabric peer` keeps working.
+
+A hand-off opens an unconfined Claude session on the target, so the target
+must opt in. It is off by default. On the host that will receive hand-offs,
+run:
+
+```sh
+provenant config set fabric.accept_handoff true
+```
+
+The setting is host-wide: enabling it accepts hand-offs from every
+configured peer, not one. Until then the host refuses with `HANDOFF_DISABLED`,
+which the calling host reports as the error code; `provenant config unset
+fabric.accept_handoff` turns it off again. The launch script prints the source
+host and the prompt path before it starts `claude`. The calling host strips
+control characters from, and bounds, every string in the peer's receipt, and
+refuses a receipt whose worktree branches differ from the requested ones
+(`HANDOFF_RECEIPT`).
 
 ```sh
 provenant workflow session handoff --to workshop --account work \
@@ -247,6 +259,14 @@ state directories. The calling host moves its record only when Terminal
 opened or `--no-launch` was given. The record is advisory: a later hand-off
 from a host that is not the recorded owner warns but proceeds.
 
+If the peer stores the hand-off but Terminal does not open, the command exits
+non-zero with `LAUNCH_FAILED`, keeps the receipt in `data` and leaves both
+leases unmoved; run the named `launch.command` on the peer by hand. Peer
+refusals keep their stable codes (`PEER_VERSION`, `QUEUE_FULL`, `CONFLICT` and
+the rest), the same as remote runs. The calling host sends its `limits.peer_seconds` and the peer works to the
+smaller of that and its own, minus 5 seconds, so a slow worktree recreation is reported by the peer rather
+than timing the calling host out.
+
 Replaying an operation ID is refused with `already_delivered`, so a peer never
 opens a second session for one hand-off. A lost reply returns
 `LAUNCH_UNKNOWN`. Look for the operation's directory in the peer's state
@@ -282,5 +302,5 @@ with `provenant lanes --host workshop`.
 ## Verify targeted changes
 
 Run only fast tests for changed Rust boundaries. Full workspace suites run in
-GitHub Actions. The current owners are `provenant-fabric-runtime` and
-`provenant-fabric-mcp`; the Python and TypeScript host owners are retired.
+GitHub Actions. The owners are `provenant-fabric-runtime` and
+`provenant-fabric-mcp`.

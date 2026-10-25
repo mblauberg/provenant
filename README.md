@@ -113,15 +113,25 @@ MCP registration, before changing a live installation. Build the optional menu b
 ## Quick start
 
 With Rust 1.99.1 installed, build from `tools/front-door`, where the pinned
-toolchain file lives, and inspect the available commands and routes:
+toolchain file lives, package a release and inspect the available commands and
+routes:
 
 ```sh
 cd tools/front-door
-BIN="${CARGO_TARGET_DIR:-$PWD/target}/release/provenant"
+RELEASE="$(mktemp -d)/release"
 cargo build --release --locked --bin provenant
+cargo run --release --locked --example package-release -- --out "$RELEASE"
+BIN="$RELEASE/bin/provenant"
 "$BIN" help
 "$BIN" route list
 "$BIN" route resolve --route junior
+```
+
+Before dispatch, install and sign in to a supported provider CLI. Claude and
+Codex lanes require `provenant accounts register` first; follow the
+[account registration steps](docs/runbooks/install.md#install).
+
+```sh
 "$BIN" quota show
 printf '%s\n' 'Summarise this repository structure in three bullets.' | \
   "$BIN" dispatch \
@@ -130,8 +140,8 @@ printf '%s\n' 'Summarise this repository structure in three bullets.' | \
 "$BIN" lanes --all
 ```
 
-The dispatch command starts a real read-only provider lane. Install and sign in
-to a supported provider CLI first; the run uses that provider's quota. Use
+The dispatch command starts a real read-only provider lane and uses that
+provider's quota. Use
 `provenant help dispatch` for all dispatch controls and
 `provenant help route` for route commands.
 
@@ -147,7 +157,7 @@ The CLI writes run state under the selected state root. Fabric uses its own
 SQLite store for messages, tasks, and host records. By default the state root
 is `~/.local/share/provenant/v1`; `--state-dir` selects another root.
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the crate map and state root layout, and
-the [Rust design index](docs/specs/rust-port/design/README.md) lists crate
+the [specifications](docs/specs/README.md) list crate
 responsibilities.
 
 ## Platform
@@ -161,9 +171,9 @@ optional menu bar app.
 
 | Guide | Use it for |
 | --- | --- |
-| [Rust design index](docs/specs/rust-port/design/README.md) | Crate owners, command boundaries, and current Rust decisions |
+| [Specifications](docs/specs/README.md) | Per-subsystem contracts and cross-cutting decisions |
 | [Architecture](docs/ARCHITECTURE.md) | Product components and system flow |
-| [Rust rewrite rulebook](docs/specs/rust-port/PORTING.md) | Rust implementation constraints and checks |
+| [Rust workspace rules](docs/specs/rust-workspace.md) | Crate layering, dependencies, errors, unsafe code and tests |
 | [Install runbook](docs/runbooks/install.md) | Build, package, install, uninstall, and migrate a release; register Fabric MCP |
 | [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, writer write paths, quota display, and chair account switching |
 | [Providers](docs/runbooks/providers.md) | Per-adapter launch notes |

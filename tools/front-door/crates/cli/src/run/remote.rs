@@ -132,33 +132,17 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
         Some(detail) => format!("{error} ({detail})"),
         None => error.to_string(),
     };
-    let (status, code) = match &error {
-        FacadeError::LaunchUnknown { operation_id } => {
-            return Fail::new(
-                Status::Error,
-                "LAUNCH_UNKNOWN",
-                format!(
-                    "{message}; rerun with --operation-id {operation_id} to recover the \
-                     peer's receipt before submitting new work"
-                ),
-            );
-        }
-        FacadeError::HomeUnavailable => (Status::Error, "PEER_UNAVAILABLE"),
-        FacadeError::PeerVersion => (Status::Refused, "PEER_VERSION"),
-        FacadeError::InvalidInput => (Status::Invalid, "INVALID"),
-        FacadeError::NotFound => (Status::Invalid, "NOT_FOUND"),
-        FacadeError::Conflict => (Status::Refused, "CONFLICT"),
-        FacadeError::Busy => (Status::Refused, "QUEUE_FULL"),
-        FacadeError::ConfinementRefused => (Status::Refused, "REFUSED"),
-        FacadeError::WorktreeMissing => (Status::Invalid, "WORKTREE_MISSING"),
-        FacadeError::BaseUnreachable => (Status::Refused, "BASE_UNREACHABLE"),
-        FacadeError::BranchExists => (Status::Refused, "BRANCH_EXISTS"),
-        FacadeError::LaneDepth => (Status::Refused, "LANE_DEPTH"),
-        FacadeError::OwnerUnavailable => (Status::Refused, "UNSUPPORTED"),
-        FacadeError::Cancelled => (Status::Error, "CANCELLED"),
-        FacadeError::StateCorrupt => (Status::Error, "STATE_CORRUPT"),
-        _ => (Status::Error, "PEER"),
-    };
+    if let FacadeError::LaunchUnknown { operation_id } = &error {
+        return Fail::new(
+            Status::Error,
+            "LAUNCH_UNKNOWN",
+            format!(
+                "{message}; rerun with --operation-id {operation_id} to recover the \
+                 peer's receipt before submitting new work"
+            ),
+        );
+    }
+    let (status, code) = crate::fabric::facade_outcome(&error);
     Fail::new(status, code, format!("peer: {message}"))
 }
 

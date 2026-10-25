@@ -7,7 +7,7 @@ edition = "2024"
 rust-version = "1.99.1"
 license = "MIT"
 
-# The only direct dependencies allowed (ADR 0028, PORTING.md R6). Member crates
+# The only direct dependencies allowed (ADR 0028; docs/specs/rust-workspace.md#dependencies). Member crates
 # use `{ workspace = true }`; an entry here enters Cargo.lock only once used.
 [workspace.dependencies]
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
@@ -22,7 +22,7 @@ tempfile = "3"
 thiserror = "2.0"
 toml_edit = { version = "0.25", features = ["serde"] }
 
-# Internal crates. Each member may depend only on the crates PORTING.md R2
+# Internal crates. Each member may depend only on the crates docs/specs/rust-workspace.md#crate-layering
 # allows it, as `provenant-<name> = { workspace = true }`.
 provenant-core = { path = "crates/core" }
 provenant-records = { path = "crates/records" }
@@ -40,11 +40,7 @@ provenant-fabric-mcp = { path = "crates/fabric-mcp" }
 provenant-workflow = { path = "crates/workflow" }
 provenant-cli = { path = "crates/cli" }
 
-# Rewrite lanes land inert (ADR 0028). Keep their shared path declarations
-# until cutover gives each a consumer; remove its ignore at that point.
 [workspace.metadata.cargo-shear]
-# Empty rewrite crates and the retained CLI-owned generated scaffold are
-# deliberate until their owner slices land. Remove each path as it gains code.
 ignored-paths = []
 ignored = []
 
