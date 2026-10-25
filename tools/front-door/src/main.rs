@@ -477,6 +477,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             }
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals),
+        Command::Gc(command) => worktrees::run_gc(command, globals),
         Command::Bench(command) => bench::run(command, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => hooks::run(hook, globals),
