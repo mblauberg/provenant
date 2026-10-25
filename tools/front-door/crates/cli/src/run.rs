@@ -1587,6 +1587,11 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
     reply_waited(
         "lanes",
         (|| {
+            if let Some(host) = command.host.as_deref()
+                && !remote::names_local_host(edge, host)?
+            {
+                return remote::host_lanes(&command, host, edge);
+            }
             if let Some(placed) = remote::lanes(&command, edge)? {
                 return Ok(placed);
             }

@@ -620,6 +620,15 @@ mod tests {
         invalid(&["lanes", "--wait", "10", "--since", "24h"]);
     }
     #[test]
+    fn lanes_host_lists_a_peer_without_ids_waits_or_cursors() {
+        valid(&["lanes", "--host", "workshop"]);
+        valid(&["lanes", "--host", "workshop", "--all", "--state", "running"]);
+        let run = "11".repeat(16);
+        invalid(&["lanes", "--host", "workshop", "--id", &run]);
+        invalid(&["lanes", "--host", "workshop", "--wait", "5"]);
+        invalid(&["lanes", "--host", "workshop", "--cursor", "1"]);
+    }
+    #[test]
     fn manifest_and_writer_authority_do_not_mix() {
         valid(&[
             "route",

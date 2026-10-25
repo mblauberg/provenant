@@ -362,6 +362,9 @@ pub struct Lanes {
     /// Show only this RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long, conflicts_with = "all")]
     pub id: Vec<Target>,
+    /// List a configured peer's own lanes, by label or host ID
+    #[arg(long, conflicts_with_all = ["id", "wait", "cursor"])]
+    pub host: Option<String>,
     /// Show every lane
     #[arg(long)]
     pub all: bool,

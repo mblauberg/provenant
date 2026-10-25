@@ -537,6 +537,11 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 None,
                 PeerResult::RunEvents,
             ),
+            PeerAction::Lanes { all, limit } => peer_result(
+                owner.lanes_local(*all, *limit, budget, &cancel),
+                None,
+                PeerResult::RunStatuses,
+            ),
             PeerAction::Health => PeerResult::Health(HostHealth {
                 host: context.identity.host,
                 available: true,
@@ -1227,6 +1232,35 @@ impl BinaryRunOwner<'_> {
                     .map_err(run_error)
             })
             .collect()
+    }
+    /// This host's lanes for `PeerAction::Lanes`: active ones oldest first,
+    /// or with `all` the newest retained ones.
+    fn lanes_local(
+        &self,
+        all: bool,
+        limit: u16,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<provenant_records::run::AttemptRecord>, FacadeError> {
+        if !(1..=100).contains(&limit) {
+            return Err(FacadeError::InvalidInput);
+        }
+        let store = self.store(budget, cancel)?;
+        let page = store
+            .lanes(
+                &provenant_run::LaneQuery {
+                    targets: Vec::new(),
+                    all,
+                    limit: u64::from(limit),
+                    after: 0,
+                    newest_first: all,
+                    owner: None,
+                    unseen_after: None,
+                },
+                &self.call(budget, cancel),
+            )
+            .map_err(run_error)?;
+        Ok(page.lanes)
     }
     fn peer(
         &self,

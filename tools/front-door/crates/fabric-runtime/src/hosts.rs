@@ -231,6 +231,11 @@ pub enum PeerAction {
         input: CoordinationInput,
         operation_id: Option<OperationId>,
     },
+    /// The peer's own lanes, active only unless `all`; newest first with `all`.
+    Lanes {
+        all: bool,
+        limit: u16,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
