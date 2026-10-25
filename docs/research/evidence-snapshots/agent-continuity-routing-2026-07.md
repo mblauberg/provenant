@@ -75,9 +75,7 @@ enum, automatic context controller and deep-mode IDs were research, not
 accepted current protocol.
 
 OpenCode activation was still open at this snapshot's cut-off. Its current
-state and remaining user gates live in the
-[provider boundary reference](../provider-adapter-and-runtime-boundaries.md)
-and checked-in adapter configuration. The later `P06-FR-032` row retains its
+state and remaining user gates live in checked-in adapter configuration. The later `P06-FR-032` row retains its
 dated disposition only.
 
 ## Section-to-destination map
@@ -85,13 +83,13 @@ dated disposition only.
 | Source material | Durable destination |
 |---|---|
 | Evidence method, volatile papers, model signals and source inventory | This snapshot |
-| Context observations, checkpointing, rotation, acknowledgement and child independence | [Agent continuity and checkpointing](../agent-continuity-and-checkpointing.md) and Specs 01/04 |
+| Context observations, checkpointing, rotation, acknowledgement and child independence | Specs 01/04 (the standalone note was deleted; see Git history) |
 | Deployed-route identity, task-local evaluation, expiry, baseline and promotion | [Evidence-based provider routing](../evidence-based-provider-routing.md) and Specs 01/02/04 |
 | One chair, topology waves, native modes, discovery surfaces and OSS orchestration patterns | [Native orchestration and discovery surfaces](../native-orchestration-and-discovery-surfaces.md) and the current Agent Fabric specifications |
-| Adapter capability/effective configuration, OpenCode boundary, telemetry and runtime stack | [Provider adapter and runtime boundaries](../provider-adapter-and-runtime-boundaries.md) and Specs 01/03/04 |
-| Terminal framework/language comparison, interaction references and resize contract | [Project Fabric Console terminal runtime](../project-fabric-console-terminal-runtime.md) and the current Console specifications |
+| Adapter capability/effective configuration, OpenCode boundary, telemetry and runtime stack | Specs 01/03/04 (the standalone note was deleted; see Git history) |
+| Terminal framework/language comparison, interaction references and resize contract | Not retained; the console was never built |
 | General delivery lifecycle and skill portfolio evidence | Existing `agentic-sdlc-harness-2026.md` and `skill-portfolio-practices-2026.md`; not merged here |
-| Skill-trigger lifecycle routing baseline | Existing `lifecycle-routing-baseline-2026-07-10.md`; not provider routing |
+| Skill-trigger lifecycle routing baseline | [Lifecycle routing dataset](../../evals/lifecycle-routing-2026-07/README.md); not provider routing |
 
 Exact source-section coverage:
 

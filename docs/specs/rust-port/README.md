@@ -5,8 +5,7 @@ Python and TypeScript implementation with Rust in one pass: redesign each
 subsystem, build it in Rust, delete what it replaces, and install once at
 the end. There is no transition period with two implementations.
 [ADR 0029](../../adr/0029-rust-rewrite-in-one-pass.md) records the decision.
-[PORTING.md](PORTING.md) is the rulebook, and [LANE-BRIEF.md](LANE-BRIEF.md)
-holds the design and build lane prompts. GitHub owns assignments and
+[PORTING.md](PORTING.md) is the rulebook. GitHub owns assignments and
 delivery state.
 
 ## Phases

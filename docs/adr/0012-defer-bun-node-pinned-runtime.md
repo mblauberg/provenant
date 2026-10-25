@@ -1,6 +1,6 @@
 # ADR 0012 — Defer Bun; Node stays the pinned runtime family
 
-**Status:** Accepted 2026-07-16 (dual-family runtime evaluation; follow-ups
+**Status:** Superseded by [ADR 0029](0029-rust-rewrite-in-one-pass.md); accepted 2026-07-16 (dual-family runtime evaluation; follow-ups
 [#198](https://github.com/mblauberg/provenant/issues/198),
 [#199](https://github.com/mblauberg/provenant/issues/199),
 [#200](https://github.com/mblauberg/provenant/issues/200),
