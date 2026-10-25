@@ -3,7 +3,7 @@ mod context;
 
 pub(crate) use context::private_dir;
 /// Shared identity/config setup for CLI leaves and the binary MCP transport.
-pub use context::{Context, PeerFailure, facade_outcome, publish};
+pub use context::{Context, PeerFailure, facade_outcome, in_lane, publish};
 
 /// Trusted project and actor identity for sibling leaves such as workflow.
 pub(crate) fn identity(
@@ -622,6 +622,9 @@ fn execute(
 ) -> Result<(Value, bool), EdgeError> {
     let seconds = cmd.wait();
     let ctx = context::Context::open(roots, home, cwd)?;
+    if ctx.in_lane && !cmd.read_only() {
+        return Err(CoordinationError::LaneMutation.into());
+    }
     if matches!(cmd, Fabric::Identity) {
         return Ok((json(ctx.identity)?, false));
     }
@@ -928,7 +931,9 @@ pub fn run(
                 EdgeError::Coordination(error) => (
                     match error.code() {
                         "invalid_input" | "not_found" => Outcome::Invalid,
-                        "stale_fence" | "conflict" => Outcome::Refused,
+                        "stale_fence" | "conflict" | "lane_coordination_refused" => {
+                            Outcome::Refused
+                        }
                         "timeout" => Outcome::Timeout,
                         "cancelled" => Outcome::Cancelled,
                         _ => Outcome::Error,

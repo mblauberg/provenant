@@ -778,6 +778,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             "PATH",
             "TMPDIR",
             "LANG",
+            "PROVENANT_AGENT_LABEL",
             "PROVENANT_ROOT",
             "PROVENANT_GIT",
             "PROVENANT_LANE_DEPTH",
@@ -1432,7 +1433,6 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
             home: Path::new("/home/u"),
             user: OsStr::new("u"),
             config_dir: Path::new("/home/u/.claude-pro"),
-            scratch: supplied_cwd,
         };
         let key = crate::accounts::detect(
             &executor,
@@ -1441,7 +1441,6 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
             login.home,
             login.user,
             login.config_dir,
-            supplied_cwd,
         )
         .unwrap();
         let account =
@@ -1492,7 +1491,6 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
             home: Path::new("/home/u"),
             user: OsStr::new("u"),
             config_dir: Path::new(config),
-            scratch: Path::new("/scratch/empty"),
         };
         let result = refresh_if_expiring(&script, &login, &|| now, deadline, None);
         (result, script.calls.into_inner().unwrap())
@@ -1524,7 +1522,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
         ]
     );
     assert!(!env.iter().any(|v| v.starts_with("CLAUDE_CONFIG_DIR=")));
-    assert_eq!(cwd, Path::new("/scratch/empty"));
+    assert_eq!(cwd, Path::new("/"));
 
     // Inside the window the CLI refreshes once, in the empty scratch directory
     // with hooks, MCP servers, slash commands and session files off.
@@ -1545,7 +1543,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
     ] {
         assert!(argv.iter().any(|a| a == flag), "{flag}");
     }
-    assert_eq!(cwd, Path::new("/scratch/empty"));
+    assert_eq!(cwd, Path::new("/"));
     assert_eq!(calls.len(), 3);
 
     // The CLI may keep a token inside the window; one with a minute left is
@@ -1987,7 +1985,6 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                         home: Path::new("/fixture/home"),
                         user: "fixture".as_ref(),
                         config_dir: &dir,
-                        scratch: Path::new("/fixture/scratch"),
                     },
                     &account,
                     &|| 1000,
@@ -2259,7 +2256,6 @@ fn claude_account_probe_carries_user_for_keychain_selection() {
         Path::new("/home/u"),
         OsStr::new("u"),
         Path::new("/home/u/.claude-pro"),
-        Path::new("/scratch/empty"),
     );
     assert!(key.is_ok());
     let calls = script.calls.into_inner().unwrap();
@@ -2283,7 +2279,6 @@ fn claude_account_probe_names_the_missing_login() {
         Path::new("/home/u"),
         OsStr::new("u"),
         Path::new("/home/u/.claude-pro"),
-        Path::new("/scratch/empty"),
     )
     .unwrap_err();
     assert!(matches!(error, ProviderError::LoginRequired));

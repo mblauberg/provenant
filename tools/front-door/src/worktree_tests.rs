@@ -1584,7 +1584,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &home,
             "fixture".as_ref(),
             &directory,
-            &rig.root,
         )?;
         if adapter == "claude" {
             claude_key.clone_from(&key);
@@ -1699,7 +1698,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 home: &home,
                 user: "fixture".as_ref(),
                 config_dir: &home.join(".claude-fixture"),
-                scratch: &paths.scratch,
             },
             &provenant_providers::identity::RegisteredAccount::new(
                 "claude",
@@ -2422,8 +2420,15 @@ fn verify_lane_profile(
     );
     host.provider_exited(&parent.encode()?, None)?;
     fs::write(state.join("config.toml"), config(1))?;
-    // The parent store's own git-home is the host's, from preparing this lane.
+    // The child store's git-home is the in-lane fabric context's own, not the
+    // host's: its preparation keeps its git home under the host root.
     assert!(child.join("tmp/git-home").is_dir());
+    // Host probes leave no directory or lease behind once the child launched.
+    let probes: Vec<_> = fs::read_dir(state)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("probe-"))
+        .collect();
+    assert!(probes.is_empty(), "{probes:?}");
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),

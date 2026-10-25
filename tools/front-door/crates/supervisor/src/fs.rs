@@ -169,6 +169,14 @@ pub struct LockGuard {
     _file: File,
 }
 impl LockGuard {
+    /// Identity of the locked file, to compare with its directory entry: a
+    /// lock taken on an inode that was unlinked meanwhile excludes nobody.
+    pub fn metadata(&self) -> Result<Metadata> {
+        self._file
+            .metadata()
+            .map(Metadata::from_std)
+            .map_err(error("fstat owner lock", Path::new("<lock>")))
+    }
     // Only the private guardian handoff can duplicate custody descriptions.
     pub(crate) fn handoff_file(&self) -> &File {
         &self._file

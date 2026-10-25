@@ -114,7 +114,6 @@ fn prepare_with(
                 &home,
                 &user,
                 &directory,
-                &paths.scratch,
             )
         {
             entries.push(provenant_providers::accounts::Registration {
@@ -355,7 +354,7 @@ fn prepare_with(
             Some(_) => ConfinedPlan::new(request)
                 .map(|plan| (plan, None))
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, state_root, project_id, &cwd, &git, request),
+            None => read_only_plan(roots, project_id, &cwd, &git, request),
         }) {
             Ok(planned) => planned,
             Err(error) => {
@@ -370,7 +369,6 @@ fn prepare_with(
                 home: &home,
                 user: &user,
                 config_dir: account.directory(),
-                scratch,
             };
             let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
@@ -896,7 +894,6 @@ fn observe_account(
             home,
             user,
             &directory,
-            scratch,
         )
         .map_err(|e| {
             format!(
@@ -1128,11 +1125,17 @@ fn confinement_request(
     })
 }
 
+/// Home and TMPDIR for the host's Git utility: a fresh private directory under
+/// the host root, never the run state root. Inside a lane that is the
+/// lane-writable child store, where the lane could pre-create or populate it.
+fn host_git_home(host_root: &Path) -> Result<provenant_providers::host::HostProbeDir, String> {
+    provenant_providers::host::HostProbeDir::create(host_root).map_err(|error| error.to_string())
+}
+
 /// Verify the selected repository on the host and match the persisted dispatch
 /// project before deriving any Git read authority from that binding.
 fn read_only_plan(
     roots: &provenant_core::Roots,
-    state_root: &Path,
     project: ProjectId,
     cwd: &Path,
     git: &Path,
@@ -1141,11 +1144,8 @@ fn read_only_plan(
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
     // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
-    // Its home lives under the run state root: inside a lane that is the
-    // child store, since the shared state root is not writable there.
-    let utility_home = state_root.join("tmp/git-home");
-    crate::fabric::private_dir(state_root, &utility_home).map_err(|error| error.to_string())?;
-    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home)
+    let utility_home = host_git_home(roots.state.as_path())?;
+    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home.path())
         .map_err(|error| error.to_string())?;
     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
@@ -1417,6 +1417,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::{NetworkAccess, PlanPermissions};
+        use std::os::unix::fs::PermissionsExt;
+        struct Identity;
+        impl provenant_core::PathResolver for Identity {
+            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
+                let mut tail = PathBuf::new();
+                let mut head = path;
+                loop {
+                    if let Ok(resolved) = std::fs::canonicalize(head) {
+                        return Ok(resolved.join(tail));
+                    }
+                    let (Some(parent), Some(name)) = (head.parent(), head.file_name()) else {
+                        return Err(std::io::ErrorKind::NotFound.into());
+                    };
+                    tail = Path::new(name).join(tail);
+                    head = parent;
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let host_root = base.join("host-state");
+        // The lane controls its child store, including the old git-home path.
+        let child_store = host_root.join("children/parent-attempt");
+        let planted = child_store.join("tmp/git-home");
+        std::fs::create_dir_all(&planted)?;
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))?;
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo)?;
+        std::fs::create_dir_all(base.join("home"))?;
+        let real = provenant_supervisor::git::git_executable().ok_or("git unavailable")?;
+        // The smallest repository layout Git accepts, without spawning Git.
+        for dir in [".git/objects", ".git/refs/heads"] {
+            std::fs::create_dir_all(repo.join(dir))?;
+        }
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+        // A git that records the HOME and TMPDIR it was given, then runs the real one.
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin)?;
+        let record = base.join("seen");
+        let git = bin.join("git");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\n[ \"$HOME\" = \"$TMPDIR\" ] || exit 97\nls -ld \"$HOME\" >> {r}\nexec {g} \"$@\"\n",
+                r = record.display(),
+                g = real.display()
+            ),
+        )?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))?;
+
+        let roots = provenant_core::RootInputs {
+            state_dir: Some(host_root.clone()),
+            ..provenant_core::RootInputs::new(base.join("home"), repo.clone())
+        }
+        .resolve(&Identity)?;
+        let grant = |name: &str| PathGrant {
+            path: base.join(name),
+            scope: PathScope::Subtree,
+        };
+        let request = PlanRequest {
+            scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+            permissions: PlanPermissions {
+                read_only: None,
+                mode: AccessMode::ReadOnly,
+                scratch: grant("scratch"),
+                private_state: Some(grant("provider-state")),
+                read_roots: vec![grant("repo")],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        };
+        // The unbound project is refused, but only after host git has run.
+        let result = read_only_plan(&roots, ProjectId::from_bytes([1; 16]), &repo, &git, request);
+        assert!(result.is_err());
+
+        let seen = std::fs::read_to_string(&record)?;
+        assert!(!seen.is_empty(), "host git never ran");
+        for line in seen.lines() {
+            assert!(line.starts_with("drwx------"), "{line}");
+            assert!(
+                line.contains(&format!("{}/probe-", host_root.display())),
+                "{line}"
+            );
+            assert!(!line.contains("children"), "{line}");
+        }
+        // The home is gone once the plan is done, and the child store is unchanged.
+        let leftovers: Vec<_> = std::fs::read_dir(&host_root)?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with("probe-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert_eq!(std::fs::read_dir(&planted)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
     fn credential_authority_never_follows_links_below_the_host_root()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{AttemptId, OperationId, RunId};
@@ -1446,7 +1554,6 @@ mod tests {
             home: &base.join("home"),
             user: std::ffi::OsStr::new("fixture"),
             config_dir: &config,
-            scratch: &paths.scratch,
         };
         credential_authority(&host_root, &paths, &login)?;
         let record = attempt.join("credential-authority.json");
