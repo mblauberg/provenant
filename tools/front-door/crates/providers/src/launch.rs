@@ -221,6 +221,14 @@ pub(crate) fn rust_tools(
             target.clone().into_os_string(),
         ),
     ]);
+    if access == Access::ReadOnly {
+        // The lane cannot fetch, so Cargo fails fast offline, and its cache
+        // clean-up never touches the shared stores behind the links.
+        env.extend([
+            ("CARGO_NET_OFFLINE".into(), "true".into()),
+            ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()),
+        ]);
+    }
     // Cargo's system LibreSSL reads its public default configuration
     // (openssl.cnf) and the TLS trust roots (cert.pem, certs/) to download
     // crates. Read-only; the whole public directory holds no secrets.
