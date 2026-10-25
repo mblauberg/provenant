@@ -31,7 +31,7 @@ PRAGMA user_version=1;
 
 /// Open, creating if needed, the ledger under the trusted host state root.
 pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
-    let (_, db) = open_database(host, FILE, request)?;
+    let (_, db, _initialisation) = open_database(host, FILE, request)?;
     if request.retry(|| version(&db))? == 0 {
         immediate(&db, request, |tx| {
             if version(tx)? == 0 {

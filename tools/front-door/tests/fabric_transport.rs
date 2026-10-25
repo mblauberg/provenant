@@ -356,6 +356,91 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
 }
 
 #[test]
+fn peer_frames_a_local_run_event_failure() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = &identity["data"]["host"];
+    let key = &identity["data"]["federation"]["key"];
+    std::fs::write(rig.state.join("run.sqlite3"), b"invalid SQLite database")?;
+    std::fs::set_permissions(
+        rig.state.join("run.sqlite3"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
+    let request = json!({
+        "version": 1, "target_host": host, "source_host": host, "agent": "worker",
+        "project": {"key": key, "common_dir": "repo/.git"},
+        "action": {"action": "coordination", "operation_id": null,
+            "input": {"domain": "events", "input": {
+                "op": "read", "after": 0, "limit": 10, "wait_ms": null
+            }}
+        }
+    });
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let response: provenant_fabric_runtime::hosts::PeerResponse =
+        serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response.version, 1);
+    assert_eq!(serde_json::to_value(response.host)?, *host);
+    assert_eq!(serde_json::to_value(response.project)?, *key);
+    assert!(matches!(
+        response.result,
+        provenant_fabric_runtime::hosts::PeerResult::Error { code, operation_id }
+            if code == "io" && operation_id.is_none()
+    ));
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn local_run_event_failure_is_an_error_instead_of_unknown_host() -> Result {
+    let rig = TestRig::new()?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    std::fs::write(rig.state.join("run.sqlite3"), b"invalid SQLite database")?;
+    std::fs::set_permissions(
+        rig.state.join("run.sqlite3"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
+
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"fabric_events","arguments":{"op":"read","limit":10,"after":0}
+            }}),
+        ],
+    )?;
+    let result = &replies
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("events")?["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["structuredContent"]["code"], "io", "{result}");
+
+    let output = rig.command(&["fabric", "events", "read", "--after", "0", "--json"])?;
+    assert_ne!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Result {
     let mut rig = TestRig::new()?;
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
