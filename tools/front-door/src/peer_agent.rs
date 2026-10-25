@@ -124,7 +124,19 @@ pub fn forward(state: &Path, request: &[u8]) -> Result<Forward, AgentError> {
     };
     stream.set_write_timeout(Some(REQUEST))?;
     stream.set_read_timeout(Some(REQUEST))?;
-    stream.write_all(request)?;
+    if let Err(error) = stream.write_all(request) {
+        // A refusal at the cap closes unread, so a request larger than the
+        // socket buffers fails to write; the busy frame is still waiting.
+        // Only `refuse` writes it, so seeing it proves nothing ran.
+        if matches!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+        ) && read_bounded(&mut stream, Duration::from_secs(5)).is_ok_and(|reply| reply == BUSY)
+        {
+            return Ok(Forward::Busy);
+        }
+        return Err(error.into());
+    }
     stream.shutdown(Shutdown::Write)?;
     let reply = read_bounded(&mut stream, REQUEST + Duration::from_secs(5))?;
     if reply.is_empty() {
@@ -572,6 +584,11 @@ mod tests {
             std::thread::park_timeout(Duration::from_millis(25));
         }
         assert_eq!(forward(&state, b"x").unwrap(), Forward::Busy);
+        // A request beyond the socket buffers must not lose the busy reply.
+        assert_eq!(
+            forward(&state, &vec![b'x'; 256 * 1024]).unwrap(),
+            Forward::Busy
+        );
         drop(held);
     }
 
