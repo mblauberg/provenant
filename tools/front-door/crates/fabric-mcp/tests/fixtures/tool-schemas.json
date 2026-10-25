@@ -423,20 +423,13 @@
           "type": "object"
         }
       },
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "op": {
-              "const": "inspect"
-            }
-          },
-          "required": [
-            "op"
-          ],
-          "type": "object"
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "inspect"
         }
-      ],
+      },
+      "required": [],
       "type": "object"
     },
     "name": "fabric_identity",
@@ -4242,168 +4235,162 @@
           "type": "object"
         }
       },
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "concurrency": {
-              "anyOf": [
-                {
-                  "maximum": 8,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {
+          "anyOf": [
+            {
+              "maximum": 8,
+              "minimum": 1,
+              "type": "integer"
             },
-            "host": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
             },
-            "knobs": {
-              "items": {
-                "maxLength": 256,
-                "minLength": 1,
-                "pattern": "^[^\\u0000]*$",
-                "type": "string",
-                "x-provenant-maxUtf8Bytes": 256
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "knobs": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "type": "string",
+            "x-provenant-maxUtf8Bytes": 256
+          },
+          "maxItems": 64,
+          "minItems": 0,
+          "type": "array"
+        },
+        "op": {
+          "const": "submission"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "tasks": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "access": {
+                "enum": [
+                  "read_only",
+                  "worktree_write"
+                ],
+                "type": "string"
               },
-              "maxItems": 64,
-              "minItems": 0,
-              "type": "array"
-            },
-            "op": {
-              "const": "submission"
-            },
-            "operation_id": {
-              "$ref": "#/$defs/OperationId"
-            },
-            "tasks": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "access": {
-                    "enum": [
-                      "read_only",
-                      "worktree_write"
-                    ],
-                    "type": "string"
+              "account": {
+                "anyOf": [
+                  {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[^\\u0000]*$",
+                    "type": "string",
+                    "x-provenant-maxUtf8Bytes": 64
                   },
-                  "account": {
-                    "anyOf": [
-                      {
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "deliver": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "branch": {
+                        "maxLength": 1024,
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "type": "string",
+                        "x-provenant-maxUtf8Bytes": 1024
+                      },
+                      "open_pr": {
+                        "type": "boolean"
+                      },
+                      "remote": {
                         "maxLength": 64,
                         "minLength": 1,
                         "pattern": "^[^\\u0000]*$",
                         "type": "string",
                         "x-provenant-maxUtf8Bytes": 64
-                      },
-                      {
-                        "type": "null"
                       }
-                    ]
+                    },
+                    "required": [
+                      "branch",
+                      "remote"
+                    ],
+                    "type": "object"
                   },
-                  "deliver": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "branch": {
-                            "maxLength": 1024,
-                            "minLength": 1,
-                            "pattern": "^[^\\u0000]*$",
-                            "type": "string",
-                            "x-provenant-maxUtf8Bytes": 1024
-                          },
-                          "open_pr": {
-                            "type": "boolean"
-                          },
-                          "remote": {
-                            "maxLength": 64,
-                            "minLength": 1,
-                            "pattern": "^[^\\u0000]*$",
-                            "type": "string",
-                            "x-provenant-maxUtf8Bytes": 64
-                          }
-                        },
-                        "required": [
-                          "branch",
-                          "remote"
-                        ],
-                        "type": "object"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "delivery_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Id"
                   },
-                  "delivery_id": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/Id"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "prompt": {
-                    "maxLength": 65536,
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "prompt": {
+                "maxLength": 65536,
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "type": "string",
+                "x-provenant-maxUtf8Bytes": 65536
+              },
+              "route": {
+                "$ref": "#/$defs/Route"
+              },
+              "timeout_ms": {
+                "maximum": 14400000,
+                "minimum": 1000,
+                "type": "integer"
+              },
+              "worktree": {
+                "anyOf": [
+                  {
+                    "maxLength": 4096,
                     "minLength": 1,
                     "pattern": "^[^\\u0000]*$",
                     "type": "string",
-                    "x-provenant-maxUtf8Bytes": 65536
+                    "x-provenant-maxUtf8Bytes": 4096
                   },
-                  "route": {
-                    "$ref": "#/$defs/Route"
-                  },
-                  "timeout_ms": {
-                    "maximum": 14400000,
-                    "minimum": 1000,
-                    "type": "integer"
-                  },
-                  "worktree": {
-                    "anyOf": [
-                      {
-                        "maxLength": 4096,
-                        "minLength": 1,
-                        "pattern": "^[^\\u0000]*$",
-                        "type": "string",
-                        "x-provenant-maxUtf8Bytes": 4096
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
+                  {
+                    "type": "null"
                   }
-                },
-                "required": [
-                  "prompt",
-                  "route",
-                  "timeout_ms"
-                ],
-                "type": "object"
-              },
-              "maxItems": 64,
-              "minItems": 1,
-              "type": "array"
-            }
+                ]
+              }
+            },
+            "required": [
+              "prompt",
+              "route",
+              "timeout_ms"
+            ],
+            "type": "object"
           },
-          "required": [
-            "op",
-            "operation_id",
-            "tasks"
-          ],
-          "type": "object"
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
         }
+      },
+      "required": [
+        "operation_id",
+        "tasks"
       ],
       "type": "object"
     },
@@ -6835,35 +6822,29 @@
           "type": "object"
         }
       },
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "after": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
             },
-            "limit": {
-              "maximum": 100,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "op": {
-              "const": "list"
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "limit",
-            "op"
-          ],
-          "type": "object"
+          ]
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "op": {
+          "const": "list"
         }
+      },
+      "required": [
+        "limit"
       ],
       "type": "object"
     },
