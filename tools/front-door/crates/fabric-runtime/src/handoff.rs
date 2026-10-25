@@ -14,6 +14,9 @@ pub const PROMPT_LIMIT: usize = 32 * 1024;
 pub const BRANCH_COUNT: usize = 64;
 pub const ACCOUNT_LIMIT: usize = 64;
 pub const MODEL_LIMIT: usize = 128;
+/// Every hand-off prompt starts with this line, so the stored prompt can never
+/// be read as a `claude` option.
+pub const PROMPT_HEADER: &str = "# Session hand-off";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,7 +74,7 @@ pub struct HandoffWorktree {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HandoffError {
-    #[error("hand-off prompt is empty or exceeds 32 KiB")]
+    #[error("hand-off prompt must start with \"# Session hand-off\" and fit 32 KiB")]
     Prompt,
     #[error("account label is invalid")]
     Account,
@@ -120,7 +123,7 @@ pub fn valid_model(model: &str) -> bool {
 impl SessionHandoff {
     /// Bounds checks shared by both ends, with the decoded attachments.
     pub fn validate(&self) -> Result<Vec<(String, Vec<u8>)>, HandoffError> {
-        if self.prompt.trim().is_empty() || self.prompt.len() > PROMPT_LIMIT {
+        if !self.prompt.starts_with(PROMPT_HEADER) || self.prompt.len() > PROMPT_LIMIT {
             return Err(HandoffError::Prompt);
         }
         if !label(&self.account, ACCOUNT_LIMIT, b"._-") || self.account == "unknown" {
@@ -218,7 +221,7 @@ mod tests {
             operation_id: OperationId::parse("handoff-1").unwrap(),
             account: "work".into(),
             model: Some("claude-opus-4-1[1m]".into()),
-            prompt: "Continue the chair.".into(),
+            prompt: "# Session hand-off\n\nContinue the chair.".into(),
             branches: vec!["feat/x".into()],
             attachments: vec![Attachment {
                 name: "notes.md".into(),
@@ -230,14 +233,14 @@ mod tests {
 
     #[test]
     fn base64_round_trips_every_padding_length() {
-        for bytes in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"] {
+        for bytes in [&b""[..], b"a", b"ab", b"abc", b"abcd", b"abcde", b"abcdef"] {
             assert_eq!(decode_base64(&encode_base64(bytes)).unwrap(), bytes);
         }
-        assert_eq!(encode_base64(b"foobar"), "Zm9vYmFy");
-        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"abcdef"), "YWJjZGVm");
+        assert_eq!(encode_base64(b"ab"), "YWI=");
         let all: Vec<u8> = (0..=255).collect();
         assert_eq!(decode_base64(&encode_base64(&all)).unwrap(), all);
-        for bad in ["Zm9", "Zm=v", "Z===", "Zm8=Zm8=", "Zm9*"] {
+        for bad in ["YWJ", "YW=j", "Y===", "YWI=YWI=", "YWJ*"] {
             assert!(decode_base64(bad).is_none(), "{bad}");
         }
     }
@@ -251,8 +254,13 @@ mod tests {
             assert_eq!(value.validate().unwrap_err(), expected);
         };
         refuse(&|h| h.prompt = " ".into(), HandoffError::Prompt);
+        // A prompt that could parse as a `claude` option never reaches the peer.
         refuse(
-            &|h| h.prompt = "x".repeat(PROMPT_LIMIT + 1),
+            &|h| h.prompt = "--allowedTools Bash".into(),
+            HandoffError::Prompt,
+        );
+        refuse(
+            &|h| h.prompt = format!("{PROMPT_HEADER}{}", "x".repeat(PROMPT_LIMIT)),
             HandoffError::Prompt,
         );
         refuse(&|h| h.account = "../x".into(), HandoffError::Account);

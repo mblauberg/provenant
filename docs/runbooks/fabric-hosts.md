@@ -205,36 +205,47 @@ provenant workflow session handoff --to workshop --account work \
 
 On the calling host the command:
 
-1. checks that each registered worktree of the project is clean and pushed
-   to `origin`. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
-   problem trees. `--wip` commits and pushes each dirty or unpushed linked
-   worktree as `WIP: session hand-off`; it refuses the primary checkout, a
-   detached tree and a tree with a live writer. `--allow-dirty` proceeds and
-   lists the problems in the prompt;
-2. reads the session checkpoint, unless `--no-checkpoint`. The session ID
+1. reads the session checkpoint, unless `--no-checkpoint`. The session ID
    comes from `--session-id`, then `CLAUDE_CODE_SESSION_ID`, then
    `CLAUDE_SESSION_ID`;
-3. builds the prompt from the checkpoint, each branch with its pushed commit,
-   the lanes still running here and each `--note`. `--prompt-file` replaces
-   the generated body; notes still follow it. The prompt is capped at 32 KiB
-   and attachments at 512 KiB in total;
-4. saves the prompt as the session checkpoint and sends it. `--dry-run`
-   prints the prompt and plan and sends nothing.
+2. builds the prompt and checks the whole request before it touches any tree.
+   The prompt holds the checkpoint, each branch with its pushed commit, the
+   lanes still running here and each `--note`. `--prompt-file` replaces the
+   generated body; notes still follow it. Every prompt opens with
+   `# Session hand-off`. The prompt is capped at 32 KiB, and a longer
+   checkpoint is cut to fit with a note saying so. Attachments are capped at
+   512 KiB in total;
+3. checks that each registered worktree of the project is clean and pushed
+   to `origin`. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
+   problem trees. `--wip` commits the tracked changes in each dirty or
+   unpushed linked worktree as `WIP: session hand-off` and pushes it. It
+   refuses the primary checkout, a detached tree, a tree with a live writer
+   and untracked files Git does not ignore. If a push fails part way, the
+   refusal names the branches already pushed. `--allow-dirty` proceeds and
+   lists the problems in the prompt;
+4. sends the request. `--dry-run` prints the prompt and plan and sends
+   nothing. Once the peer accepts, the prompt is saved as the session
+   checkpoint, so a refused or lost request leaves the checkpoint unchanged.
 
 The peer checks `--account` against its registered Claude accounts and
-refuses with the valid labels when it does not match. It then fetches
-`origin` and recreates each branch's worktree from `origin/<branch>`; an
-existing worktree is reused. It writes `prompt.md`, the attachments and
-`launch.command` under `handoff/<project-id>/<operation-id>/` in its state
-directory, and runs `open -a Terminal launch.command`. The script runs
-`claude` with `CLAUDE_CONFIG_DIR` set to the account's directory and the
-prompt read from `prompt.md`. `--no-launch` delivers everything but opens no
-Terminal; run the script by hand later. A failed launch is reported in the
-receipt and leaves the delivered files in place.
+refuses with the valid labels when it does not match. It then claims
+`handoff/<project-id>/op-<operation-id>/` in its state directory, fetches
+`origin` and recreates each branch's worktree from `origin/<branch>`. An
+existing worktree, or an existing local branch, is reused; when its commit
+differs from origin or it has uncommitted changes, the receipt and the
+prompt say so. The peer writes `prompt.md`, the attachments and
+`launch.command` into the operation directory and runs
+`open -a Terminal launch.command`. The script runs
+`claude -- "$(cat prompt.md)"` with `CLAUDE_CONFIG_DIR` set to the account's
+directory, so the prompt is never read as an option. `--no-launch` writes
+everything, including the script, but opens no Terminal; run the script by
+hand later. A failed launch is reported in the receipt and leaves the
+delivered files in place.
 
 Both hosts record the new owner in `handoff/<project-id>/owner.json` in their
-state directories. The record is advisory: a later hand-off from a host that
-is not the recorded owner warns but proceeds.
+state directories. The calling host moves its record only when Terminal
+opened or `--no-launch` was given. The record is advisory: a later hand-off
+from a host that is not the recorded owner warns but proceeds.
 
 Replaying an operation ID is refused with `already_delivered`, so a peer never
 opens a second session for one hand-off. A lost reply returns

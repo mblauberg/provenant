@@ -10,7 +10,8 @@ use provenant_fabric_runtime::{
     coordination::facade::FacadeError,
     handoff::{
         ATTACHMENT_COUNT, ATTACHMENT_LIMIT, Attachment, HandoffReceipt, HandoffWorktree,
-        SessionHandoff, encode_base64, valid_attachment_name, valid_model,
+        PROMPT_HEADER, PROMPT_LIMIT, SessionHandoff, encode_base64, valid_attachment_name,
+        valid_model,
     },
     hosts::{PeerAction, PeerResult},
 };
@@ -85,6 +86,10 @@ pub(crate) struct Owner {
 fn handoff_dir(state: &Path, project: ProjectId) -> PathBuf {
     state.join("handoff").join(project.to_string())
 }
+/// The prefix keeps an operation ID from naming `owner.json` or a staged file.
+fn operation_dir(lease_dir: &Path, operation: &OperationId) -> PathBuf {
+    lease_dir.join(format!("op-{}", operation.as_str()))
+}
 fn private_dirs(path: &Path) -> io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -97,9 +102,16 @@ fn read_owner(dir: &Path) -> Option<Owner> {
 }
 fn write_owner(dir: &Path, owner: &Owner) -> io::Result<()> {
     private_dirs(dir)?;
-    let staged = dir.join(format!(".owner.{}.json", std::process::id()));
-    write_new(&staged, &serde_json::to_vec_pretty(owner)?, 0o600)?;
-    fs::rename(&staged, dir.join("owner.json"))
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |t| t.as_nanos());
+    let staged = dir.join(format!(".owner.{}.{nanos}.tmp", std::process::id()));
+    let result = write_new(&staged, &serde_json::to_vec_pretty(owner)?, 0o600)
+        .and_then(|()| fs::rename(&staged, dir.join("owner.json")));
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result
 }
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
@@ -279,12 +291,33 @@ fn wip(tree: &Tree) -> Result<(), Refusal> {
         }
     };
     if tree.dirty {
-        step(&["add", "--all"])?;
+        step(&["add", "--update"])?;
         step(&["commit", "--message", "WIP: session hand-off"])?;
     }
     step(&["push", "--set-upstream", "origin", branch])
 }
+/// Untracked files Git does not ignore. `--wip` commits tracked changes only,
+/// so these would stay behind.
+fn untracked(tree: &Tree) -> Result<Vec<String>, Refusal> {
+    match git(
+        &tree.path,
+        &["ls-files", "--others", "--exclude-standard"],
+        GIT_TIMEOUT,
+    )? {
+        (true, out) => Ok(out.lines().map(String::from).collect()),
+        (false, error) => Err(Refusal::new(
+            Outcome::Error,
+            "GIT",
+            format!(
+                "cannot list untracked files in {}: {}",
+                tree.path.display(),
+                error.trim()
+            ),
+        )),
+    }
+}
 
+#[derive(Clone, Copy)]
 struct PromptInput<'a> {
     source: HostId,
     agent: &'a str,
@@ -298,10 +331,13 @@ struct PromptInput<'a> {
 fn build_prompt(input: &PromptInput<'_>) -> String {
     let mut text = String::new();
     if let Some(body) = input.body {
+        if !body.starts_with(PROMPT_HEADER) {
+            let _ = writeln!(text, "{PROMPT_HEADER}\n");
+        }
         text.push_str(body.trim_end());
         text.push('\n');
     } else {
-        let _ = writeln!(text, "# Session hand-off\n");
+        let _ = writeln!(text, "{PROMPT_HEADER}\n");
         let _ = writeln!(
             text,
             "You are taking over a session handed off from host `{}` (agent `{}`{}). This is a \
@@ -365,6 +401,45 @@ fn build_prompt(input: &PromptInput<'_>) -> String {
         }
     }
     text
+}
+
+/// [`build_prompt`], cutting the checkpoint so the whole prompt fits
+/// [`PROMPT_LIMIT`]. A prompt file or notes that cannot fit are refused.
+fn compose(input: &PromptInput<'_>) -> Result<String, Refusal> {
+    let full = build_prompt(input);
+    if full.len() <= PROMPT_LIMIT {
+        return Ok(full);
+    }
+    let too_large = || {
+        Refusal::invalid("the hand-off prompt exceeds 32 KiB; shorten the prompt file or the notes")
+    };
+    let Some(checkpoint) = input.checkpoint.filter(|_| input.body.is_none()) else {
+        return Err(too_large());
+    };
+    const CUT: &str = "\n\n[Checkpoint cut to fit the hand-off. Read the rest with \
+                       `provenant workflow session show` on the source host.]";
+    let overhead = build_prompt(&PromptInput {
+        checkpoint: Some(""),
+        ..*input
+    })
+    .len();
+    let budget = PROMPT_LIMIT
+        .checked_sub(overhead + CUT.len())
+        .filter(|budget| *budget > 0)
+        .ok_or_else(too_large)?;
+    let mut end = budget.min(checkpoint.len());
+    while !checkpoint.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = format!("{}{CUT}", &checkpoint[..end]);
+    let prompt = build_prompt(&PromptInput {
+        checkpoint: Some(&cut),
+        ..*input
+    });
+    if prompt.len() > PROMPT_LIMIT {
+        return Err(too_large());
+    }
+    Ok(prompt)
 }
 
 fn read_attachments(paths: &[PathBuf]) -> Result<Vec<Attachment>, Refusal> {
@@ -494,66 +569,7 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
         ));
     }
 
-    // 1. Worktrees must be clean and pushed, unless the caller says otherwise.
-    let mut trees = inspect(&src.roots, &src.cwd)?;
-    let problems: Vec<&Tree> = trees.iter().filter(|t| !t.problems().is_empty()).collect();
-    let mut committed = Vec::new();
-    if !problems.is_empty() {
-        let list = problems
-            .iter()
-            .map(|t| format!("  {}", t.describe()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if args.wip {
-            let unsafe_trees: Vec<String> = problems
-                .iter()
-                .filter(|t| t.primary || t.branch.is_none() || t.live_writer || t.unknown)
-                .map(|t| format!("  {}", t.describe()))
-                .collect();
-            if !unsafe_trees.is_empty() {
-                return Err(Refusal::refused(
-                    "WIP_REFUSED",
-                    format!(
-                        "--wip commits only clean-state branch worktrees with no live writer, \
-                         never the primary checkout. Settle these first or pass --allow-dirty:\n{}",
-                        unsafe_trees.join("\n")
-                    ),
-                ));
-            }
-            committed = problems.iter().map(|t| t.describe()).collect();
-            if !args.dry_run {
-                let pending: Vec<Tree> = problems.into_iter().cloned().collect();
-                for tree in &pending {
-                    wip(tree)?;
-                }
-                trees = inspect(&src.roots, &src.cwd)?;
-                let left: Vec<String> = trees
-                    .iter()
-                    .filter(|t| !t.problems().is_empty())
-                    .map(|t| format!("  {}", t.describe()))
-                    .collect();
-                if !left.is_empty() {
-                    return Err(Refusal::refused(
-                        "WORKTREE_DIRTY",
-                        format!(
-                            "worktrees still need attention after --wip:\n{}",
-                            left.join("\n")
-                        ),
-                    ));
-                }
-            }
-        } else if !args.allow_dirty {
-            return Err(Refusal::refused(
-                "WORKTREE_DIRTY",
-                format!(
-                    "these worktrees are dirty or unpushed; push them, or pass --wip to commit \
-                     and push them, or --allow-dirty to list them in the prompt:\n{list}"
-                ),
-            ));
-        }
-    }
-
-    // 2. The checkpoint, lanes and prompt.
+    // 1. Everything the prompt needs, read before any tree is touched.
     let edge = provenant_cli::run::Edge {
         roots: &src.roots,
         home: &src.home,
@@ -580,21 +596,11 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
         .map(|path| {
             let mut text = String::new();
             fs::File::open(path)?
-                .take(provenant_fabric_runtime::handoff::PROMPT_LIMIT as u64 + 1)
+                .take(PROMPT_LIMIT as u64 + 1)
                 .read_to_string(&mut text)?;
             Ok::<_, io::Error>(text)
         })
         .transpose()?;
-    let prompt = build_prompt(&PromptInput {
-        source: local,
-        agent: &context.identity.inbox.agent,
-        session: session.as_ref().map(HostSessionId::as_str),
-        body: body.as_deref(),
-        checkpoint: checkpoint.as_deref(),
-        trees: &trees,
-        lanes: &lanes,
-        notes: &args.notes,
-    });
     let attachments = read_attachments(&args.attachments)?;
     let operation_id = OperationId::parse(&format!(
         "handoff-{}-{}",
@@ -604,23 +610,126 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
         std::process::id()
     ))
     .map_err(|e| Refusal::invalid(e.to_string()))?;
-    let branches: Vec<String> = trees
-        .iter()
-        .filter(|t| !t.primary && t.upstream.is_some())
-        .filter_map(|t| t.branch.clone())
-        .collect();
-    let input = SessionHandoff {
-        operation_id: operation_id.clone(),
-        account: args.account.clone(),
-        model: args.model.clone(),
-        prompt: prompt.clone(),
-        branches: branches.clone(),
-        attachments,
-        launch: !args.no_launch,
+    // The whole request, built and checked for the given trees.
+    let request = |trees: &[Tree]| -> Result<SessionHandoff, Refusal> {
+        let prompt = compose(&PromptInput {
+            source: local,
+            agent: &context.identity.inbox.agent,
+            session: session.as_ref().map(HostSessionId::as_str),
+            body: body.as_deref(),
+            checkpoint: checkpoint.as_deref(),
+            trees,
+            lanes: &lanes,
+            notes: &args.notes,
+        })?;
+        let input = SessionHandoff {
+            operation_id: operation_id.clone(),
+            account: args.account.clone(),
+            model: args.model.clone(),
+            prompt,
+            branches: trees
+                .iter()
+                .filter(|t| !t.primary && t.upstream.is_some())
+                .filter_map(|t| t.branch.clone())
+                .collect(),
+            attachments: attachments.clone(),
+            launch: !args.no_launch,
+        };
+        input
+            .validate()
+            .map_err(|e| Refusal::invalid(e.to_string()))?;
+        Ok(input)
     };
-    input
-        .validate()
-        .map_err(|e| Refusal::invalid(e.to_string()))?;
+
+    // 2. Worktrees must be clean and pushed, unless the caller says otherwise.
+    let mut trees = inspect(&src.roots, &src.cwd)?;
+    let mut input = request(&trees)?;
+    let problems: Vec<Tree> = trees
+        .iter()
+        .filter(|t| !t.problems().is_empty())
+        .cloned()
+        .collect();
+    let mut committed = Vec::new();
+    if !problems.is_empty() {
+        let list = problems
+            .iter()
+            .map(|t| format!("  {}", t.describe()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if args.wip {
+            let mut unsafe_trees: Vec<String> = problems
+                .iter()
+                .filter(|t| t.primary || t.branch.is_none() || t.live_writer || t.unknown)
+                .map(|t| format!("  {}", t.describe()))
+                .collect();
+            for tree in problems.iter().filter(|t| t.dirty) {
+                let files = untracked(tree)?;
+                if !files.is_empty() {
+                    unsafe_trees.push(format!(
+                        "  {}: untracked files {}",
+                        tree.path.display(),
+                        files.join(", ")
+                    ));
+                }
+            }
+            if !unsafe_trees.is_empty() {
+                return Err(Refusal::refused(
+                    "WIP_REFUSED",
+                    format!(
+                        "--wip commits tracked changes in branch worktrees with no live writer, \
+                         never the primary checkout or untracked files. Settle these first or \
+                         pass --allow-dirty:\n{}",
+                        unsafe_trees.join("\n")
+                    ),
+                ));
+            }
+            committed = problems.iter().map(Tree::describe).collect();
+            if !args.dry_run {
+                let mut pushed: Vec<String> = Vec::new();
+                for tree in &problems {
+                    if let Err(mut refusal) = wip(tree) {
+                        if !pushed.is_empty() {
+                            let _ = write!(
+                                refusal.message,
+                                "\nAlready committed and pushed as WIP: {}",
+                                pushed.join(", ")
+                            );
+                        }
+                        return Err(refusal);
+                    }
+                    pushed.push(tree.branch.clone().unwrap_or_default());
+                }
+                trees = inspect(&src.roots, &src.cwd)?;
+                let left: Vec<String> = trees
+                    .iter()
+                    .filter(|t| !t.problems().is_empty())
+                    .map(|t| format!("  {}", t.describe()))
+                    .collect();
+                if !left.is_empty() {
+                    return Err(Refusal::refused(
+                        "WORKTREE_DIRTY",
+                        format!(
+                            "worktrees still need attention after --wip:\n{}",
+                            left.join("\n")
+                        ),
+                    ));
+                }
+                input = request(&trees)?;
+            }
+        } else if !args.allow_dirty {
+            return Err(Refusal::refused(
+                "WORKTREE_DIRTY",
+                format!(
+                    "these worktrees are dirty or unpushed; push them, or pass --wip to commit \
+                     and push them, or --allow-dirty to list them in the prompt:\n{list}"
+                ),
+            ));
+        }
+    }
+
+    // 3. The plan.
+    let prompt = input.prompt.clone();
+    let branches = input.branches.clone();
     let lease_dir = handoff_dir(src.roots.state.as_path(), project);
     let owner = read_owner(&lease_dir);
     let warning = owner.as_ref().filter(|o| o.host != local).map(|o| {
@@ -680,17 +789,10 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
         return Ok((data, human));
     }
 
-    // 3. Save the checkpoint, then send one peer action.
+    // 4. Send one peer action. The checkpoint and lease change only after
+    // the peer accepts, so a retry starts from the same checkpoint.
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    if let Some(store) = &store {
-        store.save(
-            prompt.as_bytes(),
-            WaitBudget::cli(clock.mono_now(), 30)?,
-            &cancel,
-            &clock,
-        )?;
-    }
     let budget = WaitBudget::cli(clock.mono_now(), context.config.limits.peer_seconds)?;
     let reply = context.peer(
         &clock,
@@ -754,22 +856,41 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
         }
         HandoffReceipt::Delivered { .. } => {}
     }
-    let lease = Owner {
-        schema_version: 1,
-        host: target,
-        previous: Some(local),
-        operation_id,
-        session_id: session.map(String::from),
-        at_unix: now_unix(),
-    };
-    let lease_error = write_owner(&lease_dir, &lease).err().map(|e| e.to_string());
+    // The peer holds the hand-off: record it as this session's checkpoint.
+    let checkpoint_error = store.as_ref().and_then(|store| {
+        WaitBudget::cli(clock.mono_now(), 30)
+            .map_err(|e| e.to_string())
+            .and_then(|budget| {
+                store
+                    .save(prompt.as_bytes(), budget, &cancel, &clock)
+                    .map_err(|e| e.to_string())
+            })
+            .err()
+    });
+    data["checkpoint_error"] = json!(checkpoint_error);
     data["receipt"] = serde_json::to_value(&receipt)?;
-    data["owner"] = serde_json::to_value(&lease)?;
-    data["owner_error"] = json!(lease_error);
+    // The lease moves only once the new session is opening, or the caller
+    // chose to open it by hand.
+    let started =
+        args.no_launch || matches!(receipt, HandoffReceipt::Delivered { launched: true, .. });
+    if started {
+        let lease = Owner {
+            schema_version: 1,
+            host: target,
+            previous: Some(local),
+            operation_id,
+            session_id: session.map(String::from),
+            at_unix: now_unix(),
+        };
+        let lease_error = write_owner(&lease_dir, &lease).err().map(|e| e.to_string());
+        data["owner"] = serde_json::to_value(&lease)?;
+        data["owner_error"] = json!(lease_error);
+    }
     data.as_object_mut().map(|o| o.remove("prompt"));
     let HandoffReceipt::Delivered {
         prompt_path,
         worktrees,
+        script_path,
         launched,
         launch_error,
         ..
@@ -787,7 +908,10 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
     );
     for tree in worktrees {
         let _ = match (&tree.path, &tree.error) {
-            (Some(path), _) => writeln!(
+            (Some(path), Some(warning)) => {
+                writeln!(human, "  {}: {path} (warning: {warning})", tree.branch)
+            }
+            (Some(path), None) => writeln!(
                 human,
                 "  {}: {path}{}",
                 tree.branch,
@@ -813,13 +937,29 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
     } else if let Some(error) = launch_error {
         let _ = writeln!(human, "Terminal launch failed on the peer: {error}");
     } else {
-        let _ = writeln!(human, "Not launched (--no-launch).");
+        let _ = writeln!(
+            human,
+            "Not launched (--no-launch). Run {} on the peer to start the session.",
+            script_path.as_deref().unwrap_or("its launch.command")
+        );
     }
-    let _ = writeln!(
-        human,
-        "This host's lease now names {} as owner. Stop this session once the new one has started.",
-        args.to
-    );
+    if let Some(error) = &checkpoint_error {
+        let _ = writeln!(human, "Checkpoint not saved: {error}");
+    }
+    if started {
+        let _ = writeln!(
+            human,
+            "This host's lease now names {} as owner. Stop this session once the new one has \
+             started.",
+            args.to
+        );
+    } else {
+        let _ = writeln!(
+            human,
+            "The lease still names this host. Run the peer's launch script by hand, or retry with \
+             a new hand-off once the launch problem is fixed."
+        );
+    }
     Ok((data, human))
 }
 
@@ -911,7 +1051,8 @@ fn script_path(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("{} is not UTF-8 without control characters", path.display()))
 }
 /// The Terminal script. The prompt is read from its stored file, so no prompt
-/// text passes through shell quoting.
+/// text passes through shell quoting, and `--` ends `claude`'s options, so
+/// the prompt is never read as one.
 fn script(
     project: &Path,
     account: &Path,
@@ -923,7 +1064,7 @@ fn script(
         .map(|m| format!(" --model {}", quote(m)))
         .unwrap_or_default();
     Ok(format!(
-        "#!/bin/sh\n# Provenant session hand-off.\ncd {} || exit 1\nexport CLAUDE_CONFIG_DIR={}\nexport PROVENANT_STATE_DIR={}\nexec claude{model} \"$(cat {})\"\n",
+        "#!/bin/sh\n# Provenant session hand-off.\ncd {} || exit 1\nexport CLAUDE_CONFIG_DIR={}\nexport PROVENANT_STATE_DIR={}\nexec claude{model} -- \"$(cat {})\"\n",
         quote(script_path(project)?),
         quote(script_path(account)?),
         quote(script_path(state)?),
@@ -945,19 +1086,22 @@ struct Delivery<'a> {
     attachments: Vec<(String, Vec<u8>)>,
     launch: bool,
 }
-/// Store the prompt and attachments in a new operation directory, then write
-/// and open the launch script. An existing directory means a replay, which
-/// never launches again.
+/// Claim the operation directory. False means a replay, which never launches
+/// again.
+fn reserve(dir: &Path) -> io::Result<bool> {
+    if let Some(parent) = dir.parent() {
+        private_dirs(parent)?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+/// Store the prompt and attachments in the reserved operation directory, then
+/// write and open the launch script.
 fn deliver(delivery: Delivery<'_>, launcher: &dyn Launcher) -> HandoffReceipt {
-    let staged = (|| -> io::Result<Option<(PathBuf, Vec<String>)>> {
-        if let Some(parent) = delivery.dir.parent() {
-            private_dirs(parent)?;
-        }
-        match fs::DirBuilder::new().mode(0o700).create(&delivery.dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
-            Err(error) => return Err(error),
-        }
+    let staged = (|| -> io::Result<(PathBuf, Vec<String>)> {
         let mut stored = Vec::new();
         if !delivery.attachments.is_empty() {
             let folder = delivery.dir.join("attachments");
@@ -968,7 +1112,13 @@ fn deliver(delivery: Delivery<'_>, launcher: &dyn Launcher) -> HandoffReceipt {
                 stored.push(path.to_string_lossy().into_owned());
             }
         }
-        let mut prompt = delivery.prompt.trim_end().to_owned();
+        // The stored prompt always opens with the fixed header, whatever the
+        // request held, so `claude` never reads it as an option.
+        let mut prompt = String::new();
+        if !delivery.prompt.starts_with(PROMPT_HEADER) {
+            let _ = writeln!(prompt, "{PROMPT_HEADER}\n");
+        }
+        prompt.push_str(delivery.prompt.trim_end());
         let _ = write!(
             prompt,
             "\n\n## On this host\n\n- Project checkout: `{}`\n- Claude account: `{}`\n",
@@ -979,14 +1129,19 @@ fn deliver(delivery: Delivery<'_>, launcher: &dyn Launcher) -> HandoffReceipt {
             prompt.push_str("- Worktrees:\n");
             for tree in &delivery.worktrees {
                 let _ = match (&tree.path, &tree.error) {
-                    (Some(path), _) => writeln!(
+                    (Some(path), Some(warning)) => writeln!(
+                        prompt,
+                        "  - `{}`: `{path}` (warning: {warning}; settle this before you work)",
+                        tree.branch
+                    ),
+                    (Some(path), None) => writeln!(
                         prompt,
                         "  - `{}`: `{path}`{}",
                         tree.branch,
                         if tree.created {
                             " (created from origin)"
                         } else {
-                            " (already present; check it matches origin)"
+                            " (already present at origin's commit)"
                         }
                     ),
                     (None, error) => writeln!(
@@ -1013,42 +1168,35 @@ fn deliver(delivery: Delivery<'_>, launcher: &dyn Launcher) -> HandoffReceipt {
         );
         let path = delivery.dir.join("prompt.md");
         write_new(&path, prompt.as_bytes(), 0o600)?;
-        Ok(Some((path, stored)))
+        Ok((path, stored))
     })();
     let (prompt_path, attachments) = match staged {
-        Ok(Some(staged)) => staged,
-        Ok(None) => {
-            return refused(
-                "already_delivered",
-                format!(
-                    "{} already holds this hand-off; it is never launched twice",
-                    delivery.dir.display()
-                ),
-            );
-        }
+        Ok(staged) => staged,
         Err(error) => return refused("io", format!("cannot store the hand-off: {error}")),
     };
-    let mut script_file = None;
+    // The script is written either way, so `--no-launch` can run it by hand.
     let mut launched = false;
-    let mut launch_error = None;
-    if delivery.launch {
-        let path = delivery.dir.join("launch.command");
-        let written = script(
-            delivery.project,
-            &delivery.account,
-            delivery.state,
-            delivery.model,
-            &prompt_path,
-        )
-        .and_then(|text| write_new(&path, text.as_bytes(), 0o700).map_err(|e| e.to_string()));
-        match written.and_then(|()| launcher.launch(&path)) {
-            Ok(()) => launched = true,
-            Err(error) => launch_error = Some(error),
-        }
-        if path.exists() {
-            script_file = Some(path.to_string_lossy().into_owned());
-        }
-    }
+    let path = delivery.dir.join("launch.command");
+    let written = script(
+        delivery.project,
+        &delivery.account,
+        delivery.state,
+        delivery.model,
+        &prompt_path,
+    )
+    .and_then(|text| write_new(&path, text.as_bytes(), 0o700).map_err(|e| e.to_string()));
+    let launch_error = match written {
+        Ok(()) if delivery.launch => match launcher.launch(&path) {
+            Ok(()) => {
+                launched = true;
+                None
+            }
+            Err(error) => Some(error),
+        },
+        Ok(()) => None,
+        Err(error) => Some(error),
+    };
+    let script_file = path.exists().then(|| path.to_string_lossy().into_owned());
     HandoffReceipt::Delivered {
         prompt_path: prompt_path.to_string_lossy().into_owned(),
         project: delivery.project.to_string_lossy().into_owned(),
@@ -1117,7 +1265,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                                 branch: branch.clone(),
                                 base: None,
                             };
-                            Ok((worktrees::create(context, request, cancel)?, true))
+                            Ok((worktrees::create(context, request, cancel)?, false))
                         }
                         result => Ok((result?, true)),
                     }
@@ -1129,12 +1277,30 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                     path: Some(info.path.to_string_lossy().into_owned()),
                     head: Some(info.head.to_string()),
                     created,
-                    error: None,
+                    error: worktree_warning(&info, &base),
                 },
                 Err(error) => failed(error.to_string()),
             }
         })
         .collect()
+}
+
+/// Why a reused worktree is not a clean copy of `origin/<branch>`.
+fn worktree_warning(
+    info: &worktrees::WorktreeInfo,
+    base: &provenant_core::GitOid,
+) -> Option<String> {
+    let mut found = Vec::new();
+    if info.head != *base {
+        found.push(format!(
+            "local branch differs from origin (local {}, origin {base})",
+            info.head
+        ));
+    }
+    if info.dirty != WorktreeCondition::Clean {
+        found.push("the worktree has uncommitted changes or unknown state".to_owned());
+    }
+    (!found.is_empty()).then(|| found.join("; "))
 }
 
 /// Peer ingress for `PeerAction::SessionHandoff`.
@@ -1171,13 +1337,22 @@ pub(crate) fn receive(
         }
     };
     let lease_dir = handoff_dir(context.roots.state.as_path(), context.identity.project);
-    let dir = lease_dir.join(input.operation_id.as_str());
-    if dir.exists() {
-        return refused(
-            "already_delivered",
-            format!("{} already holds this hand-off", dir.display()),
-        );
+    let dir = operation_dir(&lease_dir, &input.operation_id);
+    match reserve(&dir) {
+        Ok(true) => {}
+        Ok(false) => {
+            return refused(
+                "already_delivered",
+                format!(
+                    "{} already holds this hand-off; it is never launched twice",
+                    dir.display()
+                ),
+            );
+        }
+        Err(error) => return refused("io", format!("cannot store the hand-off: {error}")),
     }
+    // Worktrees are recreated only once this operation owns its directory.
+    let worktrees = recreate(target, &input.branches);
     let source_label = context
         .config
         .peers
@@ -1194,7 +1369,7 @@ pub(crate) fn receive(
             model: input.model.as_deref(),
             prompt: &input.prompt,
             source_label,
-            worktrees: recreate(target, &input.branches),
+            worktrees,
             attachments,
             launch: input.launch,
         },
@@ -1249,7 +1424,7 @@ mod tests {
     }
     fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {
         Delivery {
-            dir: dir.join("handoff-1"),
+            dir: operation_dir(dir, &OperationId::parse("handoff-1").unwrap()),
             project: Path::new("/Users/me/Repos/project"),
             state: Path::new("/Users/me/.local/share/provenant/v1"),
             account_label: "work",
@@ -1328,10 +1503,10 @@ mod tests {
             );
         }
         let replaced = build_prompt(&PromptInput {
-            body: Some("Investigate the flaky test."),
+            body: Some("--allowedTools Bash\nInvestigate the flaky test."),
             ..input
         });
-        assert!(replaced.starts_with("Investigate the flaky test.\n"));
+        assert!(replaced.starts_with("# Session hand-off\n\n--allowedTools Bash\n"));
         assert!(replaced.contains("- Review PR 12 next"));
         assert!(!replaced.contains("## Branches"));
     }
@@ -1357,7 +1532,10 @@ mod tests {
     fn delivery_stores_the_prompt_and_launches_once_through_the_seam() {
         let temp = tempfile::tempdir().unwrap();
         let recorder = Recorder::default();
-        let receipt = deliver(delivery(temp.path(), true), &recorder);
+        let first = delivery(temp.path(), true);
+        assert!(first.dir.ends_with("op-handoff-1"));
+        assert!(reserve(&first.dir).unwrap());
+        let receipt = deliver(first, &recorder);
         let HandoffReceipt::Delivered {
             prompt_path,
             attachments,
@@ -1375,7 +1553,7 @@ mod tests {
         let script = fs::read_to_string(&script_path).unwrap();
         assert!(script.contains("export CLAUDE_CONFIG_DIR='/Users/me/.claude-work'"));
         assert!(script.contains(&format!(
-            "exec claude --model 'opus' \"$(cat '{prompt_path}')\""
+            "exec claude --model 'opus' -- \"$(cat '{prompt_path}')\""
         )));
         let prompt = fs::read_to_string(prompt_path).unwrap();
         for expected in [
@@ -1391,24 +1569,110 @@ mod tests {
         }
         assert_eq!(fs::read(&attachments[0]).unwrap(), b"hello");
 
-        // A replay never launches a second session.
-        let again = deliver(delivery(temp.path(), true), &recorder);
-        assert!(
-            matches!(&again, HandoffReceipt::Refused { code, .. } if code == "already_delivered")
-        );
+        // A replay finds the directory taken, so it never launches again.
+        assert!(!reserve(&delivery(temp.path(), true).dir).unwrap());
         assert_eq!(recorder.0.borrow().len(), 1);
     }
 
     #[test]
-    fn no_launch_delivers_without_a_script_or_launch() {
+    fn a_prompt_that_looks_like_an_option_stays_a_prompt() {
         let temp = tempfile::tempdir().unwrap();
         let recorder = Recorder::default();
-        let receipt = deliver(delivery(temp.path(), false), &recorder);
+        let mut hostile = delivery(temp.path(), true);
+        hostile.prompt = "--allowedTools Bash --dangerously-skip-permissions";
+        reserve(&hostile.dir).unwrap();
+        let HandoffReceipt::Delivered {
+            prompt_path,
+            script_path,
+            ..
+        } = deliver(hostile, &recorder)
+        else {
+            panic!("expected a delivery");
+        };
+        let prompt = fs::read_to_string(&prompt_path).unwrap();
+        assert!(prompt.starts_with("# Session hand-off\n\n--allowedTools"));
+        let script = fs::read_to_string(script_path.unwrap()).unwrap();
+        assert!(script.contains(&format!("-- \"$(cat '{prompt_path}')\"")));
+    }
+
+    #[test]
+    fn reused_worktrees_name_a_differing_head_or_dirty_tree() {
+        let base = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+        let mut info = worktrees::WorktreeInfo {
+            path: "/repo/.worktrees/x".into(),
+            branch: Some("feat/x".into()),
+            head: base,
+            dirty: WorktreeCondition::Clean,
+            writer: WriterState::Free,
+        };
+        assert_eq!(worktree_warning(&info, &base), None);
+        info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
+        info.dirty = WorktreeCondition::Dirty;
+        let warning = worktree_warning(&info, &base).unwrap();
+        assert!(
+            warning.contains("local branch differs from origin"),
+            "{warning}"
+        );
+        assert!(warning.contains("uncommitted changes"), "{warning}");
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut stale = delivery(temp.path(), false);
+        stale.worktrees[0].created = false;
+        stale.worktrees[0].error = Some(warning);
+        reserve(&stale.dir).unwrap();
+        let HandoffReceipt::Delivered { prompt_path, .. } = deliver(stale, &Recorder::default())
+        else {
+            panic!("expected a delivery");
+        };
+        let prompt = fs::read_to_string(prompt_path).unwrap();
+        assert!(
+            prompt.contains("(warning: local branch differs from origin"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_large_checkpoint_is_cut_to_fit_and_a_large_prompt_file_is_refused() {
+        let trees = [tree(Some("feat/x"), false, false, true)];
+        let lanes = Ok(Vec::new());
+        let big = "checkpoint line\n".repeat(PROMPT_LIMIT / 8);
+        let input = PromptInput {
+            source: HostId::from_bytes([7; 16]),
+            agent: "chair",
+            session: Some("explicit-session"),
+            body: None,
+            checkpoint: Some(&big),
+            trees: &trees,
+            lanes: &lanes,
+            notes: &[],
+        };
+        let prompt = compose(&input).unwrap();
+        assert!(prompt.len() <= PROMPT_LIMIT);
+        assert!(prompt.contains("[Checkpoint cut to fit the hand-off."));
+        assert!(prompt.contains("## Branches"));
+        let body = "x".repeat(PROMPT_LIMIT);
+        assert!(
+            compose(&PromptInput {
+                body: Some(&body),
+                ..input
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn no_launch_writes_the_script_but_never_launches() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorder = Recorder::default();
+        let quiet = delivery(temp.path(), false);
+        reserve(&quiet.dir).unwrap();
+        let receipt = deliver(quiet, &recorder);
         assert!(matches!(
             receipt,
             HandoffReceipt::Delivered {
                 launched: false,
-                script_path: None,
+                script_path: Some(_),
+                launch_error: None,
                 ..
             }
         ));
@@ -1426,7 +1690,7 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("cd '/Users/me/it'\\''s' || exit 1"));
-        assert!(text.contains("exec claude \"$(cat '/state/prompt.md')\""));
+        assert!(text.contains("exec claude -- \"$(cat '/state/prompt.md')\""));
         assert!(
             script(
                 Path::new("/a\nb"),

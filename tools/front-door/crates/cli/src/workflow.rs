@@ -86,8 +86,9 @@ branch with its pushed commit, the lanes still running here and any notes. The p
 account against its own registrations, recreates each branch's worktree from origin, stores the \
 prompt and opens Terminal running `claude` under that account.
 
-Worktrees must be clean and pushed. --wip commits and pushes them first; --allow-dirty proceeds \
-and lists them in the prompt. --dry-run prints the prompt and plan and sends nothing.";
+Worktrees must be clean and pushed. --wip commits their tracked changes and pushes them first; \
+--allow-dirty proceeds and lists them in the prompt. --dry-run prints the prompt and plan and \
+sends nothing. The checkpoint is saved and the owner lease moves only after the peer accepts.";
 /// `workflow session handoff`. The binary composes it: it needs worktree and
 /// peer owners that this crate does not hold.
 #[derive(Debug, Args)]

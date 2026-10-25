@@ -607,7 +607,8 @@ mod tests {
     #[test]
     fn session_handoff_fits_one_frame_and_keeps_its_operation_on_a_lost_reply() {
         use crate::handoff::{
-            ATTACHMENT_LIMIT, Attachment, PROMPT_LIMIT, SessionHandoff, encode_base64,
+            ATTACHMENT_LIMIT, Attachment, PROMPT_HEADER, PROMPT_LIMIT, SessionHandoff,
+            encode_base64,
         };
         let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
@@ -620,7 +621,10 @@ mod tests {
             operation_id: operation.clone(),
             account: "work".into(),
             model: None,
-            prompt: "\"".repeat(PROMPT_LIMIT),
+            prompt: format!(
+                "{PROMPT_HEADER}{}",
+                "\"".repeat(PROMPT_LIMIT - PROMPT_HEADER.len())
+            ),
             branches: (0..64).map(|i| format!("feat/branch-{i}")).collect(),
             attachments: vec![Attachment {
                 name: "bundle.bin".into(),
