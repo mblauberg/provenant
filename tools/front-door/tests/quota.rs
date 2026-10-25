@@ -337,6 +337,7 @@ fn agy_registration_and_quota_follow_the_google_identity() -> Result {
     fs::write(
         &agy,
         r#"#!/bin/sh
+pwd -P > "$HOME/agy-cwd"
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "--log-file" ]; then shift; log=$1; fi
     shift
@@ -384,8 +385,25 @@ cat "$HOME/agy-usage"
     let fingerprint = provenant_providers::identity::fingerprint("one@example.test")
         .ok_or("fixture fingerprint")?;
     assert_eq!(one, format!("agy-google-{}", &fingerprint[..12]));
+    let stale = rig.state.join("probe-0123456789abcdef01234567");
+    let stale_lock = rig.state.join("probe-0123456789abcdef01234567.lock");
+    fs::create_dir(&stale)?;
+    fs::write(&stale_lock, b"")?;
     let out = rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?;
     assert_eq!(code(&out), 0);
+    let cwd = fs::read_to_string(rig.home.join("agy-cwd"))?;
+    let cwd = std::path::Path::new(cwd.trim());
+    assert_eq!(cwd.parent(), Some(fs::canonicalize(&rig.state)?.as_path()));
+    assert!(
+        cwd.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("probe-"))
+    );
+    assert!(!stale.exists());
+    assert!(!stale_lock.exists());
+    for entry in fs::read_dir(&rig.state)? {
+        assert!(!entry?.file_name().to_string_lossy().starts_with("probe-"));
+    }
     let record_path = rig.state.join("quota").join(&one).join("agy.json");
     let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&record_path)?)?;
     assert_eq!(

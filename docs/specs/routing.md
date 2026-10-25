@@ -160,6 +160,9 @@ Providers own account identity. Labels are non-secret and never emails, token
 fragments or raw auth paths; an undetectable identity is `unknown`, never
 guessed. Routing owns eligibility and run records the resolved label.
 
+Registration and quota probes run in a fresh 0700 `probe-<id>` directory under
+the host state root; directories left by owners that died are swept.
+
 - Claude: the first 16 hex digits of SHA-256 over the trimmed, lowercase email.
   A rotating `~/.claude` is identified by that fingerprint, not its directory.
 - Codex hashes `tokens.account_id`; Cursor hashes the subject claim of its
