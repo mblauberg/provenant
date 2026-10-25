@@ -720,6 +720,78 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     Ok(())
 }
 #[test]
+fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    run.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("removed-lane"),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(id, &route(), &[], None, &call)?;
+    store
+        .claim(id, WallTime::from_micros(100)?, &call)?
+        .ok_or("not admitted")?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: run.run_id,
+        attempt: id,
+        generation: 1,
+    };
+    // The guardian reserved the writer and sealed an exit; its worktree is gone.
+    let custody = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("lane");
+    std::fs::create_dir_all(&custody)?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&custody)?,
+        scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let meta = attempt.metadata()?;
+    let reservation = custody.join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+    let fields = value.as_object_mut().ok_or("reservation")?;
+    fields.insert("launch_state".into(), "never_spawned".into());
+    fields.insert("unresolved_cleanup".into(), false.into());
+    fields.insert("census_incomplete".into(), false.into());
+    fields.insert("attempt_device".into(), meta.device.into());
+    fields.insert("attempt_inode".into(), meta.inode.into());
+    std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+    artifacts::seal(&attempt, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = scope;
+    let summary = serde_json::json!({"schema_version": 1, "scope": scope, "requester": provenant_core::ActorId::from_bytes([2; 16])});
+    artifacts::seal(
+        &attempt,
+        "launch.json",
+        &serde_json::to_vec(&summary)?,
+        RECORD_LIMIT,
+    )?;
+    seal_exit(&store, &observed)?;
+
+    let fake = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+    let found = store.reconcile(run.run_id, &fake, &call)?;
+    assert_eq!(found, vec![(id, Reconciled::Finished)]);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    assert!(store.writer_fences()?.is_empty());
+    assert!(store.reconcile(run.run_id, &fake, &call)?.is_empty());
+    Ok(())
+}
+#[test]
 fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

@@ -71,11 +71,7 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("recovery task missing"))?;
         let directory = match &task.writer {
-            Some(writer) => {
-                let mut writer =
-                    crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
-                writer.custody.take().ok_or(RunError::UnsafePath)?.0
-            }
+            Some(writer) => self.writer_custody_directory(record, writer)?,
             None => attempt,
         };
         custody::acquire_recovery(
