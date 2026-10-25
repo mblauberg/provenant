@@ -1309,8 +1309,17 @@ fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(common_git_dir.join("worktrees")) else {
         return true;
     };
+    let Ok(entries) = entries
+        .take(MAX_WORKTREES + 1)
+        .collect::<std::io::Result<Vec<_>>>()
+    else {
+        return false;
+    };
+    if entries.len() > MAX_WORKTREES {
+        return false;
+    }
     let mut removed = true;
-    for entry in entries.flatten() {
+    for entry in entries {
         let Ok(text) = std::fs::read(entry.path().join("gitdir")) else {
             continue;
         };
@@ -1882,6 +1891,31 @@ pub fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_admin_entry_handles_large_directory_and_keeps_other_targets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let common = temporary.path();
+        let admin = common.join("worktrees");
+        std::fs::create_dir(&admin)?;
+        let target = common.join("target");
+        for index in 0..1024 {
+            let entry = admin.join(format!("entry-{index:04}"));
+            std::fs::create_dir(&entry)?;
+            std::fs::write(
+                entry.join("gitdir"),
+                target.join(".git").as_os_str().as_encoded_bytes(),
+            )?;
+        }
+        let keep = admin.join("keep");
+        std::fs::create_dir(&keep)?;
+        std::fs::write(keep.join("gitdir"), b"/another/worktree/.git")?;
+        assert!(remove_admin_entry(common, &target));
+        assert_eq!(std::fs::read_dir(&admin)?.count(), 1);
+        assert!(keep.is_dir());
+        Ok(())
+    }
 
     const WORKTREE_LIST: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -21,21 +21,21 @@ use thiserror::Error;
 pub enum FsError {
     #[error("expected one normal relative path component: {name:?}")]
     InvalidComponent { name: OsString },
-    #[error("filesystem {operation} failed for {path:?}")]
+    #[error("filesystem {operation} failed for {path:?}: {source} ({kind:?})", kind = .source.kind())]
     Io {
         operation: &'static str,
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("filesystem rename failed from {from_path:?} to {to_path:?}")]
+    #[error("filesystem rename failed from {from_path:?} to {to_path:?}: {source} ({kind:?})", kind = .source.kind())]
     Rename {
         from_path: PathBuf,
         to_path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("symlink or link loop refused for {path:?}")]
+    #[error("symlink or link loop refused for {path:?}: {source} ({kind:?})", kind = .source.kind())]
     Symlink {
         path: PathBuf,
         #[source]
@@ -59,6 +59,8 @@ pub enum FsError {
     InvalidLockName { name: OsString },
     #[error("stable lock entry cannot be mutated: {name:?}")]
     ReservedLockName { name: OsString },
+    #[error("directory exceeds entry limit {limit}")]
+    EntryLimit { limit: usize },
     #[error("file exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
 }
@@ -584,6 +586,20 @@ impl Directory {
     pub fn rmdir(&self, name: &OsStr) -> Result<()> {
         self.remove(name, true)
     }
+    /// Remove external payload from an exclusively owned, detached tree.
+    /// Unlike `unlink`, this permits payload names such as Cargo.lock. The
+    /// caller must establish that this is disposable content, never supervisor
+    /// state containing stable owner locks. No final symlink is followed.
+    pub fn unlink_payload(&self, name: &OsStr) -> Result<()> {
+        let name = component(name)?;
+        os::unlink(&self.file, name, false)
+            .map_err(error("unlinkat payload", &self.path.join(name)))
+    }
+    /// Directory counterpart of `unlink_payload`, with the same custody rule.
+    pub fn rmdir_payload(&self, name: &OsStr) -> Result<()> {
+        let name = component(name)?;
+        os::unlink(&self.file, name, true).map_err(error("rmdir payload", &self.path.join(name)))
+    }
     fn remove(&self, name: &OsStr, directory: bool) -> Result<()> {
         let name = mutable_component(name)?;
         os::unlink(&self.file, name, directory).map_err(error("unlinkat", &self.path.join(name)))
@@ -1015,7 +1031,7 @@ fn staging_name(prefix: &str) -> Result<OsString> {
 }
 
 mod traits;
-pub use traits::{LocalFs, SafeDir, SafeFile, SafeFs};
+pub use traits::{LocalFs, SafeDir, SafeFile, SafeFs, entry_names};
 
 mod path_io;
 pub use path_io::*;
