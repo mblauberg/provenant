@@ -263,7 +263,7 @@ impl From<FacadeError> for PeerFailure {
 }
 /// The stable outcome and code for a peer refusal, shared by remote runs and
 /// session hand-off. `LaunchUnknown` is handled by each caller, which names
-/// its own recovery step.
+/// its own recovery step. `TIMEOUT` is retryable.
 pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
     match error {
         FacadeError::LaunchUnknown { .. } => (Outcome::Error, "LAUNCH_UNKNOWN"),
@@ -281,7 +281,12 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
         FacadeError::OwnerUnavailable => (Outcome::Refused, "UNSUPPORTED"),
         FacadeError::Cancelled => (Outcome::Error, "CANCELLED"),
         FacadeError::StateCorrupt => (Outcome::Error, "STATE_CORRUPT"),
-        _ => (Outcome::Error, "PEER"),
+        FacadeError::Timeout => (Outcome::Error, "TIMEOUT"),
+        FacadeError::StaleFence
+        | FacadeError::ContinuationUnsupported
+        | FacadeError::OutputTooLarge
+        | FacadeError::PublicationFailed
+        | FacadeError::Io => (Outcome::Error, "PEER"),
     }
 }
 /// Map a transport error, naming the peer and, when known, the cause.

@@ -44,23 +44,28 @@ const RESERVE: Duration = Duration::from_secs(4);
 /// The source waits `peer_seconds`; the peer works to less, so a slow
 /// recreation is reported by the peer rather than timing the source out.
 const PEER_MARGIN: u64 = 5;
-pub(crate) fn peer_seconds(source_seconds: u64) -> u64 {
-    source_seconds.saturating_sub(PEER_MARGIN).max(1)
+/// The peer's budget: the source's less a margin, never above the peer's own
+/// limit. A source that sent no budget gets the peer's limit less the margin.
+pub(crate) fn peer_seconds(source_seconds: Option<u64>, local_limit: u64) -> u64 {
+    source_seconds
+        .map_or(local_limit, |s| s.min(local_limit))
+        .saturating_sub(PEER_MARGIN)
+        .max(1)
 }
 
 #[derive(Debug)]
 struct Refusal {
     status: Outcome,
-    code: &'static str,
+    code: String,
     message: String,
     /// Result data and human text kept with the failure.
     data: Option<(Value, String)>,
 }
 impl Refusal {
-    fn new(status: Outcome, code: &'static str, message: impl Into<String>) -> Self {
+    fn new(status: Outcome, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             status,
-            code,
+            code: code.into(),
             message: message.into(),
             data: None,
         }
@@ -72,7 +77,7 @@ impl Refusal {
     fn invalid(message: impl Into<String>) -> Self {
         Self::new(Outcome::Invalid, "INVALID", message)
     }
-    fn refused(code: &'static str, message: impl Into<String>) -> Self {
+    fn refused(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(Outcome::Refused, code, message)
     }
 }
@@ -816,6 +821,7 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
         target,
         PeerAction::SessionHandoff {
             input: Box::new(input),
+            budget_seconds: Some(context.config.limits.peer_seconds),
         },
         budget,
         &cancel,
@@ -873,7 +879,7 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
                 )
             };
             return Err(Refusal::refused(
-                "HANDOFF_REFUSED",
+                refusal_code(code),
                 format!(
                     "{} refused the hand-off ({code}): {message}{listed}",
                     args.to
@@ -1009,7 +1015,7 @@ pub fn run(args: Handoff, globals: &Globals) -> u8 {
         }) => {
             let mut result = CommandResult::new(COMMAND, status, data);
             result.error = Some(provenant_records::CommandError {
-                code: code.into(),
+                code,
                 message,
                 cause: None,
                 repair: None,
@@ -1019,7 +1025,7 @@ pub fn run(args: Handoff, globals: &Globals) -> u8 {
         Err(refusal) => crate::fail(
             COMMAND,
             refusal.status,
-            refusal.code,
+            &refusal.code,
             &refusal.message,
             globals,
         ),
@@ -1354,6 +1360,22 @@ fn worktree_warning(
     (!found.is_empty()).then(|| found.join("; "))
 }
 
+/// The peer's refusal code as this command's error code: upper-case letters
+/// and underscores only, so it cannot carry text. The peer's own lower-case
+/// codes read as their upper-case form.
+fn refusal_code(code: &str) -> String {
+    let code: String = code
+        .chars()
+        .map(|c| c.to_ascii_uppercase())
+        .filter(|c| c.is_ascii_uppercase() || *c == '_')
+        .take(64)
+        .collect();
+    if code.is_empty() {
+        "HANDOFF_REFUSED".into()
+    } else {
+        code
+    }
+}
 /// A delivered hand-off whose Terminal did not open, without `--no-launch`,
 /// is a failure: the caller must not stop its own session. The receipt stays
 /// in `data`.
@@ -1484,6 +1506,61 @@ fn vet_receipt(receipt: HandoffReceipt, requested: &[String]) -> Result<HandoffR
     })
 }
 
+/// Everything `receive` settles before it writes or opens anything: the
+/// opt-in, the input, the account and the operation directory, in that order.
+/// Only the last step touches the disk.
+/// Attachments to store, the account's directory and the claimed operation
+/// directory.
+type Admitted = (Vec<(String, Vec<u8>)>, PathBuf, PathBuf);
+fn admit(
+    accepted: bool,
+    input: &SessionHandoff,
+    lease_dir: &Path,
+    accounts: impl FnOnce() -> Result<Vec<provenant_providers::identity::RegisteredAccount>, String>,
+) -> Result<Admitted, Box<HandoffReceipt>> {
+    if let Some(receipt) = gate(accepted) {
+        return Err(Box::new(receipt));
+    }
+    let attachments = input
+        .validate()
+        .map_err(|error| Box::new(refused("invalid_input", error.to_string())))?;
+    let accounts = accounts().map_err(|error| {
+        Box::new(refused(
+            "accounts_unavailable",
+            format!("cannot read this host's registered accounts: {error}"),
+        ))
+    })?;
+    let account =
+        account_directory(&accounts, &input.account).map_err(|labels| HandoffReceipt::Refused {
+            code: "account_unregistered".into(),
+            message: format!(
+                "{} is not a registered Claude account on this host",
+                input.account
+            ),
+            accounts: labels,
+        })?;
+    let dir = operation_dir(lease_dir, &input.operation_id);
+    match reserve(&dir) {
+        Ok(true) => Ok((attachments, account, dir)),
+        Ok(false) => Err(Box::new(refused(
+            "already_delivered",
+            format!(
+                "{} already holds this hand-off; it is never launched twice",
+                dir.display()
+            ),
+        ))),
+        Err(error) => Err(Box::new(refused(
+            "io",
+            format!("cannot store the hand-off: {error}"),
+        ))),
+    }
+}
+/// The target records itself as owner only for a session that opened, or for
+/// a `--no-launch` delivery the operator will start by hand.
+fn takes_lease(receipt: &HandoffReceipt, launch: bool) -> bool {
+    matches!(receipt, HandoffReceipt::Delivered { launched, .. } if *launched || !launch)
+}
+
 /// Peer ingress for `PeerAction::SessionHandoff`.
 pub(crate) fn receive(
     target: &Target<'_>,
@@ -1503,51 +1580,14 @@ pub(crate) fn receive(
             .get("fabric.accept_handoff")
             .and_then(|k| k.value.as_bool())
     });
-    if let Some(receipt) = gate(accepted == Some(true)) {
-        return receipt;
-    }
-    let attachments = match input.validate() {
-        Ok(attachments) => attachments,
-        Err(error) => return refused("invalid_input", error.to_string()),
-    };
     let context = target.context;
-    let accounts = match crate::quota_live::registered_claude(&context.roots) {
-        Ok(accounts) => accounts,
-        Err(error) => {
-            return refused(
-                "accounts_unavailable",
-                format!("cannot read this host's registered accounts: {error}"),
-            );
-        }
-    };
-    let account = match account_directory(&accounts, &input.account) {
-        Ok(account) => account,
-        Err(labels) => {
-            return HandoffReceipt::Refused {
-                code: "account_unregistered".into(),
-                message: format!(
-                    "{} is not a registered Claude account on this host",
-                    input.account
-                ),
-                accounts: labels,
-            };
-        }
-    };
     let lease_dir = handoff_dir(context.roots.state.as_path(), context.identity.project);
-    let dir = operation_dir(&lease_dir, &input.operation_id);
-    match reserve(&dir) {
-        Ok(true) => {}
-        Ok(false) => {
-            return refused(
-                "already_delivered",
-                format!(
-                    "{} already holds this hand-off; it is never launched twice",
-                    dir.display()
-                ),
-            );
-        }
-        Err(error) => return refused("io", format!("cannot store the hand-off: {error}")),
-    }
+    let (attachments, account, dir) = match admit(accepted == Some(true), input, &lease_dir, || {
+        crate::quota_live::registered_claude(&context.roots).map_err(|e| e.to_string())
+    }) {
+        Ok(admitted) => admitted,
+        Err(receipt) => return *receipt,
+    };
     // Worktrees are recreated only once this operation owns its directory.
     let worktrees = recreate(target, &input.branches);
     let source_label = context
@@ -1573,7 +1613,7 @@ pub(crate) fn receive(
         launcher,
     );
     // A failed launch leaves the lease with the source, which keeps its session.
-    if matches!(receipt, HandoffReceipt::Delivered { launched, .. } if launched || !input.launch) {
+    if takes_lease(&receipt, input.launch) {
         // The lease is a record, not a gate: a failed write leaves the hand-off.
         let _ = write_owner(
             &lease_dir,
@@ -1996,9 +2036,64 @@ mod tests {
     }
 
     #[test]
+    fn admission_refuses_before_it_touches_the_disk_or_the_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let lease = temp.path().join("handoff/project");
+        let input = SessionHandoff {
+            operation_id: OperationId::parse("handoff-1").unwrap(),
+            account: "work".into(),
+            model: None,
+            prompt: "# Session hand-off\n\nBriefing.".into(),
+            branches: vec!["feat/x".into()],
+            attachments: Vec::new(),
+            launch: true,
+        };
+        let refusal = *admit(false, &input, &lease, || {
+            panic!("accounts must not be read while hand-off is off")
+        })
+        .unwrap_err();
+        assert!(matches!(
+            refusal,
+            HandoffReceipt::Refused { ref code, .. } if code == "HANDOFF_DISABLED"
+        ));
+        assert!(!lease.exists());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+        // Opted in, an unregistered account still stops before the directory.
+        let refusal = *admit(true, &input, &lease, || Ok(Vec::new())).unwrap_err();
+        assert!(matches!(
+            refusal,
+            HandoffReceipt::Refused { ref code, .. } if code == "account_unregistered"
+        ));
+        assert!(!lease.exists());
+    }
+
+    #[test]
+    fn the_peer_takes_the_lease_only_for_a_launch_or_no_launch() {
+        let mut receipt = delivered("feat/x", "/w");
+        assert!(!takes_lease(&receipt, true), "launch failed");
+        assert!(takes_lease(&receipt, false), "--no-launch");
+        if let HandoffReceipt::Delivered { launched, .. } = &mut receipt {
+            *launched = true;
+        }
+        assert!(takes_lease(&receipt, true));
+        assert!(!takes_lease(&refused("io", "x"), false));
+    }
+
+    #[test]
+    fn refusal_codes_pass_through_as_plain_upper_case() {
+        assert_eq!(refusal_code("HANDOFF_DISABLED"), "HANDOFF_DISABLED");
+        assert_eq!(refusal_code("account_unregistered"), "ACCOUNT_UNREGISTERED");
+        assert_eq!(refusal_code("\x1b[2J 1"), "J");
+        assert_eq!(refusal_code("123"), "HANDOFF_REFUSED");
+    }
+
+    #[test]
     fn the_peer_works_to_less_than_the_source_waits() {
-        assert_eq!(peer_seconds(30), 25);
-        assert_eq!(peer_seconds(3), 1);
+        assert_eq!(peer_seconds(Some(30), 30), 25);
+        assert_eq!(peer_seconds(Some(10), 30), 5);
+        assert_eq!(peer_seconds(Some(30), 12), 7);
+        assert_eq!(peer_seconds(None, 30), 25);
+        assert_eq!(peer_seconds(Some(3), 30), 1);
     }
 
     #[test]
