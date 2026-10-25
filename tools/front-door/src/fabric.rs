@@ -455,9 +455,26 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
             let assets = crate::roots::product_root()?;
             let state = crate::roots::roots(globals, &assets, &home)?.state;
             // Only an unreachable agent falls back; a sent request is never repeated.
-            if let crate::peer_agent::Forward::Replied(reply) =
-                crate::peer_agent::forward(state.as_path(), &bytes)?
-            {
+            let reply = match crate::peer_agent::forward(state.as_path(), &bytes)? {
+                crate::peer_agent::Forward::Replied(reply) => Some(reply),
+                // Refused unread at the agent's cap: nothing ran, so say busy.
+                crate::peer_agent::Forward::Busy => {
+                    let request = decode_request(&bytes)?;
+                    let mut busy = serde_json::to_vec(&PeerResponse {
+                        version: 1,
+                        host: request.target_host,
+                        project: request.project.key,
+                        result: PeerResult::Error {
+                            code: "busy".into(),
+                            operation_id: None,
+                        },
+                    })?;
+                    busy.push(b'\n');
+                    Some(busy)
+                }
+                crate::peer_agent::Forward::Unreachable => None,
+            };
+            if let Some(reply) = reply {
                 provenant_supervisor::sys::hook_io::write_stdout(
                     &reply,
                     Instant::now() + std::time::Duration::from_secs(30),
