@@ -121,10 +121,76 @@ impl RunStore {
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.
+    /// Stop a parent's children on its explicit stop, returning each failure.
+    /// Every child handed to a guardian stops from the scope held at
+    /// hand-off, including one start launched after the parent's scan read
+    /// its snapshot. The lane-writable record decides only for `accepted`
+    /// children, with the generation the scan expected, that never reached
+    /// a guardian.
+    pub fn stop_children(
+        &self,
+        accepted: std::collections::BTreeSet<(AttemptId, u64)>,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Vec<String> {
+        let held = self.held_attempts();
+        let unheld = accepted
+            .into_iter()
+            .filter(|(id, _)| !held.contains(id))
+            .map(|(id, generation)| (id, Some(generation)));
+        let mut errors = Vec::new();
+        for (id, generation) in held.iter().map(|id| (*id, None)).chain(unheld) {
+            if let Some(generation) = generation {
+                let record = match self.record(id, call) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        errors.push(error.to_string());
+                        continue;
+                    }
+                };
+                if matches!(record.state, AttemptState::Terminal { .. }) {
+                    continue;
+                }
+                let still_queued = record.state == AttemptState::Queued
+                    && record.generation.checked_add(1) == Some(generation);
+                if record.generation != generation && !still_queued {
+                    errors.push("accepted child generation changed".into());
+                    continue;
+                }
+            }
+            match self.cancel(id, reason, call) {
+                Ok(CancelReceipt::Unobservable { reason }) => errors.push(reason),
+                Err(error) => errors.push(error.to_string()),
+                Ok(_) => {}
+            }
+        }
+        errors
+    }
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         // Half the budget for waiting on the handoff; the rest for the store.
         let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
         let deadline = std::time::Instant::now() + std::time::Duration::from_micros(remaining / 2);
+        // A child this host handed to a guardian stops from the scope and
+        // requester held then. The lane can rewrite the child's record and
+        // launch summary, so neither decides whether or for whom it stops.
+        if let Some(scope) = self.held_scope(id) {
+            let requester = self.child_requester()?;
+            let stopped = self
+                .attempt_dir(scope.run, id, false)
+                .map_err(|error| error.to_string())
+                .and_then(|dir| {
+                    custody::stop(
+                        &custody::hold(dir, scope, requester),
+                        StopReason::ExplicitCancellation,
+                    )
+                    .map_err(|error| error.to_string())
+                });
+            return Ok(match stopped {
+                Ok(StopReceipt::Requested) => CancelReceipt::Requested,
+                Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
+                Err(reason) => CancelReceipt::Unobservable { reason },
+            });
+        }
         loop {
             let record = self.record(id, call)?;
             match record.state {

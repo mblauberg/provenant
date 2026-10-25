@@ -278,7 +278,49 @@ impl RunStore {
         })
     }
     pub fn run(&self, id: RunId, call: &Request<'_>) -> Result<RunRecord> {
-        call.retry(|| self.run_on(&self.db, id))
+        let run = call.retry(|| self.run_on(&self.db, id))?;
+        self.held_owner(&run, None)?;
+        Ok(run)
+    }
+    /// Every attempt this host view handed to a guardian, once each.
+    pub fn held_attempts(&self) -> Vec<AttemptId> {
+        let mut held: Vec<_> = self
+            .launched
+            .borrow()
+            .iter()
+            .map(|scope| scope.attempt)
+            .collect();
+        held.sort();
+        held.dedup();
+        held
+    }
+    pub(crate) fn held_scope(&self, id: AttemptId) -> Option<provenant_supervisor::custody::Scope> {
+        self.launched
+            .borrow()
+            .iter()
+            .rev()
+            .find(|scope| scope.attempt == id)
+            .copied()
+    }
+    /// The lane can rewrite a child's records after the host stamps them, so
+    /// the host's view refuses a launched run or attempt naming another owner.
+    fn held_owner(&self, run: &RunRecord, attempt: Option<&AttemptRecord>) -> Result<()> {
+        let Some(requester) = self.sealed_requester else {
+            return Ok(());
+        };
+        let launched = self.launched.borrow();
+        let run_renamed =
+            run.actor_id != requester && launched.iter().any(|scope| scope.run == run.run_id);
+        let attempt_renamed = attempt.is_some_and(|attempt| {
+            attempt.verified_owner != Some(requester)
+                && launched
+                    .iter()
+                    .any(|scope| scope.attempt == attempt.attempt_id)
+        });
+        if run_renamed || attempt_renamed {
+            return Err(RunError::Validation("child record names another owner"));
+        }
+        Ok(())
     }
     pub(crate) fn run_on(&self, db: &rusqlite::Connection, id: RunId) -> Result<RunRecord> {
         let raw: Vec<u8> = db
@@ -312,6 +354,15 @@ impl RunStore {
             .collect()
     }
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
+        let (run, record) = self.record_with_run(id, call)?;
+        self.held_owner(&run, Some(&record))?;
+        Ok(record)
+    }
+    fn record_with_run(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<(RunRecord, AttemptRecord)> {
         call.retry(|| {
             let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
             let mut record: AttemptRecord = decode(&raw)?;
@@ -348,7 +399,7 @@ impl RunStore {
                 }
                 record.last_output_at = observation.last_output_at;
             }
-            Ok(record)
+            Ok((run, record))
         })
     }
     pub fn read_output(

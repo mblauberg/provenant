@@ -271,7 +271,8 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let store = RunStore::open(&context(temp.path())?, &call)?
+        .with_sealed_requester(provenant_core::ActorId::from_bytes([7; 16]));
     let parent_task = input().request.tasks[0].clone();
     let mut nested = input();
     nested.request.lane_depth = Some(2);
@@ -300,7 +301,6 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
         store.start_child(
             record.run_id,
             &validated,
-            context(temp.path())?.actor_id,
             &fake,
             &|_, _| unreachable!(),
             &call
@@ -319,7 +319,6 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     store.start_child(
         record.run_id,
         &swapped,
-        context(temp.path())?.actor_id,
         &refuse,
         &|_, _| unreachable!(),
         &call,
@@ -346,39 +345,41 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     Ok(())
 }
 
+/// Prepares a plan; no guardian ever runs it.
+struct Ready;
+impl Providers for Ready {
+    fn prepare(
+        &self,
+        _: &TaskRequest,
+        _: &str,
+        _: &LaunchPaths,
+        _: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        Ok(PreparedLaunch {
+            argv: vec!["fixture".into()],
+            environment: Vec::new(),
+            stdin: Vec::new(),
+            secret_input: None,
+            cwd: "/".into(),
+            route: route(),
+            skipped_routes: Vec::new(),
+            observed_head: None,
+            confinement: None,
+        })
+    }
+    fn decode(
+        &self,
+        _: &RouteRecord,
+        _: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        unreachable!("no guardian runs a provider in these tests")
+    }
+}
+
 #[test]
 fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult {
-    struct Ready;
-    impl Providers for Ready {
-        fn prepare(
-            &self,
-            _: &TaskRequest,
-            _: &str,
-            _: &LaunchPaths,
-            _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, String> {
-            Ok(PreparedLaunch {
-                argv: vec!["fixture".into()],
-                environment: Vec::new(),
-                stdin: Vec::new(),
-                secret_input: None,
-                cwd: "/".into(),
-                route: route(),
-                skipped_routes: Vec::new(),
-                observed_head: None,
-                confinement: None,
-            })
-        }
-        fn decode(
-            &self,
-            _: &RouteRecord,
-            _: &[u8],
-            _: &ExitObservation,
-            _: &std::path::Path,
-        ) -> std::result::Result<Decoded, String> {
-            unreachable!("the holder refuses before any guardian")
-        }
-    }
     let parent = AttemptId::from_bytes([9; 16]);
     let sealed = provenant_core::ActorId::from_bytes([7; 16]);
     let forged = provenant_core::ActorId::from_bytes([66; 16]);
@@ -386,7 +387,8 @@ fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult 
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let lane = context(temp.path())?;
+        let mut store = RunStore::open(&lane, &call)?;
         let mut prepared = input();
         if child {
             prepared.request.lane_depth = Some(2);
@@ -414,14 +416,239 @@ fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult 
                 2,
                 &call,
             )?;
-            store.start_child(record.run_id, &validated, sealed, &Ready, &holder, &call)?
+            // Only the host's view, opened from the sealed context, launches.
+            assert!(matches!(
+                store.start_child(record.run_id, &validated, &Ready, &holder, &call),
+                Err(RunError::Validation(
+                    "child launch lacks a sealed requester"
+                ))
+            ));
+            store = store.with_sealed_requester(sealed);
+            store.start_child(record.run_id, &validated, &Ready, &holder, &call)?
         } else {
             store.start(record.run_id, &Ready, &holder, &call)?
         };
         assert!(matches!(started[..], [Started::Refused { .. }]));
         // A top-level store is host-written, so its record stays the source.
-        assert_eq!(seen.get(), Some(if child { sealed } else { forged }));
+        let owner = if child { sealed } else { forged };
+        assert_eq!(seen.get(), Some(owner));
+        // A started child records the sealed owner. The lane's operation keeps
+        // its own actor, so its replay still finds it.
+        assert_eq!(store.run(record.run_id, &call)?.actor_id, owner);
+        let attempt = store.record(prepared.attempts[0].attempt_id, &call)?;
+        let stamped = if child { sealed } else { lane.actor_id };
+        assert_eq!(attempt.verified_owner, Some(stamped));
+        let operation = store
+            .operation(&prepared.operation_id, &call)?
+            .ok_or("lane operation")?;
+        assert_eq!(operation.actor_id, lane.actor_id);
     }
+    Ok(())
+}
+
+#[test]
+fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let forged = provenant_core::ActorId::from_bytes([66; 16]);
+    // Each rewrite once made the host skip, withdraw or misdirect the stop.
+    let forgeries: [fn(&mut AttemptRecord); 3] = [
+        |record| {
+            record.state = AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                exit_code: None,
+                finished_at: record.queued_at,
+                reason: Some("rejected, says the lane".into()),
+            };
+            let mut result = record.prompt.clone();
+            result.path =
+                artifacts::artifact_path(record.attempt_id, "result.md").expect("result path");
+            record.result = Some(result);
+        },
+        |record| record.state = AttemptState::Queued,
+        |record| record.generation += 5,
+    ];
+    for forge in forgeries {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        let started = store.mark_starting(id, &route(), &[], None, &call)?;
+        let ticket: Vec<u8> = store.db.query_row(
+            "SELECT record FROM admission WHERE attempt=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        let ticket: serde_json::Value = crate::db::decode(&ticket)?;
+        assert_eq!(ticket["holder"], serde_json::to_value(sealed)?);
+        let scope = provenant_supervisor::custody::Scope {
+            run: run.run_id,
+            attempt: id,
+            generation: started.generation,
+        };
+        // As hand-off holds it just before launching the guardian.
+        store.launched.borrow_mut().push(scope);
+        // The lane rewrites the record, the launch summary and the stop.
+        let mut record = store.record(id, &call)?;
+        forge(&mut record);
+        store.db.execute(
+            "UPDATE attempts SET record=?1, terminal=?2 WHERE id=?3",
+            rusqlite::params![
+                crate::db::bytes(&record)?,
+                matches!(record.state, AttemptState::Terminal { .. }),
+                id.to_string()
+            ],
+        )?;
+        assert_eq!(store.record(id, &call)?, record);
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        let summary = serde_json::json!({"schema_version": 1, "scope": scope, "requester": forged});
+        artifacts::seal(
+            &dir,
+            "launch.json",
+            &serde_json::to_vec(&summary)?,
+            RECORD_LIMIT,
+        )?;
+        let planted = serde_json::json!({
+            "schema_version": 1,
+            "scope": scope,
+            "request_id": format!("{}.{id}.{}.cancel", run.run_id, scope.generation),
+            "requester": forged,
+            "reason": "explicit_cancellation",
+        });
+        artifacts::seal(
+            &dir,
+            "cancel.json",
+            &serde_json::to_vec(&planted)?,
+            RECORD_LIMIT,
+        )?;
+        assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
+        let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            store
+                .context
+                .state_root
+                .as_path()
+                .join(format!("runs/{}/attempts/{id}/cancel.json", run.run_id)),
+        )?)?;
+        assert_eq!(request["requester"], serde_json::to_value(sealed)?);
+        assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let mut run = input();
+    // An invalid capture plan makes the launch publish never-spawned
+    // evidence instead of starting a guardian.
+    run.request.tasks[0]
+        .profile
+        .knobs
+        .insert("lanes.silence_seconds".into(), 0.into());
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    assert!(store.held_attempts().is_empty());
+    store.start(run.run_id, &Ready, &|_, _| Ok(Vec::new()), &call)?;
+    assert_eq!(store.held_attempts(), vec![id]);
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    assert!(artifacts::read_sealed(&dir, "process-exit.json", RECORD_LIMIT)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let batch = two_tasks(2);
+    store.create(&batch, &call)?;
+    let [queued, late] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
+    // The parent's scan accepted only the queued child. A start launched
+    // the other after that snapshot, so only hand-off holds it.
+    let started = store.mark_starting(late, &route(), &[], None, &call)?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: batch.run_id,
+        attempt: late,
+        generation: started.generation,
+    };
+    store.launched.borrow_mut().push(scope);
+    let accepted = std::collections::BTreeSet::from([(queued, 1)]);
+    assert!(store.stop_children(accepted, "stop", &call).is_empty());
+    let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{late}/cancel.json", batch.run_id)),
+    )?)?;
+    assert_eq!(request["requester"], serde_json::to_value(sealed)?);
+    assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert_eq!(terminal(&store, queued, &call)?, Outcome::Cancelled);
+    Ok(())
+}
+
+#[test]
+fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let forged = provenant_core::ActorId::from_bytes([66; 16]);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let started = store.mark_starting(id, &route(), &[], None, &call)?;
+    // Before hand-off the host only stamped the owner; nothing is held yet.
+    let mut record = store.record(id, &call)?;
+    record.verified_owner = Some(forged);
+    let rename = |record: &AttemptRecord| {
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(record)?, id.to_string()],
+        )?;
+        TestResult::Ok(())
+    };
+    rename(&record)?;
+    assert!(store.record(id, &call).is_ok());
+    store
+        .launched
+        .borrow_mut()
+        .push(provenant_supervisor::custody::Scope {
+            run: run.run_id,
+            attempt: id,
+            generation: started.generation,
+        });
+    let renamed = |result: Result<()>| {
+        matches!(
+            result,
+            Err(RunError::Validation("child record names another owner"))
+        )
+    };
+    assert!(renamed(store.record(id, &call).map(drop)));
+    // The stamped owner reads again. A renamed run refuses every read,
+    // including the terminal fact that carries the owner.
+    rename(&started)?;
+    assert!(store.record(id, &call).is_ok());
+    let mut owner = store.run(run.run_id, &call)?;
+    owner.actor_id = forged;
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&owner)?, run.run_id.to_string()],
+    )?;
+    assert!(renamed(store.run(run.run_id, &call).map(drop)));
+    assert!(renamed(store.record(id, &call).map(drop)));
+    assert!(renamed(
+        crate::AttemptReader::attempt(&store, id, &call).map(drop)
+    ));
     Ok(())
 }
 

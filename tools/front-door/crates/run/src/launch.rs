@@ -321,13 +321,12 @@ impl RunStore {
     /// Start a child run from the request `validate_child` returned. The lane
     /// may have rewritten its store since, so a request whose digest no longer
     /// matches is refused rather than launched. For the same reason the child
-    /// launches for `requester`, the parent attempt's from its host-built
-    /// holder context, never the actor the child's run record names.
+    /// launches for the store's sealed requester, never the actor the child's
+    /// run record names.
     pub fn start_child(
         &self,
         run: RunId,
         validated: &CanonicalRequest,
-        requester: ActorId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         call: &Request<'_>,
@@ -346,7 +345,7 @@ impl RunStore {
                     call.clock,
                 )
             },
-            Some((validated.digest()?, requester)),
+            Some((validated.digest()?, self.child_requester()?)),
             call,
         )
     }
@@ -363,14 +362,19 @@ impl RunStore {
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
-        child: Option<(&CanonicalRequest, ActorId)>,
+        validated: Option<&CanonicalRequest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        let child = match child {
-            Some((request, requester)) => Some((request.digest()?, requester)),
+        let child = match validated {
+            Some(request) => Some((request.digest()?, self.child_requester()?)),
             None => None,
         };
         self.start_inner(run, providers, context, acquire_writer, child, call)
+    }
+    pub(crate) fn child_requester(&self) -> Result<ActorId> {
+        self.sealed_requester.ok_or(RunError::Validation(
+            "child launch lacks a sealed requester",
+        ))
     }
     /// `child` is a validated child request's digest and its host-held
     /// requester; a top-level run takes its requester from its own record.
@@ -701,6 +705,10 @@ impl RunStore {
             holder_context,
         };
         let capture = capture_plan(task);
+        // Held before launch: an unconfirmed handoff may still have a guardian.
+        if self.sealed_requester.is_some() {
+            self.launched.borrow_mut().push(scope);
+        }
         custody::launch(
             OwnedLaunch {
                 command,

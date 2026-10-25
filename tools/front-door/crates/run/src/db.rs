@@ -66,9 +66,22 @@ pub struct RunStore {
     pub(crate) context: ExecutionContext,
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
+    pub(crate) sealed_requester: Option<ActorId>,
+    /// Scopes this host view handed to a guardian, held in host memory.
+    pub(crate) launched: std::cell::RefCell<Vec<provenant_supervisor::custody::Scope>>,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
+    /// The host's view of a child store, opened from the parent attempt's
+    /// sealed holder context. The lane can write this store and its attempt
+    /// summaries, so launch and the started attempt's owner use this requester
+    /// instead of any actor they name. The view refuses a run or attempt it
+    /// launched once its record names another owner, and stops each child
+    /// from the scope it held at hand-off, never from the record.
+    pub fn with_sealed_requester(mut self, requester: ActorId) -> Self {
+        self.sealed_requester = Some(requester);
+        self
+    }
     /// The trusted host config root owns worktree registrations and the host
     /// admission ledger even when this store contains nested runs. Supplied by
     /// the host composition edge.
@@ -118,6 +131,8 @@ impl RunStore {
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
+            sealed_requester: None,
+            launched: Default::default(),
             _owner: PhantomData,
         }))
     }
@@ -133,6 +148,8 @@ impl RunStore {
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
+            sealed_requester: None,
+            launched: Default::default(),
             _owner: PhantomData,
         };
         if schema_version < 3 {
