@@ -13,24 +13,31 @@ opencode run --standalone --format json --log-level error [-s SESSION] -m MODEL[
 
 It sends the prompt on stdin and uses the user's real HOME and XDG config/data
 directories so configured providers and stored accounts remain available.
-Inline configuration sets an empty `mcp` object and restricts
-editing, shell and web access according to the access mode. The adapter sets
+Inline configuration sets an empty `mcp` object and restricts editing, shell
+and web access according to the access mode. The adapter sets
 `OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_PROJECT_CONFIG`,
 `OPENCODE_DISABLE_CLAUDE_CODE` and `OPENCODE_DISABLE_FILEWATCHER`.
 
 ## Writer lanes
 
 A confined writer's environment is built from scratch and sets `CARGO_TARGET_DIR`
-to its lane cache. A shared target is usable only when it is declared with
-`--write-root DIR` and the lane's commands set
-`CARGO_TARGET_DIR=DIR`: the write root grants write and exec, so build scripts
-under it run. An env var alone grants nothing, and the lane then fails with
-"operation not permitted". Share a target only between lanes that may share its
-output.
+to its per-lane cache. Share a target only within one worktree; across
+worktrees keep per-lane targets (`provenant worktree remove` and
+`provenant gc` prune the lane caches), because a target shared across
+worktrees can run another checkout's stale test binaries.
 
-A writer cannot `git fetch` over HTTPS: its sandbox holds no credentials and
-Git refs and remote config stay immutable. By design the host fetches, then
-delivers the result.
+A writer can exec build scripts and other binaries under any directory it holds
+write access to, such as a path declared with `--write-root DIR`. An env var
+alone grants nothing, and the lane then fails with "operation not permitted".
+Fabric, manifest, nested and `--host` dispatch cannot pass `--write-root`, so
+declare the directory in `[domains.run] writer_writes` instead; see
+[configuration](configuration.md#writer-extra-write-paths). Its entries are
+used as written and must be real paths (`/private/tmp`, not `/tmp`).
+
+Writers hold no Git credentials, and remote-tracking refs and shared config are
+read-only, so `git fetch` of a configured remote fails. Fetch on the host
+before dispatch, or dispatch with `--deliver-remote` and `--deliver-branch`:
+run fetches before launch and pushes the verified final commit after.
 
 ## General guidance
 

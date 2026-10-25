@@ -66,7 +66,10 @@ writer_writes = ["/Users/me/proj/.agent-run/locks", "/Users/me/proj/.build/cargo
 ```
 
 Each entry is an absolute directory (letters, digits and `/._-` only, no `..`,
-at most 16), granted read-write as a subtree to worktree-write lanes only.
+at most 16), granted read, write and exec as a subtree to worktree-write
+lanes only, so build scripts under it run. This is the grant for Fabric,
+manifest, nested and `--host` dispatch, which cannot pass `--write-root`; see
+[providers](providers.md#writer-lanes).
 Read-only lanes are unchanged. The config is refused if an entry is too broad
 or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
