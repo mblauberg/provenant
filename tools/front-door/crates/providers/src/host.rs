@@ -17,7 +17,9 @@ const ID_LEN: usize = 24;
 /// Liveness is an exclusive flock on a sibling `probe-<id>.lock`, taken before
 /// the directory exists and held until the directory is gone. The kernel drops
 /// it when the owner dies, even by SIGKILL, so a free lock beside a directory
-/// proves its owner is gone. `sweep_stale` relies on that.
+/// proves its owner is gone. A flock on an inode unlinked since it was opened
+/// excludes nobody, so both owner and sweeper re-check, under the lock, that
+/// the name still refers to the locked file (`holds_entry`).
 pub struct HostProbeDir {
     lock_name: OsString,
     root_path: PathBuf,
@@ -34,28 +36,49 @@ impl HostProbeDir {
     }
 
     fn create_in(root: &Directory, host_root: &Path) -> fs::Result<Self> {
-        let staging = temporary_name()?;
-        let id = staging
-            .to_str()
-            .and_then(|name| name.strip_prefix(STAGING_PREFIX))
-            .ok_or_else(|| fs::FsError::RaceRefused {
-                name: staging.clone(),
-            })?
-            .to_owned();
-        let name = OsString::from(format!("{PREFIX}{id}"));
-        let lock_name = OsString::from(format!("{PREFIX}{id}{LOCK_SUFFIX}"));
-        // Lock first: any directory a sweeper can see is already leased.
-        let lock = root.try_lock(&lock_name, LockMode::Exclusive)?;
-        let created = root.mkdir(&name, 0o700);
-        if let Err(error) = created {
-            let _ = std::fs::remove_file(host_root.join(&lock_name));
-            return Err(error);
+        Self::create_checked(root, host_root, &|_| {})
+    }
+
+    /// `locked` runs after the lock is taken and before its entry is checked:
+    /// the window in which a sweeper may unlink the file just locked.
+    fn create_checked(
+        root: &Directory,
+        host_root: &Path,
+        locked: &dyn Fn(&Path),
+    ) -> fs::Result<Self> {
+        // A sweep can unlink the lock file between our open and our flock;
+        // that lock is then worthless, so retry with a fresh id.
+        for _ in 0..8 {
+            let staging = temporary_name()?;
+            let id = staging
+                .to_str()
+                .and_then(|name| name.strip_prefix(STAGING_PREFIX))
+                .ok_or_else(|| fs::FsError::RaceRefused {
+                    name: staging.clone(),
+                })?
+                .to_owned();
+            let name = OsString::from(format!("{PREFIX}{id}"));
+            let lock_name = OsString::from(format!("{PREFIX}{id}{LOCK_SUFFIX}"));
+            let lock_path = host_root.join(&lock_name);
+            // Lock first: any directory a sweeper can see is already leased.
+            let lock = root.try_lock(&lock_name, LockMode::Exclusive)?;
+            locked(&lock_path);
+            if !holds_entry(root, &lock_name, &lock) {
+                continue;
+            }
+            if let Err(error) = root.mkdir(&name, 0o700) {
+                let _ = std::fs::remove_file(&lock_path);
+                return Err(error);
+            }
+            return Ok(Self {
+                path: host_root.join(&name),
+                lock_name,
+                root_path: host_root.to_owned(),
+                _lock: lock,
+            });
         }
-        Ok(Self {
-            path: host_root.join(&name),
-            lock_name,
-            root_path: host_root.to_owned(),
-            _lock: lock,
+        Err(fs::FsError::RaceRefused {
+            name: OsString::from(PREFIX),
         })
     }
 
@@ -70,6 +93,16 @@ impl Drop for HostProbeDir {
         // The directory API reserves `.lock` names, so unlink by path. The
         // root is host-trusted and this probe still holds the lock.
         let _ = std::fs::remove_file(self.root_path.join(&self.lock_name));
+    }
+}
+
+/// True when `name` is still the very file `lock` holds, with one link. Only a
+/// lock holder unlinks it, so after this check holds, nobody else can lock a
+/// different file under the name while the lease lasts.
+fn holds_entry(root: &Directory, name: &OsStr, lock: &LockGuard) -> bool {
+    match (lock.metadata(), root.metadata_at(name, false)) {
+        (Ok(held), Ok(entry)) => entry.same_identity(&held) && entry.links == 1 && held.links == 1,
+        _ => false,
     }
 }
 
@@ -97,16 +130,21 @@ fn sweep_stale(root: &Directory, host_root: &Path) {
     for id in ids {
         let name = OsString::from(format!("{PREFIX}{id}"));
         let lock_name = OsString::from(format!("{PREFIX}{id}{LOCK_SUFFIX}"));
-        let Ok(_lease) = root.try_lock(&lock_name, LockMode::Exclusive) else {
+        let Ok(lease) = root.try_lock(&lock_name, LockMode::Exclusive) else {
             continue;
         };
+        // Skip a lock that was unlinked after we opened it: a live owner may
+        // hold the replacement, so this lease proves nothing.
+        if !holds_entry(root, &lock_name, &lease) {
+            continue;
+        }
         match root.metadata_at(&name, false) {
             Ok(metadata) if metadata.kind == fs::FileKind::Directory => {
                 if std::fs::remove_dir_all(host_root.join(&name)).is_err() {
                     continue;
                 }
             }
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(error) if error.is_not_found() => {}
             Err(_) => continue,
         }
@@ -221,14 +259,21 @@ mod tests {
         for name in ["probe-short", "probe-0123456789abcdef0123456g", "other"] {
             std::fs::create_dir(root.join(name)).unwrap();
         }
+        // A non-directory entry is left alone, but its lock file is not kept.
+        let file_id = "probe-aaaaaaaaaaaaaaaaaaaaaaaa";
+        std::fs::write(root.join(file_id), b"").unwrap();
+        std::fs::write(root.join(format!("{file_id}.lock")), b"").unwrap();
         let live = HostProbeDir::create(root).unwrap();
         assert!(live.path().is_dir());
+        assert!(probe_id(live.path().file_name().unwrap()).is_some());
 
         let _executor = HostProbeExecutor::new(&Never, root).unwrap();
 
         assert!(!root.join(STALE).exists(), "stale directory is collected");
         assert!(!root.join(format!("{STALE}.lock")).exists());
         assert!(!root.join("probe-fedcba9876543210fedcba98.lock").exists());
+        assert!(root.join(file_id).is_file());
+        assert!(!root.join(format!("{file_id}.lock")).exists());
         assert!(live.path().is_dir(), "a live probe is never removed");
         for name in ["probe-short", "probe-0123456789abcdef0123456g", "other"] {
             assert!(root.join(name).is_dir(), "{name}");
@@ -239,5 +284,48 @@ mod tests {
         drop(live);
         assert!(!kept.exists());
         assert!(!root.join(live_lock).exists());
+    }
+
+    #[test]
+    fn a_lock_unlinked_by_a_sweeper_before_the_flock_never_leases_a_probe() {
+        let host_root = tempfile::tempdir().unwrap();
+        let root = Directory::open_anchor(host_root.path()).unwrap();
+        let calls = std::cell::Cell::new(0);
+        // The sweeper unlinks the file just locked, as in the race, and a
+        // second owner could then lock a replacement. Both ids must be refused.
+        let probe = HostProbeDir::create_checked(&root, host_root.path(), &|lock_path| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                std::fs::remove_file(lock_path).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            calls.get(),
+            2,
+            "the unlinked lease is retried with a new id"
+        );
+        assert!(probe.path().is_dir());
+        let names: Vec<_> = std::fs::read_dir(host_root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "only the retried probe and its lock exist: {names:?}"
+        );
+
+        // A replaced (not just unlinked) lock file is refused the same way.
+        let replaced = std::cell::Cell::new(true);
+        let second = HostProbeDir::create_checked(&root, host_root.path(), &|lock_path| {
+            if replaced.replace(false) {
+                std::fs::remove_file(lock_path).unwrap();
+                std::fs::write(lock_path, b"").unwrap();
+            }
+        })
+        .unwrap();
+        assert!(second.path().is_dir());
+        assert_ne!(second.path(), probe.path());
     }
 }
