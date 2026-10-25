@@ -1096,7 +1096,13 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             result["error"]["code"], "lane_coordination_refused",
             "{result}"
         );
-        // A peer frame names its own agent, so lanes may not serve one.
+        // A peer frame names its own agent, so lanes may not serve one. The
+        // forwarding path must refuse before it connects to the agent socket.
+        let agent = rig.state.join("peer-agent");
+        std::fs::create_dir_all(&agent)?;
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))?;
+        let listener = std::os::unix::net::UnixListener::bind(agent.join("peer.sock"))?;
+        listener.set_nonblocking(true)?;
         for args in [
             &["fabric", "peer", "--in-process"][..],
             &["fabric", "peer"],
@@ -1104,12 +1110,18 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         ] {
             let output = rig.command(args)?;
             assert_eq!(code(&output), 3, "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr.bytes)
+                    .contains("coordination mutations are not allowed inside a lane"),
+                "{args:?}"
+            );
         }
-        let output = rig.command(&["fabric", "peer", "--in-process"])?;
-        assert!(
-            String::from_utf8_lossy(&output.stderr.bytes)
-                .contains("coordination mutations are not allowed inside a lane")
+        assert_eq!(
+            listener.accept().map(|_| ()).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::WouldBlock)
         );
+        drop(listener);
+        std::fs::remove_dir_all(&agent)?;
         rig.assert_legacy_unchanged()?;
     }
     Ok(())

@@ -80,16 +80,18 @@ label shares one read cursor and never competes for claims. Labels do not prove
 a model family. Message, task, run and operation IDs are opaque 128-bit hex
 values.
 
-Each lane's generated MCP entry pins `PROVENANT_AGENT_LABEL` to
-`lane-<AttemptId>`, giving it a separate actor and inbox from the chair. The
+Each lane's provider environment and generated MCP entry pin
+`PROVENANT_AGENT_LABEL` to `lane-<AttemptId>`, giving it a separate actor and
+inbox from the chair. The
 MCP edge captures the host-set lane environment at startup. A positive
 `PROVENANT_LANE_DEPTH` or a present `PROVENANT_RUN_STATE_DIR` refuses
 coordination mutations with `lane_coordination_refused`: mail send and
 mark-read, task changes, event notes, claims and landing leases. The CLI
 coordination edge also refuses these mutations and landing push or reconcile
 under that environment. `fabric peer` and `fabric peer-agent` refuse to start
-there at all, because a peer frame names its own agent. Reads and child-store run submit, cancel and output
-remain available within the existing child policy.
+there at all, because a peer frame names its own agent. Reads and child-store
+run submit, cancel and output remain available within the existing child
+policy.
 
 This guards the tool surface. Lanes still have direct write access to
 `fabric.sqlite3` and its companions because opening the current store for a

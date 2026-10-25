@@ -778,6 +778,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             "PATH",
             "TMPDIR",
             "LANG",
+            "PROVENANT_AGENT_LABEL",
             "PROVENANT_ROOT",
             "PROVENANT_GIT",
             "PROVENANT_LANE_DEPTH",
