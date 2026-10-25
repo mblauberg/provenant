@@ -68,6 +68,12 @@ impl Request<'_> {
         }
     }
 }
+/// A child's scope and attempt directory retained from hand-off.
+pub(crate) struct Held {
+    pub(crate) scope: provenant_supervisor::custody::Scope,
+    pub(crate) directory: Directory,
+}
+
 /// One connection, one owning thread. Call budgets are supplied afresh and no
 /// transaction survives a call or includes filesystem publication.
 pub struct RunStore {
@@ -77,8 +83,8 @@ pub struct RunStore {
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     pub(crate) sealed_requester: Option<ActorId>,
-    /// Scopes this host view handed to a guardian, held in host memory.
-    pub(crate) launched: std::cell::RefCell<Vec<provenant_supervisor::custody::Scope>>,
+    /// Scopes and directories this host view handed to a guardian.
+    pub(crate) launched: std::cell::RefCell<Vec<Held>>,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
@@ -87,7 +93,7 @@ impl RunStore {
     /// summaries, so launch and the started attempt's owner use this requester
     /// instead of any actor they name. The view refuses a run or attempt it
     /// launched once its record names another owner, and stops each child
-    /// from the scope it held at hand-off, never from the record.
+    /// from the scope and directory it held at hand-off, never from the record.
     pub fn with_sealed_requester(mut self, requester: ActorId) -> Self {
         self.sealed_requester = Some(requester);
         self

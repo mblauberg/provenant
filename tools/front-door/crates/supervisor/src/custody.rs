@@ -484,6 +484,11 @@ pub struct PublicationReservation {
     pub(crate) custody: LockGuard,
 }
 impl PublicationReservation {
+    /// The attempt directory passed to the guardian at hand-off.
+    pub fn directory(&self) -> &Directory {
+        &self.directory
+    }
+
     pub fn prepare(
         directory: Directory,
         budget: WaitBudget,

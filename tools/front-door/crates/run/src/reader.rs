@@ -288,19 +288,11 @@ impl RunStore {
             .launched
             .borrow()
             .iter()
-            .map(|scope| scope.attempt)
+            .map(|held| held.scope.attempt)
             .collect();
         held.sort();
         held.dedup();
         held
-    }
-    pub(crate) fn held_scope(&self, id: AttemptId) -> Option<provenant_supervisor::custody::Scope> {
-        self.launched
-            .borrow()
-            .iter()
-            .rev()
-            .find(|scope| scope.attempt == id)
-            .copied()
     }
     /// The lane can rewrite a child's records after the host stamps them, so
     /// the host's view refuses a launched run or attempt naming another owner.
@@ -310,12 +302,12 @@ impl RunStore {
         };
         let launched = self.launched.borrow();
         let run_renamed =
-            run.actor_id != requester && launched.iter().any(|scope| scope.run == run.run_id);
+            run.actor_id != requester && launched.iter().any(|held| held.scope.run == run.run_id);
         let attempt_renamed = attempt.is_some_and(|attempt| {
             attempt.verified_owner != Some(requester)
                 && launched
                     .iter()
-                    .any(|scope| scope.attempt == attempt.attempt_id)
+                    .any(|held| held.scope.attempt == attempt.attempt_id)
         });
         if run_renamed || attempt_renamed {
             return Err(RunError::Validation("child record names another owner"));

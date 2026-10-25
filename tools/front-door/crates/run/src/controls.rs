@@ -177,17 +177,25 @@ impl RunStore {
         // Half the budget for waiting on the handoff; the rest for the store.
         let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
         let deadline = std::time::Instant::now() + std::time::Duration::from_micros(remaining / 2);
-        // A child this host handed to a guardian stops from the scope and
-        // requester held then. The lane can rewrite the child's record and
-        // launch summary, so neither decides whether or for whom it stops.
-        if let Some(scope) = self.held_scope(id) {
+        // A child this host handed to a guardian stops through the directory,
+        // scope and requester held then. The lane can rewrite the child's
+        // record and launch summary, so neither decides whether or for whom
+        // it stops.
+        if let Some(held) = self
+            .launched
+            .borrow()
+            .iter()
+            .rev()
+            .find(|held| held.scope.attempt == id)
+        {
             let requester = self.child_requester()?;
-            let stopped = self
-                .attempt_dir(scope.run, id, false)
+            let stopped = held
+                .directory
+                .try_clone()
                 .map_err(|error| error.to_string())
                 .and_then(|dir| {
                     custody::stop(
-                        &custody::hold(dir, scope, requester),
+                        &custody::hold(dir, held.scope, requester),
                         StopReason::ExplicitCancellation,
                     )
                     .map_err(|error| error.to_string())

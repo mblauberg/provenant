@@ -7,7 +7,10 @@ use provenant_records::CanonicalV1;
 use provenant_supervisor::{
     custody::ExitObservation, exec::Termination, fs::Directory, sys::resources::MemorySample,
 };
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    os::unix::fs::DirBuilderExt,
+};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
@@ -489,7 +492,10 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
             generation: started.generation,
         };
         // As hand-off holds it just before launching the guardian.
-        store.launched.borrow_mut().push(scope);
+        store.launched.borrow_mut().push(crate::db::Held {
+            scope,
+            directory: store.attempt_dir(run.run_id, id, false)?,
+        });
         // The lane rewrites the record, the launch summary and the stop.
         let mut record = store.record(id, &call)?;
         forge(&mut record);
@@ -538,6 +544,44 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
 }
 
 #[test]
+fn held_stop_follows_the_handed_off_directory() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let started = store.mark_starting(id, &route(), &[], None, &call)?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: run.run_id,
+        attempt: id,
+        generation: started.generation,
+    };
+    store.launched.borrow_mut().push(crate::db::Held {
+        scope,
+        directory: store.attempt_dir(run.run_id, id, false)?,
+    });
+    let original = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let renamed = original.with_file_name(format!("{id}-renamed"));
+    std::fs::rename(&original, &renamed)?;
+    std::fs::DirBuilder::new().mode(0o700).create(&original)?;
+
+    assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
+    let request: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(renamed.join("cancel.json"))?)?;
+    assert_eq!(request["requester"], serde_json::to_value(sealed)?);
+    assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert!(std::fs::read_dir(&original)?.next().is_none());
+    Ok(())
+}
+
+#[test]
 fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -579,7 +623,10 @@ fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResu
         attempt: late,
         generation: started.generation,
     };
-    store.launched.borrow_mut().push(scope);
+    store.launched.borrow_mut().push(crate::db::Held {
+        scope,
+        directory: store.attempt_dir(batch.run_id, late, false)?,
+    });
     let accepted = std::collections::BTreeSet::from([(queued, 1)]);
     assert!(store.stop_children(accepted, "stop", &call).is_empty());
     let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
@@ -619,14 +666,14 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
     };
     rename(&record)?;
     assert!(store.record(id, &call).is_ok());
-    store
-        .launched
-        .borrow_mut()
-        .push(provenant_supervisor::custody::Scope {
+    store.launched.borrow_mut().push(crate::db::Held {
+        scope: provenant_supervisor::custody::Scope {
             run: run.run_id,
             attempt: id,
             generation: started.generation,
-        });
+        },
+        directory: store.attempt_dir(run.run_id, id, false)?,
+    });
     let renamed = |result: Result<()>| {
         matches!(
             result,
