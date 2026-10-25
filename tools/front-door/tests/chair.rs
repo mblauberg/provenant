@@ -337,7 +337,9 @@ esac
     assert!(
         value["stopReason"]
             .as_str()
-            .is_some_and(|s| s.contains("new-pane"))
+            .is_some_and(|s| s.contains("new-pane")),
+        "{value}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr.bytes)
     );
     let calls = fs::read_to_string(&log)?;
     assert!(
@@ -375,6 +377,124 @@ fn chair_real_manual_switch_requires_a_stable_source_session() -> Result {
     let repeat = rig.command(&["chair", "switch", "--session-id", "source", "--json"])?;
     let repeat: serde_json::Value = serde_json::from_slice(&repeat.stdout.bytes)?;
     assert_eq!(repeat["data"]["outcome"], "already_prepared");
+    Ok(())
+}
+
+#[test]
+fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Result {
+    let mut rig = configured()?;
+    let git = rig.root.join("git");
+    let real_git = std::env::var_os("PROVENANT_GIT").unwrap_or_else(|| "/usr/bin/git".into());
+    let real_git = real_git.to_str().ok_or("git path")?.replace('\'', "'\\''");
+    // Identity discovery has a bounded utility budget of its own. Simulate a
+    // slow first Git probe without spending the snapshot's store budget.
+    fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nif [ ! -e \"$0.started\" ]; then\n  : > \"$0.started\"\n  sleep 1.1\nfi\nexec '{real_git}' \"$@\"\n"
+        ),
+    )?;
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700))?;
+    rig.env.push(("PROVENANT_GIT".into(), git.into_os_string()));
+    let output = hook(&rig, false, "slow-identity")?;
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes).map_err(|e| {
+        format!(
+            "{e}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        )
+    })?;
+    assert_eq!(value["continue"], false, "{value}");
+    assert!(rig.root.join("git.started").exists());
+    assert!(!rig.state.join("run.sqlite3").exists());
+    assert!(!rig.state.join("run.sqlite3.lock").exists());
+    Ok(())
+}
+
+#[test]
+fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
+    use provenant_core::{
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
+        WaitBudget,
+    };
+    use provenant_records::CanonicalV1;
+    use provenant_run as run;
+    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+
+    let rig = configured()?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&LocalFs)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+        &LocalFs,
+    )?;
+    let context = run::ExecutionContext {
+        state_root: roots.state,
+        project_id: binding.project_id(),
+        actor_id: ActorId::from_bytes([1; 16]),
+        read_prompts: false,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let store = run::RunStore::open(&context, &call)?;
+    let run_id = RunId::from_bytes([2; 16]);
+    let task_id = TaskId::from_bytes([3; 16]);
+    let attempt_id = AttemptId::from_bytes([4; 16]);
+    store.create(
+        &run::PreparedRun {
+            run_id,
+            operation_id: OperationId::parse("chair-snapshot")?,
+            request: run::CanonicalRequest {
+                schema_version: 1,
+                tasks: vec![run::TaskRequest {
+                    profile: Default::default(),
+                    task_id,
+                    prompt_digest: CanonicalV1::file_digest(b"existing lane"),
+                    route: run::RequestedRoute::Named {
+                        name: "utility".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    authority_digest: Digest::from_bytes([5; 32]),
+                    writer: None,
+                    deliver: None,
+                    provider_timeout_seconds: 60,
+                    delivery_id: None,
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                parent: None,
+                lane_depth: Some(1),
+                parent_attempt: None,
+            },
+            attempts: vec![run::NewAttempt {
+                attempt_id,
+                task_id,
+                prompt: "existing lane".into(),
+            }],
+            created_at: clock.wall_now()?,
+        },
+        &call,
+    )?;
+    let output = rig.command(&["chair", "switch", "--session-id", "active-lane", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(value["data"]["outcome"], "prepared", "{value}");
+    let checkpoint = value["data"]["checkpoint"].as_str().ok_or("checkpoint")?;
+    let handoff: provenant_workflow::chair::Handoff =
+        serde_json::from_slice(&fs::read(checkpoint)?)?;
+    assert_eq!(
+        handoff.open_lanes,
+        [format!("{run_id}/{task_id}/{attempt_id}")]
+    );
+    // Keep the writer connection alive through the snapshot.
+    drop(store);
     Ok(())
 }
 
