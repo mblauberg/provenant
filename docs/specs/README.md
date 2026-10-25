@@ -10,6 +10,7 @@ state, owner, dependencies and user gates. Operator procedures live in the
 ## Area specs
 
 - [CLI](cli.md): command tree, envelope, exit codes, hooks and checks
+- [Disk](disk.md): read-only storage inventory and measurement limits
 - [State](state.md): core, records, config, release and managed install
 - [Supervisor](supervisor.md): process supervision, confinement, worktrees and Git evidence
 - [Routing](routing.md): routing, providers and quota

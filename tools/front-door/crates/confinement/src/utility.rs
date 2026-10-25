@@ -263,6 +263,18 @@ pub struct DiscoveredProject {
 }
 
 impl UtilityRuntime {
+    /// Closed Git reads with HOME/TMPDIR pointing at a non-directory. This
+    /// requires no state or temporary-directory creation and grants no mutation.
+    pub fn read_only(fs: Arc<dyn SafeFs>, git: impl AsRef<Path>) -> Result<Self, UtilityError> {
+        Ok(Self {
+            git: ExecutablePin::new(fs.as_ref(), git.as_ref(), "git")?,
+            home: PrivateHome {
+                path: PathBuf::from("/dev/null"),
+                identity: None,
+            },
+            fs,
+        })
+    }
     pub fn new(
         fs: Arc<dyn SafeFs>,
         git: impl AsRef<Path>,
@@ -472,7 +484,7 @@ fn verify_executable_at(
 
 struct PrivateHome {
     path: PathBuf,
-    identity: Metadata,
+    identity: Option<Metadata>,
 }
 
 impl PrivateHome {
@@ -496,10 +508,16 @@ impl PrivateHome {
         {
             return Err(UtilityError::InvalidHome);
         }
-        Ok(Self { path, identity })
+        Ok(Self {
+            path,
+            identity: Some(identity),
+        })
     }
 
     fn verify(&self, fs: &dyn SafeFs) -> Result<(), UtilityError> {
+        let Some(expected) = self.identity else {
+            return Ok(());
+        };
         let fresh = fs
             .open_anchor(&self.path)
             .map_err(|_| UtilityError::InvalidHome)?;
@@ -507,8 +525,8 @@ impl PrivateHome {
         if identity.kind != FileKind::Directory
             || identity.uid != effective_uid()
             || identity.mode & 0o077 != 0
-            || !self.identity.same_identity(&identity)
-            || self.identity.uid != identity.uid
+            || !expected.same_identity(&identity)
+            || expected.uid != identity.uid
         {
             return Err(UtilityError::InvalidHome);
         }
@@ -984,6 +1002,9 @@ pub(crate) fn execute_git_mutation(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
+    if runtime.home.identity.is_none() {
+        return Err(UtilityError::InvalidHome);
+    }
     execute_git(
         executor,
         repo,

@@ -29,6 +29,17 @@ concurrency and errors, and an independent second reviewer checks every block.
 Supervisor depends on core and records only. Confinement adds config and
 supervisor's safe API, and no library imports `cli`.
 
+## Read-only allocation observations
+
+`Directory::private_size_at(name)` observes one normal entry without following
+its final symlink. On macOS, supervisor calls `getattrlistat` with
+`ATTR_CMN_RETURNED_ATTRS`, `ATTR_CMNEXT_PRIVATESIZE` in `forkattr`, and
+`FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW`. It returns an optional byte count;
+omitted attributes and unsupported filesystems return `None`, while access and
+I/O errors remain errors. Other platforms return `None`. Consumers use
+`Metadata::allocated` for the explicit fallback. Private size applies to the
+entry itself; a directory's value does not include descendant files.
+
 ## Boundaries
 
 Supervisor adds no run verbs and no MCP tools. Fabric's tools call run, whose
