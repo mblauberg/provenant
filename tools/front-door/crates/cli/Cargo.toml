@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [features]
-fixture = ["provenant-run/fixture"]
+fixture = ["provenant-run/fixture", "provenant-supervisor/fixture"]
 
 [dependencies]
 provenant-quota = { workspace = true }
