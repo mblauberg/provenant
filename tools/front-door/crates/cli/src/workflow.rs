@@ -81,14 +81,18 @@ pub enum Session {
     Handoff(Box<Handoff>),
 }
 const HANDOFF_ABOUT: &str = "Hand this chair or task session to a fresh Claude session on a peer \
-Fabric host. The peer gets a generated prompt, not the transcript: the session checkpoint, each \
+Fabric host that has opted in with `provenant config set fabric.accept_handoff true`; it is off \
+by default and a peer that has not enabled it refuses with HANDOFF_DISABLED. The peer gets a generated prompt, not the transcript: the session checkpoint, each \
 branch with its pushed commit, the lanes still running here and any notes. The peer checks the \
 account against its own registrations, recreates each branch's worktree from origin, stores the \
 prompt and opens Terminal running `claude` under that account.
 
 Worktrees must be clean and pushed. --wip commits their tracked changes and pushes them first; \
 --allow-dirty proceeds and lists them in the prompt. --dry-run prints the prompt and plan and \
-sends nothing. The checkpoint is saved and the owner lease moves only after the peer accepts.";
+sends nothing. The checkpoint is saved after the peer accepts. The owner lease moves, on both \
+hosts, only when Terminal opened or --no-launch was given. If the peer stored the hand-off but \
+Terminal did not open, the command fails with LAUNCH_FAILED, keeps the lease here and names the \
+launch script to run on the peer.";
 /// `workflow session handoff`. The binary composes it: it needs worktree and
 /// peer owners that this crate does not hold.
 #[derive(Debug, Args)]

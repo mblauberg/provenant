@@ -192,6 +192,23 @@ peer. The peer starts a fresh Claude session from a hand-off prompt; no
 transcript moves. The command sends one `session_handoff` peer request, so a
 key restricted to `fabric peer` keeps working.
 
+A hand-off opens an unconfined Claude session on the target, so the target
+must opt in. It is off by default. On the host that will receive hand-offs,
+run:
+
+```sh
+provenant config set fabric.accept_handoff true
+```
+
+The setting is host-wide: enabling it accepts hand-offs from every
+configured peer, not one. Until then the host refuses with `HANDOFF_DISABLED`,
+which the calling host reports as the error code; `provenant config unset
+fabric.accept_handoff` turns it off again. The launch script prints the source
+host and the prompt path before it starts `claude`. The calling host strips
+control characters from, and bounds, every string in the peer's receipt, and
+refuses a receipt whose worktree branches differ from the requested ones
+(`HANDOFF_RECEIPT`).
+
 ```sh
 provenant workflow session handoff --to workshop --account work \
   [--note TEXT]... [--attach PATH]... [--prompt-file PATH] [--no-checkpoint] \
@@ -241,6 +258,14 @@ Both hosts record the new owner in `handoff/<project-id>/owner.json` in their
 state directories. The calling host moves its record only when Terminal
 opened or `--no-launch` was given. The record is advisory: a later hand-off
 from a host that is not the recorded owner warns but proceeds.
+
+If the peer stores the hand-off but Terminal does not open, the command exits
+non-zero with `LAUNCH_FAILED`, keeps the receipt in `data` and leaves both
+leases unmoved; run the named `launch.command` on the peer by hand. Peer
+refusals keep their stable codes (`PEER_VERSION`, `QUEUE_FULL`, `CONFLICT` and
+the rest), the same as remote runs. The calling host sends its `limits.peer_seconds` and the peer works to the
+smaller of that and its own, minus 5 seconds, so a slow worktree recreation is reported by the peer rather
+than timing the calling host out.
 
 Replaying an operation ID is refused with `already_delivered`, so a peer never
 opens a second session for one hand-off. A lost reply returns

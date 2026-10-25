@@ -1,6 +1,12 @@
 {
   "schema_version": 1,
   "knobs": {
+    "fabric.accept_handoff": {
+      "type": "bool", "default": false, "status": "wired",
+      "reader": "tools/front-door/src/handoff.rs",
+      "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
+      "trade_off": "Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."
+    },
     "chair.auto_switch": {
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/chair.rs",

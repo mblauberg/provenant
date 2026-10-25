@@ -48,7 +48,8 @@ skill reads `provenant config show`.
 The registry marks these knobs `wired`: `chair.auto_switch`,
 `chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,
 `lanes.max_concurrency`, `lanes.max_depth`, `review.extra_reviewers`,
-`review.cross_family`, `review.rereview_scope` and `review.polish`. The other
+`review.cross_family`, `review.rereview_scope`, `review.polish` and
+`fabric.accept_handoff`. The other
 eight are advisory and do not alter Rust runtime behaviour. Use `config show`
 to see each knob's status and source. Install registrations with
 `provenant install --dry-run`
