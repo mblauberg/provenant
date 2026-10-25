@@ -230,7 +230,17 @@ mod tests {
         assert!(line.starts_with("kind=note message=\"{"), "{line}");
         assert!(line.ends_with(" seq=7"), "{line}");
         // Only the three real keys sit outside quotes.
-        let outside = line.split('"').step_by(2).collect::<String>();
+        let mut outside = String::new();
+        let (mut quoted, mut escaped) = (false, false);
+        for c in line.chars() {
+            match (quoted, escaped, c) {
+                (true, true, _) => escaped = false,
+                (true, false, '\\') => escaped = true,
+                (_, false, '"') => quoted = !quoted,
+                (false, _, _) => outside.push(c),
+                _ => {}
+            }
+        }
         assert_eq!(outside.matches('=').count(), 3, "{line}");
     }
     #[test]
