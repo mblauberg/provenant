@@ -223,7 +223,10 @@ home or tmp grants.
   directories (with both the `npm_config_*` and `pnpm_config_*` store and
   cache names set), so writers download cold. A read-only lane keeps a scratch
   `CARGO_HOME` whose `registry` and `git` link to the shared stores read-only,
-  so offline builds use extracted sources, and reads and executes the host's
+  so offline builds use extracted sources. Both lane kinds set `CARGO_TARGET_DIR`
+  and `CARGO_BUILD_BUILD_DIR` to the lane cache's `target` directory (scratch
+  for read-only lanes), overriding inherited Cargo build-dir configuration.
+  A read-only lane reads and executes the host's
   existing `~/.cache/node/corepack` without write. Executables
   (`~/.cargo/bin`, `~/.rustup/toolchains`) are read and exec only, except the
   Corepack cache and a writer's `--write-root` and `domains.run.writer_writes`

@@ -21,7 +21,10 @@ and web access according to the access mode. The adapter sets
 ## Writer lanes
 
 A confined writer's environment is built from scratch and sets `CARGO_TARGET_DIR`
-to its per-lane cache. Share a target only within one worktree; across
+and `CARGO_BUILD_BUILD_DIR` to its per-lane cache's `target` directory. Read-only
+lanes set both to `target` under their scratch directory. Pinning build-dir
+overrides inherited Cargo configuration and keeps intermediate artefacts in the
+lane. Share a target only within one worktree; across
 worktrees keep per-lane targets (`provenant worktree remove` and
 `provenant gc` prune the lane caches), because a target shared across
 worktrees can run another checkout's stale test binaries.

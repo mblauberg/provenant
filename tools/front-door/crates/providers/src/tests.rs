@@ -760,6 +760,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 "RUSTUP_HOME",
                 "RUSTUP_AUTO_INSTALL",
                 "CARGO_TARGET_DIR",
+                "CARGO_BUILD_BUILD_DIR",
                 "GIT_CONFIG_GLOBAL",
                 "GIT_CONFIG_NOSYSTEM",
                 "CODEX_HOME",
@@ -795,7 +796,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         {
             let index = expected
                 .iter()
-                .position(|key| *key == "CARGO_TARGET_DIR")
+                .position(|key| *key == "CARGO_BUILD_BUILD_DIR")
                 .expect("cargo env")
                 + 1;
             expected.splice(index..index, ["DEVELOPER_DIR", "SDKROOT"]);
@@ -1644,6 +1645,36 @@ fn covers(grant: &provenant_confinement::permissions::PathGrant, path: &std::pat
 }
 
 #[test]
+fn cargo_build_dir_is_pinned_to_lane_target_for_each_access() -> Result<(), ProviderError> {
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    for (access, target) in [
+        (Access::ReadOnly, "/fixture/scratch/target"),
+        (
+            Access::WorktreeWrite,
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
+        ),
+    ] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let launch = crate::codex::Codex.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+            assert!(
+                launch.env.iter().any(|(k, v)| k == key && v == target),
+                "{access:?}: {key} must be {target}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let shared = [
@@ -2155,6 +2186,10 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
         ),
         (
             "CARGO_TARGET_DIR",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
+        ),
+        (
+            "CARGO_BUILD_BUILD_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
         ),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),

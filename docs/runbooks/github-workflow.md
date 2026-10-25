@@ -258,6 +258,22 @@ one, update the next onto the new `main`, rerun the exact-head checks and
 independent review (an update-merge is a new commit and invalidates prior
 exact-head evidence), then merge it.
 
+### Rust build cache
+
+CI pins Rust 1.99.1 and `Swatinem/rust-cache` v2.9.3 at
+`d1527c8f67ef9af357290475d4af4b0fab8f12e0`. Both Rust cache steps cover
+`tools/front-door/target`. The pinned action supports Cargo's newer build-dir
+layout: its [cleanup code](https://github.com/Swatinem/rust-cache/blob/d1527c8f67ef9af357290475d4af4b0fab8f12e0/src/cleanup.ts#L236-L270)
+recognises bare package names with nested hash directories, and its target
+traversal recurses into nested build directories. No action update is needed
+for that layout.
+
+The action's [cache path configuration](https://github.com/Swatinem/rust-cache/blob/d1527c8f67ef9af357290475d4af4b0fab8f12e0/src/config.ts#L128-L137)
+uses the workspace target directory; it does not discover a separately
+configured `build.build-dir`. A build directory inside the target tree is
+covered. If CI moves it outside that tree, add that path to `cache-directories`.
+The current workflow sets `CARGO_TARGET_DIR` and has no separate build-dir.
+
 ### Reproducing a CI failure locally
 
 When a suite passes locally but fails in CI, the difference is usually developer
