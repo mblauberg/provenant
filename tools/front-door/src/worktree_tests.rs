@@ -2403,23 +2403,30 @@ fn verify_lane_profile(
     if confinement.writer.is_some() {
         // A writer lane cannot hand a writer child any registered worktree:
         // the host refuses the proposal before any provider launches.
-        let proposal = admit(&nested_frames.replace("confined-child", "confined-writer").replace(
-            "\"timeout_ms\":1000",
-            "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\".worktrees/nested-child\"",
-        ))?;
-        let store = provenant_run::RunStore::open(&child_context, &call)?;
-        let refused = await_terminal(&store, proposal, &call)?;
-        assert_terminal_outcome(&refused, provenant_run::Outcome::Rejected)?;
-        assert_ne!(refused.provider_launched, Some(true));
-        let provenant_run::AttemptState::Terminal { reason, .. } = &refused.state else {
-            return Err("writer proposal was not terminal".into());
-        };
-        assert!(
-            reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("a lane cannot propose a writer child")),
-            "{reason:?}"
-        );
+        for (name, worktree) in [
+            ("confined-writer", ".worktrees/nested-child"),
+            ("confined-parent-writer", ".worktrees/writer"),
+        ] {
+            let proposal = admit(&nested_frames.replace("confined-child", name).replace(
+                "\"timeout_ms\":1000",
+                &format!(
+                    "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\"{worktree}\""
+                ),
+            ))?;
+            let store = provenant_run::RunStore::open(&child_context, &call)?;
+            let refused = await_terminal(&store, proposal, &call)?;
+            assert_terminal_outcome(&refused, provenant_run::Outcome::Rejected)?;
+            assert_ne!(refused.provider_launched, Some(true), "{worktree}");
+            let provenant_run::AttemptState::Terminal { reason, .. } = &refused.state else {
+                return Err("writer proposal was not terminal".into());
+            };
+            assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("a lane cannot propose a writer child")),
+                "{worktree}: {reason:?}"
+            );
+        }
     }
     let cancel_child =
         launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
