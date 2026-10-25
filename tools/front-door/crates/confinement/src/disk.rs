@@ -227,6 +227,7 @@ pub fn worktrees(
             dirty: WorktreeCondition::Unknown,
             writer,
         };
+        let first = report.entries.len();
         if let Some(index) = report.measure("worktree", &info.path) {
             let merged = integration
                 .as_ref()
@@ -266,6 +267,13 @@ pub fn worktrees(
                 .into(),
             );
             entry.merged = merged;
+            let writer = entry.writer.clone();
+            for target in &mut report.entries[first..] {
+                if target.class == "host_target" && target.path.starts_with(&info.path) {
+                    target.owner = Some(info.path.display().to_string());
+                    target.writer = writer.clone();
+                }
+            }
         }
         inventory.push(info);
     }

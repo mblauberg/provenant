@@ -57,11 +57,13 @@ and `other`; these parts use unshared bytes and sum to the lane's unshared total
 | --- | --- |
 | `lane_cache` | State, owner when recognised, top-level parts, optional `reclaim: "gc"` |
 | `worktree` | Branch when attached, writer `live`, `free` or `unknown`, merge containment when known |
-| `host_target` | Directory containing a regular `CACHEDIR.TAG` in worktree or other state |
+| `host_target` | Directory containing a regular `CACHEDIR.TAG` in worktree or other state; owner worktree and writer when measured inside a worktree |
 | `attempt_tmp` | Attempt `tmp`; `leak: true` when its indexed attempt is terminal, `false` while nonterminal |
 | `attempt_retained` | One class aggregate for scratch, provider-state, quarantine, logs, stdout and stderr |
 | `child_store` | One class aggregate for `children/<attempt>`, including nested stores |
 | `other_state` | One class aggregate for remaining host, run and attempt state |
+
+Owner and writer facts on `host_target` rows grant no removal authority.
 
 Lane states are `live`, `idle`, `orphaned`, `foreign`, `legacy`, `tombstone`,
 `refused` and `unmarked`. Classification reuses cache-owner parsing and GC
