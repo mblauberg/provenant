@@ -271,7 +271,11 @@ pub(crate) fn node_tools(
             // Corepack downloads package managers (pnpm's native binary) into
             // its cache and runs them from there. Lanes can already run code
             // they write in the worktree, so this adds no new capability.
-            tool_exec_roots.push(subtree(home.join(".cache/node/corepack")));
+            // Exec roots must exist, so skip it until Corepack has run once.
+            let corepack = home.join(".cache/node/corepack");
+            if corepack.is_dir() {
+                tool_exec_roots.push(subtree(corepack));
+            }
             return;
         }
     }
