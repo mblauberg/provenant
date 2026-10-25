@@ -67,6 +67,8 @@ see the [release build example](runbooks/install.md#build-a-staged-release).
 
 ## Writer dispatch
 
+Agents use `fabric_submit`; this is the terminal path for a shell without MCP.
+
 ```sh
 provenant dispatch --operation-id OP --model ADAPTER/MODEL \
   --prompt-file BRIEF --mode worktree-write --worktree .worktrees/BRANCH

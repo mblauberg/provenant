@@ -178,7 +178,6 @@ other envelope.
 | `claim acquire\|renew\|verify\|release\|list` | Advisory issue and path ownership |
 | `landing acquire\|renew\|verify\|release\|wait\|push\|reconcile` | Branch, expected SHA and fence; push is an explicit authorised action |
 | `graph run\|status\|cancel\|resume` | Bounded task graphs |
-| `host list` | Peer and adapter readiness observations |
 | `mcp [--client NAME]` | The stdio server; clients are `claude`, `codex`, `cursor`, `agy`, `opencode` |
 
 Two entry points are hidden from `provenant help`: `fabric peer` (the fixed
@@ -216,9 +215,9 @@ under `fetch/<host>/<run>/`. Output tools accept no arbitrary source or
 destination path.
 
 Submission tasks carry a prompt and route preference, with optional account,
-access, worktree, timeout and delivery ID. They accept no artefact inputs.
-`resume` is separate from submission and cannot change route, account or
-authority.
+access, worktree, `deliver` and delivery ID, and a required `timeout_ms` (1000
+to 14400000). They accept no artefact inputs. `resume` is separate from
+submission and cannot change route, account or authority.
 
 ### Bounded graphs and route fallback
 
@@ -473,7 +472,7 @@ write access to shared SQLite or `fabric/locks`, then remove those grants.
 | Remote PID probing | Only the owning host can report process identity |
 | Offline outbound mailbox, inbox pull and merged host cursors | One authoritative sequence at the home; no replicator or clock-skew merge |
 | Copying whole run directories | An explicit verified fetch of an allowlisted artefact set replaces it |
-| Registration doctor and install smoke | `check` subjects and `host list` readiness cover them |
+| Registration doctor and install smoke | `check` subjects and `hosts` readiness cover them |
 | Startup retention sweeps and DB pruning | Explicit maintenance of new state only |
 | Numeric coercion, synonym repair and fuzzy command hints | Invalid fields are refused with a stable code and field path |
 | Python and Node discovery, subprocess RPC and package provisioning | Everything runs in process in one executable |

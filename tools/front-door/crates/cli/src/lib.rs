@@ -81,10 +81,16 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 return ParseOutcome::Invalid { error, globals };
             }
             return match error.kind() {
-                clap::error::ErrorKind::DisplayHelp => ParseOutcome::Help {
-                    text: error.to_string(),
-                    catalog: catalog(&model),
-                    globals,
+                clap::error::ErrorKind::DisplayHelp => match help_scope(&model, &argv) {
+                    Some(scope) => ParseOutcome::Help {
+                        text: error.to_string(),
+                        catalog: scoped(catalog(&model), &scope),
+                        globals,
+                    },
+                    None => ParseOutcome::Invalid {
+                        error: CliError::Invalid("unknown help command".into()),
+                        globals,
+                    },
                 },
                 clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
                 _ => ParseOutcome::Invalid {
@@ -116,9 +122,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     };
     if let Command::Help { command } = &invocation.command {
         let mut selected = &mut model;
+        let mut scope = String::from("provenant");
         for component in command {
             selected = match selected.find_subcommand_mut(component) {
-                Some(child) if !child.is_hide_set() => child,
+                Some(child) if !child.is_hide_set() => {
+                    scope = format!("{scope} {}", child.get_name());
+                    child
+                }
                 _ => {
                     return ParseOutcome::Invalid {
                         error: CliError::Invalid("unknown help command".into()),
@@ -129,7 +139,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         }
         return ParseOutcome::Help {
             text: selected.render_long_help().to_string(),
-            catalog: catalog(&command_model()),
+            catalog: scoped(catalog(&command_model()), &scope),
             globals: invocation.globals,
         };
     }
@@ -391,6 +401,39 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
     }
     Ok(())
 }
+/// The subcommand path named before the first `--help`, such as
+/// `provenant fabric mail`. Flags are skipped, along with the values of the
+/// global `--state-dir` and `--project`. A hidden command is unknown.
+fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
+    let mut scope = String::from("provenant");
+    let mut current = model;
+    let mut words = argv
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--" && *arg != "--help");
+    while let Some(arg) = words.next() {
+        if arg == "--state-dir" || arg == "--project" {
+            words.next();
+        } else if let Some(child) = arg.to_str().and_then(|name| current.find_subcommand(name)) {
+            if child.is_hide_set() {
+                return None;
+            }
+            scope = format!("{scope} {}", child.get_name());
+            current = child;
+        }
+    }
+    Some(scope)
+}
+/// Keep the named command and its descendants; `help` alone keeps all.
+fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
+    catalogue.commands.retain(|command| {
+        command
+            .command
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    });
+    catalogue
+}
 fn catalog(model: &clap::Command) -> HelpCatalogue {
     fn walk(command: &clap::Command, path: String, commands: &mut Vec<HelpCommand>) {
         if command.is_hide_set() {
@@ -473,6 +516,10 @@ pub fn usage_verbs() -> Vec<String> {
         if children.is_empty() && !path.is_empty() {
             verbs.push(path);
         } else {
+            // A parent whose subcommand is optional is also a verb (`hosts`).
+            if !path.is_empty() && !command.is_subcommand_required_set() {
+                verbs.push(path.clone());
+            }
             for child in children {
                 let name = child.get_name();
                 walk(
@@ -880,6 +927,14 @@ mod tests {
         assert!(!error.to_string().contains("Usage:"));
     }
     #[test]
+    fn usage_verbs_include_optional_parents_only() {
+        let verbs = usage_verbs();
+        assert!(verbs.contains(&"hosts".to_owned()));
+        assert!(verbs.contains(&"hosts doctor".to_owned()));
+        assert!(!verbs.contains(&"accounts".to_owned()));
+        assert!(!verbs.contains(&"fabric".to_owned()));
+    }
+    #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [
             &["lanes", "--json", "--limit", "0"][..],
@@ -933,6 +988,50 @@ mod tests {
                 .iter()
                 .any(|arg| arg.name == "wait" && arg.bounds == Some((1, 14400)))
         }));
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "reconcile", "--json"]) else {
+            panic!("reconcile help")
+        };
+        assert_eq!(catalog.commands.len(), 1);
+        let names = |words: &[&str]| match parsed(words) {
+            ParseOutcome::Help { catalog, .. } => catalog
+                .commands
+                .into_iter()
+                .map(|c| c.command)
+                .collect::<Vec<_>>(),
+            other => panic!("{words:?}: {other:?}"),
+        };
+        let mail = names(&["help", "fabric", "mail", "--json"]);
+        assert!(mail.contains(&"provenant fabric mail send".to_owned()));
+        assert!(mail.iter().all(|c| c.starts_with("provenant fabric mail")));
+        assert_eq!(
+            names(&["help", "hosts", "--json"]),
+            vec![
+                "provenant hosts".to_owned(),
+                "provenant hosts doctor".to_owned()
+            ]
+        );
+        assert_eq!(
+            names(&["fabric", "mail", "send", "--help", "--json"]),
+            vec!["provenant fabric mail send".to_owned()]
+        );
+        assert!(names(&["hosts", "--help", "--json"]).len() == 2);
+        assert_eq!(
+            names(&["--project", "hosts", "lanes", "--help", "--json"]),
+            vec!["provenant lanes".to_owned()]
+        );
+        assert_eq!(
+            names(&["hosts", "--help", "doctor", "--json"]).len(),
+            2,
+            "words after the first --help are ignored"
+        );
+        assert!(matches!(
+            parsed(&["fabric", "peer", "--help", "--json"]),
+            ParseOutcome::Invalid { .. }
+        ));
+        assert!(matches!(
+            parsed(&["help", "nope", "--json"]),
+            ParseOutcome::Invalid { .. }
+        ));
     }
     #[cfg(unix)]
     #[test]

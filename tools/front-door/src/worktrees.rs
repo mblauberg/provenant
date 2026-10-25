@@ -105,11 +105,11 @@ pub fn run(command: Worktree, globals: &Globals) -> u8 {
     };
     let read_only = matches!(command, Worktree::List);
     match execute(command, globals) {
-        Ok(data) => match serde_json::to_string_pretty(&data) {
-            Ok(human) => emit(
+        Ok(data) => match serde_json::to_value(&data) {
+            Ok(value) => emit(
                 &CommandResult::new(name, Outcome::Ok, data),
                 globals,
-                &(human + "\n"),
+                &provenant_cli::terse(&value),
                 read_only,
             ),
             Err(_) => fail(

@@ -84,8 +84,8 @@ needs durable peer exchange. Only the chair mutates shared pair state.
   transfer chair authority or provider custody automatically.
 
 The chair owns one active loop; other primaries own bounded stages. Rust
-run/supervisor owns writer custody, and `provenant fabric landing` owns the
-separate advisory landing fence.
+run/supervisor owns writer custody, and `fabric_landing` owns the
+separate advisory landing fence (the CLI only pushes and reconciles under it).
 
 ## Default rotation
 

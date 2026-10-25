@@ -8,7 +8,7 @@ peer model and boundaries.
 
 ```sh
 provenant help
-provenant fabric host list
+provenant hosts
 provenant hosts doctor
 provenant fabric peer
 provenant fabric peer-agent
@@ -17,7 +17,7 @@ provenant lanes --host workshop
 provenant workflow session handoff --help
 ```
 
-`fabric host list` reads local and configured peer health. `hosts doctor`
+`hosts` reads local and configured peer health. `hosts doctor`
 probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
 general provider sign-in check. Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
@@ -146,7 +146,8 @@ keep running after the SSH call returns. The Fabric MCP `fabric_submit` tool
 takes the same placement as an optional `host` field.
 
 A writer on a peer names a new branch and its base instead of `--worktree`,
-which is a path on the calling host:
+which is a path on the calling host. This is the terminal path; agents use
+`fabric_submit`:
 
 ```sh
 provenant dispatch --host workshop --mode worktree-write \

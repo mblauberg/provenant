@@ -36,9 +36,6 @@ pub enum Fabric {
     },
     /// Show this agent's project and inbox identity
     Identity,
-    /// List known hosts
-    #[command(subcommand)]
-    Host(Host),
     #[command(hide = true)]
     Peer {
         /// Handle the request in this process; never forward to the peer agent
@@ -66,11 +63,6 @@ pub enum Fabric {
     /// Fence and land pushes to a shared reference
     #[command(subcommand)]
     Landing(Landing),
-}
-#[derive(Debug, Subcommand)]
-pub enum Host {
-    /// List hosts
-    List,
 }
 #[derive(Debug, Subcommand)]
 pub enum Graph {
@@ -537,7 +529,6 @@ impl Fabric {
         let (domain, verb) = match self {
             Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
-            Self::Host(_) => return "fabric host list".into(),
             Self::Peer { .. } => return "fabric peer".into(),
             Self::PeerAgent => return "fabric peer-agent".into(),
             Self::Graph(Graph::Run { .. }) => return "fabric graph run".into(),
@@ -650,7 +641,6 @@ fn execute(
     let value = match cmd {
         Fabric::Identity
         | Fabric::Mcp { .. }
-        | Fabric::Host(_)
         | Fabric::Graph(_)
         | Fabric::Peer { .. }
         | Fabric::PeerAgent
@@ -948,9 +938,7 @@ pub fn run(
         }
     };
     let human = if result.error.is_none() {
-        serde_json::to_string_pretty(&result.data)
-            .map(|s| format!("{s}\n"))
-            .unwrap_or_default()
+        crate::terse(&result.data)
     } else {
         String::new()
     };

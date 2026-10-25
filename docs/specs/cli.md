@@ -41,15 +41,17 @@ it by the grammar tests.
 ### Command tree
 
 One spelling per name: no aliases, abbreviated long options or short flags
-other than what clap generates. Every leaf takes `--help`, and `help [COMMAND]`
-shows a top-level command's help. Unknown, duplicate singleton or conflicting
-options fail. Only options marked repeatable may repeat.
+other than what clap generates. Every leaf takes `--help`, and `help [COMMAND...]`
+shows the help of a command at any depth. `help --json` lists the whole surface;
+`help COMMAND... --json` and `COMMAND... --help --json` list only that command
+and its subcommands. Unknown, duplicate singleton or conflicting options fail.
+Only options marked repeatable may repeat.
 
 ```text
 provenant
-  help [COMMAND]
+  help [COMMAND...]
   root
-  hosts doctor [SSH_ALIAS]
+  hosts [doctor [SSH_ALIAS]]
   config show | set | unset
   install | uninstall
   accounts list | register | set
@@ -62,7 +64,7 @@ provenant
   cancel TARGET
   resume ATTEMPT
   reconcile
-  fabric mcp | identity | host | graph | mail | task | events | claim | landing
+  fabric mcp | identity | graph | mail | task | events | claim | landing
   telemetry stats | trace
   quota show | display | tick
   worktree create | list | remove
@@ -77,8 +79,8 @@ Global options are accepted before or after the subcommand:
 
 | Option | Meaning |
 | --- | --- |
-| `--help`, `--version` | Pure output, exit 0. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. |
+| `--help`, `--version` | Pure output, exit 0, except that `--help` on a hidden command (`internal` and its subcommands, `fabric peer`, `fabric peer-agent`) exits 2 as an unknown command. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `config show|set|unset` and `workflow` print pretty JSON; `hosts doctor` and the remaining leaves print their own text. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 
@@ -156,6 +158,7 @@ final head and open a pull request after verifying it.
 | Leaf | Grammar | Notes |
 | --- | --- | --- |
 | `root` | no flags | Reports the asset root, state directory, selected project and installation identity. Human output is the newline-terminated asset path that scripts read. Read-only; an explicit `--project` verifies the checkout with the supervisor's bounded Git runner. |
+| `hosts` | no flags | Lists the local host and configured peers with peer and adapter readiness observations. Read-only. |
 | `hosts doctor` | `[SSH_ALIAS]` | Probes sign-in on one host, or every configured host, with no inference and no credential access. |
 | `config show` | `[--task-class NAME]` | The resolved config with secrets redacted and each knob's source (default, profile or override). |
 | `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. `null` clears a nullable knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |

@@ -10,7 +10,7 @@ session checkpoint is only a bounded resume aid.
   easy to find. Follow those owners for current status.
 - Let the run and Fabric retain task assignments, lane state, outputs, and
   recovery records. Use `provenant lanes`, `provenant output`,
-  `provenant reconcile`, and `provenant resume` when continuing work.
+  `provenant reconcile`, and `fabric_run` `resume` when continuing work.
 - Before compaction or handoff, save concise Markdown for the explicit host
   session ID with `provenant workflow session save <session-id> --file
   <checkpoint.md>`. Include the goal, authority/evidence references, verified
