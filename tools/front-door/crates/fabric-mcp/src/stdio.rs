@@ -381,7 +381,7 @@ fn serve_with_timeouts(
 
     let stop_reader = AtomicBool::new(false);
     let mut live = BTreeMap::<Id, CancelToken>::new();
-    let run_result = thread::scope(|scope| {
+    thread::scope(|scope| {
         let reader = scope.spawn(|| {
             read_input(
                 input,
@@ -420,20 +420,25 @@ fn serve_with_timeouts(
         while !reader.is_finished() {
             let _ = events.recv_timeout(timeouts.event.min(timeouts.input_read));
         }
+        // Draining has stopped; disconnect late guard sends before any joins.
+        drop(events);
         if reader.join().is_err() {
             return Err(Error::Worker);
         }
+        let drained = workers.remaining == 0;
+        let panicked = workers
+            .threads
+            .drain(..)
+            .filter(|worker| drained || worker.is_finished())
+            .map(|worker| worker.join().is_err())
+            .filter(|failed| *failed)
+            .count();
         match shutdown {
             Err(error) => Err(error),
+            Ok(()) if panicked == WORKERS => Err(Error::Worker),
             Ok(()) => run,
         }
-    });
-    for worker in workers.threads {
-        if worker.is_finished() {
-            let _ = worker.join();
-        }
-    }
-    run_result
+    })
 }
 
 fn serve_loop(
@@ -636,13 +641,7 @@ fn shutdown_workers(
             _ => {}
         }
     }
-    let panicked = workers
-        .threads
-        .drain(..)
-        .map(|worker| worker.join().is_err())
-        .filter(|failed| *failed)
-        .count();
-    if !live.is_empty() || panicked == WORKERS {
+    if !live.is_empty() {
         return output_error.map_or(Err(Error::Worker), Err);
     }
     output_error.map_or(Ok(()), Err)
