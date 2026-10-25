@@ -9,7 +9,8 @@ profile or a knob with `provenant config set profile economy` or
 Profiles are `balanced`, `economy` and `rigorous`; task-class presets include
 `mechanical` and `bulk`. Inspect effective values with
 `provenant config show --task-class mechanical` and override a wired knob for
-one run with `provenant dispatch --knob NAME=VALUE`.
+one run with `provenant dispatch --knob NAME=VALUE` (the terminal path; agents
+use `fabric_submit`'s `knobs`).
 
 ## Precedence and stamps
 

@@ -50,7 +50,7 @@ inspect the Fabric task and existing output, then resume the exact attempt with
 `fabric_run`'s `resume` operation (`target: { attempt }`,
 `expected_generation: 0`, `operation_id`, `prompt`). `expected_generation`
 counts earlier continuations, so pass 0; it is not the attempt record's
-`generation`. On a conflict, target the child attempt. Preserve partial results. Retry only missing or failed work within its bound; do not
+`generation`. On `Conflict`, read `fabric_run` `status`: wait if the target is running, target its child (`parent_attempt`) if one exists, otherwise use a fresh `operation_id`. Preserve partial results. Retry only missing or failed work within its bound; do not
 relaunch a still-active task because a session lost its context.
 
 ## Checklist

@@ -37,8 +37,10 @@ bounded slices with `fabric_output`'s `read` operation, and steer with
 `fabric_mail`'s `send` operation or `fabric_run`'s `resume` operation using
 `target: { attempt: ATTEMPT }`, `expected_generation: 0` (it counts earlier
 continuations, not the attempt record's `generation`), `operation_id` and the
-prompt (`resume` also answers `input_required` lanes). On a conflict the
-attempt already has a continuation: target the child attempt.
+prompt (`resume` also answers `input_required` lanes). On `Conflict`,
+read the target's `fabric_run` `status` (`state`): if it is still running,
+wait; if a later attempt names it as `parent_attempt`, target that child;
+otherwise use a fresh `operation_id`.
 
 Long-running watchable processes go to a background shell with output to a run
 file.

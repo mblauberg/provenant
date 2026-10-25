@@ -25,5 +25,6 @@ Run owns detached custody and recovery. Use `provenant reconcile --id RUN` for
 recovery. Resume an attempt with `fabric_run`'s `resume` operation
 (`target: { attempt }`, `expected_generation: 0`, `operation_id`, `prompt`).
 `expected_generation` counts earlier continuations, so pass 0; it is not the
-attempt record's `generation`. On a conflict the attempt already has a continuation: target the child
-attempt. Use an authorised prompt for continuation.
+attempt record's `generation`. On `Conflict`, read the target's `fabric_run` `status` (`state`): if it is
+still running, wait; if a later attempt names it as `parent_attempt`, target
+that child; otherwise use a fresh `operation_id`. Use an authorised prompt for continuation.

@@ -137,7 +137,8 @@ keep running after the SSH call returns. The Fabric MCP `fabric_submit` tool
 takes the same placement as an optional `host` field.
 
 A writer on a peer names a new branch and its base instead of `--worktree`,
-which is a path on the calling host:
+which is a path on the calling host. This is the terminal path; agents use
+`fabric_submit`:
 
 ```sh
 provenant dispatch --host workshop --mode worktree-write \

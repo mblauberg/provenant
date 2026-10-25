@@ -11,7 +11,9 @@ After a crash, context loss, or uncertain dispatch:
 1. Run `provenant reconcile` to recover queued or orphaned work.
 2. Inspect `provenant lanes` and the related Fabric tasks.
 3. Use `fabric_run` `resume` (`expected_generation: 0`) to continue the attempt
-   in a new run that has it as parent; on a conflict, target the child attempt.
+   in a new run that has it as parent. On `Conflict`, read `fabric_run` `status`:
+   wait if the target is running, target its child (`parent_attempt`) if one
+   exists, otherwise use a fresh `operation_id`.
    Read task outputs and verify the exact target before repeating any work.
 4. Preserve useful partial outputs. Retry only the failed or missing work, and
    stay within the retry bound owned by the relevant lifecycle.

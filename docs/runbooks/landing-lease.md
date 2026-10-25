@@ -17,10 +17,11 @@ A terminal without MCP uses the same operations through
 `--wait` in seconds (1 to 14400).
 
 Only the CLI fences a push: `provenant fabric landing push` and
-`provenant fabric landing reconcile` settle its recorded outcome. Both take
-`--reference`, `--id`, `--generation` and `--operation-id`, copied from the
-lease `proof` plus a unique operation ID. `renew`, `verify` and `release` on
-the CLI take the same fence flags. All of them read the lease token from
+`provenant fabric landing reconcile` settle its recorded outcome. The fence
+flags are `--reference`, `--id` and `--generation`, copied from the lease
+`proof`. `push`, `reconcile`, `renew` and `release` also take a unique
+`--operation-id`; `renew` also takes `--lease-seconds`; `verify` takes the
+fence flags alone. All of them read the lease token from
 `PROVENANT_LANDING_TOKEN`, so it never enters the command arguments. The proof
 `token` is a JSON array of 16 integers; the CLI needs 32 lowercase hex digits.
 With `PROOF` holding the proof object as JSON and `OP` set to a unique
