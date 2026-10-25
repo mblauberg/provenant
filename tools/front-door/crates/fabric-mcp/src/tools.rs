@@ -309,6 +309,8 @@ impl ToolCall {
                     | Self::Events(..)
                     | Self::Claim(..)
                     | Self::Landing(..)
+                    | Self::Graph(..)
+                    | Self::Submit(SubmitInput::Submission { host: Some(_), .. })
             )
         {
             return Err(CoordinationError::LaneMutation.into());

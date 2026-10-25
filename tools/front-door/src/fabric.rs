@@ -2326,6 +2326,9 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
     };
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let factory = factory(globals)?;
+        if factory.context.in_lane && !matches!(input, GraphInput::Status { .. }) {
+            return Err(CoordinationError::LaneMutation.into());
+        }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         Ok(factory.graph(input, budget, &cancel)?)
@@ -2347,7 +2350,14 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
         Err(error) => crate::fail(
             command,
             provenant_records::Outcome::Error,
-            "graph_owner",
+            if matches!(
+                error.downcast_ref::<CoordinationError>(),
+                Some(CoordinationError::LaneMutation)
+            ) {
+                "lane_coordination_refused"
+            } else {
+                "graph_owner"
+            },
             &error.to_string(),
             globals,
         ),
@@ -2369,6 +2379,9 @@ impl Factory {
         cancel: &CancelToken,
     ) -> Result<EventCoverage, FacadeError> {
         let ctx = &self.context;
+        if ctx.in_lane {
+            return Ok(EventCoverage::default());
+        }
         if ctx.identity.federation.as_ref().is_some_and(|p| {
             ctx.config
                 .home_hosts

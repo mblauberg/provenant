@@ -1087,6 +1087,21 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         let cleanup = rig.process_cleanup();
         let identity = rig.command(&["fabric", "identity", "--json"])?;
         assert_eq!(code(&identity), 0);
+        let host_identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+        let host = host_identity["data"]["host"].as_str().ok_or("host")?;
+        assert_eq!(
+            code(&rig.command(&["fabric", "events", "read", "--json"])?),
+            0
+        );
+        let database = rig.state.join("fabric/fabric.sqlite3");
+        let cursor = || -> Result<i64> {
+            Ok(rusqlite::Connection::open(&database)?.query_row(
+                "SELECT COALESCE(SUM(sequence), 0) FROM run_event_cursors",
+                [],
+                |row| row.get(0),
+            )?)
+        };
+        let before = cursor()?;
         let parent = "11111111111111111111111111111111";
         let child_state = rig.state.join("children").join(parent);
         std::fs::create_dir_all(&child_state)?;
@@ -1113,6 +1128,19 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
                 .push((provenant_run::LANE_DEPTH_ENV.into(), depth.into()));
         }
         let calls = [
+            (
+                "fabric_graph",
+                json!({"op":"run","document":"missing.json"}),
+            ),
+            ("fabric_graph", json!({"op":"cancel","id":"g-lane"})),
+            (
+                "fabric_graph",
+                json!({"op":"resume","document":"missing.json"}),
+            ),
+            (
+                "fabric_submit",
+                json!({"op":"submission","operation_id":"lane-host","host":host,"tasks":[{"prompt":"read only","route":{"adapter":"codex","model":"gpt-6.1-sol"},"timeout_ms":1000}]}),
+            ),
             (
                 "fabric_mail",
                 json!({"op":"send","recipients":["11111111111111111111111111111111"],"kind":"note","body":"injected","artifacts":[],"operation_id":"lane-mail"}),
@@ -1156,10 +1184,18 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         for id in 1..=calls.len() {
             let result = &replies.iter().find(|r| r["id"] == id).ok_or("mutation")?["result"];
             assert_eq!(result["isError"], true, "{result}");
-            assert_eq!(
-                result["structuredContent"]["code"], "lane_coordination_refused",
-                "{result}"
-            );
+            if calls[id - 1].0 == "fabric_submit" {
+                assert_eq!(
+                    text_error_code(result),
+                    "lane_coordination_refused",
+                    "{result}"
+                );
+            } else {
+                assert_eq!(
+                    result["structuredContent"]["code"], "lane_coordination_refused",
+                    "{result}"
+                );
+            }
         }
         for id in [100, 102]
             .into_iter()
@@ -1190,12 +1226,77 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             result["error"]["code"], "lane_coordination_refused",
             "{result}"
         );
+        let prompt = rig.root.join("lane-prompt.txt");
+        std::fs::write(&prompt, "read only")?;
+        for args in [
+            vec!["fabric", "graph", "cancel", "g-lane", "--json"],
+            vec![
+                "dispatch",
+                "--host",
+                "workshop",
+                "--operation-id",
+                "lane-dispatch",
+                "--mode",
+                "read-only",
+                "--model",
+                "codex/gpt-6-luna",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+                "--json",
+            ],
+            vec![
+                "dispatch",
+                "--host",
+                "local",
+                "--operation-id",
+                "lane-local-dispatch",
+                "--mode",
+                "read-only",
+                "--model",
+                "codex/gpt-6-luna",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+                "--json",
+            ],
+            vec![
+                "workflow",
+                "session",
+                "handoff",
+                "--to",
+                host,
+                "--account",
+                "fixture",
+                "--json",
+            ],
+        ] {
+            let output = rig.command(&args)?;
+            assert_ne!(code(&output), 0, "{args:?}");
+            let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+            assert_eq!(
+                result["error"]["code"], "lane_coordination_refused",
+                "{args:?}: {result}"
+            );
+        }
+        assert!(!rig.state.join("fabric/graphs").exists());
+        let output = rig.command(&["fabric", "events", "read", "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        assert_eq!(
+            cursor()?,
+            before,
+            "lane read advanced the host run-event cursor"
+        );
         // A peer frame names its own agent, so lanes may not serve one. The
         // forwarding path must refuse before it connects to the agent socket.
         let agent = rig.state.join("peer-agent");
         std::fs::create_dir_all(&agent)?;
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))?;
-        let listener = std::os::unix::net::UnixListener::bind(agent.join("peer.sock"))?;
+        let listener = std::os::unix::net::UnixListener::bind(agent.join("peer.sock"))
+            .map_err(|error| format!("bind lane peer test socket: {error}"))?;
         listener.set_nonblocking(true)?;
         for args in [
             &["fabric", "peer", "--in-process"][..],

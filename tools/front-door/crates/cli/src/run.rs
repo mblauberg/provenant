@@ -840,6 +840,15 @@ pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
     reply_waited("dispatch", dispatch_inner(command, edge))
 }
 fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
+    // Check explicit placement before local aliases are normalised away and
+    // before writer validation or peer discovery can act on the request.
+    if command.host.is_some() && crate::fabric::in_lane() {
+        return Err(Fail::new(
+            Status::Refused,
+            "lane_coordination_refused",
+            "coordination mutations are not allowed inside a lane",
+        ));
+    }
     let access = &command.access;
     let unsupported = |what: &str| {
         Err(Fail::new(
