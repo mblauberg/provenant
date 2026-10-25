@@ -305,6 +305,11 @@ fn serve_state(state: &Path) -> Result<(), AgentError> {
 /// The LaunchAgent's long-running entrypoint, `fabric peer-agent`.
 pub fn serve(globals: &provenant_cli::Globals) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        if provenant_cli::fabric::in_lane() {
+            return Err(
+                provenant_fabric_runtime::coordination::CoordinationError::LaneMutation.into(),
+            );
+        }
         let home = crate::roots::home()?;
         let assets = crate::roots::product_root()?;
         let state = crate::roots::roots(globals, &assets, &home)?.state;

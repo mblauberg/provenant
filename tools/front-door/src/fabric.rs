@@ -447,6 +447,10 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
 }
 pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // A request names its own agent, so a lane could act as any actor.
+        if provenant_cli::fabric::in_lane() {
+            return Err(CoordinationError::LaneMutation.into());
+        }
         let bytes = provenant_supervisor::sys::hook_io::read_stdin(
             MAX_FRAME,
             Instant::now() + std::time::Duration::from_secs(30),

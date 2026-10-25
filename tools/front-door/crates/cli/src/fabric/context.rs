@@ -83,6 +83,13 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
     }
     Ok(dir)
 }
+/// Whether the host launched this process inside a lane. Every Fabric entry
+/// point that can act as an agent checks it before opening the store.
+pub fn in_lane() -> bool {
+    std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
+        || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
+}
+
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
@@ -96,8 +103,7 @@ impl Context {
             .unwrap_or_else(|| roots.state.as_path().to_owned());
         let utility_home = utility_root.join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;
-        let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
-            || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0");
+        let lane = in_lane();
         let git = provenant_supervisor::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             Arc::new(LocalFs),

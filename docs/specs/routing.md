@@ -314,8 +314,8 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
 - Run supplies the attempt ID and depth. The adapter sets
   `PROVENANT_LANE_DEPTH` (root lanes are 1), `PROVENANT_PARENT_ATTEMPT_ID` and
   `PROVENANT_RUN_STATE_DIR` in both the provider environment and the MCP entry.
-  The MCP entry also pins `PROVENANT_AGENT_LABEL=lane-<AttemptId>` so the lane
-  has its own actor and inbox. Under the host-set lane environment, Fabric
+  Both also pin `PROVENANT_AGENT_LABEL=lane-<AttemptId>`, so the lane has
+  its own actor and inbox. Under the host-set lane environment, Fabric
   refuses coordination mutations with `lane_coordination_refused`; reads and
   child-store run operations remain available. The shared SQLite write grant
   remains pending [lane store isolation](fabric.md#follow-up-lane-store-isolation).

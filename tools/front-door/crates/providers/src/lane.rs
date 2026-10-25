@@ -136,6 +136,10 @@ impl LaneRuntime<'_> {
             }
         });
         env.extend([
+            (
+                "PROVENANT_AGENT_LABEL".into(),
+                format!("lane-{}", self.attempt).into(),
+            ),
             ("PROVENANT_ROOT".into(), self.assets.into()),
             ("PROVENANT_GIT".into(), self.git.into()),
             ("PROVENANT_LANE_DEPTH".into(), self.depth.to_string().into()),

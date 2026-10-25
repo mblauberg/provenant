@@ -87,7 +87,8 @@ MCP edge captures the host-set lane environment at startup. A positive
 coordination mutations with `lane_coordination_refused`: mail send and
 mark-read, task changes, event notes, claims and landing leases. The CLI
 coordination edge also refuses these mutations and landing push or reconcile
-under that environment. Reads and child-store run submit, cancel and output
+under that environment. `fabric peer` and `fabric peer-agent` refuse to start
+there at all, because a peer frame names its own agent. Reads and child-store run submit, cancel and output
 remain available within the existing child policy.
 
 This guards the tool surface. Lanes still have direct write access to

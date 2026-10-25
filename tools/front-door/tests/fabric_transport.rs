@@ -1096,6 +1096,20 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             result["error"]["code"], "lane_coordination_refused",
             "{result}"
         );
+        // A peer frame names its own agent, so lanes may not serve one.
+        for args in [
+            &["fabric", "peer", "--in-process"][..],
+            &["fabric", "peer"],
+            &["fabric", "peer-agent"],
+        ] {
+            let output = rig.command(args)?;
+            assert_eq!(code(&output), 3, "{args:?}");
+        }
+        let output = rig.command(&["fabric", "peer", "--in-process"])?;
+        assert!(
+            String::from_utf8_lossy(&output.stderr.bytes)
+                .contains("coordination mutations are not allowed inside a lane")
+        );
         rig.assert_legacy_unchanged()?;
     }
     Ok(())
