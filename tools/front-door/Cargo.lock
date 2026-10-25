@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "provenant"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "jiff",
  "provenant-cli",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "jiff",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-core",
  "provenant-records",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-confinement"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-config",
  "provenant-core",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "jiff",
  "serde",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-fabric-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-core",
  "provenant-fabric-runtime",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-fabric-runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-config",
  "provenant-core",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-fabric-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-core",
  "provenant-records",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-providers"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "jiff",
  "provenant-config",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-quota"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "jiff",
  "provenant-config",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-records"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-core",
  "serde",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-routing"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-config",
  "provenant-core",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-run"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-config",
  "provenant-confinement",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-supervisor"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "jiff",
  "libc",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-telemetry"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "jiff",
  "provenant-core",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-workflow"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "provenant-core",
  "provenant-records",
