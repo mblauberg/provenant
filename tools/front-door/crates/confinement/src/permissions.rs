@@ -2233,7 +2233,7 @@ fn is_broad_root(path: &Path) -> bool {
                 || (normal.len() == 2 && normal.get(1).is_some_and(|value| *value == "tmp"))))
 }
 
-fn is_credential_root(path: &Path) -> bool {
+pub(crate) fn is_credential_root(path: &Path) -> bool {
     let components: Vec<&OsStr> = path
         .components()
         .filter_map(|component| match component {

@@ -91,6 +91,7 @@ fn prepare_with(
     )
     .map_err(|e| e.to_string())?;
     let settings = config.domains.accounts;
+    let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     if !entries.iter().any(|e| e.adapter == "codex") {
         let directory = registry
@@ -177,6 +178,7 @@ fn prepare_with(
             },
             writer.as_ref(),
             &task.access,
+            &host_writes,
             adapter,
         )
         .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
@@ -332,6 +334,7 @@ fn prepare_with(
             },
             writer.as_ref(),
             &task.access,
+            &host_writes,
             adapter.id(),
         )
         .and_then(|request| match writer.as_ref() {
@@ -810,11 +813,35 @@ struct ConfinementRoots<'a> {
     assets: &'a Path,
 }
 
+/// Dispatch write roots, plus host-configured shared run state for writers only.
+fn write_roots(
+    access: &run::LaneAccess,
+    host_writes: &provenant_confinement::run_config::RunConfig,
+    writer: bool,
+) -> Vec<PathGrant> {
+    access
+        .write_roots
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(
+            writer
+                .then(|| host_writes.writer_write_roots())
+                .into_iter()
+                .flatten(),
+        )
+        .map(|path| PathGrant {
+            path: path.to_owned(),
+            scope: PathScope::Subtree,
+        })
+        .collect()
+}
+
 fn confinement_request(
     project_id: ProjectId,
     roots: ConfinementRoots<'_>,
     writer: Option<&run::WriterLaunch>,
     access: &run::LaneAccess,
+    host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
 ) -> Result<PlanRequest, String> {
     let mode = match writer {
@@ -850,7 +877,7 @@ fn confinement_request(
                 _ => None,
             },
             include_continuation: false,
-            write_roots: access.write_roots.iter().map(|path| grant(path)).collect(),
+            write_roots: write_roots(access, host_writes, writer.is_some()),
             network: access.network(writer.is_some()),
             nested_confinement: false,
         },
@@ -1116,6 +1143,7 @@ pub fn writer_fixture_plan(
         },
         Some(writer),
         &run::LaneAccess::default(),
+        &Default::default(),
         "codex",
     )?;
     ConfinedPlan::new(request).map_err(|error| error.to_string())
@@ -1239,6 +1267,7 @@ mod tests {
             },
             None,
             &run::LaneAccess::default(),
+            &Default::default(),
             "codex",
         )?;
         assert!(request.permissions.read_roots.contains(&PathGrant {
@@ -1246,6 +1275,28 @@ mod tests {
             scope: PathScope::Subtree,
         }));
         Ok(())
+    }
+
+    #[test]
+    fn host_write_paths_reach_writers_only() {
+        let host = provenant_confinement::run_config::RunConfig {
+            writer_writes: vec!["/p/.agent-run/locks".into()],
+        };
+        let access = run::LaneAccess {
+            write_roots: vec!["/p/extra".into()],
+            ..Default::default()
+        };
+        let paths = |writer| -> Vec<PathBuf> {
+            write_roots(&access, &host, writer)
+                .into_iter()
+                .map(|grant| grant.path)
+                .collect()
+        };
+        assert_eq!(
+            paths(true),
+            [PathBuf::from("/p/extra"), "/p/.agent-run/locks".into()]
+        );
+        assert_eq!(paths(false), [PathBuf::from("/p/extra")]);
     }
 
     #[test]
