@@ -12,7 +12,7 @@ refuses any execution mode it does not enable, and a missing mode is disabled.
 | Claude | Live confined runs (2.1.310); success, model mismatch, matching model, continuation pair, authentication failure | Enabled | Enabled | Lane D |
 | Codex | Live confined runs (0.159.0); success/usage, structured failure, interrupted prefix | Enabled | Enabled | Lane D |
 | Cursor | Success, thinking deltas, continuation pair | Disabled | Disabled | Lane D |
-| Agy | Init/step updates/success and error result | Disabled | Disabled | Lane D |
+| Agy | Live confined runs (1.4.7, `gemini-3.8-flash`); fresh and resume, read-only and writer | Enabled | Enabled | Lane D |
 | OpenCode | Projected (version unknown): text/stop, error, tool-step finish then error and nonzero exit. Launch form prepared; live v2.0.32 stream lacked `step_finish` | Disabled | Disabled | Lane D |
 
 ## Live recordings

@@ -117,7 +117,8 @@ and PGID, with native identity checks; a changed boot identity also proves
 absence. If absence cannot be proved, Run's `reconcile` accepts a typed,
 recorded decision only with matching authority. It records actor, scope,
 generation, evidence and disposition before changing the fence; uncertainty
-alone never clears it. Neither recovery nor that decision permits killing by PID.
+alone never clears it. That decision permits no signal. Recovery signals only the
+unresolved descendants of a published exit, under the rule in the next paragraphs.
 Provider exec is gated on the guardian holding both leases and the durable
 pre-spawn reservation; a missing handoff acknowledgement is an unknown launch,
 never permission to launch again. Only guardian handoff may inherit duplicate
@@ -154,8 +155,8 @@ publication. Failure keeps the durable reservation fenced.
 A concurrent `acquire_recovery`/`acquire_writer` waiter can win the
 drop-to-`try_lock` gap, conservatively fencing an otherwise clean run.
 The exit's `settlement_evidence` records
-`darwin_census_and_custody_lease`, `linux_kernel_children`, `never_spawned` or
-`unresolved`. Linux requires two identical complete per-thread kernel children
+`darwin_census_and_custody_lease`, `linux_kernel_children`, `never_spawned`,
+`orphans_ended`, `leftover_not_proven` or `unresolved`. Linux requires two identical complete per-thread kernel children
 snapshots, including stable thread membership, before cleanup settlement.
 The Linux global census skips rows whose process group or session is 0 (host
 kernel tasks and container shims; never a descendant of the guardian's
@@ -194,16 +195,37 @@ exit during cleanup, so a same-group background child (`npm run dev &`) cannot
 outlive the attempt. A member that left the group is never
 signalled; cleanup that ends with such tracked descendants possibly alive
 publishes their PIDs in the exit's `unresolved_pids`, and reconcile reports
-them as `escaped` (still fenced) rather than a bare `uncertain`.
+them as `escaped` (still fenced) rather than a bare `uncertain`. The exit also
+carries `unresolved_identities`, the same descendants with boot and native start
+time, recorded when they are found.
 After publishing an unresolved exit the guardian stays alive, holding the
 leader, and keeps running cleanup: it polls for cancellation and for the group
 emptying. On cancel it signals the group (TERM, grace, KILL; a reaped leader
 needs a live `kill(-pgid, 0)` probe first) unless a spared or protected owner
 shares the group. When cleanup then proves quiescence it makes the reservation
 resolved and replaces `process-exit.json` once with the settled facts (the only
-replace of that file); a supervisor signal ends the wait. Reconcile reports
-`escaped` while a named pid is alive (signal-0 probe only); when none is, it
-reports `held` if a guardian holds the lease and `uncertain` otherwise.
+replace of that file); a supervisor signal ends the wait, but only after one
+more bounded cleanup pass (TERM, the descendant grace, KILL), so the guardian
+never leaves `unresolved` without trying the marked-escapee stop first.
+
+When the guardian is gone anyway, reconcile (and `cancel`, which runs it for a
+run whose request has no live actor) takes the writer lock without waiting. If
+it cannot, a guardian or lease inheritor still holds custody: reconcile reports
+`escaped` while a named pid is alive (signal-0 probe only) and `held` otherwise.
+If it can, `Recovery::end_orphans` re-observes each named pid and sorts it:
+- gone, a zombie, or now a different process (PID reuse): nothing to do;
+- proven: the live boot, pid and native start time equal the recorded identity,
+  or, for a pid recorded without one, macOS reports it inside the attempt's
+  sandbox. It receives TERM, then KILL after a bounded wait, each time after
+  re-reading its full identity, so a recycled PID is never signalled;
+- unproven: never signalled, and named in the settled exit.
+The recovery then resolves the reservation and replaces `process-exit.json`
+once with `unresolved_cleanup` false and `settlement_evidence` of
+`orphans_ended`, or `leftover_not_proven` when any pid stayed unproven (its pids
+remain in `unresolved_pids`). A proven process that survives KILL leaves the
+exit unresolved and reconcile reports `escaped`. Run then commits the settled
+exit as usual; `leftover_not_proven` makes a non-successful outcome `lost`, and
+a success keeps its outcome with the leftover pid in the reason.
 
 
 Reuse S2's machine/census/capture, `SafeFs` and #1348's `Executor`, raw outcome,

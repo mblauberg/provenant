@@ -195,8 +195,8 @@ satisfied as the run grammar states. Two shorthands recur:
   the task's `Authority`. Mode defaults to read-only and network to off.
   `--network` governs the task's own network access; the selected provider
   profile always permits that provider's API endpoints.
-  `--worktree` is required with, and only valid for, `worktree-write`. At most
-  32 read roots and 16 capabilities.
+  `--worktree`, or a peer writer's `--branch`, is required with, and only
+  valid for, `worktree-write`. At most 32 read roots and 16 capabilities.
 
 | Leaf | Grammar | Owner request type | Bounds, conflicts and reason |
 | --- | --- | --- | --- |
@@ -211,7 +211,7 @@ satisfied as the run grammar states. Two shorthands recur:
 | `route resolve` | `route resolve ROUTE` | routing `RouteRequest` with a read-only `RoutingContext` | Pure; no admission or state write. |
 | `quota show` | `quota show [--adapter ADAPTER]` | quota `QuotaQuery { adapter }` | No refresh. `--adapter` replaces quota's `--provider`, matching `route list`: one adapter key, one spelling. |
 | `quota tick` | `quota tick [--adapter ADAPTER] [--trigger timer\|panel\|manual\|wake\|power] [--power ac\|battery\|low]` | quota `QuotaTick { adapter, trigger, power }` | Defaults manual and ac; owner wall budget at most 55 s, no wait flag. The Swift app's `quota forget` and bare `quota` calls retire at cut-over: a tick drops the snapshot of any account that detection no longer reports, so no forget verb exists. |
-| `dispatch` | `dispatch (--prompt-file PATH \| --prompt-stdin \| --manifest PATH) --operation-id ID [--task-id ID] [--delivery-id ID] [ROUTE] [ACCESS] [--provider-timeout SECONDS] [--concurrency N] [--knob NAME=VALUE…] [--deliver-remote HOST] [--deliver-branch BRANCH] [--open-pr] [--host HOST] [--wait SECONDS]` | run `submit(Submission { tasks: [TaskRequest], concurrency }, OperationKey, …)`; `TaskRequest { id, prompt, route, access, timeout, delivery_id }`; `--host` is Fabric placement; a host naming this machine (`local`, `localhost`, its host ID, or a peer label that resolves to it) is dropped and the task runs locally; with `--mode worktree-write` a peer is refused (#1457) and any other name is `UNKNOWN_HOST` | Input at most 1 MiB. A single prompt requires `ROUTE`; manifest conflicts with `--task-id`, `--delivery-id`, `ROUTE`, `ACCESS` and `--provider-timeout`, which are per-task fields. Manifest `--concurrency` is 1–8, default 4; effective lane concurrency defaults to 8 via `lanes.max_concurrency`. `--knob` applies per-dispatch harness-knob overrides. `--provider-timeout` is the provider runtime budget, 1–14400, default 3600 read-only and 10800 writer. Wait uses `All` over the receipt's attempts. |
+| `dispatch` | `dispatch (--prompt-file PATH \| --prompt-stdin \| --manifest PATH) --operation-id ID [--task-id ID] [--delivery-id ID] [ROUTE] [ACCESS] [--provider-timeout SECONDS] [--concurrency N] [--knob NAME=VALUE…] [--deliver-remote HOST] [--deliver-branch BRANCH] [--open-pr] [--host HOST [--branch BRANCH --base REF]] [--wait SECONDS]` | run `submit(Submission { tasks: [TaskRequest], concurrency }, OperationKey, …)`; `TaskRequest { id, prompt, route, access, timeout, delivery_id }`; `--host` is Fabric placement; a host naming this machine (`local`, `localhost`, its host ID, or a peer label that resolves to it) is dropped and the task runs locally; a peer writer takes `--branch` and `--base` instead of `--worktree`, a local path: the peer fetches its remotes, refuses a base that no remote-tracking ref contains, creates the branch's registered worktree in its own clone and runs any delivery with its own Git authority; a writer naming any other host is `UNKNOWN_HOST` | Input at most 1 MiB. A single prompt requires `ROUTE`; manifest conflicts with `--task-id`, `--delivery-id`, `ROUTE`, `ACCESS` and `--provider-timeout`, which are per-task fields. Manifest `--concurrency` is 1–8, default 4; effective lane concurrency defaults to 8 via `lanes.max_concurrency`. `--knob` applies per-dispatch harness-knob overrides. `--provider-timeout` is the provider runtime budget, 1–14400, default 3600 read-only and 10800 writer. Wait uses `All` over the receipt's attempts. |
 | `lanes` | `lanes [--id TARGET…] [--all] [--state STATE…] [--since TIME] [--limit N] [--cursor TOKEN] [--wait SECONDS [--condition any\|all]]` | run `query(RunQuery)` or `wait(RunQuery, WaitBudget, …)`; `RunQuery { ids, states, since, cursor, limit, condition }` | At most 100 IDs; `--all` conflicts with `--id`. Limit 1–100, default 50. `--cursor` conflicts with `--wait`; condition defaults to any and requires wait. `--wait SECONDS` replaces `--wait --timeout` so every wait has one spelling. `--summary` and lane tails are dropped: no request field; `output` reads bytes. |
 | `output` | `output ATTEMPT [--part result\|prompt\|stderr\|events] [--offset N \| --tail N] [--max-bytes N]` | run `read_output(AttemptRef, ArtifactPart, ByteRange)`; `ByteRange { start: Offset(u64) \| TailLines(u16), max_bytes }` | Part defaults to result; offset defaults to 0; tail is 1–500 lines with no default, so a bare read starts at byte 0 rather than run's 40-line clip. Max bytes 1–65536, default 65536. |
 | `cancel` | `cancel TARGET --operation-id ID [--reason TEXT] [--wait SECONDS]` | run `cancel(AttemptRef, OperationKey, CancelReason, …)` | Reason UTF-8, at most 256 bytes. Aggregate targets expand to exact attempts. |
@@ -324,7 +324,8 @@ line with `hookSpecificOutput.hookEventName="PreToolUse"`,
 cannot be written, exit 2 with a bounded stderr block reason as Claude's
 blocking-error fallback; recorded fixtures must verify both paths. Allow emits
 nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
-“Direct process control is refused. Use `provenant cancel TARGET` for owned
+“Pattern and group process control is refused; targeted `kill [-SIGNAL] PID`
+with literal PIDs above 1 is allowed. Use `provenant cancel TARGET` for owned
 work.” Transport failures name the bounded-input error without echoing input.
 Confinement/custody remain authoritative even when a hook is absent.
 
@@ -332,11 +333,11 @@ The same handler then applies the workflow guard rules (#1319) to the simple
 commands the shell-command lexer reports, so there is no second parser. Rule
 ids are compiled: `stash` (bare `git stash`, `stash pop`, `stash push` without
 `-m`), `reset-hard`, `clean-force`, `force-push` (`--force`, `-f`, `+ref`;
-`--force-with-lease` passes), `no-verify`, `primary-checkout` (`git switch`, and
+`--force-with-lease` passes), `no-verify` (opt-in), `primary-checkout` (`git switch`, and
 `git checkout` of a branch or revision, when the directory is a repository
 whose `.git` is a directory; `git checkout -- PATH` passes) and `sleep-poll`
 (`sleep` of 5 s or more). Each denial carries a one-line remedy. Config is the
-closed `[domains.guard]` section, `deny = [rule ids]`, all on by default;
+closed `[domains.guard]` section, `deny = [rule ids]`, all on by default except `no-verify`;
 omitting an id disables that rule and an unknown id is a schema error. Unreadable
 config keeps every rule on. Input the lexer cannot parse is denied by the
 process-control check above, not by these rules. Codex and OpenCode have no

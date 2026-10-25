@@ -1058,6 +1058,28 @@ fn kill_failure(error: &io::Error) -> DeliveryFailure {
     }
 }
 
+/// Signal one process after re-reading its full identity (boot, PID and native
+/// start time). Returns whether a signal was delivered; an absent, replaced or
+/// zombie process is left alone, so a recycled PID is never targeted.
+pub(crate) fn signal_identity(identity: &ProcessIdentity, escalation: bool) -> bool {
+    let Ok(pid) = native_pid(identity.pid) else {
+        return false;
+    };
+    match super::census::observe_with_boot(identity.pid, &identity.boot) {
+        ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie => {}
+        _ => return false,
+    }
+    let signal = if escalation {
+        libc::SIGKILL
+    } else {
+        libc::SIGTERM
+    };
+    // SAFETY: the identity was re-read just above, so this positive PID is the
+    // exact native process the caller proved belongs to the attempt. One
+    // process only, never a group or caller-selected PID.
+    unsafe { libc::kill(pid, signal) == 0 }
+}
+
 /// Liveness probe only (signal 0): true unless every PID is provably absent.
 pub(crate) fn any_pid_alive(pids: &[i64]) -> bool {
     pids.iter().any(|&pid| match i32::try_from(pid) {

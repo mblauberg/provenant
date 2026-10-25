@@ -15,7 +15,12 @@ use provenant_supervisor::{
     fs::{Directory, FileKind, FsError, LocalFs, SafeDir, canonicalize},
 };
 use serde::Serialize;
-use std::{ffi::OsStr, path::Component, sync::Arc, time::Duration};
+use std::{
+    ffi::OsStr,
+    path::{Component, Path},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 
 /// A checkout writes the whole tree and a 1.8 GB repository took well over the
@@ -24,7 +29,7 @@ use thiserror::Error;
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Error)]
-enum Error {
+pub(crate) enum Error {
     #[error(transparent)]
     Root(#[from] roots::RootError),
     #[error(transparent)]
@@ -127,6 +132,69 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
     let assets = roots::product_root()?;
     let project = roots::selected_project(globals.project.as_deref(), true)?;
     let roots = roots::roots(globals, &assets, &project)?;
+    let result = with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
+        Ok(match command {
+            Worktree::Create { branch, base } => Data::Created(worktrees::create(
+                context,
+                WorktreeCreate { branch, base },
+                cancel,
+            )?),
+            Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
+            Worktree::Remove(args) => {
+                let named = args.name.is_some();
+                let request = if let Some(name) = args.name {
+                    WorktreeRemove::Name {
+                        name,
+                        discard: args.discard,
+                        integration: args.integration,
+                    }
+                } else {
+                    WorktreeRemove::Merged {
+                        integration: args.integration.ok_or(Error::InvalidScope)?,
+                        scope: match args.since {
+                            Some(oid) => worktrees::PruneScope::Since(oid),
+                            None => worktrees::PruneScope::Branches(args.branch),
+                        },
+                    }
+                };
+                let removed = worktrees::remove(context, request, cancel)?;
+                if named
+                    && !args.discard
+                    && removed
+                        .retained
+                        .iter()
+                        .any(|kept| kept.reason == RetainReason::NotMerged)
+                {
+                    note_kept_unmerged();
+                }
+                Data::Removed(removed)
+            }
+        })
+    })?;
+    if matches!(result, Data::Removed(_)) {
+        match roots::home() {
+            Ok(home) => {
+                if let Err(error) =
+                    provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(&home)
+                {
+                    warn_cache_sweep(&error);
+                }
+            }
+            Err(error) => warn_cache_sweep(&error),
+        }
+    }
+    Ok(result)
+}
+
+/// Run one worktree-owner action for `project` under fresh state `roots`,
+/// with Git mutations bounded by `mutation`. Peer ingress uses it to create a
+/// peer writer's worktree within its peer-call budget.
+pub(crate) fn with_context<T>(
+    roots: &provenant_core::Roots,
+    project: &Path,
+    mutation: Duration,
+    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
+) -> Result<T, Error> {
     // Create the fresh state hierarchy through held, no-follow directories.
     let mut state = Directory::root(true)?;
     for component in roots.state.as_path().components() {
@@ -167,9 +235,9 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
-    let repo = runtime.open_repo(&executor, &project, budget, &cancel)?;
+    let repo = runtime.open_repo(&executor, project, budget, &cancel)?;
     let binding = provenant_config::bind_project(
-        &roots,
+        roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
         &LocalFs,
     )?;
@@ -188,60 +256,12 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
         workers: &crate::worktree_tests::FreeWorkers,
         clock: &clock,
         utility_budget: budget,
-        mutation_budget: UtilityBudget::bounded(MUTATION_TIMEOUT)?,
+        mutation_budget: UtilityBudget::bounded(mutation)?,
         lock_budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?,
     };
-    let result = match command {
-        Worktree::Create { branch, base } => Data::Created(worktrees::create(
-            &context,
-            WorktreeCreate { branch, base },
-            &cancel,
-        )?),
-        Worktree::List => Data::Listed(worktrees::list(&context, &cancel)?),
-        Worktree::Remove(args) => {
-            let named = args.name.is_some();
-            let request = if let Some(name) = args.name {
-                WorktreeRemove::Name {
-                    name,
-                    discard: args.discard,
-                    integration: args.integration,
-                }
-            } else {
-                WorktreeRemove::Merged {
-                    integration: args.integration.ok_or(Error::InvalidScope)?,
-                    scope: match args.since {
-                        Some(oid) => worktrees::PruneScope::Since(oid),
-                        None => worktrees::PruneScope::Branches(args.branch),
-                    },
-                }
-            };
-            let removed = worktrees::remove(&context, request, &cancel)?;
-            if named
-                && !args.discard
-                && removed
-                    .retained
-                    .iter()
-                    .any(|kept| kept.reason == RetainReason::NotMerged)
-            {
-                note_kept_unmerged();
-            }
-            match roots::home() {
-                Ok(home) => {
-                    if let Err(error) =
-                        provenant_confinement::permissions::prune_orphaned_worktree_cargo_caches(
-                            &home,
-                        )
-                    {
-                        warn_cache_sweep(&error);
-                    }
-                }
-                Err(error) => warn_cache_sweep(&error),
-            }
-            Data::Removed(removed)
-        }
-    };
+    let result = action(&context, &cancel);
     drop(utility_home);
-    Ok(result)
+    result
 }
 
 fn child(parent: &dyn SafeDir, name: &str) -> Result<Box<dyn SafeDir>, Error> {

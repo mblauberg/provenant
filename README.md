@@ -33,9 +33,10 @@ reviewable path from a writer lane back to a remote branch.
   recorded. Agy, Cursor, and OpenCode adapters are catalogued but stay
   execution-disabled until a live confinement capture proves each mode.
 - **Fabric messaging and dispatch.** The CLI and Fabric MCP surface provide
-  messages, tasks, agent identity, host links, and local dispatch. Read-only
-  lanes can run on a configured peer host with `dispatch --host`; peer-host
-  writers are not available yet.
+  messages, tasks, agent identity, host links, and local dispatch. Lanes can
+  run on a configured peer host with `dispatch --host`; a peer writer names
+  `--branch` and `--base`, and the peer creates its worktree and delivers with
+  its own Git credentials.
 - **Weighted, paced routes.** Named pools select among eligible models by
   configured weight and provider pacing. Inspect routes with
   `provenant route list`; edit pools with `provenant route set` and provider

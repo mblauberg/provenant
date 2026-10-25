@@ -379,7 +379,7 @@ adds only its verified permission/config arguments; no raw caller argv.
 | Codex (enabled) | `codex exec [resume ID] --json --skip-git-repo-check --ignore-user-config --ignore-rules --dangerously-bypass-approvals-and-sandbox -c service_tier="default" -c mcp_servers.fabric.command=... -c mcp_servers.fabric.args=... -c mcp_servers.fabric.env={...} -m MODEL [-c model_reasoning_effort="EFFORT"] -`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CODEX_HOME SHELL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR` plus dispatch lineage; `PATH=~/.cargo/bin:/usr/bin:/bin`. `CODEX_HOME` is the attempt's private state, where setup links `auth.json` to the selected registered identity's `auth.json` (the default `~/.codex/auth.json` when unselected). Codex's own seatbelt cannot nest inside ours, so it is off and the outer profile is the boundary. No fast/priority tier or context-ceiling override. |
 | Claude (enabled) | `claude -p --strict-mcp-config --mcp-config STAGING/provenant-mcp.json --settings STAGING/provenant-settings.json --setting-sources "" --allowedTools mcp__fabric__* --disable-slash-commands --permission-prompts none --output-format stream-json --verbose (--session-id NEW\|--resume ID) --permission-mode dontAsk\|acceptEdits --tools Read,Grep,Glob[,Edit,Write] --model MODEL [--effort EFFORT]`; prompt on stdin. Environment `HOME USER PATH TMPDIR LANG PROVENANT_ROOT CLAUDE_CODE_TMPDIR DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` plus dispatch lineage; default config directory, with the access token read by the host and delivered through a pipe, and `CLAUDE_CONFIG_DIR` set when an account is selected. No model shell tool or keychain access. Exec adds the exact Provenant binary and hook helpers. |
 | Cursor | `cursor-agent -p --output-format stream-json --trust --approve-mcps --mode ask --sandbox enabled [--resume ID] [--model MODEL] PROMPT`; prompt on argv and open non-TTY stdin. Existing writer `--force` needs its own confined recording; read-only acceptance does not enable it. |
-| Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout Ns [--sandbox] [--conversation ID] [--model MODEL] [--effort EFFORT] [--add-dir DIR] --print PROMPT`; boundary text prefixes argv prompt, stdin null. Existing writer `--dangerously-skip-permissions` requires its own confined recording. |
+| Agy | `agy --output-format stream-json --disable-slash-commands --print-timeout 900s [--mode accept-edits for writers] [--conversation ID] --model MODEL [--effort EFFORT] --print PROMPT`; stdin null. Never `--dangerously-skip-permissions` or `--sandbox`: headless default mode denies commands and `accept-edits` approves file edits only. HOME is a private state directory holding a symlink to the login keychain only (agy signs in through `/usr/bin/security`); the profile grants that executable, process fork, a loopback server and `:443`, with no state or runtime reads. Enabled from live confined recordings (1.4.7, `gemini-3.8-flash`). |
 | OpenCode v2 (prepared, disabled) | `opencode run --standalone --format json --log-level error [-s ID] -m PROVIDER/MODEL[#VARIANT]`; prompt on stdin, no selected authentication (keyless models only). `HOME` is the attempt's private state, so data, config, caches and every home-relative lookup stay inside it; `PATH=/bin`, so no Git runs. `OPENCODE_CONFIG_CONTENT` denies bash and webfetch, allows edit only for writers, and sets no MCP servers, plugins, sharing or autoupdate; project config, Claude Code files and the file watcher are disabled. The standalone server is a forked copy of the CLI reached over loopback. No v1/shared-server fallback. |
 
 ### Lane MCP, hooks and nesting (2026-10-24)
@@ -394,8 +394,9 @@ catalogue has no utility-output handler; no obsolete hook is fabricated.
 Safe mode is removed because it disables MCP and hooks; slash commands remain
 disabled. Direct MCP calls do not need slash-command or skill discovery; lanes
 can read applicable skill instructions supplied in their workspace or brief. Codex keeps its clean private home and injects the same MCP entry with
-`-c`; no Codex hooks are currently registered by the installer. OpenCode and Agy
-remain disabled in `activation.json`, so their launch controls are unchanged.
+`-c`; no Codex hooks are currently registered by the installer. OpenCode
+remains disabled in `activation.json`. Agy is enabled without Fabric MCP, hooks or lane
+environment; wiring them is a later change.
 
 The profile grants execution/read access to the exact Provenant binary. Shared
 Fabric writes are exact `fabric/fabric.sqlite3` and its WAL/SHM/journal paths,
@@ -648,8 +649,9 @@ macOS 27.0.1 arm64, 2026-10-24):
   whether `step_finish` needs Git (snapshots); if it does, grant one Git
   executable and its libraries rather than decode a stream without a terminal
   event as success.
-- Agy and Cursor keep refusing (`launch::unrecorded`) until they have a launch
-  form and recordings. Preflight and availability records are still
+- Cursor keeps refusing (`launch::unrecorded`) until it has a launch
+  form and recordings. Agy resume needs a route account key, which has no
+  production source (#1062); recordings use an opaque key. Preflight and availability records are still
   unimplemented, so routing reports enabled adapters as `UnknownAvailability`
   until the run lane supplies them.
 
@@ -662,16 +664,17 @@ Agy Gemini MCP/plugins and sidecars/plugin_data/knowledge, Cursor
 hooks/extensions/skills/plans/ai-tracking, and shared npm state. Disabled
 adapters refuse before returning grants; the recording feature exercises the
 prepared OpenCode recipe without enabling it. Agy's private-home test also
-proves controls are neither seeded nor copied back. These are policy tests,
-not new live smoke rows; Agy/Cursor activation and their live rows move to
-#1471. The production Codex writer path passes the narrowed
+proves controls are neither seeded nor copied back. Agy's recorder
+probes deny symlink creation in its writable private home and new entries in the
+Gemini, Claude, Codex and Cursor config, hook, plugin and extension
+directories; those probes ran inside the live confined recording. The production Codex writer path passes the narrowed
 provider profile to confinement compilation. A CLI-dispatch integration fixture
 probes the host config/hook/extension/npm write denials and provider-state
 symlink denial through that path; this is a fake-provider confinement test,
 not a new live provider smoke row. The live rows for the enabled adapters are
 recorded: on 2026-10-25 a Claude writer lane ran Git (including a two-parent
 merge), node and npm under the narrowed grants, and Codex writer lanes run
-daily under them. Agy and Cursor stay refused until #1471.
+daily under them. Agy is enabled from the 2026-10-25 live confined recordings; Cursor stays refused.
 Apple's `/usr/bin/git` shim loads `libxcrun.dylib` from the developer
 installation, so granting that shim alone does not make shell Git work.
 Host selection now prefers package-manager Git, then the real CLT executable

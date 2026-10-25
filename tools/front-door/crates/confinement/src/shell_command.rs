@@ -10,8 +10,7 @@ pub enum RefusalReason {
     Unparseable,
 }
 
-pub const DENY_REASON: &str =
-    "Direct process control is refused. Use `provenant cancel TARGET` for owned work.";
+pub const DENY_REASON: &str = "Pattern and group process control is refused; targeted `kill [-SIGNAL] PID` with literal PIDs above 1 is allowed. Use `provenant cancel TARGET` for owned work.";
 
 impl RefusalReason {
     pub const fn message(self) -> &'static str {
@@ -50,8 +49,8 @@ impl ShellRefusal {
 /// stay usable. Dynamic expansion cannot establish a command name, so `$CMD`
 /// in command position is refused, as is incomplete or overdeep syntax. When an
 /// interpreter reads commands from stdin, as in `echo kill 1 | sh`, any
-/// process-control word in the line is refused. `kill -0` liveness probes are
-/// allowed. Scripts, aliases, functions and other languages are not interpreted.
+/// process-control word in the line is refused. `kill` with an optional
+/// signal and literal PIDs above 1 is allowed, as are `kill -0` probes. Scripts, aliases, functions and other languages are not interpreted.
 pub fn check(command: &str) -> Result<(), ShellRefusal> {
     inspect(command, 0).map(drop)
 }
@@ -218,8 +217,12 @@ enum Position {
     Argument,
     /// The name after `function`; the body follows in command position.
     Name,
-    /// After a literal `kill`, which only a `-0` liveness probe may follow.
-    Probe,
+    /// After a literal `kill`: an optional signal, then literal PIDs above 1.
+    Kill,
+    /// The value of `kill -s` or `-n`.
+    KillSignal,
+    /// After at least one PID, which only further PIDs may follow.
+    KillPids,
 }
 #[derive(Clone, Copy, Default)]
 enum Redirect {
@@ -402,11 +405,11 @@ impl Lexer {
             }
         }
     }
-    /// Close a simple command: a bare `kill` is refused, and an interpreter
+    /// Close a simple command: a `kill` without PIDs is refused, and an interpreter
     /// without a literal operand reads commands from stdin.
     fn end_command(&mut self, scope: &mut Scope) -> Result<(), ShellRefusal> {
-        if matches!(scope.position, Position::Probe) {
-            return Err(ShellRefusal::unparseable());
+        if matches!(scope.position, Position::Kill | Position::KillSignal) {
+            return Err(ShellRefusal(RefusalReason::ProcessControl));
         }
         if let Some((operands, dynamic)) = scope.interpreter {
             self.data_reaches_shell |= operands == 0 || dynamic;
@@ -618,8 +621,17 @@ impl Lexer {
             }
             Position::Command if keyword(&["function"]) => Position::Name,
             Position::Name => Position::Command,
-            Position::Probe if text == "-0" => Position::Argument,
-            Position::Probe => return Err(ShellRefusal::unparseable()),
+            Position::Kill | Position::KillSignal | Position::KillPids if word.plain.is_some() => {
+                return Err(ShellRefusal(RefusalReason::ProcessControl));
+            }
+            Position::Kill if text == "-0" => Position::Argument,
+            Position::Kill if text == "-s" || text == "-n" => Position::KillSignal,
+            Position::Kill if text.strip_prefix('-').is_some_and(is_signal) => Position::Kill,
+            Position::KillSignal if is_signal(text.trim_start_matches('-')) => Position::Kill,
+            Position::Kill | Position::KillPids if is_pid(text) => Position::KillPids,
+            Position::KillSignal | Position::Kill | Position::KillPids => {
+                return Err(ShellRefusal(RefusalReason::ProcessControl));
+            }
             Position::Wrapped(COMMAND) if text == "-v" || text == "-V" => Position::Argument,
             Position::Wrapped(XARGS) if !text.starts_with('-') && text.contains("{}") => {
                 return Err(ShellRefusal::unparseable());
@@ -712,7 +724,11 @@ impl Lexer {
             .map(|name| name.trim_start_matches('='))
             .collect();
         if names == ["kill"] {
-            return Ok(Position::Probe);
+            // `xargs kill` takes its PIDs from stdin.
+            if matches!(scope.position, Position::Wrapped(XARGS)) {
+                return Err(ShellRefusal(RefusalReason::ProcessControl));
+            }
+            return Ok(Position::Kill);
         }
         let named = |list: &[&str]| {
             list.iter()
@@ -731,6 +747,14 @@ impl Lexer {
         scope.find |= named(&["find"]).is_some();
         Ok(Position::Argument)
     }
+}
+/// A signal name or number such as `9`, `TERM` or `SIGHUP`.
+fn is_signal(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric())
+}
+/// A literal PID above 1; zero and negatives address process groups, and 1 is init.
+fn is_pid(text: &str) -> bool {
+    text.bytes().all(|b| b.is_ascii_digit()) && text.parse::<u32>().is_ok_and(|pid| pid > 1)
 }
 /// Durations and counts such as `timeout 5s` stay in wrapper position.
 fn duration(text: &str) -> bool {
@@ -886,13 +910,12 @@ mod tests {
     #[test]
     fn process_control_never_obtains_authority_from_shell_wrapping() {
         for command in [
-            "kill 123",
             "sudo /usr/bin/pkill -f claude",
-            "sh -c 'ki\"\"ll -9 42'",
+            "sh -c 'ki\"\"llall -9 42'",
             "ps | xargs kill",
             "killall codex",
             "${CMD} 42",
-            "ki\\\nll 1",
+            "pki\\\nll 1",
             "k?ll 1",
             "/bin/k[i]ll 1",
             "k{i,}ll 1",
@@ -927,56 +950,73 @@ mod tests {
     #[test]
     fn every_command_position_is_inspected() {
         for command in [
-            "echo $(kill 1)",
+            "echo $(pkill 1)",
             "echo \"`pkill x`\"",
-            "cat <(kill 1)",
-            "echo \"${x:-$(kill 1)}\"",
-            "sudo -u root kill 1",
-            "sudo --user root kill 1",
-            "env FOO=1 kill 1",
-            "env -i kill 1",
-            "env -S 'kill 1'",
-            "{env,-i} kill 1",
-            "timeout 5 kill 1",
-            "timeout -s TERM 5s kill 1",
-            "nice -n 5 kill 1",
-            "xargs -I {} kill {}",
-            "X=1 kill 1",
-            "X+=1 kill 1",
-            ">out kill 1",
-            "true &>/dev/null; kill 1",
-            "echo ok\nkill 1",
-            "find . -name x -exec kill {} \\;",
-            "find . -exec true \\; -exec kill {} \\;",
-            "if true; then kill 1; fi",
-            "for p in 1; do kill $p; done",
-            "(kill 1)",
-            "{ kill 1; }",
-            "f() { kill 1; }",
-            "case x in a) kill 1;; esac",
-            "echo \"$(case x in a) kill 1;; esac)\"",
-            "bash -lc 'echo ok; kill 1'",
-            "eval 'kill 1'",
-            "su -c 'kill 1'",
-            "trap 'kill 1' EXIT",
-            "cat <<EOF\n$(kill 1)\nEOF",
-            "echo \"$(cat <<EOF\n`kill 1`\nEOF\n)\"",
+            "cat <(pkill 1)",
+            "echo \"${x:-$(pkill 1)}\"",
+            "sudo -u root pkill 1",
+            "sudo --user root pkill 1",
+            "env FOO=1 pkill 1",
+            "env -i pkill 1",
+            "env -S 'pkill 1'",
+            "{env,-i} pkill 1",
+            "timeout 5 pkill 1",
+            "timeout -s TERM 5s pkill 1",
+            "nice -n 5 pkill 1",
+            "xargs -I {} pkill {}",
+            "X=1 pkill 1",
+            "X+=1 pkill 1",
+            ">out pkill 1",
+            "true &>/dev/null; pkill 1",
+            "echo ok\npkill 1",
+            "find . -name x -exec pkill {} \\;",
+            "find . -exec true \\; -exec pkill {} \\;",
+            "if true; then pkill 1; fi",
+            "for p in 1; do pkill $p; done",
+            "(pkill 1)",
+            "{ pkill 1; }",
+            "f() { pkill 1; }",
+            "case x in a) pkill 1;; esac",
+            "echo \"$(case x in a) pkill 1;; esac)\"",
+            "bash -lc 'echo ok; pkill 1'",
+            "eval 'pkill 1'",
+            "su -c 'pkill 1'",
+            "trap 'pkill 1' EXIT",
+            "cat <<EOF\n$(pkill 1)\nEOF",
+            "echo \"$(cat <<EOF\n`pkill 1`\nEOF\n)\"",
             "$CMD 1",
             "\"$HOME/bin/tool\" 1",
             "$(which tool) 1",
             "echo kill 1 | sh",
-            "cat <<EOF\nEO\\\nF\nkill 1\nEOF",
-            "function f { kill 1; }; f",
+            "cat <<EOF\nEO\\\nF\npkill 1\nEOF",
+            "function f { pkill 1; }; f",
             "/bin/[[:alpha:]]ill 1",
             "/bin/[[:alpha:][:digit:]]ill 1",
-            "env -P /bin kill 1",
-            "sudo -R /x kill 1",
-            "=kill 1",
-            "echo \"${x:-'}\"; kill 1; echo \"'}\"",
-            "arch -arm64 kill 1",
-            "gtimeout 5 kill 1",
+            "env -P /bin pkill 1",
+            "sudo -R /x pkill 1",
+            "=pkill 1",
+            "echo \"${x:-'}\"; pkill 1; echo \"'}\"",
+            "arch -arm64 pkill 1",
+            "gtimeout 5 pkill 1",
             "kill",
-            "kill -9 1",
+            "kill -9",
+            "kill -s KILL",
+            "kill 0",
+            "kill 1",
+            "sudo kill -9 1",
+            "kill -1",
+            "kill -- -1",
+            "kill 1 -1",
+            "kill -9 $PID",
+            "kill $(pgrep x)",
+            "kill \"1\"",
+            "xargs kill 123",
+            "echo 1 | xargs kill -9",
+            "pkill x",
+            "killall5",
+            "skill x",
+            "killpg 1",
+            "echo kill 1 | bash",
             "printf kill | xargs -I{} {} 1",
             "source <(echo x)",
             "bash <<'EOF'\nkill 1\nEOF",
@@ -1041,6 +1081,12 @@ mod tests {
             "bash scripts/x.sh && git commit -m 'fix kill path'",
             "command -v pkill",
             "while kill -0 \"$PID\"; do sleep 1; done",
+            "kill 84322",
+            "kill -9 123 456",
+            "kill -TERM 42",
+            "kill -s KILL 42",
+            "kill -s -HUP 42",
+            "sudo kill -HUP 42 && echo ok",
         ] {
             assert!(check(command).is_ok(), "{command}");
         }

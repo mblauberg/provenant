@@ -1007,6 +1007,11 @@ impl Driver<'_> {
             } else {
                 Vec::new()
             },
+            unresolved_identities: if unresolved {
+                self.tracked.iter().take(16).cloned().collect()
+            } else {
+                Vec::new()
+            },
             settlement_evidence: self.settlement_evidence,
             stdout: totals.next().unwrap_or_default(),
             stderr: totals.next().unwrap_or_default(),
@@ -1036,7 +1041,20 @@ impl Driver<'_> {
                     break;
                 }
                 match self.reactor.wait(&[], Duration::from_millis(100)) {
-                    Ok(event) if event.supervisor_signal => break,
+                    Ok(event) if event.supervisor_signal => {
+                        // Never leave `unresolved` without one more bounded
+                        // stop attempt: TERM, the descendant grace, then KILL.
+                        if let Ok(true) = self.cleanup(
+                            &mut child,
+                            plan,
+                            cancelled,
+                            &mut warnings,
+                            &mut omitted_warnings,
+                        ) {
+                            self.republish_settled(record, cancelled);
+                        }
+                        break;
+                    }
                     _ => {}
                 }
             }
@@ -1064,6 +1082,7 @@ impl Driver<'_> {
         }
         record.unresolved_cleanup = false;
         record.unresolved_pids = Vec::new();
+        record.unresolved_identities = Vec::new();
         record.settlement_evidence = self.settlement_evidence;
         record.reaped = self.reaped.clone();
         record.omitted_reaped = self.omitted_reaped;
