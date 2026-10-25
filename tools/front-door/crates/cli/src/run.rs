@@ -951,7 +951,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 },
                 fallback,
                 task.delivery_id,
-                task.account,
+                task.account.or_else(|| command.account.clone()),
                 task.deliver.or_else(|| flag_delivery.clone()),
             ));
         }
@@ -979,7 +979,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             },
             flag_route.3.clone(),
             command.delivery_id,
-            None,
+            command.account.clone(),
             flag_delivery,
         ));
     }

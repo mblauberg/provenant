@@ -64,6 +64,33 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         rig.state.join("runs").join(run).join("request.json"),
     )?)?;
     assert_eq!(saved["tasks"][0]["account"], "fixture-account");
+    // --account pins the same way a manifest task does, and an unknown one is
+    // rejected at launch with the manifest path's outcome.
+    let pinned = rig.execute(
+        binary,
+        &[
+            "--state-dir",
+            &state,
+            "dispatch",
+            "--prompt-stdin",
+            "--model",
+            "codex/id",
+            "--account",
+            "fixture-account",
+            "--operation-id",
+            "account-flag",
+            "--json",
+        ],
+        Some(b"hello"),
+    )?;
+    assert_eq!(code(&pinned), 0);
+    let pinned: serde_json::Value = serde_json::from_slice(&pinned.stdout.bytes)?;
+    let run = pinned["data"]["run_id"].as_str().ok_or("run")?;
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        rig.state.join("runs").join(run).join("request.json"),
+    )?)?;
+    assert_eq!(saved["tasks"][0]["account"], "fixture-account");
+    assert_eq!(pinned["data"]["lanes"][0]["state"], "rejected", "{pinned}");
     // Replaying the operation returns the same run.
     let again: serde_json::Value =
         serde_json::from_slice(&rig.execute(binary, &args, Some(b"hello"))?.stdout.bytes)?;
@@ -142,7 +169,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         String::from_utf8_lossy(&stats.stdout.bytes)
     );
     let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
-    assert_eq!(value["data"]["totals"]["attempts"], 2);
+    assert_eq!(value["data"]["totals"]["attempts"], 3);
     rig.assert_legacy_unchanged()
 }
 
