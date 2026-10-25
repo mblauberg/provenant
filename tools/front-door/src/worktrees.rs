@@ -1,6 +1,6 @@
 //! Compose the worktree owner with verified project and fresh state roots.
 use crate::{emit, fail, roots};
-use provenant_cli::{Globals, Worktree};
+use provenant_cli::{Gc, Globals, Worktree};
 use provenant_confinement::{
     UtilityBudget, UtilityRuntime,
     worktrees::{
@@ -184,6 +184,87 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
         }
     }
     Ok(result)
+}
+
+#[derive(Serialize)]
+struct GcData {
+    #[serde(flatten)]
+    report: provenant_confinement::permissions::CacheGcReport,
+    idle_days: u64,
+}
+
+/// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
+/// worktree has a live or unobservable writer.
+pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
+    match gc(&command, globals) {
+        Ok(data) => {
+            let mut human = String::new();
+            let verb = if data.report.dry_run {
+                "would remove"
+            } else {
+                "removed"
+            };
+            for entry in &data.report.removed {
+                human.push_str(&format!(
+                    "{verb} {} ({} bytes, {})\n",
+                    entry.path.display(),
+                    entry.bytes,
+                    serde_json::to_string(&entry.reason)
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                ));
+            }
+            human.push_str(&format!(
+                "{} cache(s), {} bytes {}\n",
+                data.report.removed.len(),
+                data.report.bytes_freed,
+                if data.report.dry_run {
+                    "reclaimable"
+                } else {
+                    "freed"
+                }
+            ));
+            emit(
+                &CommandResult::new("gc", Outcome::Ok, data),
+                globals,
+                &human,
+                command.dry_run,
+            )
+        }
+        Err(error) => fail("gc", error.outcome(), "GC", &error.to_string(), globals),
+    }
+}
+
+fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
+    use provenant_confinement::permissions::{CacheGcPolicy, gc_worktree_cargo_caches};
+    use provenant_confinement::worktrees::WriterState;
+
+    let assets = roots::product_root()?;
+    let project = roots::selected_project(globals.project.as_deref(), true)?;
+    let roots = roots::roots(globals, &assets, &project)?;
+    let home = roots::home()?;
+    let listed = with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
+        Ok(worktrees::list(context, cancel)?)
+    })?;
+    let protected_owners = listed
+        .into_iter()
+        .filter(|info| info.writer != WriterState::Free)
+        .map(|info| info.path)
+        .collect();
+    let now_ns = SystemClock
+        .wall_now()
+        .map(|now| i128::from(now.as_micros()) * 1_000)
+        .map_err(|_| Error::Budget)?;
+    let idle_ns = i128::from(command.idle_days) * 86_400 * 1_000_000_000;
+    let policy = CacheGcPolicy {
+        idle_before_ns: Some(now_ns - idle_ns),
+        dry_run: command.dry_run,
+        protected_owners,
+    };
+    Ok(GcData {
+        report: gc_worktree_cargo_caches(&home, &policy)?,
+        idle_days: command.idle_days,
+    })
 }
 
 /// Run one worktree-owner action for `project` under fresh state `roots`,
