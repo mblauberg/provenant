@@ -286,6 +286,12 @@ fn component(name: &OsStr) -> Result<&OsStr> {
     Ok(name)
 }
 
+/// Whether a component is reserved for lock-name mutation protection.
+/// Includes bare `lock` names and case or Unicode aliases of `.lock`.
+pub fn is_reserved_lock_name(name: &OsStr) -> bool {
+    is_lock_name(name)
+}
+
 fn is_lock_name(name: &OsStr) -> bool {
     // Case-insensitive filesystems also accept case and Unicode spellings of
     // an existing leaf. Inspect just the extension so non-UTF-8 prefixes retain

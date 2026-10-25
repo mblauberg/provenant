@@ -173,7 +173,7 @@ fn validate_relative_file(path: &str) -> Result<()> {
     }
     for component in path.split('/') {
         if component.eq_ignore_ascii_case(".git")
-            || component.ends_with(".lock")
+            || fs::is_reserved_lock_name(OsStr::new(component))
             || component == "."
             || component == ".."
         {
@@ -523,13 +523,19 @@ mod tests {
             "a/../escape",
             ".git/config",
             "a/b.lock",
+            "a/b.LOCK",
+            "B.Lock/c",
+            "lock",
+            "a/b.loc\u{212A}",
             "/absolute",
             "a//b",
         ] {
+            let files = vec![file(path, b"x")];
+            let digest = manifest_digest(FETCH_VERSION, &files).unwrap();
             let manifest = FetchManifest {
                 version: FETCH_VERSION,
-                files: vec![file(path, b"x")],
-                digest: Digest::from_bytes([0; 32]),
+                files,
+                digest,
             };
             assert!(manifest.validate().is_err(), "{path}");
         }
