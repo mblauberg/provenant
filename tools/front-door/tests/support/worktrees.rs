@@ -45,6 +45,10 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "create_list_and_remove_a_managed_worktree",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
+            "merged_pruning_deletes_a_merged_branch_without_a_worktree",
+            "remove_by_name_follows_the_branch_merge_state",
+            "remove_by_name_deletes_a_branch_fully_contained_in_integration",
+            "remove_resolves_directory_names_and_remote_integration_refs",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_an_unregistered_worktree_names_the_create_command",
             "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
@@ -79,6 +83,18 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees" => {
                     merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees()
+                }
+                "merged_pruning_deletes_a_merged_branch_without_a_worktree" => {
+                    merged_pruning_deletes_a_merged_branch_without_a_worktree()
+                }
+                "remove_by_name_follows_the_branch_merge_state" => {
+                    remove_by_name_follows_the_branch_merge_state()
+                }
+                "remove_by_name_deletes_a_branch_fully_contained_in_integration" => {
+                    remove_by_name_deletes_a_branch_fully_contained_in_integration()
+                }
+                "remove_resolves_directory_names_and_remote_integration_refs" => {
+                    remove_resolves_directory_names_and_remote_integration_refs()
                 }
                 "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_names_the_create_command()
@@ -1152,6 +1168,210 @@ fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
         rig.assert_legacy_unchanged()?;
     }
     Ok(())
+}
+
+fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -> Result {
+    let rig = repository()?;
+    // At the integration tip: nothing unique, so the name removal deletes it.
+    ok(
+        &rig,
+        &["worktree", "create", "at-tip", "--base", "HEAD", "--json"],
+    )?;
+    let at_tip = rig.project.join(".worktrees/at-tip");
+    let removed = ok(&rig, &["worktree", "remove", "at-tip", "--json"])?;
+    assert_eq!(
+        removed["data"]["pruned_refs"],
+        serde_json::json!(["at-tip"])
+    );
+    assert!(!at_tip.exists());
+    assert!(!has_branch(&rig, "at-tip")?);
+
+    // An ancestor of a later integration tip: its commit is contained in main.
+    let old = git(&rig, &["rev-parse", "HEAD"])?;
+    ok(
+        &rig,
+        &["worktree", "create", "behind", "--base", &old, "--json"],
+    )?;
+    git(
+        &rig,
+        &["commit", "--allow-empty", "-qm", "advance integration"],
+    )?;
+    let removed = ok(&rig, &["worktree", "remove", "behind", "--json"])?;
+    assert_eq!(
+        removed["data"]["pruned_refs"],
+        serde_json::json!(["behind"])
+    );
+    assert!(!has_branch(&rig, "behind")?);
+    rig.assert_legacy_unchanged()
+}
+
+fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
+    let rig = repository()?;
+    // The worktree directory is the branch with `/` replaced by `-`.
+    ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "fix/shipped",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
+    let shipped = rig.project.join(".worktrees/fix-shipped");
+    let shipped_text = shipped.to_str().ok_or("non-text fixture path")?;
+    fs::write(shipped.join("shipped.txt"), "work")?;
+    git(&rig, &["-C", shipped_text, "add", "shipped.txt"])?;
+    git(&rig, &["-C", shipped_text, "commit", "-qm", "shipped"])?;
+    // Local main stays behind; the work is only on the remote-tracking ref.
+    let tip = git(&rig, &["rev-parse", "fix/shipped"])?;
+    git(&rig, &["update-ref", "refs/remotes/origin/main", &tip])?;
+
+    let removed = ok(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "fix-shipped",
+            "--integration",
+            "origin/main",
+            "--json",
+        ],
+    )?;
+    assert_eq!(
+        removed["data"]["pruned_refs"],
+        serde_json::json!(["fix/shipped"])
+    );
+    assert!(!shipped.exists());
+    assert!(!has_branch(&rig, "fix/shipped")?);
+
+    // The merged sweep accepts the same remote-tracking integration ref.
+    let swept = branch_commit(&rig, "swept")?;
+    let swept_tip = git(&rig, &["rev-parse", "swept"])?;
+    // A merge of the branch into the remote's main: contained, and not on the
+    // first-parent history, so the sweep may delete it.
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    let merge_tree = git(&rig, &["rev-parse", &format!("{head}^{{tree}}")])?;
+    let next = git(
+        &rig,
+        &[
+            "commit-tree",
+            &merge_tree,
+            "-p",
+            &head,
+            "-p",
+            &swept_tip,
+            "-m",
+            "merge swept",
+        ],
+    )?;
+    git(&rig, &["update-ref", "refs/remotes/origin/main", &next])?;
+    let stale = git(&rig, &["rev-parse", "HEAD"])?;
+    git(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            swept.to_str().ok_or("path")?,
+        ],
+    )?;
+    let result = ok(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "origin/main",
+            "--branch",
+            "swept",
+            "--json",
+        ],
+    )?;
+    assert_eq!(result["data"]["pruned_refs"], serde_json::json!(["swept"]));
+    assert!(!has_branch(&rig, "swept")?);
+    assert_eq!(git(&rig, &["rev-parse", "HEAD"])?, stale);
+    rig.assert_legacy_unchanged()
+}
+
+fn has_branch(rig: &TestRig, name: &str) -> Result<bool> {
+    let reference = format!("refs/heads/{name}");
+    Ok(!git(rig, &["for-each-ref", reference.as_str()])?.is_empty())
+}
+
+fn remove_by_name_follows_the_branch_merge_state() -> Result {
+    let rig = repository()?;
+    let merged = branch_commit(&rig, "merged")?;
+    git(&rig, &["merge", "--no-ff", "-qm", "Merge merged", "merged"])?;
+    let unmerged = branch_commit(&rig, "unmerged")?;
+    let dirty = branch_commit(&rig, "dirty")?;
+    let dirty_head = git(&rig, &["rev-parse", "dirty"])?;
+    fs::write(dirty.join("precious"), "uncommitted work")?;
+
+    let refused = command(
+        &rig,
+        &["worktree", "remove", "dirty", "--discard", "--json"],
+    )?;
+    assert_eq!(code(&refused), 1);
+    assert_eq!(json(&refused)?["status"], "refused");
+    assert!(has_branch(&rig, "dirty")?);
+    assert!(dirty.join("precious").is_file());
+
+    let removed = ok(&rig, &["worktree", "remove", "merged", "--json"])?;
+    assert_eq!(
+        removed["data"]["pruned_refs"],
+        serde_json::json!(["merged"])
+    );
+    assert!(!merged.exists());
+    assert!(!has_branch(&rig, "merged")?);
+
+    let kept = ok(&rig, &["worktree", "remove", "unmerged", "--json"])?;
+    assert!(
+        kept["data"]["pruned_refs"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+    assert_eq!(kept["data"]["retained"][0]["branch"], "unmerged");
+    assert_eq!(kept["data"]["retained"][0]["reason"], "not_merged");
+    assert!(!unmerged.exists());
+    assert!(has_branch(&rig, "unmerged")?);
+
+    fs::remove_file(dirty.join("precious"))?;
+    let discarded = ok(
+        &rig,
+        &["worktree", "remove", "dirty", "--discard", "--json"],
+    )?;
+    assert_eq!(discarded["data"]["discarded"][0]["branch"], "dirty");
+    assert_eq!(discarded["data"]["discarded"][0]["head"], dirty_head);
+    assert!(!dirty.exists());
+    assert!(!has_branch(&rig, "dirty")?);
+    rig.assert_legacy_unchanged()
+}
+
+fn merged_pruning_deletes_a_merged_branch_without_a_worktree() -> Result {
+    let rig = repository()?;
+    let stale = branch_commit(&rig, "stale")?;
+    let stale_text = stale.to_str().ok_or("non-text fixture path")?;
+    git(&rig, &["worktree", "remove", "--force", stale_text])?;
+    git(&rig, &["merge", "--no-ff", "-qm", "Merge stale", "stale"])?;
+    let pruned = ok(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "main",
+            "--branch",
+            "stale",
+            "--json",
+        ],
+    )?;
+    assert_eq!(pruned["data"]["pruned_refs"], serde_json::json!(["stale"]));
+    assert!(!has_branch(&rig, "stale")?);
+    rig.assert_legacy_unchanged()
 }
 
 fn dispatch_into_an_unregistered_worktree_names_the_create_command() -> Result {

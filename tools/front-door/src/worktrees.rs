@@ -3,7 +3,9 @@ use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Worktree};
 use provenant_confinement::{
     UtilityBudget, UtilityRuntime,
-    worktrees::{self, WorktreeContext, WorktreeCreate, WorktreeError, WorktreeRemove},
+    worktrees::{
+        self, RetainReason, WorktreeContext, WorktreeCreate, WorktreeError, WorktreeRemove,
+    },
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{CommandResult, Outcome};
@@ -53,6 +55,13 @@ pub(crate) enum Error {
 #[allow(clippy::print_stderr)]
 fn warn_cache_sweep(error: &impl std::fmt::Display) {
     eprintln!("warning: could not sweep orphaned lane caches: {error}");
+}
+
+#[allow(clippy::print_stderr)]
+fn note_kept_unmerged() {
+    eprintln!(
+        "note: the branch is not merged into the integration branch and was kept; pass --discard to delete it"
+    );
 }
 
 impl Error {
@@ -132,8 +141,13 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
             )?),
             Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
             Worktree::Remove(args) => {
+                let named = args.name.is_some();
                 let request = if let Some(name) = args.name {
-                    WorktreeRemove::Name(name)
+                    WorktreeRemove::Name {
+                        name,
+                        discard: args.discard,
+                        integration: args.integration,
+                    }
                 } else {
                     WorktreeRemove::Merged {
                         integration: args.integration.ok_or(Error::InvalidScope)?,
@@ -143,7 +157,17 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                         },
                     }
                 };
-                Data::Removed(worktrees::remove(context, request, cancel)?)
+                let removed = worktrees::remove(context, request, cancel)?;
+                if named
+                    && !args.discard
+                    && removed
+                        .retained
+                        .iter()
+                        .any(|kept| kept.reason == RetainReason::NotMerged)
+                {
+                    note_kept_unmerged();
+                }
+                Data::Removed(removed)
             }
         })
     })?;
