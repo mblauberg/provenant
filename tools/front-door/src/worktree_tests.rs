@@ -1584,7 +1584,6 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &home,
             "fixture".as_ref(),
             &directory,
-            &rig.root,
         )?;
         if adapter == "claude" {
             claude_key.clone_from(&key);

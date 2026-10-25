@@ -1441,7 +1441,6 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
             login.home,
             login.user,
             login.config_dir,
-            supplied_cwd,
         )
         .unwrap();
         let account =
@@ -2257,7 +2256,6 @@ fn claude_account_probe_carries_user_for_keychain_selection() {
         Path::new("/home/u"),
         OsStr::new("u"),
         Path::new("/home/u/.claude-pro"),
-        Path::new("/scratch/empty"),
     );
     assert!(key.is_ok());
     let calls = script.calls.into_inner().unwrap();
@@ -2281,7 +2279,6 @@ fn claude_account_probe_names_the_missing_login() {
         Path::new("/home/u"),
         OsStr::new("u"),
         Path::new("/home/u/.claude-pro"),
-        Path::new("/scratch/empty"),
     )
     .unwrap_err();
     assert!(matches!(error, ProviderError::LoginRequired));

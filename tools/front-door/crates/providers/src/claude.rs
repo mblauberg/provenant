@@ -109,11 +109,12 @@ pub struct Login<'a> {
     pub config_dir: &'a Path,
 }
 
-/// Placeholder working directory for host probes. The caller's executor owns
-/// the real one: `HostProbeExecutor` replaces it with a fresh private
-/// directory, so no project settings, hooks or instructions apply. No caller
-/// can name a lane-writable directory here.
-const PROBE_CWD: &str = "/";
+/// Placeholder working directory for host probes, never a caller's choice, so
+/// a lane-writable directory cannot be named. Production executors are
+/// `HostProbeExecutor`, which replaces it with a fresh private directory so no
+/// project settings, hooks or instructions apply. Any other executor runs the
+/// probe in `/`, a fallback that is root-owned and never lane-written.
+pub(crate) const PROBE_CWD: &str = "/";
 
 /// Keychain service suffix for a non-default `CLAUDE_CONFIG_DIR`: the first
 /// eight hex digits of the directory path's digest.

@@ -96,12 +96,7 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
         _ => Err(format!("unknown account `{account}`")),
     }
 }
-pub fn execute(
-    command: &Accounts,
-    roots: &Roots,
-    home: &Path,
-    cwd: &Path,
-) -> Result<Settings, String> {
+pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Settings, String> {
     let mut settings =
         provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)
             .map_err(|e| e.to_string())?
@@ -170,7 +165,12 @@ pub fn execute(
             );
         }
         let executable = crate::run::provider_executable(adapter)?;
-        let executor = SystemExecutor::new(1).map_err(|e| e.to_string())?;
+        // The probe runs in a fresh private directory under the host state
+        // root, never the caller's cwd, which may hold lane-written settings.
+        let system = SystemExecutor::new(1).map_err(|e| e.to_string())?;
+        let executor =
+            provenant_providers::host::HostProbeExecutor::new(&system, roots.state.as_path())
+                .map_err(|e| e.to_string())?;
         let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
             .map_err(|e| e.to_string())?
             .ok_or("current user identity is unavailable")?
@@ -182,7 +182,6 @@ pub fn execute(
             home,
             &user,
             &directory,
-            cwd,
         );
         // OpenCode's local ledger has no sign-in identity.
         let (key, org_fingerprint) = match detected {
