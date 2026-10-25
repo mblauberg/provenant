@@ -2101,6 +2101,57 @@ fn rust_tools_exec_repository_scripts_in_the_working_directory() {
 }
 
 #[test]
+fn writer_git_core_helpers_are_readable_and_executable_only_for_writers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    // The host resolves Homebrew's bin/git symlink into its versioned keg.
+    let keg = temp.path().join("Cellar/git/1.0");
+    let git = keg.join("bin/git");
+    let core = keg.join("libexec/git-core");
+    std::fs::create_dir_all(&core)?;
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.provenant.git = &git;
+        let launch = crate::codex::Codex.prepare(input)?;
+        let profile = &launch.profile.spec;
+        let mut helpers = vec![core.clone()];
+        if cfg!(target_os = "macos") && Path::new("/Library/Developer/CommandLineTools").is_dir() {
+            helpers.push("/Library/Developer/CommandLineTools/usr/libexec/git-core".into());
+        }
+        for helper in helpers {
+            assert_eq!(
+                profile
+                    .tool_exec_roots
+                    .iter()
+                    .any(|grant| grant.path == helper
+                        && grant.scope == provenant_confinement::permissions::PathScope::Subtree),
+                access == Access::WorktreeWrite,
+                "{access:?}: {}",
+                helper.display()
+            );
+            assert!(!profile.tool_writes.iter().any(|grant| grant.path == helper));
+        }
+        assert_eq!(
+            profile.runtime_reads.iter().any(|grant| grant.path == core
+                && grant.scope == provenant_confinement::permissions::PathScope::Subtree),
+            access == Access::WorktreeWrite
+        );
+        // Only the selected installation's helper directory is added.
+        assert!(
+            !profile
+                .tool_exec_roots
+                .iter()
+                .any(|grant| grant.path == keg)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn homebrew_node_tools_grant_the_prefix_but_not_var() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let prefix = temp.path();

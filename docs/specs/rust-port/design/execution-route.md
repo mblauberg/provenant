@@ -547,9 +547,15 @@ credential access. Writers also get exact write access to the linked worktree's
 private `COMMIT_EDITMSG`, `AUTO_MERGE`, `AUTO_MERGE.lock`, `MERGE_HEAD`,
 `MERGE_MSG`, `MERGE_MODE`, `MERGE_RR` (and lock), `ORIG_HEAD` and `ORIG_HEAD.lock`, so `git commit` and a
 local `git merge` complete; the common `.git` stays read-only apart from the
-listed ref grants and the exact `packed-refs.lock` that any ref deletion takes
+listed ref grants, the exact private and common `FETCH_HEAD` paths and the exact
+`packed-refs.lock` that any ref deletion takes
 (`packed-refs` itself stays read-only, so the lock can never replace it), so
-fetches stay host-side. When a Homebrew prefix
+fetches that update remote refs stay host-side. The push guard trusts the
+host-owned `refs/remotes/<remote>/HEAD` to identify the default branch, so
+remote refs and their reflogs remain immutable. Writers also execute CLT's
+`usr/libexec/git-core` helpers and read/execute the selected Git installation's
+`libexec/git-core` when present, including Homebrew Git without Node. Read-only
+helper grants are unchanged. When a Homebrew prefix
 (`/opt/homebrew`, else `/usr/local`) has `bin/node`, shell-capable lanes also
 read and exec its `bin`, `Cellar`, `opt` and `lib`, and its `bin` ends `PATH`;
 the prefix's `etc/` and `var/` stay unreadable and nothing under it is
@@ -725,9 +731,9 @@ lanes for the same worktree incarnation reuse it. A planted
 `cargo-home/config.toml` or executable can affect later lane builds. Host code
 only prepares and anchors the cache; it never runs Cargo with that home or
 executes cache contents. Lane children execute those contents inside their
-confinement profile. CLT `usr/libexec/git-core` is readable but has no exec
-grant. `git status`, `git diff` and `git commit` are built-ins and need no
-helpers there; commands needing external Git helpers remain outside this grant.
+confinement profile. Writers can execute CLT `usr/libexec/git-core` helpers;
+read-only lanes retain their previous exec grants. Remote-tracking refs remain
+host-owned because the push guard trusts their default-branch evidence.
 
 After the chair approves the pro account, quota and throwaway-worktree run,
 record both shell sessions from the repository root for replay coverage:

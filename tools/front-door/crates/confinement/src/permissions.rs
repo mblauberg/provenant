@@ -654,6 +654,8 @@ struct WorktreeWriteGrants {
     next_index: PathGrant,
     /// Git reads this shared exclude file during status and build fingerprinting.
     common_exclude: PathGrant,
+    /// Fetch may record its result without changing host-owned remote refs.
+    fetch_heads: [PathGrant; 2],
     /// Deleting any ref, even an unpacked pseudoref such as AUTO_MERGE, takes
     /// this lock. `packed-refs` itself stays read-only, so the lock can never be
     /// committed over it.
@@ -684,6 +686,9 @@ impl WorktreeWriteGrants {
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
             next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
             common_exclude: exact(common.join("info/exclude")),
+            // Linked worktrees normally use their private FETCH_HEAD; also
+            // cover Git invocations that use the common directory directly.
+            fetch_heads: [private, common].map(|directory| exact(directory.join("FETCH_HEAD"))),
             packed_refs_lock: exact(common.join("packed-refs.lock")),
             // `git commit` writes its message buffer and clears AUTO_MERGE here;
             // a local `git merge` records its state and ORIG_HEAD here too.
@@ -722,6 +727,7 @@ impl WorktreeWriteGrants {
             .chain(self.index.iter())
             .chain(std::iter::once(&self.next_index))
             .chain([&self.common_exclude, &self.packed_refs_lock])
+            .chain(self.fetch_heads.iter())
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
             .chain(self.selected_ref.iter())
@@ -729,7 +735,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v7\0");
+        digest.update(b"provenant-worktree-git-grants-v8\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -1932,6 +1938,7 @@ fn push_worktree_rule(
         .index
         .iter()
         .chain(std::iter::once(&grants.packed_refs_lock))
+        .chain(&grants.fetch_heads)
         .chain(&grants.head)
         .chain(&grants.selected_ref)
     {
@@ -3031,6 +3038,17 @@ mod tests {
             "(regex #\"^{private_pattern}/next-index-[0-9]+\\.lock$\")"
         )));
         assert!(!source.contains(&format!("^{}/next-index", sbpl_regex_path(&common)?)));
+        // Fetch can record its result, without changing trusted remote refs.
+        for directory in [&private, &common] {
+            assert!(source.contains(&format!(
+                "(allow file-write* (literal \"{}\"))",
+                directory.join("FETCH_HEAD").display()
+            )));
+            assert!(!source.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                directory.join("FETCH_HEAD").display()
+            )));
+        }
         // Ref deletion takes the packed-refs lock; packed-refs itself stays read-only.
         assert!(source.contains(&format!(
             "\"{}\"",
@@ -3041,8 +3059,11 @@ mod tests {
             "config.lock",
             "packed-refs",
             "refs/heads/main",
+            "refs/remotes",
             "refs/remotes/origin",
             "refs/remotes/upstream",
+            "logs/refs/remotes",
+            "hooks",
         ] {
             assert!(
                 !source.contains(&format!("\"{}\"", common.join(relative).display())),
@@ -3072,6 +3093,21 @@ mod tests {
         ));
         std::fs::remove_file(&hardlink_alias)?;
         std::fs::remove_file(&private_head_log)?;
+
+        for directory in [&private, &common] {
+            let fetch_head = directory.join("FETCH_HEAD");
+            std::fs::write(&fetch_head, b"fetch result\n")?;
+            std::fs::hard_link(&fetch_head, &hardlink_alias)?;
+            assert!(matches!(
+                verify_worktree_authority(&authority, &anchors),
+                Err(PermissionError::AnchorMismatch)
+            ));
+            std::fs::remove_file(&hardlink_alias)?;
+            std::fs::remove_file(&fetch_head)?;
+            std::os::unix::fs::symlink(common.join("config"), &fetch_head)?;
+            assert!(verify_worktree_authority(&authority, &anchors).is_err());
+            std::fs::remove_file(&fetch_head)?;
+        }
 
         let mut tampered = authority.clone();
         tampered.git_grants_digest[0] ^= 1;
@@ -3231,6 +3267,12 @@ mod tests {
         let common_logs = common.join("logs/refs/heads/s3");
         for directory in [&private_logs, &common_heads, &common_logs] {
             std::fs::create_dir_all(directory)?;
+        }
+        // Probe existing remote files so a denial cannot be an absent parent.
+        for relative in ["refs/remotes/origin/HEAD", "logs/refs/remotes/origin/HEAD"] {
+            let path = common.join(relative);
+            std::fs::create_dir_all(path.parent().ok_or("remote ref parent")?)?;
+            std::fs::write(path, b"ref: refs/remotes/origin/main\n")?;
         }
         let executables = [
             provenant_supervisor::fs::canonicalize(Path::new("/usr/bin/touch"))?,
@@ -3461,6 +3503,16 @@ mod tests {
             inside_outcome.termination,
             String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
+        for directory in [&private, &common] {
+            let fetch_head_outcome = run(&executables[0], &[&directory.join("FETCH_HEAD")]);
+            assert!(
+                successful_probe(&fetch_head_outcome),
+                "{} FETCH_HEAD write failed: {:?}; {}",
+                directory.display(),
+                fetch_head_outcome.termination,
+                String::from_utf8_lossy(&fetch_head_outcome.stderr.bytes)
+            );
+        }
         // Package managers link into node_modules; a link grants nothing,
         // since the sandbox checks the resolved path.
         let new_link = linked.path().join("new-link");
@@ -3488,6 +3540,33 @@ mod tests {
             );
         }
         let mut probes = vec![
+            (
+                "git config write",
+                run(&executables[0], &[&common.join("config")]),
+            ),
+            (
+                "packed refs write",
+                run(&executables[0], &[&common.join("packed-refs")]),
+            ),
+            (
+                "other branch write",
+                run(&executables[0], &[&common.join("refs/heads/main")]),
+            ),
+            (
+                "remote ref write",
+                run(&executables[0], &[&common.join("refs/remotes/origin/HEAD")]),
+            ),
+            (
+                "remote reflog write",
+                run(
+                    &executables[0],
+                    &[&common.join("logs/refs/remotes/origin/HEAD")],
+                ),
+            ),
+            (
+                "git hooks write",
+                run(&executables[0], &[&common.join("hooks/pre-push")]),
+            ),
             (
                 "cargo credentials read",
                 run(&executables[4], &[&cargo_credentials]),

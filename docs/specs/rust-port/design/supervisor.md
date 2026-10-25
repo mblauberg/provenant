@@ -308,7 +308,8 @@ Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)`, explicit
 read and write roots and a network level. Hold verified path anchors;
 reject traversal, symlinked state/lock leaves, credential roots and broad home
 or tmp grants. Writers may change their linked tree, private Git index/HEAD/COMMIT_EDITMSG/AUTO_MERGE/merge state/ORIG_HEAD,
-objects, exactly their branch/ref lock/reflog and the common `packed-refs.lock`. Keep `.git`, `commondir`,
+objects, exactly their branch/ref lock/reflog, the private and common
+`FETCH_HEAD` files and the common `packed-refs.lock`. Keep `.git`, `commondir`,
 `gitdir`, `config.worktree`, `objects/info`, other refs, provider configuration
 and protected instructions immutable. Network is a level: `provider` (the
 profile's API endpoints only, the read-only default), `local` (adds localhost
@@ -366,8 +367,11 @@ Shell-capable Claude writers use the same Rust recipe as Codex, with
 `CARGO_TARGET_DIR` inside the exact lane cache.
 On macOS with CLT installed, the recipe selects
 `/Library/Developer/CommandLineTools` with `DEVELOPER_DIR` and its macOS SDK
-with `SDKROOT`. That one installation is readable; only its `usr/bin` subtree
-is executable. This lets the compiler/linker load `libxcrun.dylib` and SDK
+with `SDKROOT`. That one installation is readable; its `usr/bin` subtree
+is executable, and writers also execute its `usr/libexec/git-core` helpers.
+Writers read and execute the selected Git installation's `libexec/git-core`
+when present, including a resolved Homebrew Git keg without a Node installation.
+This lets the compiler/linker load `libxcrun.dylib` and SDK
 resources without a read or write grant to Xcode apps or CLT's parent.
 Without CLT, this recipe promises no macOS Rust build support. Shell Git is
 host-selected and linked (Claude shell lanes: wrapped by a config-pinning script) at `scratch/bin/git`; the exact selected executable
@@ -380,11 +384,15 @@ For #1255 the design's other-ref/config restriction takes precedence over the
 issue's proposed shared-file grants: changing `packed-refs` can change every
 packed branch, and common `config`/`config.lock` cannot be narrowed to one
 `branch.<name>` section. Remote-tracking refs, packed refs and common config
-therefore remain host-owned. Git's files ref backend may probe
-`packed-refs.lock` while preparing a commit's ref update; the sandbox denial is
-harmless when the selected branch is updated through its granted loose ref,
-which is why the commit can succeed with that warning. Do not grant the common
-lock: that would let the writer enter the shared packed-ref update path. The
+therefore remain host-owned. The push guard trusts
+`refs/remotes/<remote>/HEAD` to identify the default branch; letting a writer
+change it would bypass default-branch push refusals. Remote refs and their
+reflogs stay immutable. Writers can write the exact private and common
+`FETCH_HEAD` paths, but fetches that update remote refs still require the host.
+Linked-worktree Git resolves `FETCH_HEAD` into the private Git directory. The existing objects
+grant includes pack writes, excluding `objects/info`. The exact common
+`packed-refs.lock` permits loose-ref deletion; `packed-refs` itself remains
+read-only, so that lock cannot replace it. The
 common Git `info/exclude` file is an exact read-only grant for status and build
 fingerprinting. A writer `TaskRequest` may explicitly carry
 `deliver: {remote, branch, open_pr}`. Run binds the configured remote's single

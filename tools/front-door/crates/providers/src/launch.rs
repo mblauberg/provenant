@@ -219,10 +219,25 @@ pub(crate) fn rust_tools(
         if developer.is_dir() {
             runtime_reads.push(subtree(developer));
             tool_exec_roots.push(subtree(developer.join("usr/bin")));
+            if access == Access::WorktreeWrite {
+                tool_exec_roots.push(subtree(developer.join("usr/libexec/git-core")));
+            }
             env.extend([
                 ("DEVELOPER_DIR".into(), developer.into()),
                 ("SDKROOT".into(), developer.join("SDKs/MacOSX.sdk").into()),
             ]);
+        }
+    }
+    // Homebrew resolves bin/git into its versioned keg. Its remote helpers
+    // live beside bin/, independently of whether Node enables Homebrew tools.
+    // Grant only the selected Git's helper directory, and only to writers.
+    if access == Access::WorktreeWrite
+        && let Some(prefix) = input.provenant.git.parent().and_then(Path::parent)
+    {
+        let core = prefix.join("libexec/git-core");
+        if core.is_dir() {
+            runtime_reads.push(subtree(&core));
+            tool_exec_roots.push(subtree(core));
         }
     }
     if access == Access::ReadOnly {
