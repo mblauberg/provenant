@@ -124,8 +124,156 @@ impl InstallReporter for Reporter {
 struct Smoke;
 
 #[test]
+fn peer_agent_accepts_a_symlinked_home() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    let alias = f.base.join("home-alias");
+    symlink(&f.home, &alias).unwrap();
+    f.targets.home = alias;
+    f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+    let release = f.release();
+    let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
+    let plan = plan_install(release, f.targets.clone(), snapshots).unwrap();
+    assert!(plan.actions().iter().any(|action| {
+        action.selector == "peer-agent"
+            && action.path.to_path_buf().unwrap()
+                == f.home.join("Library/LaunchAgents/dev.provenant.peer.plist")
+    }));
+}
+
+#[test]
+fn uninstall_prunes_empty_managed_hook_groups() {
+    let mut f = Fixture::new();
+    f.targets.harnesses =
+        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    let settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.home.join(".claude/settings.json")).unwrap()).unwrap();
+    assert_eq!(settings["hooks"], serde_json::json!({}));
+}
+
+#[test]
+fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
+    let mut f = Fixture::new();
+    f.targets.harnesses =
+        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let path = f.home.join(".claude/settings.json");
+    let mut bytes = fs::read(&path).unwrap();
+    // An extra key protects the group even when its last owned leaf is removed.
+    bytes = crate::splice::set(
+        &bytes,
+        &["hooks", "PreCompact", "0", "user"],
+        Some(&serde_json::json!(true)),
+    )
+    .unwrap();
+    let foreign = serde_json::json!({"type": "command", "command": "herdr capture"});
+    bytes = crate::splice::set(
+        &bytes,
+        &["hooks", "PreToolUse", "0", "hooks", "1"],
+        Some(&foreign),
+    )
+    .unwrap();
+    // The second group moves when the first, owned-only group is pruned.
+    let sibling = serde_json::json!({"matcher": "startup", "hooks": [foreign.clone()]});
+    bytes = crate::splice::set(&bytes, &["hooks", "SessionStart", "1"], Some(&sibling)).unwrap();
+    let mut commented = b"{ // keep user comment\n".to_vec();
+    commented.extend_from_slice(&bytes[1..]);
+    fs::write(&path, commented).unwrap();
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let settings: serde_json::Value = provenant_records::decode_jsonc(
+        std::io::Cursor::new(&bytes),
+        provenant_records::Limits::CONFIG,
+    )
+    .unwrap();
+    assert_eq!(
+        settings["hooks"],
+        serde_json::json!({
+            "PreToolUse": [{"matcher": "Bash", "hooks": [foreign]}],
+            "PreCompact": [{"hooks": [], "user": true}],
+            "SessionStart": [sibling],
+        })
+    );
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("// keep user comment")
+    );
+}
+
+#[test]
+fn missing_peer_agent_is_stopped_only_when_the_last_harness_is_removed() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude, Harness::Codex],
+    )
+    .harnesses;
+    f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    fs::remove_file(peer_agent_plist(f.targets.roots.state.as_path()).unwrap()).unwrap();
+    struct StopReporter(usize);
+    impl InstallReporter for StopReporter {
+        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+            if action.selector == "peer-agent" {
+                self.0 += 1;
+            }
+            Ok(())
+        }
+    }
+    let mut reporter = StopReporter(0);
+    let codex = f.targets.harnesses.pop().unwrap();
+    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
+    assert_eq!(reporter.0, 0);
+    assert!(
+        read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "peer-agent")
+    );
+    f.targets.harnesses = vec![codex];
+    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
+    assert_eq!(reporter.0, 1);
+    assert!(
+        !read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "peer-agent")
+    );
+}
+
+#[test]
 fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
-    for modified in [false, true] {
+    for state in ["unchanged", "modified", "missing"] {
+        let modified = state == "modified";
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
             .resolve(&Resolver)
@@ -171,6 +319,9 @@ fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
                 "{error}"
             );
         }
+        if state == "missing" {
+            fs::remove_file(&plist).unwrap();
+        }
         struct StopReporter(usize);
         impl InstallReporter for StopReporter {
             fn preview(&mut self, _: &[Action]) -> io::Result<()> {
@@ -186,6 +337,14 @@ fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
         let mut reporter = StopReporter(0);
         let result = uninstall(&f.targets, &context, &mut reporter).unwrap();
         assert_eq!(reporter.0, usize::from(!modified));
+        assert_eq!(
+            result
+                .actions
+                .iter()
+                .filter(|action| action.selector == "peer-agent")
+                .count(),
+            usize::from(!modified)
+        );
         assert_eq!(plist.exists(), modified);
         assert_eq!(
             result
@@ -531,50 +690,52 @@ fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
 
 #[test]
 fn failed_peer_stop_keeps_the_plist_and_receipt_for_retry() {
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let context = InstallContext {
-        fs: &LocalFs,
-        clock: &clock,
-        cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
-    };
-    install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
-    let receipt = fs::read(f.receipt()).unwrap();
-    struct FailStop;
-    impl InstallReporter for FailStop {
-        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-            Ok(())
+    for missing in [false, true] {
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            fs: &LocalFs,
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+        };
+        install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+        let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        if missing {
+            fs::remove_file(&plist).unwrap();
         }
-        fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-            if action.selector == "peer-agent" {
-                Err(io::Error::other("bootout failed"))
-            } else {
+        let receipt = fs::read(f.receipt()).unwrap();
+        struct FailStop;
+        impl InstallReporter for FailStop {
+            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
                 Ok(())
             }
+            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+                if action.selector == "peer-agent" {
+                    Err(io::Error::other("bootout failed"))
+                } else {
+                    Ok(())
+                }
+            }
         }
+        assert!(matches!(
+            uninstall(&f.targets, &context, &mut FailStop),
+            Err(InstallError::Partial { .. })
+        ));
+        assert_eq!(fs::read(f.receipt()).unwrap(), receipt);
+        assert_eq!(plist.exists(), !missing);
+        uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
+        assert!(
+            !peer_agent_plist(f.targets.roots.state.as_path())
+                .unwrap()
+                .exists()
+        );
     }
-    assert!(matches!(
-        uninstall(&f.targets, &context, &mut FailStop),
-        Err(InstallError::Partial { .. })
-    ));
-    assert_eq!(fs::read(f.receipt()).unwrap(), receipt);
-    assert!(
-        peer_agent_plist(f.targets.roots.state.as_path())
-            .unwrap()
-            .exists()
-    );
-    uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
-    assert!(
-        !peer_agent_plist(f.targets.roots.state.as_path())
-            .unwrap()
-            .exists()
-    );
 }
 
 #[test]

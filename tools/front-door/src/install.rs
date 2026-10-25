@@ -220,19 +220,31 @@ fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
 struct PreviewReporter {
     home: Option<PathBuf>,
 }
-impl InstallReporter for PreviewReporter {
-    fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+impl PreviewReporter {
+    fn before_remove_with(
+        &self,
+        action: &Action,
+        stop: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
         if action.selector == "peer-agent" {
             let home = self
                 .home
                 .as_deref()
                 .ok_or_else(|| io::Error::other("missing agent home"))?;
-            if action.path.to_path_buf().ok().as_ref() != Some(&super::peer_agent::plist(home)) {
+            let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+            if action.path.to_path_buf().ok().as_ref() != Some(&super::peer_agent::plist(&home)) {
                 return Err(io::Error::other("unexpected agent plist path"));
             }
-            super::peer_agent::stop(home).map_err(io::Error::other)?;
+            stop(&home)?;
         }
         Ok(())
+    }
+}
+impl InstallReporter for PreviewReporter {
+    fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+        self.before_remove_with(action, |home| {
+            super::peer_agent::stop(home).map_err(io::Error::other)
+        })
     }
     fn preview(&mut self, _: &[Action]) -> io::Result<()> {
         Ok(())
@@ -656,4 +668,48 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
         None,
         globals,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn peer_agent_removal_accepts_canonical_home_and_refuses_other_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_config::Disposition;
+        use provenant_records::AbsolutePath;
+        let tmp = tempfile::tempdir()?;
+        let home = tmp.path().canonicalize()?.join("home");
+        std::fs::create_dir(&home)?;
+        let alias = tmp.path().join("home-alias");
+        std::os::unix::fs::symlink(&home, &alias)?;
+        let reporter = PreviewReporter { home: Some(alias) };
+        let mut action = Action {
+            path: AbsolutePath::new(&crate::peer_agent::plist(&home))?,
+            disposition: Disposition::Remove,
+            selector: "peer-agent".into(),
+            before: None,
+            after: None,
+            identity: None,
+            edits: Vec::new(),
+        };
+        let mut stops = 0;
+        reporter.before_remove_with(&action, |cwd| {
+            assert_eq!(cwd, home);
+            stops += 1;
+            Ok(())
+        })?;
+        assert_eq!(stops, 1);
+        action.path = AbsolutePath::new(&home.join("foreign.plist"))?;
+        assert!(
+            reporter
+                .before_remove_with(&action, |_| {
+                    stops += 1;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(stops, 1);
+        Ok(())
+    }
 }

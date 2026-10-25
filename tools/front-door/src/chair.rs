@@ -116,8 +116,14 @@ fn cached(roots: &Roots, key: &str) -> Option<QuotaSnapshot> {
     }
     record.snapshot
 }
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
+fn quote(text: &str) -> Result<String, Error> {
+    // These characters have incompatible single-quote rules across shells.
+    if text.contains(['\'', '\\']) {
+        return Err(
+            "chair handoff cannot quote text containing a single quote or backslash".into(),
+        );
+    }
+    Ok(format!("'{text}'"))
 }
 fn terminal_path(path: &Path) -> Result<&str, Error> {
     path.to_str()
@@ -147,32 +153,47 @@ fn command(
     target: &RegisteredAccount,
     checkpoint: &Path,
 ) -> Result<String, Error> {
+    command_with_executable(context, target, checkpoint, &std::env::current_exe()?)
+}
+fn command_with_executable(
+    context: &Context,
+    target: &RegisteredAccount,
+    checkpoint: &Path,
+    executable: &Path,
+) -> Result<String, Error> {
     // Supply these hooks to the new session even when the target has only its
     // own credentials/settings. No config directory contents are copied.
     fixed_target(context, target)?;
     let checkpoint = terminal_path(checkpoint)?;
-    let executable = std::env::current_exe()?;
     let hook = |leaf: &str| -> Result<String, Error> {
         Ok(format!(
             "{} hook claude {leaf}",
-            quote(terminal_path(&executable)?)
+            quote(terminal_path(executable)?)?
         ))
     };
     let settings = json!({"hooks":{
         "SessionStart":[{"hooks":[{"type":"command","command":hook("chair-start")?,"timeout":5}]}],
         "UserPromptSubmit":[{"hooks":[{"type":"command","command":hook("chair-prompt")?,"timeout":10}]}]
     }});
+    // Hook commands contain our own single-quote delimiters. Preserve them as
+    // double-quoted apostrophes between strict single-quoted JSON fragments.
+    let settings = settings
+        .to_string()
+        .split('\'')
+        .map(quote)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\"'\"");
     let prompt = format!(
         "Continue the chair handoff from checkpoint {}. Read it and its state/handoff file first. Inspect the listed Fabric lane IDs in the run store before acting; collect existing results and never re-run completed lanes. Preserve the originating authority limits.",
         checkpoint
     );
     Ok(format!(
         "cd {} && CLAUDE_CONFIG_DIR={} PROVENANT_STATE_DIR={} claude --settings {} {}",
-        quote(terminal_path(&context.cwd)?),
-        quote(terminal_path(target.directory())?),
-        quote(terminal_path(context.roots.state.as_path())?),
-        quote(&settings.to_string()),
-        quote(&prompt)
+        quote(terminal_path(&context.cwd)?)?,
+        quote(terminal_path(target.directory())?)?,
+        quote(terminal_path(context.roots.state.as_path())?)?,
+        settings,
+        quote(&prompt)?
     ))
 }
 fn execute_herdr(args: &[OsString]) -> Result<Value, Error> {
@@ -560,6 +581,75 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chair_command_preserves_nested_hook_quotes_and_refuses_unsafe_paths()
+    -> Result<(), super::Error> {
+        use super::*;
+        use provenant_core::{PathResolver, RootInputs};
+        struct Resolver;
+        impl PathResolver for Resolver {
+            fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let tmp = tempfile::tempdir()?;
+        let home = tmp.path().canonicalize()?;
+        let cwd = home.join("a b/$x");
+        std::fs::create_dir_all(&cwd)?;
+        let context = Context {
+            roots: RootInputs::new(home.clone(), cwd.clone()).resolve(&Resolver)?,
+            cwd,
+            assets: home.join("assets"),
+            home: home.clone(),
+        };
+        let target = RegisteredAccount::new("claude", "work", home.join(".claude-work"))?;
+        let checkpoint = home.join("checkpoint.md");
+        let executable = Path::new("/a b/$x/provenant");
+        let command = command_with_executable(&context, &target, &checkpoint, executable)?;
+        // Capture Claude's argv without running a provider. This catches both
+        // shell expansion and the JSON quoting of the nested hook command.
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+            if shell != "/bin/sh" && !Path::new(shell).is_file() {
+                continue;
+            }
+            let script = format!("claude() {{ printf '%s\\n' \"$@\"; }}; {command}");
+            let argv = vec![shell.into(), "-c".into(), script.into()];
+            let mut options = ExecOptions::new(&argv, &home, Duration::from_secs(2));
+            options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0));
+            let output = std::str::from_utf8(&output.stdout.bytes)?;
+            let mut lines = output.lines();
+            assert_eq!(lines.next(), Some("--settings"));
+            let settings: Value = serde_json::from_str(lines.next().ok_or("missing settings")?)?;
+            assert_eq!(
+                settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+                "'/a b/$x/provenant' hook claude chair-start"
+            );
+            assert!(
+                lines
+                    .next()
+                    .is_some_and(|prompt| prompt.contains("checkpoint.md"))
+            );
+        }
+        for path in ["/a'b/provenant", r"/a\b/provenant", "/a\"b/provenant"] {
+            assert!(
+                command_with_executable(&context, &target, &checkpoint, Path::new(path)).is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn chair_quote_refuses_shell_dependent_escapes() -> Result<(), super::Error> {
+        assert_eq!(super::quote("/a b/$x")?, "'/a b/$x'");
+        assert!(super::quote("/a'b").is_err());
+        assert!(super::quote(r"/a\b").is_err());
+        let settings = serde_json::json!({"command": "/a\"b"});
+        assert!(super::quote(&settings.to_string()).is_err());
+        Ok(())
+    }
+
     #[test]
     fn chair_launch_paths_require_utf8() {
         use super::*;

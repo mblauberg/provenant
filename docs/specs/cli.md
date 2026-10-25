@@ -188,6 +188,11 @@ final head and open a pull request after verifying it.
 | `check` | `config`, `install [--source ABS]`, `harness`, `release [--base OID --head OID]` and `writing PATHS… [--rules general\|academic\|legal]` | Each takes `--limit N` (1 to 100, default 50) and `--cursor TOKEN`. |
 | `internal supervise` | hidden | Launch handshake for run's scheduler and attempt guardian. Takes zero or five private descriptor numbers; `--json` refused. |
 
+`chair switch` refuses paths containing a single quote (`'`) or backslash (`\`)
+when building a handoff command, so quoting is safe in sh, bash, zsh and fish.
+An executable path containing a double quote also refuses because its settings
+JSON requires a backslash escape.
+
 `worktree remove` takes either a `NAME` or `--merged`, never both, and `--discard`
 only with a `NAME`. `--merged` requires `--integration` (a branch or remote-tracking
 ref such as `origin/main`) and exactly one of `--branch` (repeatable) or `--since`. It has no remote deletion and no force.
