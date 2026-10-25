@@ -9,7 +9,8 @@ profile or a knob with `provenant config set profile economy` or
 Profiles are `balanced`, `economy` and `rigorous`; task-class presets include
 `mechanical` and `bulk`. Inspect effective values with
 `provenant config show --task-class mechanical` and override a wired knob for
-one run with `provenant dispatch --knob NAME=VALUE`.
+one run with `provenant dispatch --knob NAME=VALUE` (the terminal path; agents
+use `fabric_submit`'s `knobs`).
 
 ## Precedence and stamps
 
@@ -76,8 +77,8 @@ entry overlaps the state directory's protected parts or Git metadata.
 
 Routing changes are stored per state root and apply on the next route command.
 To change routing, run `provenant route set` or `provenant route pacing`.
-Inspect effective weights, pacing factors and readiness with
-`provenant route list --pool NAME`. Remove a member with
+Inspect configured weights with `provenant route list --pool NAME`; pacing and
+readiness apply at dispatch. Remove a member with
 `provenant route remove POOL MODEL`; restore the bundled pool with
 `provenant route reset POOL`.
 

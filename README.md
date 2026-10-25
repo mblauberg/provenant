@@ -102,8 +102,9 @@ STATE="$HOME/.local/share/provenant/v1"
 ```
 
 Close each selected harness and configuration editor before applying an
-install. `--hooks` defaults to `off`; use only the hook handlers provided by
-the selected integration. Repeat `--harness` to select more than one client.
+install. Hooks are disabled on first install; omitting `--hooks` on reinstall
+preserves existing ownership. Use only the hook handlers provided by the
+selected integration. Repeat `--harness` to select more than one client.
 Upgrading from a pre-1.0 install needs `--legacy-checkout`; see
 [Migrating from a pre-1.0 install](docs/runbooks/install.md#migrating-from-a-pre-10-install).
 See the [install runbook](docs/runbooks/install.md), which also covers Fabric

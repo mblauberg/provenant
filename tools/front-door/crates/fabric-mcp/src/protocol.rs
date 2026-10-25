@@ -304,6 +304,7 @@ impl Protocol {
                         return Action::Reply(result(
                             &id,
                             tool_error(
+                                Some(&call.name),
                                 "invalid_input",
                                 json!({"code":"invalid_input","path":path}),
                             ),

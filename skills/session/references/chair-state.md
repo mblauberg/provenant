@@ -3,7 +3,7 @@
 The run owns live execution state. Use `provenant lanes` to inspect active work,
 Fabric tasks to follow assignments and results, and the run's `output` command
 to read returned artifacts. After interruption, use `provenant reconcile` to
-recover queued or orphaned work and `provenant resume` to continue the run.
+recover queued or orphaned work and `fabric_run` `resume` to continue the run.
 Do not keep a parallel queue, lease ledger, or per-chair live status file.
 
 A host-session checkpoint is separate, bounded Markdown saved for its explicit

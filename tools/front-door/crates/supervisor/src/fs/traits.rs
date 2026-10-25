@@ -46,6 +46,16 @@ pub trait SafeDir: Send + Sync {
     ) -> Result<LockGuard>;
     fn unlink(&self, name: &OsStr) -> Result<()>;
     fn rmdir(&self, name: &OsStr) -> Result<()>;
+    /// Disposal-only operations for detached external payload trees. Callers
+    /// must exclude supervisor state and its stable locks; see Directory's
+    /// custody requirements. Adapters retain ordinary lock protection unless
+    /// they explicitly support payload removal.
+    fn unlink_payload(&self, name: &OsStr) -> Result<()> {
+        self.unlink(name)
+    }
+    fn rmdir_payload(&self, name: &OsStr) -> Result<()> {
+        self.rmdir(name)
+    }
     fn replace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     /// Atomically move an entry between held directories without replacement.
@@ -103,6 +113,21 @@ pub trait SafeFs: Send + Sync {
     fn entropy_128(&self) -> Result<[u8; 16]> {
         super::entropy_128()
     }
+}
+
+/// Snapshot one directory before mutating its entries. A lazy readdir stream
+/// may skip names when entries are removed between reads (notably on APFS).
+/// Refuse oversized directories before the caller starts deleting anything.
+pub fn entry_names(directory: &dyn SafeDir, limit: usize) -> Result<Vec<OsString>> {
+    let mut names = Vec::new();
+    for entry in directory.entries()? {
+        let name = entry?;
+        if names.len() == limit {
+            return Err(FsError::EntryLimit { limit });
+        }
+        names.push(name);
+    }
+    Ok(names)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -163,6 +188,12 @@ impl SafeFile for FileHandle {
     }
 }
 impl SafeDir for Directory {
+    fn unlink_payload(&self, name: &OsStr) -> Result<()> {
+        Directory::unlink_payload(self, name)
+    }
+    fn rmdir_payload(&self, name: &OsStr) -> Result<()> {
+        Directory::rmdir_payload(self, name)
+    }
     fn into_anchor(self: Box<Self>) -> Result<Box<dyn SafeDir>> {
         Ok(Box::new(Directory::into_anchor(*self)?))
     }

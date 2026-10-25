@@ -173,14 +173,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         ready_adapters: &'static [&'static str],
         expected_pick: Option<&'static str>,
         expect_effort_exclusion: bool,
-        all_disabled: bool,
         codex_pacing: &'static str,
         quota_used_basis_points: Option<u64>,
         quota_reset_after_seconds: Option<i64>,
         alternative_quota_used_basis_points: Option<u64>,
         include_weekly_window: bool,
         expected_codex_factor: Option<u32>,
-        expect_no_eligible: bool,
         redraw: bool,
     }
     let cases = [
@@ -191,14 +189,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: false,
-            all_disabled: false,
             codex_pacing: "spend",
             quota_used_basis_points: None,
             quota_reset_after_seconds: None,
             alternative_quota_used_basis_points: None,
             include_weekly_window: false,
             expected_codex_factor: Some(10_000),
-            expect_no_eligible: false,
             redraw: false,
         },
         Case {
@@ -208,14 +204,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["agy"],
             expected_pick: Some("gemini-3.8-flash"),
             expect_effort_exclusion: false,
-            all_disabled: false,
             codex_pacing: "max",
             quota_used_basis_points: None,
             quota_reset_after_seconds: None,
             alternative_quota_used_basis_points: None,
             include_weekly_window: false,
             expected_codex_factor: Some(10_000),
-            expect_no_eligible: false,
             redraw: false,
         },
         Case {
@@ -225,14 +219,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: true,
-            all_disabled: false,
             codex_pacing: "spend",
             quota_used_basis_points: None,
             quota_reset_after_seconds: None,
             alternative_quota_used_basis_points: None,
             include_weekly_window: false,
             expected_codex_factor: Some(10_000),
-            expect_no_eligible: false,
             redraw: false,
         },
         Case {
@@ -242,14 +234,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: false,
-            all_disabled: false,
             codex_pacing: "pace",
             quota_used_basis_points: Some(9_900),
             quota_reset_after_seconds: Some(18_000),
             alternative_quota_used_basis_points: None,
             include_weekly_window: false,
             expected_codex_factor: Some(2_500),
-            expect_no_eligible: false,
             redraw: false,
         },
         Case {
@@ -259,31 +249,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: false,
-            all_disabled: false,
             codex_pacing: "pace",
             quota_used_basis_points: Some(5_000),
             quota_reset_after_seconds: Some(4_500),
             alternative_quota_used_basis_points: Some(9_900),
             include_weekly_window: true,
             expected_codex_factor: Some(20_000),
-            expect_no_eligible: false,
-            redraw: false,
-        },
-        Case {
-            name: "disabled members are not fallback candidates",
-            effort: "high",
-            weights: [4, 4, 2],
-            ready_adapters: &[],
-            expected_pick: None,
-            expect_effort_exclusion: false,
-            all_disabled: true,
-            codex_pacing: "spend",
-            quota_used_basis_points: None,
-            quota_reset_after_seconds: None,
-            alternative_quota_used_basis_points: None,
-            include_weekly_window: false,
-            expected_codex_factor: Some(10_000),
-            expect_no_eligible: true,
             redraw: false,
         },
         Case {
@@ -293,14 +264,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: false,
-            all_disabled: false,
             codex_pacing: "spend",
             quota_used_basis_points: None,
             quota_reset_after_seconds: None,
             alternative_quota_used_basis_points: None,
             include_weekly_window: false,
             expected_codex_factor: Some(10_000),
-            expect_no_eligible: false,
             redraw: true,
         },
         Case {
@@ -310,14 +279,12 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ready_adapters: &["codex", "claude", "agy"],
             expected_pick: None,
             expect_effort_exclusion: false,
-            all_disabled: false,
             codex_pacing: "pace",
             quota_used_basis_points: None,
             quota_reset_after_seconds: None,
             alternative_quota_used_basis_points: None,
             include_weekly_window: false,
             expected_codex_factor: Some(10_000),
-            expect_no_eligible: false,
             redraw: false,
         },
     ];
@@ -370,18 +337,11 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             ]},
             "pacing": {"codex":case.codex_pacing}
         }))?;
-        let mut availability: Vec<_> = base_availability
+        let availability: Vec<_> = base_availability
             .iter()
-            .filter(|record| {
-                case.ready_adapters.contains(&record.adapter.as_str()) || case.all_disabled
-            })
+            .filter(|record| case.ready_adapters.contains(&record.adapter.as_str()))
             .cloned()
             .collect();
-        if case.all_disabled {
-            for record in &mut availability {
-                record.last_preflight_error = Some(provenant_providers::PreflightFailure::Disabled);
-            }
-        }
         let quota = if let (Some(used_basis_points), Some(reset_after_seconds)) =
             (case.quota_used_basis_points, case.quota_reset_after_seconds)
         {
@@ -468,38 +428,6 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         } else {
             resolve_with_seed(&query, &ctx, "operation-route-pools", 2)
         };
-        if case.expect_no_eligible {
-            match result {
-                Err(RoutingError::NoEligiblePoolMember { exclusions }) => {
-                    assert!(exclusions.iter().any(|reason| reason.contains("disabled")));
-                }
-                Err(error) => return Err(error.into()),
-                Ok(_) => panic!("disabled-only pool member was selected"),
-            }
-            let mut recoverable_availability = base_availability.clone();
-            for record in &mut recoverable_availability {
-                record.last_preflight_error = Some(if record.adapter == "claude" {
-                    provenant_providers::PreflightFailure::AuthRequired
-                } else {
-                    provenant_providers::PreflightFailure::Disabled
-                });
-            }
-            let mut recoverable_context = context(&catalogue, &config, now()?);
-            recoverable_context.registry = &registry;
-            recoverable_context.availability = &recoverable_availability;
-            recoverable_context.access = &access;
-            let recoverable =
-                resolve_with_seed(&query, &recoverable_context, "operation-route-pools", 2)?;
-            assert_eq!(
-                recoverable.adapter, "claude",
-                "recoverable member beats disabled"
-            );
-            assert_eq!(
-                reason(&recoverable),
-                Some(&RouteExclusionReason::AuthRequired)
-            );
-            continue;
-        }
         let route = result?;
         let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
         assert_eq!(receipt["pool"], "trial", "{}", case.name);
@@ -859,30 +787,18 @@ fn availability() -> AvailabilityRecord {
         catalogue_revision: "route-pools-20261025-v2".into(),
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
-        last_preflight_error: None,
         observed_unix_seconds: 80,
         expires_unix_seconds: 120,
     }
 }
 #[test]
-fn cached_availability_age_and_disclosure_are_checked() -> Result<(), Box<dyn std::error::Error>> {
+fn availability_gates_disclosure_and_rejects_duplicates() -> Result<(), Box<dyn std::error::Error>>
+{
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let records = [availability()];
     let mut context = context(&catalogue, &config, now()?);
     context.availability = &records;
-    let listed = list(
-        &RouteListQuery {
-            adapter: Some("codex".into()),
-            pool: None,
-        },
-        &context,
-    )?;
-    assert_eq!(listed.availability.len(), 1);
-    assert_eq!(
-        listed.availability.first().and_then(|a| a.age_seconds),
-        Some(20)
-    );
     // Enabled and available, Codex reaches the next gate: disclosure.
     assert!(matches!(
         resolve(&request("codex/test")?, &context)?.readiness,
@@ -1199,15 +1115,6 @@ fn availability_access_and_scoped_quota_are_independent_gates()
         reason(&resolve(&request("codex/not-observed")?, &context)?),
         Some(&RouteExclusionReason::UnverifiedModel)
     );
-    let mut error_record = availability();
-    error_record.last_preflight_error = Some(provenant_providers::PreflightFailure::AuthRequired);
-    let error_records = [error_record];
-    context.availability = &error_records;
-    assert_eq!(
-        reason(&resolve(&query, &context)?),
-        Some(&RouteExclusionReason::AuthRequired)
-    );
-    context.availability = &records;
     let stale = [quota(
         "codex/test",
         "opaque-account",

@@ -2,7 +2,7 @@
 use crate::{HookRegistration, InstallError, Targets, managed::SelectorChange, splice};
 use provenant_records::{Harness, Limits, decode_jsonc};
 use serde_json::{Value, json};
-use std::{io::Cursor, path::Path};
+use std::{collections::BTreeSet, io::Cursor, path::Path};
 
 pub(crate) fn command(spec: &HookRegistration, targets: &Targets) -> Result<String, InstallError> {
     hook_command(
@@ -120,17 +120,47 @@ pub(crate) fn set(
 }
 /// Replace exact manifest leaves in place, then append only missing registry
 /// registrations. Old `remove` entries are handled by the legacy cleaner.
-type Registration = (Vec<u8>, Vec<SelectorChange>, Vec<(String, Value)>);
-pub(crate) fn register(bytes: &[u8], targets: &Targets) -> Result<Registration, InstallError> {
+pub(crate) struct Registration {
+    pub bytes: Vec<u8>,
+    pub changes: Vec<SelectorChange>,
+    pub owned: Vec<(String, Value)>,
+    pub relinquished_modified: bool,
+}
+pub(crate) fn register(
+    bytes: &[u8],
+    targets: &Targets,
+    inherited: &BTreeSet<String>,
+) -> Result<Registration, InstallError> {
     let mut out = bytes.to_vec();
     let mut changes = Vec::new();
     let mut owned = Vec::new();
+    let mut relinquished_modified = false;
     for spec in targets
         .hook_specs
         .iter()
         .filter(|spec| spec.harness == Some(Harness::Claude))
     {
         let desired = value(spec, targets)?;
+        let command = desired
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or(InstallError::InvalidConfig("hook command"))?;
+        let sel = selector(spec.event, spec.matcher, command)?;
+        // Inheritance refreshes recorded registrations, including changes to
+        // their command path or event. It must not recreate relinquished leaves.
+        let was_owned = inherited.iter().any(|selector| {
+            selector.strip_prefix("hook:").is_some_and(|identity| {
+                serde_json::from_str::<(String, Option<String>, String)>(identity).is_ok_and(
+                    |(event, matcher, old_command)| {
+                        (event == spec.event && matcher.as_deref() == spec.matcher)
+                            || old_command == command
+                    },
+                )
+            })
+        });
+        if !targets.hooks && !was_owned {
+            continue;
+        }
         if let Some(checkout) = &targets.legacy_checkout {
             let root: Value = decode_jsonc(Cursor::new(&out), Limits::CONFIG)?;
             if let Some(groups) = root
@@ -164,15 +194,14 @@ pub(crate) fn register(bytes: &[u8], targets: &Targets) -> Result<Registration, 
                 }
             }
         }
-        let command = desired
-            .get("command")
-            .and_then(Value::as_str)
-            .ok_or(InstallError::InvalidConfig("hook command"))?;
-        let sel = selector(spec.event, spec.matcher, command)?;
         if let Some(existing) = get(&out, &sel)? {
             if existing != desired {
+                if !targets.hooks {
+                    relinquished_modified = true;
+                    continue;
+                }
                 return Err(InstallError::InvalidConfig(
-                    "managed hook registration changed",
+                    "managed hook registration changed; rerun install with --hooks off to relinquish edited hooks",
                 ));
             }
         } else {
@@ -203,7 +232,12 @@ pub(crate) fn register(bytes: &[u8], targets: &Targets) -> Result<Registration, 
         }
         owned.push((sel, desired));
     }
-    Ok((out, changes, owned))
+    Ok(Registration {
+        bytes: out,
+        changes,
+        owned,
+        relinquished_modified,
+    })
 }
 
 /// Registrations shared by the installer, lane settings and CLI handlers.

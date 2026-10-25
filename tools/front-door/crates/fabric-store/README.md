@@ -32,27 +32,6 @@ Only SQLite BUSY/LOCKED retries; rollback precedes bounded, cancellable backoff.
 Other commit failures propagate and are never replayed automatically. The edge
 must preserve the original IDs if explicitly retrying an uncertain mutation.
 
-`import_snapshot` is explicit and one-shot per source ID. It accepts a supplied,
-quiescent, sidecar-free old-schema snapshot, including cleanly closed WAL-mode
-and rollback databases. It opens SQLite READ_ONLY with an encoded immutable URI
-and reads one deferred transaction, without creating source sidecars or performing
-recovery. Existing WAL/SHM/journal sidecars return a typed stop-old-Fabric-and-retry
-error. No legacy-root lookup exists. Bounds are 10,000 task/delivery rows and
-8 MiB selected text; the whole source file has no size cap. Invalid message/task
-rows and invalid individual deliveries are skipped with durable reason counts;
-valid sibling deliveries survive. Destination imports require an empty project. A failed transaction leaves
-no rows, cursor changes or marker. The source ID also binds the old/new project.
-Repeated completed imports return their receipt without reopening the source.
-
-Open/blocked tasks created by cut-over are copied regardless of age. Requests
-must be unacknowledged and from the inclusive previous 14 days through cut-over.
-Blocked becomes Open with a review note;
-old owners are cleared. Callers explicitly bind old labels to actor IDs.
-Imported IDs are deterministic, domain-separated hashes of source/project/old ID.
-Internal links resolve only within the subset; all others retain legacy identity.
-Legacy output paths remain labelled legacy data, never readable artefact handles.
-Mail cursors start after the imported deliveries; explicit replay remains possible.
-
 Shared state design owns time: APIs use core `WallTime`/`UtcMicros`, not Fabric's
 older millisecond sketch. Records use nested `RecordHeader::V1` and the shared
 canonical encoder and bounded decoder. Future SQL schema versions are refused.
@@ -128,6 +107,18 @@ a changed expected or candidate OID conflicts, including during an unresolved pu
 
 Migration 3 adds claims, paths and push operations after the two F1 migrations.
 Migration 4 adds persistent counters and indexed path lookup/pruning.
+Migration 7 drops the removed legacy import's table and strips its always-null
+`legacy` members from messages, tasks, coordination receipts and committed peer
+replies, and deletes the `imported` event of an import that brought nothing
+over. While any data that import wrote remains, opening refuses the upgrade with
+`LegacyImportData` (service code `upgrade_refused`), naming the table and its
+row count. Earlier migrations commit separately, so the store stays at a version
+the previous release still opens. The supported remedy is to keep the previous
+release or archive the store, as the
+[Fabric hosts runbook](../../../../docs/runbooks/fabric-hosts.md#legacy-import-data)
+describes. A binary from before migration 7 may still write a null `legacy` or
+`legacy_output_path` after it; records read such a member, drop it and never
+write it.
 All mutations and their events share F1's immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.

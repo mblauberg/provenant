@@ -82,8 +82,8 @@ restart; page further results with its cursor. Read retained events with
 A dispatching sub-agent still blocks in the foreground on its own worker; see
 [worker-liveness.md](worker-liveness.md). Registered worktrees share the
 project, so the waiter works from any cwd in that project. Start inbox triage
-with `provenant fabric mail read --after SEQ --limit N`; advance its read cursor
-with `provenant fabric mail mark-read SEQ --operation-id ID` after processing.
+with `fabric_mail`'s `read` operation (`after`, `limit`); advance its read
+cursor with `mark_read` (`through`, `operation_id`) after processing.
 
 ## Peers and relay discipline
 
@@ -129,12 +129,13 @@ as leaves where it belongs, then close it once its done-when is verified.
 
 - Delegate inspection. Exploration beyond a few files or commands goes to a
   lane that returns a digest and a path.
-- Read bounded slices with `fabric_output`'s `read` operation using a target,
-  part, offset and `max_bytes`; use the result part before events or transcripts.
+- Read bounded slices with `fabric_output`'s `read` operation (`stdout` or
+  `stderr` part, target, offset and `max_bytes`); for the result or events use
+  `provenant output RUN/TASK/ATTEMPT --part result|events` before transcripts.
   Read diffs by stat first and open only what a verdict hinges on.
 - Never read images in the chair. Captures go to reviewers, who look at them
   and return verdicts.
-- Keep briefs in files and pass `prompt_file`; do not paste diffs into prompts.
+- Keep briefs short and inline in the task `prompt` (`prompt_file` is CLI-only); do not paste diffs into prompts.
 
 ## Reviewer git-verb denylist
 

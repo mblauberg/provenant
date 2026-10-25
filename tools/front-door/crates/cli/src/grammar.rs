@@ -49,9 +49,11 @@ pub enum Command {
     /// Register and list provider accounts
     #[command(subcommand)]
     Accounts(crate::accounts::Accounts),
-    /// Check remote host sign-in
-    #[command(subcommand)]
-    Hosts(Hosts),
+    /// List hosts and their readiness; `doctor` checks remote sign-in
+    Hosts {
+        #[command(subcommand)]
+        command: Option<Hosts>,
+    },
     /// Show and edit configuration
     #[command(subcommand)]
     Config(Config),
@@ -455,9 +457,6 @@ pub struct Reconcile {
     /// Reconcile only this run (repeatable)
     #[arg(long)]
     pub id: Vec<RunId>,
-    /// Abandon uncertain custody (not available in this build)
-    #[arg(long, requires = "id", hide = true)]
-    pub abandon_uncertain: bool,
 }
 #[derive(Debug, Subcommand)]
 pub enum Telemetry {

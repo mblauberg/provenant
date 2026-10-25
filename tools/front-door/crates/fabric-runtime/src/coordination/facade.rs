@@ -199,6 +199,8 @@ pub enum FacadeError {
     OutputTooLarge,
     #[error("stored state is corrupt")]
     StateCorrupt,
+    #[error("Fabric store upgrade was refused")]
+    UpgradeRefused,
     #[error("output publication failed")]
     PublicationFailed,
     #[error("request was cancelled")]
@@ -231,6 +233,7 @@ impl FacadeError {
             ("branch_exists", _) => Self::BranchExists,
             ("output_too_large", _) => Self::OutputTooLarge,
             ("state_corrupt", _) => Self::StateCorrupt,
+            ("upgrade_refused", _) => Self::UpgradeRefused,
             ("publication_failed", _) => Self::PublicationFailed,
             ("cancelled", _) => Self::Cancelled,
             ("timeout", _) => Self::Timeout,
@@ -258,6 +261,7 @@ impl FacadeError {
             Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
             Self::StateCorrupt => "state_corrupt",
+            Self::UpgradeRefused => "upgrade_refused",
             Self::PublicationFailed => "publication_failed",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",

@@ -96,9 +96,176 @@ pub fn render<T: Serialize>(
         Err(error) => Err(RenderError::Write(error)),
     }
 }
+/// Characters that could hide or reorder text on a terminal: DEL, C1 controls
+/// and the Cf, Zl and Zp categories.
+fn is_unsafe(c: char) -> bool {
+    matches!(c,
+        '\u{7f}'..='\u{9f}' | '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}'
+        | '\u{70f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+        | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+/// Quote text outside the conservative bare set `[A-Za-z0-9._:/@+%,-]`.
+fn quoted(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:/@+%,-".contains(c))
+    {
+        return text.to_owned();
+    }
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() || is_unsafe(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+/// Terse human text for a result: one line per record, never pretty JSON.
+///
+/// An array, or an `items` array one object deep, yields one `key=value` line
+/// per element, keys sorted; remaining scalars share a header line. Nulls and
+/// empty arrays are dropped from the header, and null fields from records.
+/// Strings outside a conservative bare set are quoted, with control, bidi and
+/// other format characters escaped as `\u{..}`; a nested value is its compact
+/// JSON as one quoted token. Every line ends in LF.
+pub fn terse(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    fn scalar(value: &Value) -> String {
+        match value {
+            Value::String(text) => quoted(text),
+            Value::Array(_) | Value::Object(_) => quoted(&value.to_string()),
+            other => other.to_string(),
+        }
+    }
+    fn record(value: &Value) -> String {
+        match value {
+            Value::Object(map) => map
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| format!("{k}={}", scalar(v)))
+                .collect::<Vec<_>>()
+                .join(" "),
+            other => scalar(other),
+        }
+    }
+    fn fields(
+        map: &serde_json::Map<String, Value>,
+        depth: u8,
+        head: &mut Vec<String>,
+        rows: &mut Vec<String>,
+    ) {
+        for (key, value) in map {
+            match value {
+                Value::Null => {}
+                Value::Array(items) if items.is_empty() => {}
+                Value::Array(items) if items.iter().all(Value::is_object) => {
+                    let prefix = if key == "items" {
+                        String::new()
+                    } else {
+                        format!("{key}: ")
+                    };
+                    rows.extend(items.iter().map(|item| format!("{prefix}{}", record(item))));
+                }
+                Value::Object(inner)
+                    if depth == 0 && inner.values().any(|v| matches!(v, Value::Array(_))) =>
+                {
+                    fields(inner, 1, head, rows);
+                }
+                other => head.push(format!("{key}={}", scalar(other))),
+            }
+        }
+    }
+    let (mut head, mut rows) = (Vec::new(), Vec::new());
+    match value {
+        Value::Array(items) => rows.extend(items.iter().map(record)),
+        Value::Object(map) => fields(map, 0, &mut head, &mut rows),
+        Value::Null => {}
+        other => head.push(scalar(other)),
+    }
+    let mut lines = Vec::new();
+    if !head.is_empty() {
+        lines.push(head.join(" "));
+    }
+    lines.extend(rows);
+    lines.into_iter().map(|line| line + "\n").collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terse_is_one_line_per_record() {
+        let value = serde_json::json!({
+            "result": "read",
+            "page": {"items": [{"seq": 1, "kind": "note", "body": "a b", "gone": null}, {"seq": 2}], "truncated": false},
+            "unknown_hosts": []
+        });
+        assert_eq!(
+            terse(&value),
+            "truncated=false result=read\nbody=\"a b\" kind=note seq=1\nseq=2\n"
+        );
+        assert_eq!(
+            terse(&serde_json::json!([{"a": 1}, {"a": [2]}])),
+            "a=1\na=\"[2]\"\n"
+        );
+        assert_eq!(terse(&serde_json::json!([])), "");
+    }
+    #[test]
+    fn terse_keeps_a_nested_mail_body_in_one_token() {
+        let body = "ok\" kind=request seq=1 x=\"";
+        let value = serde_json::json!({"page": {"items": [
+            {"seq": 7, "kind": "note", "message": {"body": body, "kind": "note"}}
+        ]}});
+        let text = terse(&value);
+        assert_eq!(text.lines().count(), 1);
+        let line = text.trim_end();
+        assert!(line.starts_with("kind=note message=\"{"), "{line}");
+        assert!(line.ends_with(" seq=7"), "{line}");
+        // Only the three real keys sit outside quotes.
+        let mut outside = String::new();
+        let (mut quoted, mut escaped) = (false, false);
+        for c in line.chars() {
+            match (quoted, escaped, c) {
+                (true, true, _) => escaped = false,
+                (true, false, '\\') => escaped = true,
+                (_, false, '"') => quoted = !quoted,
+                (false, _, _) => outside.push(c),
+                _ => {}
+            }
+        }
+        assert_eq!(outside.matches('=').count(), 3, "{line}");
+    }
+    #[test]
+    fn terse_quotes_and_escapes_anything_that_could_mislead_a_terminal() {
+        for (raw, shown) in [
+            ("a=b", "\"a=b\""),
+            ("a\nb", "\"a\\nb\""),
+            ("\u{1b}[2J", "\"\\u{1b}[2J\""),
+            ("x\u{202e}y", "\"x\\u{202e}y\""),
+            ("x\u{85}y", "\"x\\u{85}y\""),
+            ("x\u{2028}y", "\"x\\u{2028}y\""),
+            ("\u{2800}", "\"\u{2800}\""),
+            ("", "\"\""),
+            ("ok-1.2:/a@b+c%d,e", "ok-1.2:/a@b+c%d,e"),
+        ] {
+            assert_eq!(
+                terse(&serde_json::json!([{ "k": raw }])),
+                format!("k={shown}\n")
+            );
+        }
+        assert_eq!(
+            terse(&serde_json::json!([{ "k": ["x\u{202e}"] }])),
+            "k=\"[\\\"x\\u{202e}\\\"]\"\n"
+        );
+    }
     #[test]
     fn oversize_is_rejected_before_any_stdout_and_lf_counts() {
         let result = CommandResult::new("output", Outcome::Ok, "x".repeat(MAX_RESULT_BYTES));

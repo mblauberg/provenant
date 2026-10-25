@@ -3,18 +3,18 @@ use crate::{Globals, RenderMode};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Roots, WallTime};
 use provenant_providers::{AvailabilityRecord, REGISTRY};
-use provenant_records::{CommandError, CommandResult, Limits, Outcome, RouteReadiness};
+use provenant_records::{CommandError, CommandResult, Outcome, RouteReadiness};
 use provenant_routing::{
     AccessContext, BoundedModels, Catalogue, Fallback, ModelId, PacingPolicy, QuotaObservation,
     RouteChoice, RouteName, RoutePoolMember, RoutingContext, RoutingError,
 };
-use provenant_supervisor::fs::{Directory, FsError, LocalFs};
+use provenant_supervisor::fs::{FsError, LocalFs};
 use serde::Serialize;
-use std::{collections::BTreeSet, ffi::OsStr, io, str::FromStr};
+use std::{collections::BTreeSet, io, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Route {
-    /// Show effective models, pools, pacing and readiness.
+    /// Show the catalogue, pools, configured weights and pacing policy.
     List(RouteListRequest),
     /// Resolve a named route or exact model for preview.
     Resolve(RouteRequest),
@@ -29,7 +29,7 @@ pub enum Route {
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
-    /// Limit pool members and provider readiness to this adapter.
+    /// Limit models, named routes and pool members to this adapter.
     #[arg(long)]
     pub adapter: Option<String>,
     /// Show only this effective pool.
@@ -151,8 +151,6 @@ enum EdgeError {
     Routing(#[from] RoutingError),
     #[error(transparent)]
     Fs(#[from] FsError),
-    #[error("invalid availability record")]
-    Decode(#[from] provenant_records::DecodeError),
     #[error("invalid current time")]
     Time(#[from] provenant_core::TimeError),
     #[error(transparent)]
@@ -165,32 +163,6 @@ enum EdgeError {
 pub enum Data {
     List(provenant_routing::RouteList),
     Resolved(Box<provenant_records::ResolvedRoute>),
-}
-fn cached(roots: &Roots) -> Result<Vec<AvailabilityRecord>, EdgeError> {
-    // Descend descriptor-relatively; no links, missing directories are not writes.
-    let open = || -> Result<Directory, FsError> {
-        Directory::open_anchor(roots.state.as_path())?
-            .open_verified_directory(OsStr::new("routing"))?
-            .open_verified_directory(OsStr::new("availability"))
-    };
-    let directory = match open() {
-        Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut records = Vec::new();
-    for reg in REGISTRY {
-        let name = format!("{}.json", reg.adapter.id());
-        let file = match directory.open_read(OsStr::new(&name)) {
-            Ok(file) => file,
-            Err(error) if error.is_not_found() => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let record: AvailabilityRecord = provenant_records::decode_v1(file, Limits::CONFIG)?;
-        provenant_routing::validate_availability(&record, reg.adapter.id())?;
-        records.push(record);
-    }
-    Ok(records)
 }
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
@@ -257,7 +229,7 @@ fn quota_observations(
 }
 fn with_context<T>(
     roots: &Roots,
-    supplied_availability: Option<&[AvailabilityRecord]>,
+    availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
     action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
@@ -266,17 +238,6 @@ fn with_context<T>(
         .domains
         .routing;
     let catalogue = Catalogue::bundled()?;
-    let cached_availability;
-    let availability = match supplied_availability {
-        Some(records) => records,
-        None => {
-            cached_availability = cached(roots)?;
-            &cached_availability
-        }
-    };
-    for record in availability {
-        provenant_routing::validate_availability(record, &record.adapter)?;
-    }
     // A lane holds no grant on the shared quota store: route without a
     // snapshot there rather than refusing the nested dispatch.
     let quota_records = match crate::quota::read_cache(roots) {
@@ -317,76 +278,66 @@ pub(crate) fn resolve_dispatch(
     access: &[AccessContext<'_>],
     host: &str,
 ) -> Result<provenant_records::ResolvedRoute, String> {
-    with_context(
-        roots,
-        Some(availability),
-        access,
-        host,
-        |context, records| {
-            let mut excluded_members = Vec::new();
-            let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
-                request,
-                context,
-                account,
-                seed.0,
-                seed.1,
-                &excluded_members,
-            )?;
-            loop {
-                if !matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
-                    break;
-                }
-                let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
-                let pools = free_pools(&resolved.adapter, || {
-                    context.catalogue.is_free_model(&model)
-                });
-                let now_unix_seconds = context.now.as_timestamp().as_second();
-                let policies = provenant_providers::quota_policies(context.registry);
-                let admission = provenant_quota::Admission {
-                    policies: &policies,
-                    now_unix_seconds,
-                    records,
-                    pools: &pools,
-                };
-                if let Err(error) = admission.check(&resolved) {
-                    if !matches!(&request.choice, RouteChoice::NamedRoute(_))
-                        || resolved.pool_selection.is_none()
-                        || excluded_members.contains(&model)
-                    {
-                        return Err(error.into());
-                    }
-                    let reason = error.to_string();
-                    excluded_members.push(model);
-                    let mut replacement =
-                        match provenant_routing::resolve_for_account_with_seed_excluding(
-                            request,
-                            context,
-                            account,
-                            seed.0,
-                            seed.1,
-                            &excluded_members,
-                        ) {
-                            Ok(route)
-                                if matches!(&route.readiness, RouteReadiness::Ready { .. }) =>
-                            {
-                                route
-                            }
-                            Ok(_) | Err(_) => return Err(error.into()),
-                        };
-                    if replacement.adapter == resolved.adapter
-                        && replacement.model == resolved.model
-                    {
-                        return Err(error.into());
-                    }
-                    record_pool_redraw(&resolved, &mut replacement, &reason)?;
-                    resolved = replacement;
-                    continue;
-                }
+    with_context(roots, availability, access, host, |context, records| {
+        let mut excluded_members = Vec::new();
+        let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
+            request,
+            context,
+            account,
+            seed.0,
+            seed.1,
+            &excluded_members,
+        )?;
+        loop {
+            if !matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
                 break;
             }
-            Ok(resolved)
-        },
-    )
+            let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
+            let pools = free_pools(&resolved.adapter, || {
+                context.catalogue.is_free_model(&model)
+            });
+            let now_unix_seconds = context.now.as_timestamp().as_second();
+            let policies = provenant_providers::quota_policies(context.registry);
+            let admission = provenant_quota::Admission {
+                policies: &policies,
+                now_unix_seconds,
+                records,
+                pools: &pools,
+            };
+            if let Err(error) = admission.check(&resolved) {
+                if !matches!(&request.choice, RouteChoice::NamedRoute(_))
+                    || resolved.pool_selection.is_none()
+                    || excluded_members.contains(&model)
+                {
+                    return Err(error.into());
+                }
+                let reason = error.to_string();
+                excluded_members.push(model);
+                let mut replacement =
+                    match provenant_routing::resolve_for_account_with_seed_excluding(
+                        request,
+                        context,
+                        account,
+                        seed.0,
+                        seed.1,
+                        &excluded_members,
+                    ) {
+                        Ok(route) if matches!(&route.readiness, RouteReadiness::Ready { .. }) => {
+                            route
+                        }
+                        Ok(_) | Err(_) => return Err(error.into()),
+                    };
+                if replacement.adapter == resolved.adapter && replacement.model == resolved.model {
+                    return Err(error.into());
+                }
+                record_pool_redraw(&resolved, &mut replacement, &reason)?;
+                resolved = replacement;
+                continue;
+            }
+            break;
+        }
+        Ok(resolved)
+    })
     .map_err(|error| error.to_string())
 }
 
@@ -482,7 +433,7 @@ fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<provenant_routing::RouteList, EdgeError> {
-    with_context(roots, None, &[], "local-preview", |context, _| {
+    with_context(roots, &[], &[], "local-preview", |context, _| {
         Ok(provenant_routing::list(
             &provenant_routing::RouteListQuery {
                 adapter: query.adapter.clone(),
@@ -695,7 +646,7 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
 fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
-        Route::Resolve(query) => with_context(roots, None, &[], "local-preview", |context, _| {
+        Route::Resolve(query) => with_context(roots, &[], &[], "local-preview", |context, _| {
             Ok(Data::Resolved(Box::new(provenant_routing::resolve(
                 &query.to_domain()?,
                 context,
@@ -761,12 +712,8 @@ pub fn run(
         Ok(data) => CommandResult::new(name, Outcome::Ok, Some(data)),
         Err(error) => {
             let (status, code) = match &error {
-                EdgeError::Config(provenant_config::ConfigError::Read { .. })
-                | EdgeError::Decode(provenant_records::DecodeError::Read(_)) => {
+                EdgeError::Config(provenant_config::ConfigError::Read { .. }) => {
                     (Outcome::Error, "IO")
-                }
-                EdgeError::Routing(RoutingError::Availability) | EdgeError::Decode(_) => {
-                    (Outcome::Invalid, "AVAILABILITY")
                 }
                 EdgeError::QuotaCache(crate::quota::EdgeError::Quota(_)) | EdgeError::Quota(_) => {
                     (Outcome::Invalid, "QUOTA")
@@ -821,15 +768,6 @@ pub fn run(
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("route pool {name} = {models}")
-                }));
-                lines.extend(list.availability.iter().map(|a| {
-                    format!(
-                        "{} {:?} age={}s",
-                        a.adapter,
-                        a.reason,
-                        a.age_seconds
-                            .map_or_else(|| "unknown".into(), |s| s.to_string())
-                    )
                 }));
                 format!("{}\n", lines.join("\n"))
             }
@@ -916,7 +854,6 @@ mod route_tests {
                 "opencode/glm-5.3-flash-free".into(),
                 "openrouter/some-model".into(),
             ],
-            last_preflight_error: None,
             observed_unix_seconds: 100,
             expires_unix_seconds: 200,
         }];
