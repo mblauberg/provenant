@@ -968,7 +968,7 @@ pub fn run(
 
 /// The command outcome for a coordination error code. A refused store upgrade
 /// is a refusal here, as on the facade edge (`context::facade_outcome`).
-fn coordination_outcome(code: &str) -> Outcome {
+pub fn coordination_outcome(code: &str) -> Outcome {
     match code {
         "invalid_input" | "not_found" => Outcome::Invalid,
         "stale_fence" | "conflict" | "lane_coordination_refused" | "upgrade_refused" => {

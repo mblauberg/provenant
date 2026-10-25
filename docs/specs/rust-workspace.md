@@ -29,7 +29,7 @@ responsibility or edges lands in this table in the same PR.
 | run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing |
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
 | fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, run, fabric-store |
-| fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime |
+| fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime; fabric-store in tests only, to check store error rendering |
 | workflow | Delivery/review validators, session, tracker and writing tools | core, records, config, confinement, supervisor's safe filesystem API |
 | cli | Argument parsing and output/exit rendering for all commands | Libraries above as needed; no library imports cli |
 

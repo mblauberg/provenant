@@ -26,6 +26,38 @@ fn token(proof: &Value) -> Result<String> {
     }
     Ok(provenant_core::hex(&bytes))
 }
+
+#[test]
+fn events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
+    let rig = TestRig::new()?;
+    call(
+        &rig,
+        &[
+            "fabric",
+            "events",
+            "note",
+            "--note",
+            "seed store",
+            "--operation-id",
+            "seed-1",
+        ],
+        0,
+    )?;
+    let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    db.execute_batch(
+        "CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, \
+         legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
+         tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
+         skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT; \
+         INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,0,X'7B7D'); \
+         PRAGMA user_version=6;",
+    )?;
+    drop(db);
+    let result = call(&rig, &["fabric", "events", "read"], 1)?;
+    assert_eq!(result["error"]["code"], "upgrade_refused");
+    Ok(())
+}
+
 #[test]
 fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
     let rig = TestRig::new()?;

@@ -538,6 +538,109 @@ mod tests {
         Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn peer_responses_read_only_null_retired_members() {
+        use provenant_core::{MessageId, ProjectId, TaskId};
+        use provenant_fabric_store::{Delivery, Message, MessageKind, Page, Task, TaskState};
+        use provenant_records::RecordHeader;
+
+        fn old_frame(response: &PeerResponse, record: &str, member: &str, value: &str) -> Vec<u8> {
+            let old = format!(
+                "{},\"{member}\":{value}}}",
+                record.strip_suffix('}').unwrap()
+            );
+            let frame = serde_json::to_string(response).unwrap();
+            assert!(frame.contains(record));
+            frame.replace(record, &old).into_bytes()
+        }
+
+        let now = WallTime::from_micros(1).unwrap();
+        let task = Task {
+            header: RecordHeader::V1,
+            project: ProjectId::from_bytes([1; 16]),
+            id: TaskId::from_bytes([2; 16]),
+            objective: "Review".into(),
+            note: None,
+            state: TaskState::Open,
+            owner: None,
+            generation: 0,
+            expires_at: None,
+            created_at: now,
+            updated_at: now,
+            legacy: (),
+        };
+        let mut response = PeerResponse {
+            version: 1,
+            host: HostId::from_bytes([3; 16]),
+            project: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            result: PeerResult::Coordination(CoordinationResult::Task(TaskResult::Created {
+                task: task.clone(),
+            })),
+        };
+        let task_json = serde_json::to_string(&task).unwrap();
+        let frame = old_frame(&response, &task_json, "legacy", "null");
+        let decoded =
+            provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG).unwrap();
+        assert!(matches!(
+            decoded.result,
+            PeerResult::Coordination(CoordinationResult::Task(TaskResult::Created { task: got }))
+                if got == task
+        ));
+        let frame = old_frame(&response, &task_json, "legacy", "{}");
+        assert!(
+            provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG).is_err()
+        );
+
+        let message = Message {
+            header: RecordHeader::V1,
+            project: task.project,
+            id: MessageId::from_bytes([4; 16]),
+            sender: ActorId::from_bytes([5; 16]),
+            recipients: vec![ActorId::from_bytes([6; 16])],
+            conversation: None,
+            kind: MessageKind::Note,
+            body: "Review".into(),
+            artifacts: vec![],
+            reply_to: None,
+            task: None,
+            created_at: now,
+            legacy_output_path: (),
+            legacy: (),
+        };
+        let mail = MailResult::Read {
+            page: Page {
+                items: vec![Delivery {
+                    seq: 1,
+                    message: message.clone(),
+                }],
+                truncated: false,
+            },
+            cursor: 1,
+        };
+        response.result = PeerResult::Coordination(CoordinationResult::Mail(mail.clone()));
+        let message_json = serde_json::to_string(&message).unwrap();
+        for member in ["legacy", "legacy_output_path"] {
+            let frame = old_frame(&response, &message_json, member, "null");
+            let decoded =
+                provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
+                    .unwrap();
+            assert!(matches!(
+                decoded.result,
+                PeerResult::Coordination(CoordinationResult::Mail(got)) if got == mail
+            ));
+            let frame = old_frame(&response, &message_json, member, "{}");
+            assert!(
+                provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
+                    .is_err()
+            );
+        }
+    }
+
     struct Ssh {
         request: Mutex<Option<PeerRequest>>,
         lose_reply: bool,
