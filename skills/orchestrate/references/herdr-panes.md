@@ -34,7 +34,7 @@ rule). Dispatch through Fabric, observe with
 `provenant lanes --all --wait N --condition all`, read retained events with
 `provenant output RUN/TASK/ATTEMPT --part events`, read
 bounded slices with `fabric_output`'s `read` operation, and steer with
-`provenant fabric mail send` or `fabric_run`'s `resume` operation using
+`fabric_mail`'s `send` operation or `fabric_run`'s `resume` operation using
 `target: { attempt: ATTEMPT }`, `expected_generation`, `operation_id` and the
 prompt (`resume` also answers `input_required` lanes).
 
@@ -129,23 +129,22 @@ be aware that a repeated send repeats the pane effect.
 ## Send answer-bearing work
 
 Create the task with `provenant fabric task create`, then send its request
-with `provenant fabric mail send --task ID`. Give each mutation a unique
-`--operation-id`; a retry reuses that ID and identical input. Replies use
-`--reply-to MESSAGE_ID` and identify the output artifact. A deadline in the run
+with `fabric_mail`'s `send` operation and `task`. Give each mutation a unique
+`operation_id`; a retry reuses that ID and identical input. Replies use
+`reply_to` and identify the output artifact. A deadline in the run
 artifact is a chair-owned expectation; Herdr cannot enforce or deliver it.
 
-The peer reads ordered deliveries with `provenant fabric mail read --after SEQ`.
+The peer reads ordered deliveries with `fabric_mail`'s `read` operation (`after`).
 Reading is observation-only. After persisting its result and correlated reply,
-it advances its cursor with `provenant fabric mail mark-read SEQ --operation-id
-ID`. Advance only through processed deliveries. Distinct labels give independent
+it advances its cursor with `mark_read` (`through`, `operation_id`). Advance only through processed deliveries. Distinct labels give independent
 consumers separate cursors. Delivery and correlation do not establish provider
 liveness or completion: verify the named artifact and run receipt.
 
 Fabric derives the project from the working directory. A repository's primary
 checkout and ordinary registered linked worktrees share messages, tasks and
-activity, while `provenant fabric identity --json` retains the caller's resolved `cwd`. Agents may
-therefore keep a persistent MCP session or use the CLI from their own worktree
-without a manual project override. Separate repositories and copied worktree
+activity, while `fabric_identity` retains the caller's resolved `cwd`. Agents may
+therefore keep a persistent MCP session in their own worktree without a manual
+project override. Separate repositories and copied worktree
 metadata stay isolated.
 
 If the active integration cannot carry a Fabric request and reply, record
@@ -220,7 +219,7 @@ the Fabric reply or named artifact. A `blocked` agent needs input; `unknown`
 means integration or detection is not yet reliable.
 
 For answer-bearing Fabric work, read the correlated reply with
-`provenant fabric mail read --after SEQ --limit N` and verify its artifact.
+`fabric_mail`'s `read` operation (`after`, `limit`) and verify its artifact.
 When there is no local work, observe the project event stream with
 `provenant fabric events read --after SEQ --wait SECONDS`, then read the inbox
 again. Each wait has an explicit budget. A deadline does not cancel work;

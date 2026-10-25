@@ -1,9 +1,7 @@
 # Fabric identity
 
-Call `fabric_identity` in the intended workspace; the CLI equivalent is
-`provenant fabric identity --json`, with global `--project PATH` to select the
-workspace. Verify `project`, `cwd`, `common_dir` and `inbox` (under `data` in
-the CLI envelope) before claiming work. Linked Git worktrees share a random
+Call `fabric_identity` in the intended workspace. Verify `project`, `cwd`,
+`common_dir` and `inbox` before claiming work. Linked Git worktrees share a random
 host-local project ID; their working directories remain distinct. Confinement
 verifies Git discovery, and config owns the canonical project binding.
 

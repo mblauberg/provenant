@@ -129,8 +129,9 @@ as leaves where it belongs, then close it once its done-when is verified.
 
 - Delegate inspection. Exploration beyond a few files or commands goes to a
   lane that returns a digest and a path.
-- Read bounded slices with `fabric_output`'s `read` operation using a target,
-  part, offset and `max_bytes`; use the result part before events or transcripts.
+- Read bounded slices with `fabric_output`'s `read` operation (`stdout` or
+  `stderr` part, target, offset and `max_bytes`); for the result or events use
+  `provenant output --part result|events` before transcripts.
   Read diffs by stat first and open only what a verdict hinges on.
 - Never read images in the chair. Captures go to reviewers, who look at them
   and return verdicts.
