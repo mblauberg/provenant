@@ -122,6 +122,263 @@ impl InstallReporter for Reporter {
     }
 }
 struct Smoke;
+
+#[test]
+fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
+    for modified in [false, true] {
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+        let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        let plan = f.plan();
+        assert!(
+            plan.actions()
+                .iter()
+                .any(|action| action.selector == "peer-agent"
+                    && action.path.to_path_buf().unwrap() == plist)
+        );
+        assert!(!plist.exists());
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            fs: &LocalFs,
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+        };
+        install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
+        assert!(f.plan().actions().is_empty());
+        let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+        assert!(
+            receipt
+                .entries
+                .iter()
+                .any(|entry| entry.selector == "peer-agent")
+        );
+        if modified {
+            fs::write(&plist, b"user edited plist\n").unwrap();
+        }
+        struct StopReporter(usize);
+        impl InstallReporter for StopReporter {
+            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+                Ok(())
+            }
+            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+                if action.selector == "peer-agent" {
+                    self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+        let mut reporter = StopReporter(0);
+        let result = uninstall(&f.targets, &context, &mut reporter).unwrap();
+        assert_eq!(reporter.0, usize::from(!modified));
+        assert_eq!(plist.exists(), modified);
+        assert_eq!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "relinquished_modified_entry"
+                    && finding.path.to_path_buf().unwrap() == plist),
+            modified
+        );
+    }
+}
+
+#[test]
+fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
+    let mut f = Fixture::new();
+    f.targets.harnesses =
+        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let context = InstallContext {
+        fs: &LocalFs,
+        clock: &clock,
+        cancel: &cancel,
+        budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+    };
+    install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+    let hook = f.targets.harnesses[0].hook_file.clone().unwrap();
+    let old = read_receipt(&f.targets, &LocalFs)
+        .unwrap()
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.selector.starts_with("hook:") && entry.selector.contains("PreToolUse"))
+        .unwrap();
+    f.targets.hooks = false; // Omitted --hooks inherits the recorded target.
+    f.targets.hook_specs[0].event = "ChangedEvent";
+    install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(
+        crate::hooks::get(&fs::read(&hook).unwrap(), &old.selector)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector.contains("ChangedEvent"))
+    );
+    uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
+    assert!(
+        !fs::read_to_string(hook)
+            .unwrap()
+            .contains("'hook' 'claude'")
+    );
+}
+
+#[test]
+fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
+    for (upgrade, recognised) in [(true, true), (true, false), (false, true), (false, false)] {
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            fs: &LocalFs,
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+        };
+        install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+        let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(&plist, b"historical plist\n").unwrap();
+        fs::set_permissions(&plist, fs::Permissions::from_mode(0o644)).unwrap();
+        f.targets.peer_agent = Some(b"new plist\n".to_vec());
+        f.targets.peer_agent_previous = recognised.then(|| b"historical plist\n".to_vec());
+        if upgrade {
+            let release = f.release();
+            let plan = Snapshots::capture(&release, &f.targets, &LocalFs)
+                .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
+            if recognised {
+                install(
+                    &plan.unwrap(),
+                    &context,
+                    &mut Reporter::default(),
+                    &Smoke,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(fs::read(&plist).unwrap(), b"new plist\n");
+                assert_eq!(
+                    fs::metadata(&plist).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                assert!(
+                    read_receipt(&f.targets, &LocalFs)
+                        .unwrap()
+                        .unwrap()
+                        .entries
+                        .iter()
+                        .any(|entry| entry.selector == "peer-agent")
+                );
+            } else {
+                assert!(matches!(plan, Err(InstallError::Conflict(_))));
+                assert_eq!(fs::read(&plist).unwrap(), b"historical plist\n");
+            }
+        } else {
+            let result = uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
+            assert_eq!(plist.exists(), !recognised);
+            assert_eq!(
+                result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.rule == "relinquished_modified_entry"),
+                !recognised
+            );
+        }
+    }
+}
+
+#[test]
+fn failed_peer_stop_keeps_the_plist_and_receipt_for_retry() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let context = InstallContext {
+        fs: &LocalFs,
+        clock: &clock,
+        cancel: &cancel,
+        budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+    };
+    install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+    let receipt = fs::read(f.receipt()).unwrap();
+    struct FailStop;
+    impl InstallReporter for FailStop {
+        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+            if action.selector == "peer-agent" {
+                Err(io::Error::other("bootout failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    assert!(matches!(
+        uninstall(&f.targets, &context, &mut FailStop),
+        Err(InstallError::Partial { .. })
+    ));
+    assert_eq!(fs::read(f.receipt()).unwrap(), receipt);
+    assert!(
+        peer_agent_plist(f.targets.roots.state.as_path())
+            .unwrap()
+            .exists()
+    );
+    uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
+    assert!(
+        !peer_agent_plist(f.targets.roots.state.as_path())
+            .unwrap()
+            .exists()
+    );
+}
+
+#[test]
+fn peer_agent_refuses_symlinked_plist_and_parent_before_writes() {
+    for parent in [false, true] {
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+        let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        let outside = f.base.join("outside");
+        if parent {
+            fs::create_dir(&outside).unwrap();
+            fs::create_dir_all(f.home.join("Library")).unwrap();
+            symlink(&outside, plist.parent().unwrap()).unwrap();
+        } else {
+            fs::write(&outside, b"foreign").unwrap();
+            fs::create_dir_all(plist.parent().unwrap()).unwrap();
+            symlink(&outside, &plist).unwrap();
+        }
+        let release = f.release();
+        let result = Snapshots::capture(&release, &f.targets, &LocalFs)
+            .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
+        assert!(result.is_err());
+        assert!(!f.receipt().exists());
+        if !parent {
+            assert_eq!(fs::read(outside).unwrap(), b"foreign");
+        }
+    }
+}
+
 impl ReleaseSmoke for Smoke {
     fn check(&self, release: &Release, _: &CancelToken) -> io::Result<VersionInfo> {
         Ok(VersionInfo {

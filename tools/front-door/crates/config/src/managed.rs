@@ -148,6 +148,11 @@ pub struct Targets {
     pub harnesses: Vec<HarnessTarget>,
     pub adopt_existing: bool,
     pub hooks: bool,
+    pub remove_hooks: bool,
+    /// Rendered per-user LaunchAgent, supplied only by the process edge.
+    pub peer_agent: Option<Vec<u8>>,
+    /// Exact recognised historical rendering, for migration from pre-receipt agents.
+    pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
     pub legacy_checkout: Option<PathBuf>,
     pub git_hooks_dir: Option<PathBuf>,
@@ -201,6 +206,9 @@ impl Targets {
             harnesses: targets,
             adopt_existing: false,
             hooks: false,
+            remove_hooks: false,
+            peer_agent: None,
+            peer_agent_previous: None,
             hook_specs: Vec::new(),
             legacy_checkout: None,
             git_hooks_dir: None,
@@ -408,6 +416,10 @@ pub struct ManualInclude {
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
+    /// Called under the install lock after the exact-match recheck, before unlink.
+    fn before_remove(&mut self, _action: &Action) -> std::io::Result<()> {
+        Ok(())
+    }
     fn findings(&mut self, _findings: &[InstallFinding]) -> std::io::Result<()> {
         Ok(())
     }
@@ -479,6 +491,7 @@ impl Snapshots {
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
                 if entry.selector == "binary"
+                    || entry.selector == "git-hook:pre-push"
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
                         .is_some_and(|owner| selected.contains(&owner))
                 {
@@ -611,6 +624,27 @@ fn desired(
         None,
         "binary".into(),
     )?;
+    if let Some(bytes) = &targets.peer_agent {
+        let path = peer_agent_plist(targets.roots.state.as_path()).ok_or(
+            InstallError::InvalidConfig("peer agent requires the default state root"),
+        )?;
+        if path
+            != targets
+                .home
+                .join("Library/LaunchAgents/dev.provenant.peer.plist")
+        {
+            return Err(InstallError::Conflict(path));
+        }
+        insert(
+            path,
+            Value::File {
+                bytes: bytes.clone(),
+                mode: 0o600,
+            },
+            None,
+            "peer-agent".into(),
+        )?;
+    }
     for target in &targets.harnesses {
         let mut skills = BTreeMap::new();
         for path in release.files.keys() {
@@ -672,11 +706,19 @@ pub(crate) fn release_root(state: &Path, digest: provenant_records::SourceDigest
     state.join("releases").join(digest.to_string())
 }
 
+/// The single per-user agent belongs only to an account's default state root.
+pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
+    let home = state.ancestors().nth(4)?;
+    (state == home.join(".local/share/provenant/v1"))
+        .then(|| home.join("Library/LaunchAgents/dev.provenant.peer.plist"))
+}
+
 fn validate_removal(
     path: &Path,
     targets: &Targets,
     source: Option<&Path>,
     before: &Option<Snapshot>,
+    owned_git_hook: bool,
 ) -> Result<(), InstallError> {
     normal_absolute(path)?;
     // The composition edge resolves this directory from the explicit checkout.
@@ -694,6 +736,7 @@ fn validate_removal(
         }),
         _ => false,
     };
+    let git_hook = git_hook || owned_git_hook;
     if path.starts_with(targets.roots.state.as_path())
         || source.is_some_and(|root| path.starts_with(root) || root.starts_with(path))
         || (!git_hook
@@ -748,7 +791,7 @@ pub fn plan_install(
         // The only write inside the explicitly selected legacy checkout is
         // replacement of its exact compiled pre-push link. The Git directory
         // was resolved at the process edge, independently of --project.
-        let git_hook = if let (
+        let legacy_git_hook = if let (
             Some(checkout),
             Some(directory),
             Some(Some(Snapshot {
@@ -770,6 +813,18 @@ pub fn plan_install(
         } else {
             false
         };
+        let git_hook = legacy_git_hook
+            || snapshots.receipt.as_ref().is_some_and(|receipt| {
+                receipt.entries.iter().any(|entry| {
+                    entry.selector == "git-hook:pre-push"
+                        && entry.path.to_path_buf().is_ok_and(|owned| &owned == path)
+                        && snapshots
+                            .entries
+                            .get(path)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|current| matches_owned(&current.value, &entry.expected))
+                })
+            });
         if desired.contains_key(path)
             || path.starts_with(targets.roots.state.as_path())
             || path.starts_with(&release.source)
@@ -862,7 +917,21 @@ pub fn plan_install(
                         && crate::legacy::legacy_shim(&targets.home)?
                             .is_some_and(|shim| shim.retained && &shim.path == path)
                         && matches!(&current.value, Value::File { bytes, .. } if crate::legacy::legacy_shim_matches(bytes)));
-                if !immutable && !was_owned && !adopt_binary && !legacy && want.selector != "config"
+                let legacy_peer = want.selector == "peer-agent"
+                    && !snapshots.receipt.as_ref().is_some_and(|receipt| {
+                        receipt
+                            .entries
+                            .iter()
+                            .any(|entry| entry.selector == "peer-agent")
+                    })
+                    && matches!(&current.value, Value::File { bytes, mode: 0o600 | 0o644 }
+                        if targets.peer_agent_previous.as_ref() == Some(bytes));
+                if !immutable
+                    && !was_owned
+                    && !adopt_binary
+                    && !legacy
+                    && !legacy_peer
+                    && want.selector != "config"
                 {
                     return Err(InstallError::Conflict(path.clone()));
                 }
@@ -914,7 +983,15 @@ pub fn plan_install(
             {
                 continue;
             }
-            if entry.selector != "binary" {
+            if (entry.selector == "git-hook:pre-push" && !targets.remove_hooks)
+                || entry.selector == "peer-agent"
+            {
+                if entry.selector == "peer-agent" {
+                    entries.push(entry.clone());
+                }
+                continue;
+            }
+            if entry.selector != "binary" && entry.selector != "git-hook:pre-push" {
                 let Some(owner) = owner else {
                     continue;
                 };
@@ -974,7 +1051,13 @@ pub fn plan_install(
                 .entries
                 .get(&path)
                 .ok_or_else(|| InstallError::Drift(path.clone()))?;
-            validate_removal(&path, &targets, Some(&release.source), before)?;
+            validate_removal(
+                &path,
+                &targets,
+                Some(&release.source),
+                before,
+                action.selector == "git-hook:pre-push",
+            )?;
         }
     }
     for action in &mut actions {
@@ -985,6 +1068,22 @@ pub fn plan_install(
                 .get(&path)
                 .cloned()
                 .unwrap_or_default();
+        }
+    }
+    if targets.legacy_checkout.is_some() {
+        for entry in &entries {
+            if entry.selector == "git-hook:pre-push" {
+                let path = entry.path.to_path_buf()?;
+                if targets
+                    .git_hooks_dir
+                    .as_ref()
+                    .is_none_or(|dir| path != dir.join("pre-push"))
+                {
+                    // One receipt records one legacy hooks directory. Remove
+                    // or relinquish its launcher before migrating another.
+                    return Err(InstallError::Conflict(path));
+                }
+            }
         }
     }
     let mut resolved_targets = BTreeMap::new();
@@ -1611,6 +1710,15 @@ pub(crate) fn read_receipt(
 ) -> Result<Option<InstallReceipt>, InstallError> {
     read_receipt_inspected(targets, fs, None)
 }
+/// Validated stable binary path for recognising a historical peer plist.
+pub fn installed_binary(
+    targets: &Targets,
+    fs: &dyn SafeFs,
+) -> Result<Option<PathBuf>, InstallError> {
+    read_receipt(targets, fs)?
+        .map(|receipt| Ok(receipt.bin_dir.to_path_buf()?.join("provenant")))
+        .transpose()
+}
 pub(crate) fn read_receipt_inspected(
     targets: &Targets,
     fs: &dyn SafeFs,
@@ -1746,6 +1854,16 @@ fn permitted_entry(
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
+        if entry.selector == "peer-agent" {
+            return Ok(peer_agent_plist(state_root).as_ref() == Some(&path)
+                && matches!(
+                    entry.expected,
+                    OwnedValue::File {
+                        mode: 0o600 | 0o644,
+                        ..
+                    }
+                ));
+        }
         if entry.selector == "git-hook:pre-push" {
             return Ok(receipt
                 .legacy
@@ -2045,13 +2163,43 @@ pub fn uninstall(
     if selected.is_empty() {
         return not_installed(&receipt_path, reporter);
     }
+    // Older installers wrote this fixed plist without recording it. The
+    // process edge recognises its exact historical rendering, never its label
+    // alone. Unknown bytes still become a preserved-and-reported finding.
+    if selected == registered
+        && !receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "peer-agent")
+        && let Some(desired) = &targets.peer_agent
+        && let Some(path) = peer_agent_plist(state_root)
+    {
+        let current = snapshot(&path, fs)?;
+        let mode = match current.as_ref().map(|snapshot| &snapshot.value) {
+            Some(Value::File { mode: 0o644, .. }) => 0o644,
+            _ => 0o600,
+        };
+        receipt.entries.push(OwnedEntry {
+            path: AbsolutePath::new(&path)?,
+            harness: None,
+            selector: "peer-agent".into(),
+            expected: owned(&Value::File {
+                bytes: targets
+                    .peer_agent_previous
+                    .clone()
+                    .unwrap_or_else(|| desired.clone()),
+                mode,
+            })?,
+        });
+    }
     let mut owners = Vec::with_capacity(receipt.entries.len());
     for entry in &receipt.entries {
         owners.push(entry_owner(entry, &receipt, state_root)?);
     }
     let removed = |entry: &OwnedEntry, owner: &Option<TargetId>| {
         owner.as_ref().is_some_and(|id| selected.contains(id))
-            || (entry.selector == "git-hook:pre-push" && selected == registered)
+            || (matches!(entry.selector.as_str(), "git-hook:pre-push" | "peer-agent")
+                && selected == registered)
     };
 
     let mut removals = Vec::new();
@@ -2153,7 +2301,11 @@ pub fn uninstall(
     });
 
     for (path, before) in &removals {
-        validate_removal(path, targets, None, before)?;
+        let owned_git_hook = actions.iter().any(|action| {
+            action.selector == "git-hook:pre-push"
+                && action.path.to_path_buf().is_ok_and(|owned| &owned == path)
+        });
+        validate_removal(path, targets, None, before, owned_git_hook)?;
     }
     reporter.preview(&actions).map_err(InstallError::Preview)?;
     reporter
@@ -2182,6 +2334,10 @@ pub fn uninstall(
             if let Some(value) = selector_files.get(path) {
                 publish(path, value, true, fs, state_root)
             } else {
+                reporter
+                    .before_remove(&actions[index])
+                    .map_err(InstallError::Preview)?;
+                recheck(path, before, fs, state_root)?;
                 remove_entry(path, fs, state_root)
             }
         })();

@@ -39,6 +39,23 @@ enum EdgeError {
     Install(InstallError),
     Git,
     Home,
+    Peer(super::peer_agent::AgentError),
+}
+
+fn prepare_peer_agent(targets: &mut Targets) -> Result<(), EdgeError> {
+    let state = targets.roots.state.as_path();
+    if super::peer_agent::eligible(state, &targets.home) {
+        let program = targets.bin_dir.join("provenant");
+        let previous = provenant_config::installed_binary(targets, &LocalFs)
+            .map_err(EdgeError::Install)?
+            .unwrap_or_else(|| program.clone());
+        targets.peer_agent =
+            Some(super::peer_agent::install_plist(&program, state).map_err(EdgeError::Peer)?);
+        targets.peer_agent_previous =
+            super::peer_agent::previous_plist(&previous, state, &targets.home)
+                .map_err(EdgeError::Peer)?;
+    }
+    Ok(())
 }
 
 struct Environment {
@@ -200,8 +217,23 @@ fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
 }
 
 #[derive(Default)]
-struct PreviewReporter;
+struct PreviewReporter {
+    home: Option<PathBuf>,
+}
 impl InstallReporter for PreviewReporter {
+    fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+        if action.selector == "peer-agent" {
+            let home = self
+                .home
+                .as_deref()
+                .ok_or_else(|| io::Error::other("missing agent home"))?;
+            if action.path.to_path_buf().ok().as_ref() != Some(&super::peer_agent::plist(home)) {
+                return Err(io::Error::other("unexpected agent plist path"));
+            }
+            super::peer_agent::stop(home).map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
     fn preview(&mut self, _: &[Action]) -> io::Result<()> {
         Ok(())
     }
@@ -317,6 +349,13 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
             "cannot resolve legacy checkout Git hooks directory",
             globals,
         ),
+        EdgeError::Peer(error) => super::fail(
+            command,
+            Outcome::Error,
+            "PEER_AGENT",
+            &error.to_string(),
+            globals,
+        ),
         EdgeError::Home => super::fail(
             command,
             Outcome::Invalid,
@@ -391,6 +430,30 @@ fn output_install(
                 counts.entry("target").or_default();
             }
             let mut human = format!("{command}:\n");
+            for finding in &outcome.findings {
+                if let Ok(path) = finding.path.to_path_buf()
+                    && path.file_name() == Some(OsStr::new("dev.provenant.peer.plist"))
+                {
+                    human.push_str(&format!(
+                        "  LaunchAgent plist: preserved {} ({})\n",
+                        path.display(),
+                        finding.rule
+                    ));
+                }
+            }
+            for action in &outcome.actions {
+                if action.selector == "peer-agent" {
+                    let path = action
+                        .path
+                        .to_path_buf()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    human.push_str(&format!(
+                        "  LaunchAgent plist: {:?} {path}\n",
+                        action.disposition
+                    ));
+                }
+            }
             for (target, count) in counts {
                 human.push_str(&format!(
                     "  {target}: {} changed links, {} changed hooks, {} changed MCP, {} notes; {} findings; {} other\n",
@@ -537,10 +600,12 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
             );
         }
     };
-    let program = targets.bin_dir.join("provenant");
     let state = targets.roots.state.as_path().to_path_buf();
     let home = targets.home.clone();
-    let mut reporter = PreviewReporter;
+    if let Err(error) = prepare_peer_agent(&mut targets) {
+        return edge_error("install", error, globals);
+    }
+    let mut reporter = PreviewReporter::default();
     let result = cli::install::execute_install(
         &args,
         targets,
@@ -551,19 +616,27 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
     );
     // The release is installed first; the agent then serves the new binary.
     let peer_agent = match &result {
-        Ok(outcome) if !outcome.dry_run => {
-            Some(super::peer_agent::install(&program, &state, &home))
-        }
+        Ok(outcome) if !outcome.dry_run => Some(super::peer_agent::install(
+            &state,
+            &home,
+            outcome
+                .actions
+                .iter()
+                .any(|action| action.selector == "peer-agent"),
+        )),
         _ => None,
     };
     output_install("install", result, peer_agent, globals)
 }
 
 pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 {
-    let targets = match receipt_targets(globals, &args.harness) {
+    let mut targets = match receipt_targets(globals, &args.harness) {
         Ok(value) => value,
         Err(error) => return edge_error("uninstall", error, globals),
     };
+    if let Err(error) = prepare_peer_agent(&mut targets) {
+        return edge_error("uninstall", error, globals);
+    }
     let fs = LocalFs;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -573,7 +646,9 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
             return super::fail("uninstall", Outcome::Error, "WAIT_BUDGET", &error, globals);
         }
     };
-    let mut reporter = PreviewReporter;
+    let mut reporter = PreviewReporter {
+        home: Some(targets.home.clone()),
+    };
     output_install(
         "uninstall",
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),

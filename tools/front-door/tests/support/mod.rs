@@ -73,7 +73,7 @@ impl TestRig {
     pub fn new() -> Result<Self> {
         // Outside the checkout: a rig beneath it lets cargo in a confined lane
         // probe find (and fail to read) the workspace manifest and config above.
-        Self::in_directory(Path::new("/tmp"))
+        Self::in_directory(&std::env::temp_dir())
     }
     pub fn in_directory(parent: &Path) -> Result<Self> {
         Self::with_object_format(parent, "sha1")
