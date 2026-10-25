@@ -36,8 +36,8 @@ final class QuotaModel {
     @ObservationIgnored private var fixture = false   // a saved report to draw; never runs the CLI
 
     /// A saved report, for `--render`: no timers, watchers or CLI runs.
-    init(fixture report: QuotaReport, updatedAt: Date) {
-        (self.report, self.updatedAt, fixture) = (report, updatedAt, true)
+    init(fixture report: QuotaReport, updatedAt: Date, lanes: [Lane] = []) {
+        (self.report, self.updatedAt, self.lanes, fixture) = (report, updatedAt, lanes, true)
         label = MenuLabel(report: report, failed: false, now: updatedAt)
     }
 
@@ -88,7 +88,7 @@ final class QuotaModel {
     /// ⌘R.
     func refresh() { run(.manual) }
 
-    /// The panel can become key twice as it opens; avoid closely spaced ticks.
+    /// Each menu open; avoid closely spaced ticks.
     func panelOpened() {
         refreshLanes()
         if let updatedAt, Date.now.timeIntervalSince(updatedAt) < 5 { return }
