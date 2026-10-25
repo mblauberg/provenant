@@ -1961,9 +1961,24 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             .iter()
             .any(|g| g.path == Path::new("/fixture/scratch/bin"))
     );
-    assert!(launch.profile.spec.runtime_reads.iter().all(|grant| {
-        !grant.path.ends_with(".cargo") && !grant.path.to_string_lossy().contains("credentials")
-    }));
+    // Runtime roots are readable; no grant names a credentials file, and the
+    // compiler hard-denies Cargo credentials inside them.
+    assert!(
+        launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|grant| grant.path == Path::new("/fixture/home/.cargo"))
+    );
+    assert!(
+        launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .all(|grant| !grant.path.to_string_lossy().contains("credentials"))
+    );
     assert!(launch.profile.spec.state_writes.iter().all(|grant| {
         !grant.path.starts_with("/fixture/home/.cargo")
             && !grant.path.starts_with("/fixture/home/.rustup")
