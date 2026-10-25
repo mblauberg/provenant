@@ -185,6 +185,14 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     Ok((ok, text))
 }
 
+/// The branch name of a full `refs/heads/` ref.
+fn short_branch(reference: &str) -> String {
+    reference
+        .strip_prefix("refs/heads/")
+        .unwrap_or(reference)
+        .to_owned()
+}
+
 /// One worktree of this project, as the hand-off sees it.
 #[derive(Debug, Clone, Serialize)]
 struct Tree {
@@ -248,7 +256,9 @@ fn inspect(roots: &provenant_core::Roots, project: &Path) -> Result<Vec<Tree>, R
     let mut trees = Vec::with_capacity(infos.len());
     for info in infos {
         let head = info.head.to_string();
-        let (upstream, pushed) = match info.branch.as_deref() {
+        // Worktree listings carry full refs; the hand-off speaks branch names.
+        let branch = info.branch.as_deref().map(short_branch);
+        let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
                 let remote = format!("refs/remotes/origin/{branch}");
                 let (found, oid) = git(
@@ -278,8 +288,10 @@ fn inspect(roots: &provenant_core::Roots, project: &Path) -> Result<Vec<Tree>, R
         trees.push(Tree {
             primary: primary.as_deref() == Some(path.as_path()),
             path,
-            branch: info.branch,
+            branch,
             head,
+            // Ignored files, such as build output and `.worktrees/`, are not
+            // lost work.
             dirty: info.dirty == WorktreeCondition::Dirty,
             unknown: matches!(
                 info.dirty,
@@ -316,7 +328,9 @@ fn wip(tree: &Tree) -> Result<(), Refusal> {
         step(&["add", "--update"])?;
         step(&["commit", "--message", "WIP: session hand-off"])?;
     }
-    step(&["push", "--set-upstream", "origin", branch])
+    // A full refspec cannot be confused with a tag of the same name.
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    step(&["push", "--set-upstream", "origin", &refspec])
 }
 /// Untracked files Git does not ignore. `--wip` commits tracked changes only,
 /// so these would stay behind.
@@ -1307,7 +1321,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                 |context, cancel| {
                     if let Some(info) = worktrees::list(context, cancel)?
                         .into_iter()
-                        .find(|w| w.branch.as_deref() == Some(branch.as_str()))
+                        .find(|w| w.branch.as_deref().map(short_branch).as_ref() == Some(branch))
                     {
                         return Ok((info, false));
                     }
@@ -1354,7 +1368,10 @@ fn worktree_warning(
             info.head
         ));
     }
-    if info.dirty != WorktreeCondition::Clean {
+    if !matches!(
+        info.dirty,
+        WorktreeCondition::Clean | WorktreeCondition::Ignored
+    ) {
         found.push("the worktree has uncommitted changes or unknown state".to_owned());
     }
     (!found.is_empty()).then(|| found.join("; "))
@@ -1660,6 +1677,12 @@ mod tests {
             pushed,
         }
     }
+    #[test]
+    fn listed_refs_become_branch_names() {
+        assert_eq!(short_branch("refs/heads/feat/x"), "feat/x");
+        assert_eq!(short_branch("main"), "main");
+    }
+
     fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {
         Delivery {
             dir: operation_dir(dir, &OperationId::parse("handoff-1").unwrap()),

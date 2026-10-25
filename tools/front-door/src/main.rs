@@ -200,9 +200,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             run_edge(
                 &inv.leaf,
                 globals,
-                |edge| match provenant_cli::accounts::execute(
-                    &command, edge.roots, edge.home, edge.cwd,
-                ) {
+                |edge| match provenant_cli::accounts::execute(&command, edge.roots, edge.home) {
                     Ok(data) => provenant_cli::run::Reply {
                         human: data
                             .entries

@@ -8,7 +8,7 @@ use provenant_core::{ProjectId, WorkScope};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
-use provenant_supervisor::fs::{Directory, FileKind, PublishMode, entropy_128};
+use provenant_supervisor::fs::{Directory, FileKind, FsError, PublishMode, entropy_128};
 use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::path::{Path, PathBuf};
 
@@ -84,6 +84,12 @@ fn prepare_with(
         .name;
 
     let executor = provenant_supervisor::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
+    // Nested attempts live in a lane-writable child store. Unconfined provider
+    // commands, including status, version and token refresh, get a fresh cwd
+    // under the host configuration root retained in the launch context.
+    let executor =
+        provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
+            .map_err(|e| e.to_string())?;
     let config = provenant_config::read_with_domains(
         roots,
         &provenant_supervisor::fs::LocalFs,
@@ -108,7 +114,6 @@ fn prepare_with(
                 &home,
                 &user,
                 &directory,
-                &paths.scratch,
             )
         {
             entries.push(provenant_providers::accounts::Registration {
@@ -349,7 +354,7 @@ fn prepare_with(
             Some(_) => ConfinedPlan::new(request)
                 .map(|plan| (plan, None))
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, state_root, project_id, &cwd, &git, request),
+            None => read_only_plan(roots, project_id, &cwd, &git, request),
         }) {
             Ok(planned) => planned,
             Err(error) => {
@@ -364,9 +369,8 @@ fn prepare_with(
                 home: &home,
                 user: &user,
                 config_dir: account.directory(),
-                scratch,
             };
-            let authority = match credential_authority(paths, &login) {
+            let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
                 Err(error) => {
                     reasons.push(skip(&label, SkipKind::AuthRequired, error));
@@ -548,54 +552,270 @@ fn continuation_for(
     Ok(continuation)
 }
 
-/// The `candidate-N` directory of `provider_state` holding a file or directory
-/// named for `session`, searched to a bounded depth and size.
-fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
-    fn holds(dir: &Path, session: &str, depth: u32, budget: &mut u32) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
+/// Bounds on retained provider state, shared by its search and its copy. A
+/// leftover process from the prior attempt may still grow the tree. Lane state
+/// nests plugin caches 14 directories deep, and the launch census refuses a
+/// private tree past 100,000 entries anyway. The byte budget is many times a
+/// long session's state while bounding what a sparse or still-growing file can
+/// make the host write.
+#[derive(Clone, Copy)]
+struct StateLimits {
+    depth: u32,
+    entries: u32,
+    bytes: u64,
+}
+const RETAINED_STATE: StateLimits = StateLimits {
+    depth: 32,
+    entries: 100_000,
+    bytes: 4 << 30,
+};
+
+/// The names in `directory`, each spending one of `entries`, or `None` once
+/// they run out. Listing first closes the stream before any descent.
+fn listed(
+    directory: &Directory,
+    entries: &mut u32,
+) -> Result<Option<Vec<std::ffi::OsString>>, FsError> {
+    let mut names = Vec::new();
+    for name in directory.entries()? {
+        let Some(left) = entries.checked_sub(1) else {
+            return Ok(None);
         };
-        for entry in entries.flatten() {
-            *budget = budget.saturating_sub(1);
-            if *budget == 0 {
-                return false;
-            }
-            if entry.file_name().to_string_lossy().contains(session) {
-                return true;
-            }
-            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            if is_dir && depth > 0 && holds(&entry.path(), session, depth - 1, budget) {
-                return true;
-            }
-        }
-        false
+        *entries = left;
+        names.push(name?);
     }
-    std::fs::read_dir(provider_state)
-        .ok()?
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("candidate-")
-        })
-        .map(|entry| entry.path())
-        .find(|path| holds(path, session, 8, &mut 100_000))
+    Ok(Some(names))
 }
 
-/// Copy regular files and directories. Symlinks are skipped: setup recreates
-/// the ones a provider needs, and a copy never follows one out of the state.
+/// A real directory on `device`, opened without following a link. A mount
+/// point stats as the mounted root, so it is never opened.
+fn open_local_directory(
+    parent: &Directory,
+    name: &std::ffi::OsStr,
+    device: u64,
+) -> Option<Directory> {
+    parent
+        .metadata_at(name, false)
+        .is_ok_and(|metadata| metadata.kind == FileKind::Directory && metadata.device == device)
+        .then(|| parent.open_directory(name).ok())
+        .flatten()
+}
+
+/// The `candidate-N` directory of `provider_state` holding a file or directory
+/// named for `session`, searched within `RETAINED_STATE`. The prior lane
+/// wrote this tree, so the path must already be canonical and every directory
+/// is opened from its parent's handle, never through a link or a mount.
+fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
+    fn holds(dir: &Directory, session: &str, depth: u32, device: u64, budget: &mut u32) -> bool {
+        let Ok(Some(names)) = listed(dir, budget) else {
+            return false;
+        };
+        names.iter().any(|name| {
+            name.to_string_lossy().contains(session)
+                || depth > 0
+                    && open_local_directory(dir, name, device)
+                        .is_some_and(|child| holds(&child, session, depth - 1, device, budget))
+        })
+    }
+    if provenant_supervisor::fs::canonicalize(provider_state).ok()? != provider_state {
+        return None;
+    }
+    let root = Directory::open_anchor(provider_state).ok()?;
+    let device = root.metadata().ok()?.device;
+    let mut budget = RETAINED_STATE.entries;
+    listed(&root, &mut budget)
+        .ok()??
+        .into_iter()
+        .find(|name| {
+            name.to_string_lossy().starts_with("candidate-")
+                && open_local_directory(&root, name, device).is_some_and(|candidate| {
+                    holds(
+                        &candidate,
+                        session,
+                        RETAINED_STATE.depth,
+                        device,
+                        &mut budget,
+                    )
+                })
+        })
+        .map(|name| provider_state.join(name))
+}
+
+/// Copy regular files and directories within `RETAINED_STATE`. Symlinks and
+/// other entries are skipped: setup recreates the links a provider needs. A
+/// leftover process may still change the tree, so every entry is opened from
+/// its parent's handle without following a link, and the opened descriptor is
+/// checked and copied.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
-    let error = |error: std::io::Error| format!("copying retained provider state: {error}");
-    std::fs::create_dir_all(to).map_err(error)?;
-    for entry in std::fs::read_dir(from).map_err(error)? {
-        let entry = entry.map_err(error)?;
-        let target = to.join(entry.file_name());
-        let kind = entry.file_type().map_err(error)?;
-        if kind.is_dir() {
-            copy_state(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            std::fs::copy(entry.path(), &target).map_err(error)?;
+    copy_state_within(from, to, RETAINED_STATE)
+}
+
+fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), String> {
+    let failed =
+        |detail: &dyn std::fmt::Display| format!("copying retained provider state: {detail}");
+    // The anchor opens without following its final component; this stat only
+    // names the common refusal.
+    if !std::fs::symlink_metadata(from)
+        .map_err(|error| failed(&error))?
+        .is_dir()
+    {
+        return Err("retained provider state is not a directory".into());
+    }
+    let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
+    std::fs::create_dir_all(to).map_err(|error| failed(&error))?;
+    let target = Directory::open_anchor(to).map_err(|error| failed(&error))?;
+    let mut budget = Budget {
+        entries: limits.entries,
+        bytes: limits.bytes,
+        device: source.metadata().map_err(|error| failed(&error))?.device,
+    };
+    copy_tree(&source, &target, limits.depth, &mut budget).map_err(|refusal| match refusal {
+        CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
+        CopyRefusal::TooLarge => format!(
+            "retained provider state exceeds its {} byte copy budget",
+            limits.bytes
+        ),
+        CopyRefusal::TooMany => {
+            format!("retained provider state exceeds {} entries", limits.entries)
+        }
+        CopyRefusal::TooDeep => format!(
+            "retained provider state nests deeper than {} directories",
+            limits.depth
+        ),
+        CopyRefusal::CrossDevice => "retained provider state crosses a filesystem boundary".into(),
+        CopyRefusal::Fs(error) => failed(&error),
+    })
+}
+
+/// What the rest of a copy may still spend, and the source's filesystem.
+struct Budget {
+    entries: u32,
+    bytes: u64,
+    device: u64,
+}
+
+enum CopyRefusal {
+    HardLink,
+    TooLarge,
+    TooMany,
+    TooDeep,
+    CrossDevice,
+    Fs(FsError),
+}
+
+impl From<FsError> for CopyRefusal {
+    fn from(error: FsError) -> Self {
+        Self::Fs(error)
+    }
+}
+
+/// The entry changed type or vanished after it was listed. A leftover process
+/// may churn the tree; skipping such an entry copies nothing it names.
+fn changed_entry(error: &FsError) -> bool {
+    error.is_symlink()
+        || error.is_not_found()
+        || matches!(error, FsError::NotRegular { .. })
+        // A directory now a file, or a file now a socket (Linux, then Darwin).
+        || matches!(
+            error.raw_os_error(),
+            Some(libc::ENOTDIR | libc::ENXIO | libc::EOPNOTSUPP)
+        )
+}
+
+// Lets a test change an entry between its stat and its open.
+#[cfg(test)]
+type OpenHook = Box<dyn FnMut(&std::ffi::OsStr)>;
+#[cfg(test)]
+thread_local! {
+    static BEFORE_OPEN: std::cell::RefCell<Option<OpenHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn before_open(_name: &std::ffi::OsStr) {
+    #[cfg(test)]
+    BEFORE_OPEN.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook(_name);
+        }
+    });
+}
+
+fn copy_tree(
+    from: &Directory,
+    to: &Directory,
+    depth: u32,
+    budget: &mut Budget,
+) -> Result<(), CopyRefusal> {
+    for name in listed(from, &mut budget.entries)?.ok_or(CopyRefusal::TooMany)? {
+        let metadata = match from.metadata_at(&name, false) {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(error.into()),
+        };
+        // A mount point stats as the mounted root. Like a verified directory
+        // open, the walk refuses to leave its anchor's filesystem.
+        if metadata.device != budget.device {
+            return Err(CopyRefusal::CrossDevice);
+        }
+        before_open(&name);
+        match metadata.kind {
+            FileKind::Directory => {
+                let depth = depth.checked_sub(1).ok_or(CopyRefusal::TooDeep)?;
+                let child = match from.open_directory(&name) {
+                    Ok(child) => child,
+                    Err(error) if changed_entry(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if child.metadata()?.device != budget.device {
+                    return Err(CopyRefusal::CrossDevice);
+                }
+                match to.mkdir(&name, 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                copy_tree(&child, &to.open_directory(&name)?, depth, budget)?;
+            }
+            FileKind::Regular => {
+                let mut file = match from.open_read(&name) {
+                    Ok(file) => file,
+                    Err(error) if changed_entry(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let opened = file.metadata()?;
+                if opened.device != budget.device {
+                    return Err(CopyRefusal::CrossDevice);
+                }
+                // A hard link can name a host file the lane could not otherwise
+                // read; the host copy would then publish its contents.
+                if opened.links > 1 {
+                    return Err(CopyRefusal::HardLink);
+                }
+                // The destination is the new attempt's fresh, empty candidate
+                // directory, so an existing entry there is refused, not replaced.
+                let mut copy = to.create_new(&name)?;
+                // Size is never trusted: read one byte past the budget, so a
+                // sparse or still-growing file is refused, not copied unbounded.
+                let copied = std::io::copy(
+                    &mut std::io::Read::take(&mut file, budget.bytes.saturating_add(1)),
+                    &mut copy,
+                )
+                .map_err(|source| FsError::Io {
+                    operation: "copy file",
+                    path: name.clone().into(),
+                    source,
+                })?;
+                if copied > budget.bytes {
+                    drop(copy);
+                    let _ = to.unlink(&name);
+                    return Err(CopyRefusal::TooLarge);
+                }
+                budget.bytes -= copied;
+                if opened.mode & 0o100 != 0 {
+                    copy.make_owner_executable()?;
+                }
+            }
+            FileKind::Symlink | FileKind::Other => {}
         }
     }
     Ok(())
@@ -604,7 +824,7 @@ fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
 /// Host context for fresh account identity and version probes.
 struct Probe<'a> {
     roots: Option<&'a provenant_core::Roots>,
-    executor: &'a provenant_supervisor::exec::SystemExecutor,
+    executor: &'a provenant_providers::host::HostProbeExecutor<'a>,
     home: &'a Path,
     user: &'a std::ffi::OsStr,
     scratch: &'a Path,
@@ -674,7 +894,6 @@ fn observe_account(
             home,
             user,
             &directory,
-            scratch,
         )
         .map_err(|e| {
             format!(
@@ -784,6 +1003,7 @@ fn adapter_route(route: &ResolvedRoute) -> ResolvedRoute {
 /// Record this dispatch's credential authority durably beside the attempt
 /// before any refresh may act on it.
 fn credential_authority(
+    host_root: &Path,
     paths: &run::LaunchPaths,
     login: &provenant_providers::claude::Login<'_>,
 ) -> Result<provenant_providers::claude::CredentialAuthority, String> {
@@ -798,7 +1018,18 @@ fn credential_authority(
         .provider_state
         .parent()
         .ok_or("attempt directory missing")?;
-    let parent = Directory::open_anchor(attempt).map_err(|e| e.to_string())?;
+    let relative = attempt
+        .strip_prefix(host_root)
+        .map_err(|_| "attempt directory is outside host state")?;
+    let mut parent = Directory::open_anchor(host_root).map_err(|e| e.to_string())?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("attempt directory is not normalised".into());
+        };
+        parent = parent
+            .open_verified_directory(name)
+            .map_err(|e| e.to_string())?;
+    }
     let publication = parent
         .atomic_write(
             std::ffi::OsStr::new("credential-authority.json"),
@@ -895,11 +1126,17 @@ fn confinement_request(
     })
 }
 
+/// Home and TMPDIR for the host's Git utility: a fresh private directory under
+/// the host root, never the run state root. Inside a lane that is the
+/// lane-writable child store, where the lane could pre-create or populate it.
+fn host_git_home(host_root: &Path) -> Result<provenant_providers::host::HostProbeDir, String> {
+    provenant_providers::host::HostProbeDir::create(host_root).map_err(|error| error.to_string())
+}
+
 /// Verify the selected repository on the host and match the persisted dispatch
 /// project before deriving any Git read authority from that binding.
 fn read_only_plan(
     roots: &provenant_core::Roots,
-    state_root: &Path,
     project: ProjectId,
     cwd: &Path,
     git: &Path,
@@ -908,11 +1145,8 @@ fn read_only_plan(
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
     // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
-    // Its home lives under the run state root: inside a lane that is the
-    // child store, since the shared state root is not writable there.
-    let utility_home = state_root.join("tmp/git-home");
-    crate::fabric::private_dir(state_root, &utility_home).map_err(|error| error.to_string())?;
-    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home)
+    let utility_home = host_git_home(roots.state.as_path())?;
+    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home.path())
         .map_err(|error| error.to_string())?;
     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
@@ -1060,7 +1294,7 @@ fn write_setup_file(
                     parent.sync().map_err(|error| error.to_string())?;
                     true
                 }
-                Ok(_) | Err(provenant_supervisor::fs::FsError::TooLarge { .. }) => false,
+                Ok(_) | Err(FsError::TooLarge { .. }) => false,
                 Err(error) => return Err(error.to_string()),
             }
         }
@@ -1184,6 +1418,170 @@ mod tests {
     use super::*;
 
     #[test]
+    fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::{NetworkAccess, PlanPermissions};
+        use std::os::unix::fs::PermissionsExt;
+        struct Identity;
+        impl provenant_core::PathResolver for Identity {
+            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
+                let mut tail = PathBuf::new();
+                let mut head = path;
+                loop {
+                    if let Ok(resolved) = std::fs::canonicalize(head) {
+                        return Ok(resolved.join(tail));
+                    }
+                    let (Some(parent), Some(name)) = (head.parent(), head.file_name()) else {
+                        return Err(std::io::ErrorKind::NotFound.into());
+                    };
+                    tail = Path::new(name).join(tail);
+                    head = parent;
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let host_root = base.join("host-state");
+        // The lane controls its child store, including the old git-home path.
+        let child_store = host_root.join("children/parent-attempt");
+        let planted = child_store.join("tmp/git-home");
+        std::fs::create_dir_all(&planted)?;
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))?;
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo)?;
+        std::fs::create_dir_all(base.join("home"))?;
+        let real = provenant_supervisor::git::git_executable().ok_or("git unavailable")?;
+        // The smallest repository layout Git accepts, without spawning Git.
+        for dir in [".git/objects", ".git/refs/heads"] {
+            std::fs::create_dir_all(repo.join(dir))?;
+        }
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+        // A git that records the HOME and TMPDIR it was given, then runs the real one.
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin)?;
+        let record = base.join("seen");
+        let git = bin.join("git");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\n[ \"$HOME\" = \"$TMPDIR\" ] || exit 97\nls -ld \"$HOME\" >> {r}\nexec {g} \"$@\"\n",
+                r = record.display(),
+                g = real.display()
+            ),
+        )?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))?;
+
+        let roots = provenant_core::RootInputs {
+            state_dir: Some(host_root.clone()),
+            ..provenant_core::RootInputs::new(base.join("home"), repo.clone())
+        }
+        .resolve(&Identity)?;
+        let grant = |name: &str| PathGrant {
+            path: base.join(name),
+            scope: PathScope::Subtree,
+        };
+        let request = PlanRequest {
+            scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+            permissions: PlanPermissions {
+                read_only: None,
+                mode: AccessMode::ReadOnly,
+                scratch: grant("scratch"),
+                private_state: Some(grant("provider-state")),
+                read_roots: vec![grant("repo")],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        };
+        // The unbound project is refused, but only after host git has run.
+        let result = read_only_plan(&roots, ProjectId::from_bytes([1; 16]), &repo, &git, request);
+        assert!(result.is_err());
+
+        let seen = std::fs::read_to_string(&record)?;
+        assert!(!seen.is_empty(), "host git never ran");
+        for line in seen.lines() {
+            assert!(line.starts_with("drwx------"), "{line}");
+            assert!(
+                line.contains(&format!("{}/probe-", host_root.display())),
+                "{line}"
+            );
+            assert!(!line.contains("children"), "{line}");
+        }
+        // The home is gone once the plan is done, and the child store is unchanged.
+        let leftovers: Vec<_> = std::fs::read_dir(&host_root)?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with("probe-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert_eq!(std::fs::read_dir(&planted)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn credential_authority_never_follows_links_below_the_host_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{AttemptId, OperationId, RunId};
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let host_root = base.join("host-state");
+        let relative = Path::new("children/parent/runs/run/attempts/attempt");
+        let attempt = host_root.join(relative);
+        let config = base.join("home/.claude-pro");
+        std::fs::create_dir_all(attempt.join("provider-state"))?;
+        std::fs::create_dir_all(&config)?;
+        std::fs::write(config.join(".credentials.json"), b"{}")?;
+        let mut paths = run::LaunchPaths {
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            operation_id: OperationId::parse("fixture")?,
+            task_index: 0,
+            lane_depth: 2,
+            run_id: RunId::from_bytes([2; 16]),
+            deadline_unix_ms: u64::MAX,
+            scratch: attempt.join("scratch"),
+            provider_state: attempt.join("provider-state"),
+            temporary: attempt.join("tmp"),
+        };
+        let login = provenant_providers::claude::Login {
+            executable: Path::new("/fixture/claude"),
+            home: &base.join("home"),
+            user: std::ffi::OsStr::new("fixture"),
+            config_dir: &config,
+        };
+        credential_authority(&host_root, &paths, &login)?;
+        let record = attempt.join("credential-authority.json");
+        let original = std::fs::read(&record)?;
+        // Test intermediate child-store ancestors as well as the final attempt.
+        for ancestor in [
+            Path::new("children"),
+            Path::new("children/parent"),
+            relative,
+        ] {
+            let source = host_root.join(ancestor);
+            let redirected = base.join("redirected");
+            std::fs::rename(&source, &redirected)?;
+            std::os::unix::fs::symlink(&redirected, &source)?;
+            assert!(credential_authority(&host_root, &paths, &login).is_err());
+            assert_eq!(std::fs::read(&record)?, original);
+            std::fs::remove_file(&source)?;
+            std::fs::rename(&redirected, &source)?;
+        }
+        paths.provider_state = base.join("outside/provider-state");
+        assert!(credential_authority(&host_root, &paths, &login).is_err());
+        paths.provider_state = host_root.join("children/../outside/provider-state");
+        assert!(credential_authority(&host_root, &paths, &login).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn user_session_stores_resume_without_private_session_files()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{AttemptId, Digest, RunId, TaskId};
@@ -1231,6 +1629,313 @@ mod tests {
                 assert!(continuation_for(&prior, &route, "fixture", state, state).is_err());
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_never_follows_a_symlink() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let state = base.join("provider-state");
+        std::fs::create_dir_all(base.join("outside/fixture-session"))?;
+        std::fs::create_dir_all(&state)?;
+        std::os::unix::fs::symlink(base.join("outside"), state.join("candidate-0"))?;
+        assert_eq!(find_session_state(&state, "fixture-session"), None);
+        std::fs::create_dir_all(state.join("candidate-1/fixture-session"))?;
+        assert_eq!(
+            find_session_state(&state, "fixture-session"),
+            Some(state.join("candidate-1"))
+        );
+        std::os::unix::fs::symlink(&state, base.join("alias"))?;
+        assert_eq!(
+            find_session_state(&base.join("alias"), "fixture-session"),
+            None
+        );
+        assert!(copy_state(&state.join("candidate-0"), &base.join("copy")).is_err());
+        std::fs::write(state.join("candidate-1/fixture-session/own"), "lane")?;
+        copy_state(&state.join("candidate-1"), &base.join("copy"))?;
+        assert!(base.join("copy/fixture-session/own").is_file());
+        std::fs::write(base.join("outside/host-secret"), "host")?;
+        std::fs::hard_link(
+            base.join("outside/host-secret"),
+            state.join("candidate-1/fixture-session/linked"),
+        )?;
+        let copied = base.join("linked-copy");
+        assert_eq!(
+            copy_state(&state.join("candidate-1"), &copied),
+            Err("retained provider state holds a hard-linked file".into())
+        );
+        assert!(!copied.join("fixture-session/linked").exists());
+        Ok(())
+    }
+
+    // Test-only: std has no mkfifo and this crate forbids unsafe code.
+    #[allow(clippy::disallowed_methods)]
+    fn mkfifo(path: &Path) -> std::io::Result<()> {
+        let status = std::process::Command::new("mkfifo").arg(path).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("mkfifo failed"))
+        }
+    }
+
+    /// Copy `source` while `swap` changes the entry `victim` after its check,
+    /// on a thread so a blocking open fails the test instead of hanging it.
+    fn copy_with_swap(
+        source: &Path,
+        copied: &Path,
+        swap: impl FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+    ) -> Result<(), String> {
+        let (source, copied) = (source.to_owned(), copied.to_owned());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut swap = Some(swap);
+            let entry = source.join("victim");
+            BEFORE_OPEN.set(Some(Box::new(move |name| {
+                if name == "victim"
+                    && let Some(swap) = swap.take()
+                {
+                    swap(&entry).expect("swap the checked entry");
+                }
+            })));
+            let _ = sender.send(copy_state(&source, &copied));
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the copy finishes without blocking")
+    }
+
+    #[test]
+    fn retained_state_copy_skips_entries_swapped_after_their_check()
+    -> Result<(), Box<dyn std::error::Error>> {
+        type Swap = fn(&Path, &Path) -> std::io::Result<()>;
+        let swaps: [(&str, bool, Swap); 6] = [
+            ("file to outside link", false, |entry, outside| {
+                std::fs::remove_file(entry)?;
+                std::os::unix::fs::symlink(outside.join("host-secret"), entry)
+            }),
+            ("directory to outside link", true, |entry, outside| {
+                std::fs::remove_dir_all(entry)?;
+                std::os::unix::fs::symlink(outside, entry)
+            }),
+            ("file to FIFO", false, |entry, _| {
+                std::fs::remove_file(entry)?;
+                mkfifo(entry)
+            }),
+            ("file to socket", false, |entry, _| {
+                std::fs::remove_file(entry)?;
+                std::os::unix::net::UnixListener::bind(entry).map(drop)
+            }),
+            ("directory to file", true, |entry, _| {
+                std::fs::remove_dir_all(entry)?;
+                std::fs::write(entry, "replaced")
+            }),
+            ("file removed", false, |entry, _| {
+                std::fs::remove_file(entry)
+            }),
+        ];
+        for (label, directory, swap) in swaps {
+            let temp = tempfile::tempdir()?;
+            let base = std::fs::canonicalize(temp.path())?;
+            let (source, outside) = (base.join("candidate-0"), base.join("outside"));
+            std::fs::create_dir_all(&outside)?;
+            std::fs::write(outside.join("host-secret"), "host")?;
+            std::fs::create_dir_all(&source)?;
+            std::fs::write(source.join("keep"), "lane")?;
+            if directory {
+                std::fs::create_dir(source.join("victim"))?;
+                std::fs::write(source.join("victim/inner"), "lane")?;
+            } else {
+                std::fs::write(source.join("victim"), "lane")?;
+            }
+            let copied = base.join("copy");
+            let swap_outside = outside.clone();
+            copy_with_swap(&source, &copied, move |entry| swap(entry, &swap_outside))
+                .map_err(|error| format!("{label}: {error}"))?;
+            assert_eq!(std::fs::read_to_string(copied.join("keep"))?, "lane");
+            let entries = std::fs::read_dir(&copied)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(entries, ["keep"], "{label}: the swapped entry is skipped");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_refuses_a_file_swapped_for_a_hard_link()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(&source)?;
+        std::fs::write(base.join("host-secret"), "host")?;
+        std::fs::write(source.join("victim"), "lane")?;
+        let copied = base.join("copy");
+        let secret = base.join("host-secret");
+        let result = copy_with_swap(&source, &copied, move |entry| {
+            std::fs::remove_file(entry)?;
+            std::fs::hard_link(&secret, entry)
+        });
+        assert_eq!(
+            result,
+            Err("retained provider state holds a hard-linked file".into())
+        );
+        assert!(std::fs::symlink_metadata(copied.join("victim")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_skips_nested_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(base.join("outside/secrets"))?;
+        std::fs::write(base.join("outside/host-secret"), "host")?;
+        std::fs::write(base.join("outside/secrets/token"), "host")?;
+        std::fs::create_dir_all(source.join("sessions/2026"))?;
+        std::fs::write(source.join("config.toml"), "lane")?;
+        std::fs::write(source.join("sessions/2026/rollout.jsonl"), "turn")?;
+        std::fs::write(source.join("tool"), "#!/bin/sh\n")?;
+        std::fs::set_permissions(source.join("tool"), std::fs::Permissions::from_mode(0o755))?;
+        std::os::unix::fs::symlink(base.join("outside/host-secret"), source.join("file-link"))?;
+        std::os::unix::fs::symlink(base.join("outside/secrets"), source.join("dir-link"))?;
+        std::os::unix::fs::symlink(
+            base.join("outside/host-secret"),
+            source.join("sessions/2026/nested-link"),
+        )?;
+        let copied = base.join("copy");
+        copy_state(&source, &copied)?;
+        assert_eq!(std::fs::read_to_string(copied.join("config.toml"))?, "lane");
+        assert_eq!(
+            std::fs::read_to_string(copied.join("sessions/2026/rollout.jsonl"))?,
+            "turn"
+        );
+        let tool = std::fs::metadata(copied.join("tool"))?.permissions().mode();
+        assert_eq!(tool & 0o100, 0o100, "owner execute survives the copy");
+        for skipped in ["file-link", "dir-link", "sessions/2026/nested-link"] {
+            assert!(
+                std::fs::symlink_metadata(copied.join(skipped)).is_err(),
+                "{skipped} must not be copied"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_refuses_state_past_its_byte_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const LIMIT: u64 = 1 << 20;
+        let limits = StateLimits {
+            bytes: LIMIT,
+            ..RETAINED_STATE
+        };
+        let refusal = Err(format!(
+            "retained provider state exceeds its {LIMIT} byte copy budget"
+        ));
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        // A sparse file costs the lane no blocks but claims far past the budget.
+        let sparse = base.join("sparse");
+        std::fs::create_dir(&sparse)?;
+        std::fs::File::create(sparse.join("rollout.jsonl"))?.set_len(64 * LIMIT)?;
+        let copied = base.join("sparse-copy");
+        assert_eq!(copy_state_within(&sparse, &copied, limits), refusal);
+        assert!(
+            !copied.join("rollout.jsonl").exists(),
+            "the partial copy is removed"
+        );
+        // The budget spans the tree, not each file.
+        let split = base.join("split");
+        std::fs::create_dir_all(split.join("sessions"))?;
+        let half = vec![b'x'; usize::try_from(LIMIT / 2 + 1)?];
+        std::fs::write(split.join("history.jsonl"), &half)?;
+        std::fs::write(split.join("sessions/rollout.jsonl"), &half)?;
+        assert_eq!(
+            copy_state_within(&split, &base.join("split-copy"), limits),
+            refusal
+        );
+        // State of exactly the budget still copies whole.
+        let exact = base.join("exact");
+        std::fs::create_dir(&exact)?;
+        std::fs::write(exact.join("a"), &half)?;
+        std::fs::write(exact.join("b"), vec![b'y'; usize::try_from(LIMIT / 2 - 1)?])?;
+        copy_state_within(&exact, &base.join("exact-copy"), limits)?;
+        assert_eq!(std::fs::read(base.join("exact-copy/a"))?, half);
+        assert_eq!(
+            std::fs::metadata(base.join("exact-copy/b"))?.len(),
+            LIMIT / 2 - 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = StateLimits {
+            depth: 2,
+            entries: 4,
+            ..RETAINED_STATE
+        };
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let within = base.join("within");
+        std::fs::create_dir_all(within.join("a/b"))?;
+        std::fs::write(within.join("a/b/file"), "lane")?;
+        std::fs::write(within.join("top"), "lane")?;
+        copy_state_within(&within, &base.join("within-copy"), limits)?;
+        assert_eq!(
+            std::fs::read_to_string(base.join("within-copy/a/b/file"))?,
+            "lane"
+        );
+
+        let deep = base.join("deep");
+        std::fs::create_dir_all(deep.join("a/b/c"))?;
+        assert_eq!(
+            copy_state_within(&deep, &base.join("deep-copy"), limits),
+            Err("retained provider state nests deeper than 2 directories".into())
+        );
+
+        let wide = base.join("wide");
+        std::fs::create_dir(&wide)?;
+        for name in ["1", "2", "3", "4", "5"] {
+            std::fs::write(wide.join(name), "lane")?;
+        }
+        assert_eq!(
+            copy_state_within(&wide, &base.join("wide-copy"), limits),
+            Err("retained provider state exceeds 4 entries".into())
+        );
+        Ok(())
+    }
+
+    // No unprivileged test can mount a filesystem inside a temporary tree, so
+    // this runs the walk as if its anchor sat on another device.
+    #[test]
+    fn retained_state_copy_refuses_a_filesystem_boundary() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(source.join("sessions"))?;
+        std::fs::create_dir(base.join("copy"))?;
+        let (from, to) = (
+            Directory::open_anchor(&source)?,
+            Directory::open_anchor(&base.join("copy"))?,
+        );
+        let mut budget = Budget {
+            entries: RETAINED_STATE.entries,
+            bytes: RETAINED_STATE.bytes,
+            device: from.metadata()?.device ^ 1,
+        };
+        let opened = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = std::rc::Rc::clone(&opened);
+        BEFORE_OPEN.set(Some(Box::new(move |_| seen.set(true))));
+        let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget);
+        BEFORE_OPEN.set(None);
+        assert!(matches!(result, Err(CopyRefusal::CrossDevice)));
+        assert!(!opened.get(), "a mount point is refused before its open");
+        assert!(!base.join("copy/sessions").exists());
         Ok(())
     }
 

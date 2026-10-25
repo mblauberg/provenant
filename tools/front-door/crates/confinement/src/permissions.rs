@@ -1712,6 +1712,17 @@ fn compile_sbpl(
         .iter()
         .chain(&profile.spec.tool_writes)
         .collect();
+    // The path checks above know only conventional homes; the host's own home
+    // is broad and its nested credential roots stay hidden wherever it lives.
+    if read_grants
+        .iter()
+        .chain(shared_writes.iter().copied())
+        .chain(&profile.spec.tool_exec_roots)
+        .chain(&profile.spec.state_writes)
+        .any(|grant| encloses_home_credentials(grant, anchors.home))
+    {
+        return Err(PermissionError::CredentialRoot);
+    }
     for grant in &read_grants {
         anchors.verify_grant_held(grant)?;
     }
@@ -1967,11 +1978,16 @@ fn verify_shared_writes(
 
 /// Credential and preservation paths no lane may read or write, whatever
 /// else its profile grants. Rendered last so they override every allow.
+/// `Library/Keychains` stays out: Agy reads its login keychain through an
+/// exact authentication grant.
 #[cfg(target_os = "macos")]
-fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 8] {
+fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 11] {
     [
         (".ssh", PathScope::Subtree),
         (".aws", PathScope::Subtree),
+        (".azure", PathScope::Subtree),
+        (".gnupg", PathScope::Subtree),
+        (".config/gh", PathScope::Subtree),
         (".kube", PathScope::Subtree),
         (".secrets", PathScope::Subtree),
         ("Monero", PathScope::Subtree),
@@ -2490,10 +2506,44 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
 
 pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), PermissionError> {
     grant.validate()?;
-    if is_credential_root(&grant.path) {
+    if is_credential_root(&grant.path) || encloses_credential_root(grant) {
         return Err(PermissionError::CredentialRoot);
     }
     Ok(())
+}
+
+/// A subtree of `/Users/<name>` or `/home/<name>` that holds a nested
+/// credential root (`~/.config`, `~/Library`, `~/Archives`) would expose it.
+/// The home itself is a broad root; `compile_sbpl` repeats this check against
+/// the host's actual home, wherever it lives.
+fn encloses_credential_root(grant: &PathGrant) -> bool {
+    let mut normal = grant
+        .path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        });
+    match (normal.next(), normal.next()) {
+        (Some(root), Some(user)) if root == "Users" || root == "home" => {
+            encloses_home_credentials(grant, &Path::new("/").join(root).join(user))
+        }
+        _ => false,
+    }
+}
+
+/// A subtree that holds `home` itself or one of its nested credential roots.
+fn encloses_home_credentials(grant: &PathGrant, home: &Path) -> bool {
+    grant.scope == PathScope::Subtree
+        && (home.starts_with(&grant.path)
+            || [
+                ".config",
+                "Library",
+                "Library/Application Support",
+                "Archives",
+            ]
+            .iter()
+            .any(|nested| grant.path == home.join(nested)))
 }
 
 /// Validates a grant that confers only read and exec. It is the one place the
@@ -2501,7 +2551,7 @@ pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), Perm
 /// roots and private state keep the strict credential-root check.
 pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), PermissionError> {
     grant.validate()?;
-    if is_codex_standalone_package(&grant.path) {
+    if is_codex_standalone_package(&grant.path) && !encloses_credential_root(grant) {
         return Ok(());
     }
     validate_noncredential_grant(grant)
@@ -2830,6 +2880,133 @@ mod tests {
             };
             assert!(grant.validate().is_ok(), "{path}");
         }
+    }
+
+    #[test]
+    fn grants_enclosing_a_credential_root_are_refused() {
+        let grant = |path: &str, scope| PathGrant {
+            path: PathBuf::from(path),
+            scope,
+        };
+        for path in [
+            "/Users/alice/.config",
+            "/Users/alice/Library",
+            "/Users/alice/Library/Application Support",
+            "/Users/alice/Archives",
+        ] {
+            for validate in [validate_read_exec_grant, validate_noncredential_grant] {
+                assert!(
+                    matches!(
+                        validate(&grant(path, PathScope::Subtree)),
+                        Err(PermissionError::CredentialRoot)
+                    ),
+                    "{path}"
+                );
+            }
+            // An exact grant exposes the directory entry, not what it holds.
+            assert!(validate_read_exec_grant(&grant(path, PathScope::Exact)).is_ok());
+        }
+        for path in [
+            "/Users/alice/.config/cursor",
+            "/Users/alice/.config/opencode",
+            "/Users/alice/Library/pnpm",
+            "/Users/alice/Library/Caches/pnpm",
+            "/Users/alice/project/.config",
+            "/Users/alice/project/Archives",
+            "/Library/Developer/CommandLineTools",
+            "/srv/work/.config",
+        ] {
+            assert!(
+                validate_read_exec_grant(&grant(path, PathScope::Subtree)).is_ok(),
+                "{path}"
+            );
+        }
+        // An unconventional home is checked against the host's own path.
+        let home = Path::new("/srv/alice");
+        for path in [
+            "/srv",
+            "/srv/alice",
+            "/srv/alice/.config",
+            "/srv/alice/Library",
+        ] {
+            assert!(
+                encloses_home_credentials(&grant(path, PathScope::Subtree), home),
+                "{path}"
+            );
+        }
+        for path in ["/srv/alice/project", "/srv/alice/project/.config"] {
+            assert!(
+                !encloses_home_credentials(&grant(path, PathScope::Subtree), home),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compiler_refuses_grants_of_or_around_an_unconventional_host_home() {
+        // Static grant checks know only /Users and /home; the compiler must
+        // still refuse the host's actual home and any root that encloses it.
+        let home = Path::new("/srv/team/alice");
+        let grant = |path: &Path| PathGrant {
+            path: path.to_owned(),
+            scope: PathScope::Subtree,
+        };
+        let profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                process_executables: vec![PathGrant {
+                    path: "/opt/provider/bin/cli".into(),
+                    scope: PathScope::Exact,
+                }],
+                ..ProviderProfileSpec::default()
+            },
+            observations: BTreeMap::new(),
+        };
+        let plan = |read_roots: Vec<PathGrant>, write_roots: Vec<PathGrant>| PlanPermissions {
+            read_only: None,
+            mode: AccessMode::ReadOnly,
+            scratch: grant(Path::new("/srv/scratch")),
+            private_state: None,
+            read_roots,
+            protected_roots: Vec::new(),
+            secret_roots: Vec::new(),
+            selected_authentication: None,
+            include_continuation: false,
+            write_roots,
+            network: NetworkAccess::Provider,
+            nested_confinement: false,
+        };
+        let anchors = Anchors {
+            home,
+            directories: &[],
+            safe_fs: &LocalFs,
+            worktree: None,
+        };
+        for root in [home, Path::new("/srv/team"), Path::new("/srv")] {
+            for plan in [
+                plan(vec![grant(root)], Vec::new()),
+                plan(Vec::new(), vec![grant(root)]),
+            ] {
+                assert!(validate_read_exec_grant(&grant(root)).is_ok(), "{root:?}");
+                assert!(
+                    matches!(
+                        compile_sbpl(&plan, &profile, &anchors),
+                        Err(PermissionError::CredentialRoot)
+                    ),
+                    "{root:?}"
+                );
+            }
+        }
+        // A project beneath the home passes this check and fails later only
+        // because the fixture holds no anchors.
+        assert!(matches!(
+            compile_sbpl(
+                &plan(vec![grant(&home.join("project"))], Vec::new()),
+                &profile,
+                &anchors
+            ),
+            Err(PermissionError::AnchorMismatch)
+        ));
     }
 
     #[cfg(target_os = "macos")]
@@ -4120,6 +4297,9 @@ mod tests {
             "(deny file-read* (subpath \"/Users/fixture/Monero\"))",
             "(deny file-write* (subpath \"/Users/fixture/Archives/git-preservation\"))",
             "(deny file-read* (literal \"/Users/fixture/.cargo/credentials.toml\"))",
+            "(deny file-read* (subpath \"/Users/fixture/.gnupg\"))",
+            "(deny file-read* (subpath \"/Users/fixture/.azure\"))",
+            "(deny file-read* (subpath \"/Users/fixture/.config/gh\"))",
         ] {
             assert!(
                 provider.find(denied).expect(denied) > last_allow,
