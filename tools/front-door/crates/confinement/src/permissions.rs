@@ -1370,6 +1370,17 @@ fn compile_sbpl(
         .iter()
         .chain(&profile.spec.tool_writes)
         .collect();
+    // The path checks above know only conventional homes; the host's own home
+    // is broad and its nested credential roots stay hidden wherever it lives.
+    if read_grants
+        .iter()
+        .chain(shared_writes.iter().copied())
+        .chain(&profile.spec.tool_exec_roots)
+        .chain(&profile.spec.state_writes)
+        .any(|grant| encloses_home_credentials(grant, anchors.home))
+    {
+        return Err(PermissionError::CredentialRoot);
+    }
     for grant in &read_grants {
         anchors.verify_grant_held(grant)?;
     }
@@ -2159,19 +2170,38 @@ pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), Perm
     Ok(())
 }
 
-/// A subtree ending where a nested credential root begins (`~/.config`,
-/// `~/Library`, `~/Archives`) would expose that root, so it is refused too.
-/// Single-component roots sit directly under a home, which is a broad root.
+/// A subtree of `/Users/<name>` or `/home/<name>` that holds a nested
+/// credential root (`~/.config`, `~/Library`, `~/Archives`) would expose it.
+/// The home itself is a broad root; `compile_sbpl` repeats this check against
+/// the host's actual home, wherever it lives.
 fn encloses_credential_root(grant: &PathGrant) -> bool {
+    let mut normal = grant
+        .path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        });
+    match (normal.next(), normal.next()) {
+        (Some(root), Some(user)) if root == "Users" || root == "home" => {
+            encloses_home_credentials(grant, &Path::new("/").join(root).join(user))
+        }
+        _ => false,
+    }
+}
+
+/// A subtree that holds `home` itself or one of its nested credential roots.
+fn encloses_home_credentials(grant: &PathGrant, home: &Path) -> bool {
     grant.scope == PathScope::Subtree
-        && [
-            ".config",
-            "Library",
-            "Library/Application Support",
-            "Archives",
-        ]
-        .iter()
-        .any(|tail| grant.path.ends_with(tail))
+        && (home.starts_with(&grant.path)
+            || [
+                ".config",
+                "Library",
+                "Library/Application Support",
+                "Archives",
+            ]
+            .iter()
+            .any(|nested| grant.path == home.join(nested)))
 }
 
 /// Validates a grant that confers only read and exec. It is the one place the
@@ -2539,10 +2569,32 @@ mod tests {
             "/Users/alice/.config/opencode",
             "/Users/alice/Library/pnpm",
             "/Users/alice/Library/Caches/pnpm",
+            "/Users/alice/project/.config",
+            "/Users/alice/project/Archives",
             "/Library/Developer/CommandLineTools",
+            "/srv/work/.config",
         ] {
             assert!(
                 validate_read_exec_grant(&grant(path, PathScope::Subtree)).is_ok(),
+                "{path}"
+            );
+        }
+        // An unconventional home is checked against the host's own path.
+        let home = Path::new("/srv/alice");
+        for path in [
+            "/srv",
+            "/srv/alice",
+            "/srv/alice/.config",
+            "/srv/alice/Library",
+        ] {
+            assert!(
+                encloses_home_credentials(&grant(path, PathScope::Subtree), home),
+                "{path}"
+            );
+        }
+        for path in ["/srv/alice/project", "/srv/alice/project/.config"] {
+            assert!(
+                !encloses_home_credentials(&grant(path, PathScope::Subtree), home),
                 "{path}"
             );
         }
