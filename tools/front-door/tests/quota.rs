@@ -617,3 +617,90 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("fixture-account"));
     rig.assert_legacy_unchanged()
 }
+
+fn json(out: &provenant_supervisor::exec::ExecOutcome) -> Result<serde_json::Value> {
+    Ok(serde_json::from_slice(&out.stdout.bytes)?)
+}
+
+#[test]
+fn show_carries_display_blocks_and_display_command_persists() -> Result {
+    let rig = quota_rig()?;
+    let shown = json(&rig.command(&["quota", "show", "--json"])?)?;
+    assert_eq!(
+        shown["data"]["display"],
+        serde_json::json!({"headline": "auto", "icon": "most_constrained"})
+    );
+    assert_eq!(
+        shown["data"]["accounts"][0]["display"],
+        serde_json::json!({"id": "codex-default", "hidden": false})
+    );
+    let set = rig.command(&[
+        "accounts",
+        "set",
+        "default",
+        "--display-name",
+        "Work",
+        "--order",
+        "2",
+        "--hidden",
+        "true",
+        "--headline",
+        "weekly",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&set),
+        0,
+        "{}",
+        String::from_utf8_lossy(&set.stdout.bytes)
+    );
+    let out = rig.command(&[
+        "quota",
+        "display",
+        "--headline",
+        "weekly",
+        "--icon",
+        "default",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let out = json(&out)?;
+    assert_eq!(out["command"], "quota display");
+    assert_eq!(
+        out["data"]["display"],
+        serde_json::json!({"headline": "weekly", "icon": "codex-default"})
+    );
+    assert_eq!(
+        out["data"]["accounts"][0]["display"],
+        serde_json::json!({"id": "codex-default", "name": "Work", "hidden": true, "order": 2, "headline": "weekly"})
+    );
+    let config = std::fs::read_to_string(rig.state.join("config.toml"))?;
+    assert!(config.contains("[domains.quota.display]"), "{config}");
+    assert!(config.contains("codex-default"));
+    // No flags changes nothing; unknown icon is refused and leaves config alone.
+    let before = config;
+    assert_eq!(code(&rig.command(&["quota", "display", "--json"])?), 0);
+    assert_ne!(
+        code(&rig.command(&["quota", "display", "--icon", "nope", "--json"])?),
+        0
+    );
+    assert_eq!(
+        std::fs::read_to_string(rig.state.join("config.toml"))?,
+        before
+    );
+    let reset =
+        json(&rig.command(&["quota", "display", "--icon", "most_constrained", "--json"])?)?;
+    assert_eq!(reset["data"]["display"]["icon"], "most_constrained");
+    // Tick output and report.json decorate identically.
+    let tick = json(&rig.command(&["quota", "tick", "--json"])?)?;
+    let disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
+    assert_eq!(disk, tick["data"]);
+    assert_eq!(disk["accounts"][0]["display"]["name"], "Work");
+    rig.assert_legacy_unchanged()
+}

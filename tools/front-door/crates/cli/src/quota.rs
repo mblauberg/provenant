@@ -411,9 +411,7 @@ fn decorate(
         row.display = accounts
             .entries
             .iter()
-            .find(|(_, e)| {
-                e.adapter == row.account.adapter && e.key == row.account.account_key
-            })
+            .find(|(_, e)| e.adapter == row.account.adapter && e.key == row.account.account_key)
             .map(|(id, e)| RowDisplay {
                 id: id.clone(),
                 name: e.display_name.clone(),
@@ -433,12 +431,8 @@ fn execute(
     let (filter, tick) = match command {
         Quota::Show(filter) => (filter, None),
         Quota::Display { headline, icon } => {
-            crate::accounts::set_quota_display(
-                roots,
-                headline.map(Into::into),
-                icon.as_deref(),
-            )
-            .map_err(EdgeError::Display)?;
+            crate::accounts::set_quota_display(roots, headline.map(Into::into), icon.as_deref())
+                .map_err(EdgeError::Display)?;
             (&all, None)
         }
         Quota::Tick {
@@ -485,14 +479,8 @@ fn execute(
     let Some(tick) = tick else {
         let mut records = read_cache(roots)?;
         add_configured(&mut records, &configured);
-        let mut report = schedule::report(
-            &policies,
-            &records,
-            &detected,
-            &query,
-            now,
-            report_path,
-        )?;
+        let mut report =
+            schedule::report(&policies, &records, &detected, &query, now, report_path)?;
         decorate(&mut report, &entries, &settings.display);
         return Ok(report);
     };
