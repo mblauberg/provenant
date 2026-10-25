@@ -1,7 +1,7 @@
 # Spec: replay bench studies, model-effort frontier and fleet topology
 
 Status: **proposed**, 2026-10-22, for issue #1064. This file defines two
-studies that build on the [replay bench](replay-bench.md). It reuses that
+studies that build on the [replay bench](../../runbooks/bench.md). It reuses that
 spec's statistics (unit, repeats, win rule, guards, power, zero cases),
 sets and split rules (B1), isolation and confidentiality (B2), run rules
 (B3) and row provenance (B4) by reference. It grants no authority, and a
