@@ -526,7 +526,8 @@ pub(super) fn dispatch(
                 json!({ "host": host, "path": worktree.path, "branch": worktree.branch });
             format!(
                 "worktree {} {} (on the peer)\n{human}",
-                worktree.branch, worktree.path
+                provenant_fabric_runtime::hosts::plain_text(&worktree.branch, usize::MAX),
+                provenant_fabric_runtime::hosts::plain_text(&worktree.path, usize::MAX)
             )
         }
         None => human,
