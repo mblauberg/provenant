@@ -933,9 +933,13 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
                 "stream-json",
                 "--workspace",
                 "/fixture/repo",
+                "--trust",
+                "--sandbox",
+                "disabled",
             ];
-            if access == Access::WorktreeWrite {
-                expected.push("--force");
+            match access {
+                Access::ReadOnly => expected.extend(["--mode", "ask"]),
+                Access::WorktreeWrite => expected.push("--force"),
             }
             if resume {
                 expected.extend(["--resume", "fixture-session"]);
