@@ -14,7 +14,9 @@ use std::{
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
-    provenant_supervisor::fixture::tempdir(".tmp")
+    provenant_supervisor::fixture::tempdir(|root| {
+        tempfile::Builder::new().prefix(".tmp").tempdir_in(root)
+    })
 }
 
 fn tempdir_in(parent: &Path) -> std::io::Result<tempfile::TempDir> {

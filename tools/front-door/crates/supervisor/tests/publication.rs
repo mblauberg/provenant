@@ -272,7 +272,11 @@ const TESTS: &[&str] = &[
 ];
 
 fn run_case(name: &str) -> Result<()> {
-    let root = fixture::tempdir("s2-publication-")?;
+    let root = fixture::tempdir(|root| {
+        tempfile::Builder::new()
+            .prefix("s2-publication-")
+            .tempdir_in(root)
+    })?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let result = match name {
         "exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot" => {

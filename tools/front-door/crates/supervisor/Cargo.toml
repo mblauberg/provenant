@@ -14,14 +14,13 @@ serde_json = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 
 [features]
-fixture = ["dep:tempfile"]
+fixture = []
 
 [[test]]
 name = "process"

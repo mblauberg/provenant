@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) fn tempdir() -> io::Result<tempfile::TempDir> {
-    provenant_supervisor::fixture::tempdir(".tmp")
+    provenant_supervisor::fixture::tempdir(|root| {
+        tempfile::Builder::new().prefix(".tmp").tempdir_in(root)
+    })
 }
 
 pub(crate) struct Fixture {

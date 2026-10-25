@@ -433,7 +433,9 @@ const TESTS: &[&str] = &[
 ];
 
 fn run_case(name: &str) -> Result<()> {
-    let root = fixture::short_tempdir("s1-", "parent-exit.sock")?;
+    let root = fixture::short_tempdir("parent-exit.sock", |root| {
+        tempfile::Builder::new().prefix("s1-").tempdir_in(root)
+    })?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let result = match name {
         "captures_bytes_and_text_validation" => captures_bytes_and_text_validation(root.path()),
