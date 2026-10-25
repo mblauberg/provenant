@@ -2403,6 +2403,7 @@ impl Factory {
                         .map_err(|_| FacadeError::StateCorrupt)?;
                     coverage.more_events |= page.truncated;
                 }
+                Err(error) if host == ctx.identity.host => return Err(error),
                 Err(_) => coverage.unknown_hosts.push(host),
             }
         }
