@@ -20,14 +20,6 @@ impl TaskState {
             Self::Cancelled => "cancelled",
         }
     }
-    /// Historical state mapping is data for the one-shot importer, not a live
-    /// compatibility API. Only Open and blocked rows are eligible for import.
-    pub(crate) fn from_old(state: &str) -> Result<Self> {
-        match state {
-            "open" | "blocked" => Ok(Self::Open),
-            _ => Err(Error::Invalid("old task state")),
-        }
-    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,7 +35,6 @@ pub struct Task {
     pub expires_at: Option<WallTime>,
     pub created_at: WallTime,
     pub updated_at: WallTime,
-    pub legacy: Option<LegacyRef>,
 }
 #[derive(Clone)]
 pub struct TaskClaim {

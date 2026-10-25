@@ -13,7 +13,6 @@ pub enum EventKind {
     TaskRenewed,
     TaskReleased,
     TaskFinished,
-    Imported,
     RunChanged,
     ClaimAcquired,
     ClaimRenewed,

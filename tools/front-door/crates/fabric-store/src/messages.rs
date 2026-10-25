@@ -11,25 +11,16 @@ pub enum MessageKind {
     Response,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyRef {
-    pub source: String,
-    pub project: String,
-    pub id: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MessageRef {
     Local { id: MessageId },
     Remote { host: HostId, id: MessageId },
-    Legacy { reference: LegacyRef },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRef {
     Local { id: TaskId },
     Remote { host: HostId, id: TaskId },
-    Legacy { reference: LegacyRef },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,14 +31,12 @@ pub struct Message {
     pub sender: ActorId,
     pub recipients: Vec<ActorId>,
     pub conversation: Option<MessageRef>,
-    pub legacy_output_path: Option<String>,
     pub kind: MessageKind,
     pub body: String,
     pub artifacts: Vec<ArtifactRef>,
     pub reply_to: Option<MessageRef>,
     pub task: Option<TaskRef>,
     pub created_at: WallTime,
-    pub legacy: Option<LegacyRef>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

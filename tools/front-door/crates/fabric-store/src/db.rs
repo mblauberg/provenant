@@ -18,6 +18,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/004-claim-lookup.sql"),
     include_str!("migrations/005-coordination-operations.sql"),
     include_str!("migrations/006-federation.sql"),
+    include_str!("migrations/007-remove-legacy-import.sql"),
 ];
 fn schema_version(db: &Connection) -> Result<usize> {
     // One statement reads both values from one snapshot, so a concurrent first
