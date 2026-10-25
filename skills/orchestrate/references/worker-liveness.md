@@ -22,9 +22,13 @@ Never signal a PID inferred from a stale record or an empty observation.
 ## Detached work
 
 Run owns detached custody and recovery. Use `provenant reconcile --id RUN` for
-recovery. Resume an attempt with `fabric_run`'s `resume` operation
-(`target: { attempt }`, `expected_generation: 0`, `operation_id`, `prompt`).
+recovery. Resume an attempt with `fabric_run`'s `resume` operation (`target: {
+attempt }`, `expected_generation: 0`, `operation_id`, `prompt`).
 `expected_generation` counts earlier continuations, so pass 0; it is not the
-attempt record's `generation`. On `Conflict`, read the target's `fabric_run` `status` (`state`): if it is
-still running, wait; if a later attempt names it as `parent_attempt`, target
-that child; otherwise use a fresh `operation_id`. Use an authorised prompt for continuation.
+attempt record's `generation`. On `Conflict`, read the target's `fabric_run`
+`status`. If its `state` is not `terminal`, wait and retry. If you are retrying
+your own resume, repeat it with the same `operation_id`, prompt and target; the
+replay returns the existing continuation, including on a peer. Otherwise use
+`fabric_run` `list` (local host only) and target the attempt whose `retry_of` is
+the target. Use a fresh `operation_id` only when the ID was reused with a
+different prompt. Use an authorised prompt for continuation.

@@ -47,10 +47,16 @@ retry limit and escalation path declared by the owning lifecycle.
 
 If dispatch or capture is interrupted, run `provenant reconcile --id RUN`,
 inspect the Fabric task and existing output, then resume the exact attempt with
-`fabric_run`'s `resume` operation (`target: { attempt }`,
-`expected_generation: 0`, `operation_id`, `prompt`). `expected_generation`
-counts earlier continuations, so pass 0; it is not the attempt record's
-`generation`. On `Conflict`, read `fabric_run` `status`: wait if the target is running, target its child (`parent_attempt`) if one exists, otherwise use a fresh `operation_id`. Preserve partial results. Retry only missing or failed work within its bound; do not
+`fabric_run`'s `resume` operation (`target: { attempt }`, `expected_generation:
+0`, `operation_id`, `prompt`). `expected_generation` counts earlier
+continuations, so pass 0; it is not the attempt record's `generation`. On
+`Conflict`, read the target's `fabric_run` `status`. If its `state` is not
+`terminal`, wait and retry. If you are retrying your own resume, repeat it with
+the same `operation_id`, prompt and target; the replay returns the existing
+continuation, including on a peer. Otherwise use `fabric_run` `list` (local host
+only) and target the attempt whose `retry_of` is the target. Use a fresh
+`operation_id` only when the ID was reused with a different prompt. Preserve
+partial results. Retry only missing or failed work within its bound; do not
 relaunch a still-active task because a session lost its context.
 
 ## Checklist

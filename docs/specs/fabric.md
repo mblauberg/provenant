@@ -197,10 +197,9 @@ under `fetch/<host>/<run>/`. Output tools accept no arbitrary source or
 destination path.
 
 Submission tasks carry a prompt and route preference, with optional account,
-access, worktree and delivery ID, and a required `timeout_ms` (1000 to
-14400000). They accept no artefact inputs.
-`resume` is separate from submission and cannot change route, account or
-authority.
+access, worktree, `deliver` and delivery ID, and a required `timeout_ms` (1000
+to 14400000). They accept no artefact inputs. `resume` is separate from
+submission and cannot change route, account or authority.
 
 ### Bounded graphs and route fallback
 

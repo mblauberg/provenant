@@ -37,10 +37,13 @@ bounded slices with `fabric_output`'s `read` operation, and steer with
 `fabric_mail`'s `send` operation or `fabric_run`'s `resume` operation using
 `target: { attempt: ATTEMPT }`, `expected_generation: 0` (it counts earlier
 continuations, not the attempt record's `generation`), `operation_id` and the
-prompt (`resume` also answers `input_required` lanes). On `Conflict`,
-read the target's `fabric_run` `status` (`state`): if it is still running,
-wait; if a later attempt names it as `parent_attempt`, target that child;
-otherwise use a fresh `operation_id`.
+prompt (`resume` also answers `input_required` lanes). On `Conflict`, read the
+target's `fabric_run` `status`. If its `state` is not `terminal`, wait and
+retry. If you are retrying your own resume, repeat it with the same
+`operation_id`, prompt and target; the replay returns the existing continuation,
+including on a peer. Otherwise use `fabric_run` `list` (local host only) and
+target the attempt whose `retry_of` is the target. Use a fresh `operation_id`
+only when the ID was reused with a different prompt.
 
 Long-running watchable processes go to a background shell with output to a run
 file.
