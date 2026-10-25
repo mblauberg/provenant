@@ -43,8 +43,12 @@ used as written and must be real paths (`/private/tmp`, not `/tmp`).
 
 Inspect `provenant lanes --id RUN/TASK/ATTEMPT --json` and its `write_grants`
 array for the write allowances applied to that attempt. Each entry records its
-source, byte-encoded absolute path and scope. Writer Git grants are represented
-by `git_grants_digest`; profile deny rules still restrict the listed allowances.
+source, scope and absolute path. The path is stored relative to `/`, as
+`{"relative_to_root":{"encoding":"utf8","path":"Users/..."}}`, or with
+`"encoding":"native_bytes"` and a hex `path` when it is not UTF-8. A
+`write_root` source covers both `[domains.run] writer_writes` and
+`--write-root`. Writer Git grants are represented by `git_grants_digest`;
+profile deny rules still restrict the listed allowances.
 
 Writers hold no Git credentials, and remote-tracking refs and shared config are
 read-only, so `git fetch` of a configured remote fails. Fetch on the host
