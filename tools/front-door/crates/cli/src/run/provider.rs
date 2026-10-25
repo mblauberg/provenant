@@ -8,7 +8,7 @@ use provenant_core::{ProjectId, WorkScope};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
-use provenant_supervisor::fs::{Directory, FileKind, PublishMode, entropy_128};
+use provenant_supervisor::fs::{Directory, FileKind, FsError, PublishMode, entropy_128};
 use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::path::{Path, PathBuf};
 
@@ -594,49 +594,81 @@ fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
 /// still change the tree, so every entry is opened from its parent's handle
 /// without following a link, and the opened descriptor is checked and copied.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
-    let error = |error: provenant_supervisor::fs::FsError| {
-        format!("copying retained provider state: {error}")
-    };
+    let failed =
+        |detail: &dyn std::fmt::Display| format!("copying retained provider state: {detail}");
     // The anchor opens without following its final component; this stat only
     // names the common refusal.
-    let metadata = std::fs::symlink_metadata(from)
-        .map_err(|failure| format!("copying retained provider state: {failure}"))?;
-    if !metadata.is_dir() {
+    if !std::fs::symlink_metadata(from)
+        .map_err(|error| failed(&error))?
+        .is_dir()
+    {
         return Err("retained provider state is not a directory".into());
     }
-    let source = Directory::open_anchor(from).map_err(error)?;
-    std::fs::create_dir_all(to)
-        .map_err(|failure| format!("copying retained provider state: {failure}"))?;
-    let target = Directory::open_anchor(to).map_err(error)?;
-    copy_tree(&source, &target).map_err(|failure| match failure {
+    let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
+    std::fs::create_dir_all(to).map_err(|error| failed(&error))?;
+    let target = Directory::open_anchor(to).map_err(|error| failed(&error))?;
+    copy_tree(&source, &target).map_err(|refusal| match refusal {
         CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
-        CopyRefusal::Fs(failure) => error(failure),
+        CopyRefusal::Fs(error) => failed(&error),
     })
 }
 
 enum CopyRefusal {
     HardLink,
-    Fs(provenant_supervisor::fs::FsError),
+    Fs(FsError),
 }
 
-impl From<provenant_supervisor::fs::FsError> for CopyRefusal {
-    fn from(error: provenant_supervisor::fs::FsError) -> Self {
+impl From<FsError> for CopyRefusal {
+    fn from(error: FsError) -> Self {
         Self::Fs(error)
     }
 }
 
+/// The entry changed type or vanished after it was listed. A leftover process
+/// may churn the tree; skipping such an entry copies nothing it names.
+fn changed_entry(error: &FsError) -> bool {
+    error.is_symlink()
+        || error.is_not_found()
+        || matches!(error, FsError::NotRegular { .. })
+        // A directory now a file, or a file now a socket (Linux, then Darwin).
+        || matches!(
+            error.raw_os_error(),
+            Some(libc::ENOTDIR | libc::ENXIO | libc::EOPNOTSUPP)
+        )
+}
+
+// Lets a test change an entry between its stat and its open.
+#[cfg(test)]
+type OpenHook = Box<dyn FnMut(&std::ffi::OsStr)>;
+#[cfg(test)]
+thread_local! {
+    static BEFORE_OPEN: std::cell::RefCell<Option<OpenHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn before_open(_name: &std::ffi::OsStr) {
+    #[cfg(test)]
+    BEFORE_OPEN.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook(_name);
+        }
+    });
+}
+
 fn copy_tree(from: &Directory, to: &Directory) -> Result<(), CopyRefusal> {
-    use provenant_supervisor::fs::FsError;
-    // An entry swapped for a link after the stat fails to open and is skipped.
-    let skipped =
-        |error: &FsError| error.is_symlink() || matches!(error, FsError::NotRegular { .. });
     for name in from.entries()? {
         let name = name?;
-        match from.metadata_at(&name, false)?.kind {
+        let kind = match from.metadata_at(&name, false) {
+            Ok(metadata) => metadata.kind,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(error.into()),
+        };
+        before_open(&name);
+        match kind {
             FileKind::Directory => {
                 let child = match from.open_directory(&name) {
                     Ok(child) => child,
-                    Err(error) if skipped(&error) => continue,
+                    Err(error) if changed_entry(&error) => continue,
                     Err(error) => return Err(error.into()),
                 };
                 match to.mkdir(&name, 0o700) {
@@ -649,7 +681,7 @@ fn copy_tree(from: &Directory, to: &Directory) -> Result<(), CopyRefusal> {
             FileKind::Regular => {
                 let mut file = match from.open_read(&name) {
                     Ok(file) => file,
-                    Err(error) if skipped(&error) => continue,
+                    Err(error) if changed_entry(&error) => continue,
                     Err(error) => return Err(error.into()),
                 };
                 // A hard link can name a host file the lane could not otherwise
@@ -658,6 +690,8 @@ fn copy_tree(from: &Directory, to: &Directory) -> Result<(), CopyRefusal> {
                 if opened.links > 1 {
                     return Err(CopyRefusal::HardLink);
                 }
+                // The destination is the new attempt's fresh, empty candidate
+                // directory, so an existing entry there is refused, not replaced.
                 let mut copy = to.create_new(&name)?;
                 std::io::copy(&mut file, &mut copy).map_err(|source| FsError::Io {
                     operation: "copy file",
@@ -1133,7 +1167,7 @@ fn write_setup_file(
                     parent.sync().map_err(|error| error.to_string())?;
                     true
                 }
-                Ok(_) | Err(provenant_supervisor::fs::FsError::TooLarge { .. }) => false,
+                Ok(_) | Err(FsError::TooLarge { .. }) => false,
                 Err(error) => return Err(error.to_string()),
             }
         }
@@ -1341,6 +1375,122 @@ mod tests {
             Err("retained provider state holds a hard-linked file".into())
         );
         assert!(!copied.join("fixture-session/linked").exists());
+        Ok(())
+    }
+
+    // Test-only: std has no mkfifo and this crate forbids unsafe code.
+    #[allow(clippy::disallowed_methods)]
+    fn mkfifo(path: &Path) -> std::io::Result<()> {
+        let status = std::process::Command::new("mkfifo").arg(path).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("mkfifo failed"))
+        }
+    }
+
+    /// Copy `source` while `swap` changes the entry `victim` after its check,
+    /// on a thread so a blocking open fails the test instead of hanging it.
+    fn copy_with_swap(
+        source: &Path,
+        copied: &Path,
+        swap: impl FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+    ) -> Result<(), String> {
+        let (source, copied) = (source.to_owned(), copied.to_owned());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut swap = Some(swap);
+            let entry = source.join("victim");
+            BEFORE_OPEN.set(Some(Box::new(move |name| {
+                if name == "victim"
+                    && let Some(swap) = swap.take()
+                {
+                    swap(&entry).expect("swap the checked entry");
+                }
+            })));
+            let _ = sender.send(copy_state(&source, &copied));
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the copy finishes without blocking")
+    }
+
+    #[test]
+    fn retained_state_copy_skips_entries_swapped_after_their_check()
+    -> Result<(), Box<dyn std::error::Error>> {
+        type Swap = fn(&Path, &Path) -> std::io::Result<()>;
+        let swaps: [(&str, bool, Swap); 6] = [
+            ("file to outside link", false, |entry, outside| {
+                std::fs::remove_file(entry)?;
+                std::os::unix::fs::symlink(outside.join("host-secret"), entry)
+            }),
+            ("directory to outside link", true, |entry, outside| {
+                std::fs::remove_dir_all(entry)?;
+                std::os::unix::fs::symlink(outside, entry)
+            }),
+            ("file to FIFO", false, |entry, _| {
+                std::fs::remove_file(entry)?;
+                mkfifo(entry)
+            }),
+            ("file to socket", false, |entry, _| {
+                std::fs::remove_file(entry)?;
+                std::os::unix::net::UnixListener::bind(entry).map(drop)
+            }),
+            ("directory to file", true, |entry, _| {
+                std::fs::remove_dir_all(entry)?;
+                std::fs::write(entry, "replaced")
+            }),
+            ("file removed", false, |entry, _| {
+                std::fs::remove_file(entry)
+            }),
+        ];
+        for (label, directory, swap) in swaps {
+            let temp = tempfile::tempdir()?;
+            let base = std::fs::canonicalize(temp.path())?;
+            let (source, outside) = (base.join("candidate-0"), base.join("outside"));
+            std::fs::create_dir_all(&outside)?;
+            std::fs::write(outside.join("host-secret"), "host")?;
+            std::fs::create_dir_all(&source)?;
+            std::fs::write(source.join("keep"), "lane")?;
+            if directory {
+                std::fs::create_dir(source.join("victim"))?;
+                std::fs::write(source.join("victim/inner"), "lane")?;
+            } else {
+                std::fs::write(source.join("victim"), "lane")?;
+            }
+            let copied = base.join("copy");
+            let swap_outside = outside.clone();
+            copy_with_swap(&source, &copied, move |entry| swap(entry, &swap_outside))
+                .map_err(|error| format!("{label}: {error}"))?;
+            assert_eq!(std::fs::read_to_string(copied.join("keep"))?, "lane");
+            let entries = std::fs::read_dir(&copied)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(entries, ["keep"], "{label}: the swapped entry is skipped");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_refuses_a_file_swapped_for_a_hard_link()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(&source)?;
+        std::fs::write(base.join("host-secret"), "host")?;
+        std::fs::write(source.join("victim"), "lane")?;
+        let copied = base.join("copy");
+        let secret = base.join("host-secret");
+        let result = copy_with_swap(&source, &copied, move |entry| {
+            std::fs::remove_file(entry)?;
+            std::fs::hard_link(&secret, entry)
+        });
+        assert_eq!(
+            result,
+            Err("retained provider state holds a hard-linked file".into())
+        );
+        assert!(std::fs::symlink_metadata(copied.join("victim")).is_err());
         Ok(())
     }
 
