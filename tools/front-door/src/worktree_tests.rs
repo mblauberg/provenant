@@ -2423,6 +2423,12 @@ fn verify_lane_profile(
     // The child store's git-home is the in-lane fabric context's own, not the
     // host's: its preparation keeps its git home under the host root.
     assert!(child.join("tmp/git-home").is_dir());
+    // Host probes leave no directory or lease behind once the child launched.
+    let probes: Vec<_> = fs::read_dir(&state)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("probe-"))
+        .collect();
+    assert!(probes.is_empty(), "{probes:?}");
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),

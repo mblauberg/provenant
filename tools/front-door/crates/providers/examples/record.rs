@@ -1096,8 +1096,10 @@ fn main() -> Result<()> {
             };
             let now = || now_ms().unwrap_or(u64::MAX);
             let deadline = now().saturating_add(90_000);
+            // A fresh private cwd under the run root, not the supervisor's `/`.
+            let probe = provenant_providers::host::HostProbeExecutor::new(&executor, &args.root)?;
             Some(refresh_for_account(
-                &executor, &login, account, &now, deadline,
+                &probe, &login, account, &now, deadline,
             )?)
         }
         _ => None,

@@ -1221,32 +1221,110 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_git_home_is_private_and_outside_a_prepopulated_child_store()
+    fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::{NetworkAccess, PlanPermissions};
         use std::os::unix::fs::PermissionsExt;
+        struct Identity;
+        impl provenant_core::PathResolver for Identity {
+            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
+                let mut tail = PathBuf::new();
+                let mut head = path;
+                loop {
+                    if let Ok(resolved) = std::fs::canonicalize(head) {
+                        return Ok(resolved.join(tail));
+                    }
+                    let (Some(parent), Some(name)) = (head.parent(), head.file_name()) else {
+                        return Err(std::io::ErrorKind::NotFound.into());
+                    };
+                    tail = Path::new(name).join(tail);
+                    head = parent;
+                }
+            }
+        }
 
         let temp = tempfile::tempdir()?;
-        let host_root = temp.path().canonicalize()?;
+        let base = temp.path().canonicalize()?;
+        let host_root = base.join("host-state");
         // The lane controls its child store, including the old git-home path.
         let child_store = host_root.join("children/parent-attempt");
         let planted = child_store.join("tmp/git-home");
         std::fs::create_dir_all(&planted)?;
         std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))?;
-
-        let home = host_git_home(&host_root)?;
-        let path = home.path();
-        assert_eq!(path.parent(), Some(host_root.as_path()));
-        assert!(!path.starts_with(&child_store));
-        assert_ne!(path, planted);
-        assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o700);
-        assert_eq!(std::fs::read_dir(path)?.count(), 0);
-        // The runtime accepts it, so Git really runs with this home.
-        let git = provenant_supervisor::git::git_executable().ok_or("git unavailable")?;
-        provenant_confinement::UtilityRuntime::new(
-            std::sync::Arc::new(provenant_supervisor::fs::LocalFs),
-            canonical(&git)?,
-            path,
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo)?;
+        std::fs::create_dir_all(base.join("home"))?;
+        let real = provenant_supervisor::git::git_executable().ok_or("git unavailable")?;
+        // The smallest repository layout Git accepts, without spawning Git.
+        for dir in [".git/objects", ".git/refs/heads"] {
+            std::fs::create_dir_all(repo.join(dir))?;
+        }
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+        // A git that records the HOME and TMPDIR it was given, then runs the real one.
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin)?;
+        let record = base.join("seen");
+        let git = bin.join("git");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\n[ \"$HOME\" = \"$TMPDIR\" ] || exit 97\nls -ld \"$HOME\" >> {r}\nexec {g} \"$@\"\n",
+                r = record.display(),
+                g = real.display()
+            ),
         )?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))?;
+
+        let roots = provenant_core::RootInputs {
+            state_dir: Some(host_root.clone()),
+            ..provenant_core::RootInputs::new(base.join("home"), repo.clone())
+        }
+        .resolve(&Identity)?;
+        let grant = |name: &str| PathGrant {
+            path: base.join(name),
+            scope: PathScope::Subtree,
+        };
+        let request = PlanRequest {
+            scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+            permissions: PlanPermissions {
+                read_only: None,
+                mode: AccessMode::ReadOnly,
+                scratch: grant("scratch"),
+                private_state: Some(grant("provider-state")),
+                read_roots: vec![grant("repo")],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        };
+        // The unbound project is refused, but only after host git has run.
+        let result = read_only_plan(&roots, ProjectId::from_bytes([1; 16]), &repo, &git, request);
+        assert!(result.is_err());
+
+        let seen = std::fs::read_to_string(&record)?;
+        assert!(!seen.is_empty(), "host git never ran");
+        for line in seen.lines() {
+            assert!(line.starts_with("drwx------"), "{line}");
+            assert!(
+                line.contains(&format!("{}/probe-", host_root.display())),
+                "{line}"
+            );
+            assert!(!line.contains("children"), "{line}");
+        }
+        // The home is gone once the plan is done, and the child store is unchanged.
+        let leftovers: Vec<_> = std::fs::read_dir(&host_root)?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with("probe-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert_eq!(std::fs::read_dir(&planted)?.count(), 0);
         Ok(())
     }
 
