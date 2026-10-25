@@ -79,7 +79,7 @@ Global options are accepted before or after the subcommand:
 | Option | Meaning |
 | --- | --- |
 | `--help`, `--version` | Pure output, exit 0. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, output is terse text: one `key=value` line per record, never pretty-printed JSON. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 

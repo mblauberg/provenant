@@ -96,9 +96,98 @@ pub fn render<T: Serialize>(
         Err(error) => Err(RenderError::Write(error)),
     }
 }
+/// Terse human text for a result: one line per record, never pretty JSON.
+///
+/// An array, or an `items` array one object deep, yields one `key=value` line
+/// per element, keys sorted; remaining scalars share a header line. Nulls and empty arrays
+/// are dropped, and nested values stay compact JSON. Every line ends in LF.
+pub fn terse(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    fn scalar(value: &Value) -> String {
+        match value {
+            Value::String(text)
+                if !text.is_empty()
+                    && !text
+                        .chars()
+                        .any(|c| c.is_whitespace() || c == '"' || c.is_control()) =>
+            {
+                text.clone()
+            }
+            other => other.to_string(),
+        }
+    }
+    fn record(value: &Value) -> String {
+        match value {
+            Value::Object(map) => map
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| format!("{k}={}", scalar(v)))
+                .collect::<Vec<_>>()
+                .join(" "),
+            other => scalar(other),
+        }
+    }
+    fn fields(
+        map: &serde_json::Map<String, Value>,
+        depth: u8,
+        head: &mut Vec<String>,
+        rows: &mut Vec<String>,
+    ) {
+        for (key, value) in map {
+            match value {
+                Value::Null => {}
+                Value::Array(items) if items.is_empty() => {}
+                Value::Array(items) if items.iter().all(Value::is_object) => {
+                    let prefix = if key == "items" {
+                        String::new()
+                    } else {
+                        format!("{key}: ")
+                    };
+                    rows.extend(items.iter().map(|item| format!("{prefix}{}", record(item))));
+                }
+                Value::Object(inner)
+                    if depth == 0 && inner.values().any(|v| matches!(v, Value::Array(_))) =>
+                {
+                    fields(inner, 1, head, rows);
+                }
+                other => head.push(format!("{key}={}", scalar(other))),
+            }
+        }
+    }
+    let (mut head, mut rows) = (Vec::new(), Vec::new());
+    match value {
+        Value::Array(items) => rows.extend(items.iter().map(record)),
+        Value::Object(map) => fields(map, 0, &mut head, &mut rows),
+        Value::Null => {}
+        other => head.push(scalar(other)),
+    }
+    let mut lines = Vec::new();
+    if !head.is_empty() {
+        lines.push(head.join(" "));
+    }
+    lines.extend(rows);
+    lines.into_iter().map(|line| line + "\n").collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terse_is_one_line_per_record() {
+        let value = serde_json::json!({
+            "result": "read",
+            "page": {"items": [{"seq": 1, "kind": "note", "body": "a b", "gone": null}, {"seq": 2}], "truncated": false},
+            "unknown_hosts": []
+        });
+        assert_eq!(
+            terse(&value),
+            "truncated=false result=read\nbody=\"a b\" kind=note seq=1\nseq=2\n"
+        );
+        assert_eq!(
+            terse(&serde_json::json!([{"a": 1}, {"a": [2]}])),
+            "a=1\na=[2]\n"
+        );
+        assert_eq!(terse(&serde_json::json!([])), "");
+    }
     #[test]
     fn oversize_is_rejected_before_any_stdout_and_lf_counts() {
         let result = CommandResult::new("output", Outcome::Ok, "x".repeat(MAX_RESULT_BYTES));

@@ -423,7 +423,7 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
     })();
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
                     "hosts",
@@ -912,7 +912,7 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
         })();
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
                     command,
@@ -2313,7 +2313,7 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
     })();
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
                     command,
@@ -2510,7 +2510,7 @@ pub fn events(
     })();
     match result {
         Ok((data, timed_out)) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
             crate::emit(
                 &provenant_records::CommandResult::new(
                     "fabric events read",

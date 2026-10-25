@@ -942,9 +942,7 @@ pub fn run(
         }
     };
     let human = if result.error.is_none() {
-        serde_json::to_string_pretty(&result.data)
-            .map(|s| format!("{s}\n"))
-            .unwrap_or_default()
+        crate::terse(&result.data)
     } else {
         String::new()
     };
