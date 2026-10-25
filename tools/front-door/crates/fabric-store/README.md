@@ -109,8 +109,13 @@ Migration 3 adds claims, paths and push operations after the two F1 migrations.
 Migration 4 adds persistent counters and indexed path lookup/pruning.
 Migration 7 drops the removed legacy import's table and strips its always-null
 `legacy` members from messages, tasks, coordination receipts and committed peer
-replies. Opening refuses it, and changes nothing, while any data that import
-wrote remains. Records still read a null `legacy` or `legacy_output_path`, which
+replies, and deletes the `imported` event of an import that brought nothing
+over. While any data that import wrote remains, opening refuses the upgrade with
+`LegacyImportData` (service code `upgrade_refused`), naming the table and its
+row count, and changes nothing. The supported remedy is to keep the previous
+release or archive the store, as the
+[Fabric hosts runbook](../../../../docs/runbooks/fabric-hosts.md#legacy-import-data)
+describes. Records still read a null `legacy` or `legacy_output_path`, which
 a binary from before migration 7 may write after it, drop it and never write it.
 All mutations and their events share F1's immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock

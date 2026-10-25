@@ -1,10 +1,14 @@
 -- The one-shot legacy import is gone. Opening refuses this migration while any
--- data that import wrote remains (db.rs), so only always-null members are left.
--- Drop its marker table and strip those members wherever a Task or Message is
--- stored: records, coordination receipts (TaskResult) and committed peer replies
--- (PeerResponse carrying a TaskResult). json_remove keeps the other members
+-- data that import wrote remains (db.rs), so only always-null members and the
+-- `imported` event of an import that brought nothing over are left. Delete that
+-- event, drop the marker table and strip those members wherever a Task or
+-- Message is stored: records, coordination receipts (TaskResult) and committed
+-- peer replies (PeerResponse carrying a TaskResult). json_remove keeps the other members
 -- verbatim, so canonical records stay byte-identical to a fresh encode. Only
 -- rows that hold a removed member are rewritten.
+DELETE FROM events
+ WHERE json_extract(CAST(record AS TEXT), '$.kind') = 'imported'
+   AND project IN (SELECT project FROM imports WHERE tasks = 0 AND messages = 0);
 DROP TABLE imports;
 UPDATE messages
  SET record = CAST(json_remove(CAST(record AS TEXT), '$.legacy', '$.legacy_output_path') AS BLOB)

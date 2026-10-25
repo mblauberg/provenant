@@ -749,8 +749,8 @@ fn store_error_code(error: &provenant_fabric_store::Error) -> &'static str {
         | StoreError::Encode(_)
         | StoreError::SchemaVersion(_)
         | StoreError::UnversionedDatabase
-        | StoreError::LegacyImportData(_)
         | StoreError::JournalMode(_) => "state_corrupt",
+        StoreError::LegacyImportData { .. } => "upgrade_refused",
         _ => "io",
     }
 }
@@ -2544,6 +2544,7 @@ mod peer_tests {
             "stale_fence",
             "timeout",
             "state_corrupt",
+            "upgrade_refused",
             "peer_version",
             "publication_failed",
             "home_unavailable",

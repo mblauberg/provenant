@@ -1136,57 +1136,92 @@ fn null_members_an_old_binary_writes_after_migration_read_and_are_never_written(
 }
 
 #[test]
+fn empty_legacy_import_upgrades_and_leaves_no_trace() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (_, t) = seed_records(&f, &store);
+    let events = store.events(project(), 0, 100, &f.request()).unwrap().items;
+    // An import that brought nothing over left its receipt and one event.
+    downgrade_to_six(
+        &store,
+        &format!(
+            "INSERT INTO imports VALUES('/old/fabric.db','{}','lp',0,0,0,X'7B7D'); \
+             INSERT INTO events(project,dedup,record) SELECT project,NULL,\
+             CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
+             FROM events WHERE seq=1;",
+            project()
+        ),
+    );
+    drop(store);
+    let store = f.open();
+    let imports: i64 = store
+        .db
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='imports'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(imports, 0);
+    assert_eq!(
+        store.events(project(), 0, 100, &f.request()).unwrap().items,
+        events
+    );
+    assert_eq!(store.task(project(), t.id, &f.request()).unwrap(), t);
+}
+
+#[test]
 fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
     let reference = r#"json('{"id":"i","project":"p","source":"s"}')"#;
     let cases = [
         (
-            "import receipts",
-            "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,1,X'7B7D');".to_owned(),
+            "imports",
+            "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,0,X'7B7D');".to_owned(),
         ),
         (
-            "imported events",
+            "events",
             "UPDATE events SET record=CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
              WHERE seq=1;"
                 .to_owned(),
         ),
         (
-            "imported messages",
+            "messages",
             format!(
                 "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
             ),
         ),
         (
-            "imported messages",
+            "messages",
             "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy_output_path','out.md') AS BLOB);"
                 .to_owned(),
         ),
         (
-            "imported messages",
+            "messages",
             format!(
                 "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.reply_to',\
                  json_object('reference',{reference},'scope','legacy')) AS BLOB);"
             ),
         ),
         (
-            "imported tasks",
+            "tasks",
             format!(
                 "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
             ),
         ),
         (
-            "imported task receipts",
+            "coordination_operations",
             format!(
                 "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.task.legacy',{reference}) AS BLOB);"
             ),
         ),
         (
-            "imported peer task replies",
+            "peer_operations",
             format!(
                 "UPDATE peer_operations SET response=CAST(json_set(CAST(response AS TEXT),'$.result.data.result.task.legacy',{reference}) AS BLOB);"
             ),
         ),
     ];
-    for (kind, rows) in cases {
+    for (table, rows) in cases {
         let f = Fixture::new();
         let store = f.open();
         seed_records(&f, &store);
@@ -1194,17 +1229,23 @@ fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
         let before = stored_records(&store.db);
         drop(store);
         let refused = Store::open(&f.root, &f.request());
+        let error = refused.err().unwrap();
         assert!(
-            matches!(refused, Err(Error::LegacyImportData(found)) if found == kind),
-            "{kind}: {:?}",
-            refused.err()
+            matches!(error, Error::LegacyImportData { table: found, rows: 1 } if found == table),
+            "{table}: {error:?}"
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains(&format!("1 row(s) of legacy import data in table {table}"))
+                && text.contains("docs/runbooks/fabric-hosts.md"),
+            "{text}"
         );
         let db = rusqlite::Connection::open(f.path()).unwrap();
         let version: i64 = db
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6, "{kind}");
-        assert_eq!(stored_records(&db), before, "{kind}");
+        assert_eq!(version, 6, "{table}");
+        assert_eq!(stored_records(&db), before, "{table}");
     }
 }
 

@@ -306,6 +306,34 @@ provenant workflow session handoff --to workshop --account work \
 Drop `--dry-run` once the plan looks right. Follow the peer's lanes from here
 with `provenant lanes --host workshop`.
 
+## Legacy import data
+
+A newer release cannot upgrade a store that still holds data from the removed
+legacy import. Opening it fails with `upgrade_refused`; the message names the
+table and its row count, and the store stays at a version the previous release
+still opens. An import that brought nothing over does not block the
+upgrade.
+
+Keep the previous release while you need that data. To move to the newer
+release, archive the store and let Fabric create a fresh one:
+
+1. On the previous release, record what you still need from
+   `provenant fabric task list` and `provenant fabric mail read`, and resolve
+   any peer operation that still reports `launch_unknown`.
+2. Stop every process that holds the store: MCP servers in open sessions, the
+   `fabric peer-agent` LaunchAgent and running lanes.
+3. Move the store files out of the state directory (here the default):
+
+   ```sh
+   state=~/.local/share/provenant/v1
+   archive=~/fabric-store-archive-$(date +%Y%m%d)
+   mkdir -m 700 "$archive"
+   mv "$state"/fabric/fabric.sqlite3* "$archive"/
+   ```
+
+4. Run the newer release. It starts with no tasks, mail, events, claims or peer
+   journal; create again any work you still need.
+
 ## Verify targeted changes
 
 Run only fast tests for changed Rust boundaries. Full workspace suites run in

@@ -86,8 +86,12 @@ pub enum Error {
     Encode(#[from] provenant_records::CanonicalError),
     #[error("time is outside the supported range")]
     Time(#[from] provenant_core::TimeError),
-    #[error("database holds legacy import data ({0}); refusing the upgrade that would discard it")]
-    LegacyImportData(&'static str),
+    #[error(
+        "Fabric store holds {rows} row(s) of legacy import data in table {table}, which this \
+         release would discard, so it left the store unchanged. Keep the previous release, or \
+         archive the store as docs/runbooks/fabric-hosts.md (Legacy import data) describes"
+    )]
+    LegacyImportData { table: &'static str, rows: i64 },
 }
 
 fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {
