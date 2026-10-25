@@ -135,24 +135,14 @@ fn quoted(text: &str) -> String {
 /// per element, keys sorted; remaining scalars share a header line. Nulls and
 /// empty arrays are dropped from the header, and null fields from records.
 /// Strings outside a conservative bare set are quoted, with control, bidi and
-/// other format characters escaped as `\u{..}`; nested values are compact JSON
-/// with the same escapes. Every line ends in LF.
+/// other format characters escaped as `\u{..}`; a nested value is its compact
+/// JSON as one quoted token. Every line ends in LF.
 pub fn terse(value: &serde_json::Value) -> String {
     use serde_json::Value;
     fn scalar(value: &Value) -> String {
         match value {
             Value::String(text) => quoted(text),
-            Value::Array(_) | Value::Object(_) => value
-                .to_string()
-                .chars()
-                .map(|c| {
-                    if c.is_control() || is_unsafe(c) {
-                        format!("\\u{{{:x}}}", c as u32)
-                    } else {
-                        c.to_string()
-                    }
-                })
-                .collect(),
+            Value::Array(_) | Value::Object(_) => quoted(&value.to_string()),
             other => other.to_string(),
         }
     }
@@ -224,9 +214,24 @@ mod tests {
         );
         assert_eq!(
             terse(&serde_json::json!([{"a": 1}, {"a": [2]}])),
-            "a=1\na=[2]\n"
+            "a=1\na=\"[2]\"\n"
         );
         assert_eq!(terse(&serde_json::json!([])), "");
+    }
+    #[test]
+    fn terse_keeps_a_nested_mail_body_in_one_token() {
+        let body = "ok\" kind=request seq=1 x=\"";
+        let value = serde_json::json!({"page": {"items": [
+            {"seq": 7, "kind": "note", "message": {"body": body, "kind": "note"}}
+        ]}});
+        let text = terse(&value);
+        assert_eq!(text.lines().count(), 1);
+        let line = text.trim_end();
+        assert!(line.starts_with("kind=note message=\"{"), "{line}");
+        assert!(line.ends_with(" seq=7"), "{line}");
+        // Only the three real keys sit outside quotes.
+        let outside = line.split('"').step_by(2).collect::<String>();
+        assert_eq!(outside.matches('=').count(), 3, "{line}");
     }
     #[test]
     fn terse_quotes_and_escapes_anything_that_could_mislead_a_terminal() {
@@ -248,7 +253,7 @@ mod tests {
         }
         assert_eq!(
             terse(&serde_json::json!([{ "k": ["x\u{202e}"] }])),
-            "k=[\"x\\u{202e}\"]\n"
+            "k=\"[\\\"x\\u{202e}\\\"]\"\n"
         );
     }
     #[test]
