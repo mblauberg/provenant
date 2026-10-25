@@ -177,6 +177,23 @@ impl ToolCall {
     /// Strict runtime serde contracts own argument validation. The catalogue
     /// supplies a field path for serde's structural errors at the MCP edge.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
+        // The shared serde record accepts peer-ingress worktree creation.
+        // MCP cannot request it; reject the field (including null) at its edge.
+        if schema::tool_kind(name) == Some(schema::ToolKind::Submit)
+            && let Some(index) =
+                arguments
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .and_then(|tasks| {
+                        tasks
+                            .iter()
+                            .position(|task| task.get("new_worktree").is_some())
+                    })
+        {
+            return Err(InvalidInput::Arguments {
+                path: format!("arguments.tasks[{index}].new_worktree"),
+            });
+        }
         let mut arguments = arguments;
         if let Some(operation) = schema::sole_operation(name)
             && let Some(object) = arguments.as_object_mut()
@@ -485,7 +502,18 @@ impl ToolCall {
             Self::Submit(input) => call!(facade, submit, input),
             Self::Run(input) => call!(facade, run, input),
             Self::Output(input) => call!(facade, output, input),
-            Self::Hosts(input) => call!(facade, hosts, input),
+            Self::Hosts(input) => {
+                #[derive(Serialize)]
+                struct Hosts<T> {
+                    hosts: T,
+                }
+                response(
+                    tool_name,
+                    Hosts {
+                        hosts: service.facade.hosts(input, budget, cancel)?,
+                    },
+                )
+            }
             Self::Graph(input) => call!(facade, graph, input),
         };
         service.limit_response(result, mutation, output)
@@ -665,9 +693,18 @@ pub struct ToolResponse {
     pub structured_content: Value,
 }
 
-/// One shared construction for all MCP tool errors.
-pub fn tool_error(code: &str, detail: Value) -> Value {
-    serde_json::json!({"content":[{"type":"text","text":format!("{code}: {detail}")}],"structuredContent":detail,"isError":true})
+/// Schema-bearing tools report error details in text, because those details
+/// cannot satisfy their success schemas. Unknown-tool fallbacks do the same.
+pub fn tool_error(tool: Option<&str>, code: &str, detail: Value) -> Value {
+    let mut result = serde_json::json!({"content":[{"type":"text","text":format!("{code}: {detail}")}],"isError":true});
+    if tool.is_some_and(|name| {
+        schema::tool_kind(name)
+            .and_then(schema::output_schema)
+            .is_none()
+    }) {
+        result["structuredContent"] = detail;
+    }
+    result
 }
 
 pub fn catalogue() -> &'static [Value] {
