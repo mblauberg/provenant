@@ -611,6 +611,62 @@ pub(super) fn lanes(
     Ok(Some((data, human, false)))
 }
 
+/// `lanes --host`: the peer's own lanes, read over the peer channel. The
+/// peer applies `--all` and `--limit`; state and time filters apply here to
+/// the page it returns.
+pub(super) fn host_lanes(
+    command: &Lanes,
+    host: &str,
+    edge: &Edge<'_>,
+) -> Result<(Value, String, bool), Fail> {
+    let peer = Peer::open(edge)?;
+    peer.project()?;
+    let id = peer
+        .context
+        .peer_host(host)
+        .ok_or_else(|| unknown_host(host))?;
+    let limit = u16::try_from(command.limit)
+        .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --limit"))?;
+    let PeerResult::RunStatuses(records) = peer.call(
+        id,
+        PeerAction::Lanes {
+            all: command.all,
+            limit,
+        },
+    )?
+    else {
+        return Err(corrupt());
+    };
+    if records.len() > usize::from(limit) {
+        return Err(corrupt());
+    }
+    let since = command
+        .since
+        .map(|since| WallTime::from_micros(since.as_microsecond()))
+        .transpose()
+        .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --since value"))?;
+    let lanes: Vec<_> = records
+        .into_iter()
+        .filter(|lane| {
+            command.states.is_empty()
+                || command
+                    .states
+                    .iter()
+                    .any(|state| state.as_str() == state_name(&lane.state))
+        })
+        .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
+        .collect();
+    let selected: Vec<_> = lanes.iter().map(|lane| (id, lane.attempt_id)).collect();
+    let (data, human) = if selected.is_empty() {
+        let (mut data, human) = render_lanes(&[], None, edge.roots.state.as_path());
+        data["host"] = json!(id);
+        (data, format!("host {id}\n{human}"))
+    } else {
+        render(&lanes, &selected, edge)
+    };
+    Ok((data, human, false))
+}
+
 pub(super) fn output(
     command: &Output,
     placement: &Placement,

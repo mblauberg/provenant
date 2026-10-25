@@ -16,6 +16,8 @@ provenant hosts doctor
 provenant fabric peer
 provenant fabric peer-agent
 provenant dispatch --host workshop --mode read-only --help
+provenant lanes --host workshop
+provenant workflow session handoff --help
 ```
 
 `fabric host list` reads local and configured peer health. `hosts doctor`
@@ -170,7 +172,10 @@ Other limits on a peer run:
 - `output` reads the result and stderr only, without `--tail`;
 - `cancel` does not forward `--reason`; the peer records its own;
 - `lanes` without `--id` lists only lanes on the calling host, and mixing
-  local and peer runs in one call is refused.
+  local and peer runs in one call is refused. `lanes --host workshop` lists
+  the peer's own lanes, newest first with `--all`. It takes `--state` and
+  `--since` but not `--id`, `--wait` or `--cursor`, and filters only the page
+  the peer returns.
 
 `provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation
@@ -184,6 +189,95 @@ whose reply is lost can return `launch_unknown`; retain its operation ID and
 reconcile the recorded outcome before submitting replacement work. The host
 owner also reports `peer_version`, `home_unavailable` and `state_corrupt` for
 version, reachability and frame failures.
+
+## Session hand-off
+
+`provenant workflow session handoff` moves a chair or task session to a
+peer. The peer starts a fresh Claude session from a hand-off prompt; no
+transcript moves. The command sends one `session_handoff` peer request, so a
+key restricted to `fabric peer` keeps working.
+
+```sh
+provenant workflow session handoff --to workshop --account work \
+  [--note TEXT]... [--attach PATH]... [--prompt-file PATH] [--no-checkpoint] \
+  [--model ID] [--wip | --allow-dirty] [--dry-run] [--no-launch]
+```
+
+On the calling host the command:
+
+1. reads the session checkpoint, unless `--no-checkpoint`. The session ID
+   comes from `--session-id`, then `CLAUDE_CODE_SESSION_ID`, then
+   `CLAUDE_SESSION_ID`;
+2. builds the prompt and checks the whole request before it touches any tree.
+   The prompt holds the checkpoint, each branch with its pushed commit, the
+   lanes still running here and each `--note`. `--prompt-file` replaces the
+   generated body; notes still follow it. Every prompt opens with
+   `# Session hand-off`. The prompt is capped at 32 KiB, and a longer
+   checkpoint is cut to fit with a note saying so. Attachments are capped at
+   512 KiB in total;
+3. checks that each registered worktree of the project is clean and pushed
+   to `origin`. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
+   problem trees. `--wip` commits the tracked changes in each dirty or
+   unpushed linked worktree as `WIP: session hand-off` and pushes it. It
+   refuses the primary checkout, a detached tree, a tree with a live writer
+   and untracked files Git does not ignore. If a push fails part way, the
+   refusal names the branches already pushed. `--allow-dirty` proceeds and
+   lists the problems in the prompt;
+4. sends the request. `--dry-run` prints the prompt and plan and sends
+   nothing. Once the peer accepts, the prompt is saved as the session
+   checkpoint, so a refused or lost request leaves the checkpoint unchanged.
+
+The peer checks `--account` against its registered Claude accounts and
+refuses with the valid labels when it does not match. It then claims
+`handoff/<project-id>/op-<operation-id>/` in its state directory, fetches
+`origin` and recreates each branch's worktree from `origin/<branch>`. An
+existing worktree, or an existing local branch, is reused; when its commit
+differs from origin or it has uncommitted changes, the receipt and the
+prompt say so. The peer writes `prompt.md`, the attachments and
+`launch.command` into the operation directory and runs
+`open -a Terminal launch.command`. The script runs
+`claude -- "$(cat prompt.md)"` with `CLAUDE_CONFIG_DIR` set to the account's
+directory, so the prompt is never read as an option. `--no-launch` writes
+everything, including the script, but opens no Terminal; run the script by
+hand later. A failed launch is reported in the receipt and leaves the
+delivered files in place.
+
+Both hosts record the new owner in `handoff/<project-id>/owner.json` in their
+state directories. The calling host moves its record only when Terminal
+opened or `--no-launch` was given. The record is advisory: a later hand-off
+from a host that is not the recorded owner warns but proceeds.
+
+Replaying an operation ID is refused with `already_delivered`, so a peer never
+opens a second session for one hand-off. A lost reply returns
+`LAUNCH_UNKNOWN`. Look for the operation's directory in the peer's state
+directory before you retry, and remove it only if you want a second session.
+
+Full chair hand-off, with the checkpoint and notes:
+
+```sh
+provenant workflow session handoff --to workshop --account work \
+  --note "Watch CI on PR 1512, then merge." \
+  --note "Lane 4 is still reviewing the hosts spec."
+```
+
+Quick task hand-off, with no checkpoint, after committing the tree as WIP:
+
+```sh
+provenant workflow session handoff --to workshop --account personal \
+  --no-checkpoint --wip --note "Finish the failing parser test on feat/x."
+```
+
+Read-only investigation, from a written prompt with a log attached, while
+this tree stays dirty:
+
+```sh
+provenant workflow session handoff --to workshop --account work \
+  --no-checkpoint --allow-dirty --prompt-file investigate.md \
+  --attach crash.log --dry-run
+```
+
+Drop `--dry-run` once the plan looks right. Follow the peer's lanes from here
+with `provenant lanes --host workshop`.
 
 ## Verify targeted changes
 
