@@ -554,52 +554,105 @@ fn continuation_for(
     Ok(continuation)
 }
 
+/// Bounds on retained provider state, shared by its search and its copy. A
+/// leftover process from the prior attempt may still grow the tree. Lane state
+/// nests plugin caches 14 directories deep, and the launch census refuses a
+/// private tree past 100,000 entries anyway. The byte budget is many times a
+/// long session's state while bounding what a sparse or still-growing file can
+/// make the host write.
+#[derive(Clone, Copy)]
+struct StateLimits {
+    depth: u32,
+    entries: u32,
+    bytes: u64,
+}
+const RETAINED_STATE: StateLimits = StateLimits {
+    depth: 32,
+    entries: 100_000,
+    bytes: 4 << 30,
+};
+
+/// The names in `directory`, each spending one of `entries`, or `None` once
+/// they run out. Listing first closes the stream before any descent.
+fn listed(
+    directory: &Directory,
+    entries: &mut u32,
+) -> Result<Option<Vec<std::ffi::OsString>>, FsError> {
+    let mut names = Vec::new();
+    for name in directory.entries()? {
+        let Some(left) = entries.checked_sub(1) else {
+            return Ok(None);
+        };
+        *entries = left;
+        names.push(name?);
+    }
+    Ok(Some(names))
+}
+
+/// A real directory on `device`, opened without following a link. A mount
+/// point stats as the mounted root, so it is never opened.
+fn open_local_directory(
+    parent: &Directory,
+    name: &std::ffi::OsStr,
+    device: u64,
+) -> Option<Directory> {
+    parent
+        .metadata_at(name, false)
+        .is_ok_and(|metadata| metadata.kind == FileKind::Directory && metadata.device == device)
+        .then(|| parent.open_directory(name).ok())
+        .flatten()
+}
+
 /// The `candidate-N` directory of `provider_state` holding a file or directory
-/// named for `session`, searched to a bounded depth and size. The prior lane
-/// wrote this tree, so the path must already be canonical and a candidate
-/// must be a real directory, never a symlink out of the state.
+/// named for `session`, searched within `RETAINED_STATE`. The prior lane
+/// wrote this tree, so the path must already be canonical and every directory
+/// is opened from its parent's handle, never through a link or a mount.
 fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
-    fn holds(dir: &Path, session: &str, depth: u32, budget: &mut u32) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    fn holds(dir: &Directory, session: &str, depth: u32, device: u64, budget: &mut u32) -> bool {
+        let Ok(Some(names)) = listed(dir, budget) else {
             return false;
         };
-        for entry in entries.flatten() {
-            *budget = budget.saturating_sub(1);
-            if *budget == 0 {
-                return false;
-            }
-            if entry.file_name().to_string_lossy().contains(session) {
-                return true;
-            }
-            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            if is_dir && depth > 0 && holds(&entry.path(), session, depth - 1, budget) {
-                return true;
-            }
-        }
-        false
+        names.iter().any(|name| {
+            name.to_string_lossy().contains(session)
+                || depth > 0
+                    && open_local_directory(dir, name, device)
+                        .is_some_and(|child| holds(&child, session, depth - 1, device, budget))
+        })
     }
     if provenant_supervisor::fs::canonicalize(provider_state).ok()? != provider_state {
         return None;
     }
-    std::fs::read_dir(provider_state)
-        .ok()?
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("candidate-")
-                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+    let root = Directory::open_anchor(provider_state).ok()?;
+    let device = root.metadata().ok()?.device;
+    let mut budget = RETAINED_STATE.entries;
+    listed(&root, &mut budget)
+        .ok()??
+        .into_iter()
+        .find(|name| {
+            name.to_string_lossy().starts_with("candidate-")
+                && open_local_directory(&root, name, device).is_some_and(|candidate| {
+                    holds(
+                        &candidate,
+                        session,
+                        RETAINED_STATE.depth,
+                        device,
+                        &mut budget,
+                    )
+                })
         })
-        .map(|entry| entry.path())
-        .find(|path| holds(path, session, 8, &mut 100_000))
+        .map(|name| provider_state.join(name))
 }
 
-/// Copy regular files and directories. Symlinks and other entries are
-/// skipped: setup recreates the links a provider needs. A leftover process may
-/// still change the tree, so every entry is opened from its parent's handle
-/// without following a link, and the opened descriptor is checked and copied.
+/// Copy regular files and directories within `RETAINED_STATE`. Symlinks and
+/// other entries are skipped: setup recreates the links a provider needs. A
+/// leftover process may still change the tree, so every entry is opened from
+/// its parent's handle without following a link, and the opened descriptor is
+/// checked and copied.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
+    copy_state_within(from, to, RETAINED_STATE)
+}
+
+fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), String> {
     let failed =
         |detail: &dyn std::fmt::Display| format!("copying retained provider state: {detail}");
     // The anchor opens without following its final component; this stat only
@@ -613,14 +666,42 @@ fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
     let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
     std::fs::create_dir_all(to).map_err(|error| failed(&error))?;
     let target = Directory::open_anchor(to).map_err(|error| failed(&error))?;
-    copy_tree(&source, &target).map_err(|refusal| match refusal {
+    let mut budget = Budget {
+        entries: limits.entries,
+        bytes: limits.bytes,
+        device: source.metadata().map_err(|error| failed(&error))?.device,
+    };
+    copy_tree(&source, &target, limits.depth, &mut budget).map_err(|refusal| match refusal {
         CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
+        CopyRefusal::TooLarge => format!(
+            "retained provider state exceeds its {} byte copy budget",
+            limits.bytes
+        ),
+        CopyRefusal::TooMany => {
+            format!("retained provider state exceeds {} entries", limits.entries)
+        }
+        CopyRefusal::TooDeep => format!(
+            "retained provider state nests deeper than {} directories",
+            limits.depth
+        ),
+        CopyRefusal::CrossDevice => "retained provider state crosses a filesystem boundary".into(),
         CopyRefusal::Fs(error) => failed(&error),
     })
 }
 
+/// What the rest of a copy may still spend, and the source's filesystem.
+struct Budget {
+    entries: u32,
+    bytes: u64,
+    device: u64,
+}
+
 enum CopyRefusal {
     HardLink,
+    TooLarge,
+    TooMany,
+    TooDeep,
+    CrossDevice,
     Fs(FsError),
 }
 
@@ -661,28 +742,41 @@ fn before_open(_name: &std::ffi::OsStr) {
     });
 }
 
-fn copy_tree(from: &Directory, to: &Directory) -> Result<(), CopyRefusal> {
-    for name in from.entries()? {
-        let name = name?;
-        let kind = match from.metadata_at(&name, false) {
-            Ok(metadata) => metadata.kind,
+fn copy_tree(
+    from: &Directory,
+    to: &Directory,
+    depth: u32,
+    budget: &mut Budget,
+) -> Result<(), CopyRefusal> {
+    for name in listed(from, &mut budget.entries)?.ok_or(CopyRefusal::TooMany)? {
+        let metadata = match from.metadata_at(&name, false) {
+            Ok(metadata) => metadata,
             Err(error) if error.is_not_found() => continue,
             Err(error) => return Err(error.into()),
         };
+        // A mount point stats as the mounted root. Like a verified directory
+        // open, the walk refuses to leave its anchor's filesystem.
+        if metadata.device != budget.device {
+            return Err(CopyRefusal::CrossDevice);
+        }
         before_open(&name);
-        match kind {
+        match metadata.kind {
             FileKind::Directory => {
+                let depth = depth.checked_sub(1).ok_or(CopyRefusal::TooDeep)?;
                 let child = match from.open_directory(&name) {
                     Ok(child) => child,
                     Err(error) if changed_entry(&error) => continue,
                     Err(error) => return Err(error.into()),
                 };
+                if child.metadata()?.device != budget.device {
+                    return Err(CopyRefusal::CrossDevice);
+                }
                 match to.mkdir(&name, 0o700) {
                     Ok(()) => {}
                     Err(error) if error.is_exists() => {}
                     Err(error) => return Err(error.into()),
                 }
-                copy_tree(&child, &to.open_directory(&name)?)?;
+                copy_tree(&child, &to.open_directory(&name)?, depth, budget)?;
             }
             FileKind::Regular => {
                 let mut file = match from.open_read(&name) {
@@ -690,20 +784,35 @@ fn copy_tree(from: &Directory, to: &Directory) -> Result<(), CopyRefusal> {
                     Err(error) if changed_entry(&error) => continue,
                     Err(error) => return Err(error.into()),
                 };
+                let opened = file.metadata()?;
+                if opened.device != budget.device {
+                    return Err(CopyRefusal::CrossDevice);
+                }
                 // A hard link can name a host file the lane could not otherwise
                 // read; the host copy would then publish its contents.
-                let opened = file.metadata()?;
                 if opened.links > 1 {
                     return Err(CopyRefusal::HardLink);
                 }
                 // The destination is the new attempt's fresh, empty candidate
                 // directory, so an existing entry there is refused, not replaced.
                 let mut copy = to.create_new(&name)?;
-                std::io::copy(&mut file, &mut copy).map_err(|source| FsError::Io {
+                // Size is never trusted: read one byte past the budget, so a
+                // sparse or still-growing file is refused, not copied unbounded.
+                let copied = std::io::copy(
+                    &mut std::io::Read::take(&mut file, budget.bytes.saturating_add(1)),
+                    &mut copy,
+                )
+                .map_err(|source| FsError::Io {
                     operation: "copy file",
                     path: name.clone().into(),
                     source,
                 })?;
+                if copied > budget.bytes {
+                    drop(copy);
+                    let _ = to.unlink(&name);
+                    return Err(CopyRefusal::TooLarge);
+                }
+                budget.bytes -= copied;
                 if opened.mode & 0o100 != 0 {
                     copy.make_owner_executable()?;
                 }
@@ -1604,6 +1713,122 @@ mod tests {
                 "{skipped} must not be copied"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_refuses_state_past_its_byte_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const LIMIT: u64 = 1 << 20;
+        let limits = StateLimits {
+            bytes: LIMIT,
+            ..RETAINED_STATE
+        };
+        let refusal = Err(format!(
+            "retained provider state exceeds its {LIMIT} byte copy budget"
+        ));
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        // A sparse file costs the lane no blocks but claims far past the budget.
+        let sparse = base.join("sparse");
+        std::fs::create_dir(&sparse)?;
+        std::fs::File::create(sparse.join("rollout.jsonl"))?.set_len(64 * LIMIT)?;
+        let copied = base.join("sparse-copy");
+        assert_eq!(copy_state_within(&sparse, &copied, limits), refusal);
+        assert!(
+            !copied.join("rollout.jsonl").exists(),
+            "the partial copy is removed"
+        );
+        // The budget spans the tree, not each file.
+        let split = base.join("split");
+        std::fs::create_dir_all(split.join("sessions"))?;
+        let half = vec![b'x'; usize::try_from(LIMIT / 2 + 1)?];
+        std::fs::write(split.join("history.jsonl"), &half)?;
+        std::fs::write(split.join("sessions/rollout.jsonl"), &half)?;
+        assert_eq!(
+            copy_state_within(&split, &base.join("split-copy"), limits),
+            refusal
+        );
+        // State of exactly the budget still copies whole.
+        let exact = base.join("exact");
+        std::fs::create_dir(&exact)?;
+        std::fs::write(exact.join("a"), &half)?;
+        std::fs::write(exact.join("b"), vec![b'y'; usize::try_from(LIMIT / 2 - 1)?])?;
+        copy_state_within(&exact, &base.join("exact-copy"), limits)?;
+        assert_eq!(std::fs::read(base.join("exact-copy/a"))?, half);
+        assert_eq!(
+            std::fs::metadata(base.join("exact-copy/b"))?.len(),
+            LIMIT / 2 - 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = StateLimits {
+            depth: 2,
+            entries: 4,
+            ..RETAINED_STATE
+        };
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let within = base.join("within");
+        std::fs::create_dir_all(within.join("a/b"))?;
+        std::fs::write(within.join("a/b/file"), "lane")?;
+        std::fs::write(within.join("top"), "lane")?;
+        copy_state_within(&within, &base.join("within-copy"), limits)?;
+        assert_eq!(
+            std::fs::read_to_string(base.join("within-copy/a/b/file"))?,
+            "lane"
+        );
+
+        let deep = base.join("deep");
+        std::fs::create_dir_all(deep.join("a/b/c"))?;
+        assert_eq!(
+            copy_state_within(&deep, &base.join("deep-copy"), limits),
+            Err("retained provider state nests deeper than 2 directories".into())
+        );
+
+        let wide = base.join("wide");
+        std::fs::create_dir(&wide)?;
+        for name in ["1", "2", "3", "4", "5"] {
+            std::fs::write(wide.join(name), "lane")?;
+        }
+        assert_eq!(
+            copy_state_within(&wide, &base.join("wide-copy"), limits),
+            Err("retained provider state exceeds 4 entries".into())
+        );
+        Ok(())
+    }
+
+    // No unprivileged test can mount a filesystem inside a temporary tree, so
+    // this runs the walk as if its anchor sat on another device.
+    #[test]
+    fn retained_state_copy_refuses_a_filesystem_boundary() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(source.join("sessions"))?;
+        std::fs::create_dir(base.join("copy"))?;
+        let (from, to) = (
+            Directory::open_anchor(&source)?,
+            Directory::open_anchor(&base.join("copy"))?,
+        );
+        let mut budget = Budget {
+            entries: RETAINED_STATE.entries,
+            bytes: RETAINED_STATE.bytes,
+            device: from.metadata()?.device ^ 1,
+        };
+        let opened = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = std::rc::Rc::clone(&opened);
+        BEFORE_OPEN.set(Some(Box::new(move |_| seen.set(true))));
+        let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget);
+        BEFORE_OPEN.set(None);
+        assert!(matches!(result, Err(CopyRefusal::CrossDevice)));
+        assert!(!opened.get(), "a mount point is refused before its open");
+        assert!(!base.join("copy/sessions").exists());
         Ok(())
     }
 
