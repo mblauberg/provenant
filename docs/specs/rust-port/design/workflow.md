@@ -322,6 +322,7 @@ provenant workflow receipt show <id> [--json]
 provenant workflow receipt save <id> --expected-revision <n> --request <file|->
 provenant workflow session save <session-id> --file <markdown|->
 provenant workflow session show <session-id> [--json]
+provenant workflow session handoff --to <peer> --account <label> [--note TEXT]... [--attach PATH]... [--prompt-file PATH] [--no-checkpoint] [--model ID] [--wip|--allow-dirty] [--dry-run] [--no-launch] [--json]
 provenant hook claude pre-compact|compact
 provenant check writing <paths...> [--rules general|academic|legal] [--json]
 ```

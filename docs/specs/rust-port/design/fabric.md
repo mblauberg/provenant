@@ -726,7 +726,8 @@ struct RegistrationDescriptor { executable: PathBuf, args: Vec<String>,
 records, so run never imports Fabric. `WaitBudget { deadline: MonotonicDeadline }`
 and cooperative `CancelToken` live in core; supervisor consumes them. Runtime's
 peer client takes `PeerRequest { version, target_host, project: ProjectKey, operation, action }`;
-`action` is a closed enum for coordination, run, health and Git transfer. There
+`action` is a closed enum for coordination, run, lane listing, health, Git
+transfer and session hand-off. There
 is no arbitrary executable field. The peer resolves ProjectKey to its local
 ProjectId. The target is the execution host for runs and the project home for coordination.
 Fabric derives `ExecutionContext.project` from Identity.project; Submission
