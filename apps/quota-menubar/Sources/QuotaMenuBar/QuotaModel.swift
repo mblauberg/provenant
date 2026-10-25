@@ -139,6 +139,30 @@ final class QuotaModel {
         }
     }
 
+    /// Runs a `provenant` settings command (a display choice or `accounts set`), then reloads `quota show` so the
+    /// menu and the status item follow at once. A failure shows as the menu's refresh error.
+    func apply(_ arguments: [String]) {
+        guard !fixture else { return }
+        let cached = launcher
+        Task {
+            let (resolved, failure) = await Task.detached(priority: .userInitiated) { CLI.command(cached, arguments) }.value
+            launcher = resolved ?? launcher
+            if let failure {
+                error = failure.message
+                relabel()
+                return
+            }
+            let (found, outcome) = await Task.detached(priority: .userInitiated) {
+                CLI.quota(resolved ?? cached, ["quota", "show", "--json"])
+            }.value
+            launcher = found ?? launcher
+            switch outcome {
+            case .report(let report): show(report)
+            case .failure(let failure): error = failure.message; relabel()
+            }
+        }
+    }
+
     private func run(_ trigger: Trigger) {
         guard !fixture else { return }
         guard !isRefreshing else {
@@ -325,6 +349,23 @@ enum CLI {
         case .success(let report): return (launcher, .report(report))
         case .failure(let failure): return fail(launcher, "unreadable response", failure.message)
         }
+    }
+
+    /// Runs a command whose output the app does not read; nil on success.
+    static func command(_ cached: Launcher?, _ arguments: [String]) -> (Launcher?, Failure?) {
+        guard let launcher = cached ?? resolve() else {
+            return (nil, Failure(message: "provenant was not found on the login shell's PATH or at ~/.local/bin/provenant. "
+                                 + "Set PROVENANT_BIN to its path."))
+        }
+        let name = arguments.prefix(2).joined(separator: " ")
+        let run: Output
+        do { run = try exec(launcher.url, arguments, path: launcher.path, limit: 30) } catch {
+            return (nil, Failure(message: "Could not start provenant: \(error.localizedDescription)"))
+        }
+        if run.status == 0 && !run.timedOut && !run.signalled { return (launcher, nil) }
+        let detail = run.err.split(separator: "\n").last.map(String.init) ?? "no error output"
+        log.error("\(name, privacy: .public) failed with status \(run.status)")
+        return (launcher, Failure(message: "provenant \(name) failed: \(detail)"))
     }
 
     /// PROVENANT_BIN; else `provenant` and PATH from the user's login shell; else ~/.local/bin/provenant

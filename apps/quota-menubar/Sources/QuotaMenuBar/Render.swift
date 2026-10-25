@@ -62,13 +62,13 @@ enum Render {
 
 /// The macOS 26 menu frame the preview imitates, measured from real menus: 5-point vertical padding, 24-point
 /// rows (36 with a subtitle), icons centred 22.5 points in, titles at 37 points (16 without an icon), trailing
-/// shortcuts and submenu arrows 18 points from the edge, and submenus overlapping their menu by 4 points.
+/// shortcuts and submenu arrows 18 points from the edge (account rows draw their own, RowView.swift), and submenus overlapping their menu by 4 points.
 enum MenuMetrics {
     static let padding: CGFloat = 5
     static let row: CGFloat = 24, tallRow: CGFloat = 36, header: CGFloat = 26, separator: CGFloat = 11
     static let iconCentre: CGFloat = 22.5, iconTitle: CGFloat = 37
     static let trailing: CGFloat = 18
-    static let arrowColumn: CGFloat = 34          // after the title column, when an item has a submenu
+    static let arrowColumn: CGFloat = 34          // from the right edge to the end of the figure, on a row with a submenu
     static let shortcutColumn: CGFloat = 62       // after the title column, when an item has a shortcut
     static let submenuOverlap: CGFloat = 4
     static let corner: CGFloat = 12
@@ -148,8 +148,10 @@ final class PreviewMenu: NSView {
             case .separator: view = PreviewSeparator(height: MenuMetrics.separator)
             case .header(let title): view = PreviewHeader(title, height: MenuMetrics.header)
             case .item(let spec):
-                let item = PreviewItem(spec: spec, column: column, open: spec.id != nil && spec.id == open)
-                if item.open, let submenu = spec.submenu { openSubmenu = (submenu, NSRect(x: 0, y: y, width: width, height: item.frame.height)) }
+                let isOpen = spec.id != nil && spec.id == open
+                let item: NSView = spec.drawn ? RowView(spec: spec, column: column, open: isOpen)
+                    : PreviewItem(spec: spec, column: column, open: isOpen)
+                if isOpen, let submenu = spec.submenu { openSubmenu = (submenu, NSRect(x: 0, y: y, width: width, height: item.frame.height)) }
                 view = item
             default: view = MenuInfoView.make(for: entry, reusing: nil) ?? NSView()
             }

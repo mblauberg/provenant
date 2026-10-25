@@ -57,7 +57,7 @@ struct MenuLabel: Equatable {
         } ?? "–"
         let exhausted = report?.exhausted(now: now).count ?? 0
         let drawing = report?.drawing(now: now).count ?? 0
-        let unavailable = report?.accounts.filter { !$0.hasReading && !$0.requiresAuth }.count ?? 0
+        let unavailable = report?.visible.filter { !$0.hasReading && !$0.requiresAuth }.count ?? 0
         spoken = ["Provider quota",
                   featured.map { "\($0.account.title), \($0.window.fullTitle) \(Fmt.percent($0.window.usedPercent ?? 0)) used" },
                   exhausted > 0 ? "\(exhausted) exhausted" : nil,

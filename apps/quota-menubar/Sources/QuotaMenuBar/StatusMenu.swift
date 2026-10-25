@@ -76,7 +76,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             switch entry {
             case .separator: item.isSeparatorItem
             case .header: item.isSectionHeader
-            case .item: !item.isSeparatorItem && !item.isSectionHeader && item.view == nil
+            case .item(let spec): !item.isSeparatorItem && !item.isSectionHeader && (item.view is RowView) == spec.drawn
             case .title, .window, .fact, .note: MenuInfoView.matches(entry, item.view)
             }
         }
@@ -105,6 +105,16 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     }
 
     private func configure(_ item: NSMenuItem, _ spec: MenuItemSpec, column: CGFloat) {
+        if spec.drawn {
+            // The row draws its own title, figure, highlight and chevron; the item keeps the submenu and a title for
+            // VoiceOver and the menu's type-to-find.
+            let view = RowView.make(spec, column: column, reusing: item.view)
+            if item.view !== view { item.view = view }
+            item.attributedTitle = nil
+            item.title = spec.title
+            item.image = nil
+            return configureRest(item, spec)
+        }
         if #available(macOS 14.4, *) {
             item.subtitle = spec.subtitle
         } else if let subtitle = spec.subtitle {
@@ -122,7 +132,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     }
 
     private func configureRest(_ item: NSMenuItem, _ spec: MenuItemSpec) {
-        item.image = spec.icon.flatMap(MenuStyle.image)
+        item.image = spec.drawn ? nil : spec.icon.flatMap(MenuStyle.image)
         item.keyEquivalent = spec.shortcut ?? ""
         item.keyEquivalentModifierMask = .command
         item.isHidden = spec.hidden
@@ -133,6 +143,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         item.target = spec.action == nil ? nil : self
         item.action = spec.action == nil ? nil : #selector(choose(_:))
         item.isEnabled = spec.enabled
+        item.state = spec.checked ? .on : .off
         if let entries = spec.submenu {
             let submenu = item.submenu ?? {
                 let submenu = NSMenu()
@@ -152,6 +163,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case .refresh: model.refresh()
         case .quit: NSApplication.shared.terminate(nil)
         case .open(let url): NSWorkspace.shared.open(url)
+        case .run(let arguments): model.apply(arguments)
         }
     }
 }

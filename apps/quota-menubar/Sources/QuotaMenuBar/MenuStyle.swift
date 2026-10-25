@@ -45,15 +45,23 @@ enum MenuStyle {
         return title
     }
 
-    private static func head(_ spec: MenuItemSpec) -> NSAttributedString {
-        // Explicit colours, as an attributed title gets no default; highlighting still turns every run white.
-        let head = NSMutableAttributedString(string: spec.title, attributes: [
-            .font: titleFont, .foregroundColor: spec.enabled ? NSColor.labelColor : NSColor.tertiaryLabelColor])
+    /// The title and, in the secondary colour, its detail. Highlighted, both turn to the selected-item colours.
+    static func head(_ spec: MenuItemSpec, highlighted: Bool = false) -> NSAttributedString {
+        // Explicit colours, as an attributed title gets no default; a native item turns every run white when lit.
+        let primary: NSColor = highlighted ? .selectedMenuItemTextColor : spec.enabled ? .labelColor : .tertiaryLabelColor
+        let head = NSMutableAttributedString(string: spec.title, attributes: [.font: titleFont, .foregroundColor: primary])
         if let detail = spec.detail {
-            head.append(NSAttributedString(string: " " + detail,
-                                           attributes: [.font: titleFont, .foregroundColor: NSColor.secondaryLabelColor]))
+            head.append(NSAttributedString(string: " " + detail, attributes: [
+                .font: titleFont, .foregroundColor: highlighted ? RowView.dimmed : NSColor.secondaryLabelColor]))
         }
         return head
+    }
+
+    /// A drawn row's trailing figure.
+    static func figure(_ spec: MenuItemSpec, highlighted: Bool) -> NSAttributedString {
+        let color: NSColor = highlighted ? .selectedMenuItemTextColor
+            : !spec.enabled ? .tertiaryLabelColor : spec.dimValue ? .secondaryLabelColor : .labelColor
+        return NSAttributedString(string: spec.value ?? "", attributes: [.font: figureFont, .foregroundColor: color])
     }
 
     static func width(_ text: NSAttributedString) -> CGFloat { ceil(text.size().width) }

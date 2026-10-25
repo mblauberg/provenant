@@ -4,6 +4,8 @@ import Foundation
 enum MenuAction: Equatable {
     case refresh, quit
     case open(URL)
+    /// Runs `provenant` with these arguments, then reloads `quota show`.
+    case run([String])
 }
 
 /// A system colour that marks state. Each maps to a semantic `NSColor`, so it adapts to light, dark and
@@ -48,10 +50,13 @@ struct MenuItemSpec: Equatable {
     var shortcut: String? = nil   // a key used with ⌘
     var hidden = false            // carries only its shortcut, as first-party menu extras show none
     var enabled = true
+    var checked = false           // a checkmark, for a choice among several
     var action: MenuAction? = nil
     var submenu: [MenuEntry]? = nil
     var help: String? = nil       // never set on a row with a submenu, where it would cover the submenu
     var id: String? = nil         // an account id, for `--render --expand`
+    /// Account rows draw themselves (RowView.swift) so the figure column and the qualifier's colour are exact.
+    var drawn: Bool { id != nil }
 }
 
 /// A usage window in an account's submenu.
@@ -83,15 +88,10 @@ enum QuotaMenu {
         var entries: [MenuEntry] = [.title(title, freshness)]
         entries += notices(report: report, error: error)
         if let report, !report.accounts.isEmpty {
-            // Accounts stay together by provider, in the order of each provider's most pressing account.
-            let sorted = report.sorted(now: now)
-            var providers: [String] = []
-            for account in sorted where !providers.contains(account.provider) { providers.append(account.provider) }
-            entries.append(.separator)
-            for provider in providers {
-                entries += sorted.filter { $0.provider == provider }
-                    .map { .item(account($0, now: now, alert: report.alertPercent)) }
-            }
+            // Hidden accounts are left out; ordered ones come first, the rest stay together by provider.
+            let listed = report.listed(now: now)
+            if !listed.isEmpty { entries.append(.separator) }
+            entries += listed.map { .item(account($0, now: now, alert: report.alertPercent, headline: report.leading($0))) }
         }
         if !lanes.isEmpty {
             entries += [.separator, .header("Needs attention")]
@@ -110,6 +110,8 @@ enum QuotaMenu {
             .item(MenuItemSpec(title: "Refresh", icon: .symbol("arrow.clockwise"), enabled: !refreshing, action: .refresh)),
             .item(MenuItemSpec(title: "Open Report Folder", icon: .symbol("folder"), enabled: report != nil,
                                action: report.map { .open(URL(fileURLWithPath: $0.reportPath).deletingLastPathComponent()) })),
+            .item(MenuItemSpec(title: "Customise", icon: .symbol("slider.horizontal.3"), enabled: report != nil,
+                               submenu: report.map { customise($0, stateRoot: stateRoot) })),
             .separator,
             .item(MenuItemSpec(title: "Quit Quota", icon: .symbol("power"), action: .quit)),
             // ⌘R and ⌘Q work while the menu is open without a shortcut column widening every row.
@@ -148,10 +150,13 @@ enum QuotaMenu {
     /// One account: provider and label, the binding window's use as the row's one figure, and a short line saying
     /// what limits it. The ring's colour carries the state, so the line never repeats it, and a spent allowance
     /// shows when it comes back rather than a figure the full ring already gives.
-    static func account(_ account: QuotaReport.Account, now: Date, alert: Double) -> MenuItemSpec {
+    static func account(_ account: QuotaReport.Account, now: Date, alert: Double,
+                        headline: QuotaReport.Headline = .auto) -> MenuItemSpec {
         let binding = account.binding(now: now)
-        let shown = account.hasReading ? account.display(now: now, alert: alert) : nil
-        var row = MenuItemSpec(title: account.providerName ?? Fmt.human(account.provider), detail: label(account),
+        let shown = account.hasReading ? account.display(now: now, alert: alert, headline: headline) : nil
+        // A chosen name replaces the title and its qualifier.
+        var row = MenuItemSpec(title: account.entry?.name ?? account.providerName ?? Fmt.human(account.provider),
+                               detail: account.entry?.name == nil ? label(account) : nil,
                                submenu: details(account, now: now, alert: alert), id: account.id)
         var parts: [String?] = []
         switch account.rank(now) {
@@ -193,6 +198,40 @@ enum QuotaMenu {
         }
         row.subtitle = parts.compactMap { $0 }.joined(separator: " · ")
         return row
+    }
+
+    /// The Customise submenu: how rows and the menu bar lead, which accounts show, and the config file.
+    static func customise(_ report: QuotaReport, stateRoot: URL) -> [MenuEntry] {
+        func display(_ args: [String], _ title: String, _ on: Bool) -> MenuEntry {
+            .item(MenuItemSpec(title: title, checked: on, action: .run(["quota", "display"] + args)))
+        }
+        var entries: [MenuEntry] = [.header("Row figure")]
+        entries += [("auto", "Automatic", QuotaReport.Headline.auto), ("5h", "5-hour", .fiveHour), ("weekly", "Weekly", .weekly)]
+            .map { display(["--headline", $0.0], $0.1, report.display.headline == $0.2) }
+        entries.append(.header("Menu bar figure"))
+        let icon = report.display.icon
+        entries.append(display(["--icon", QuotaReport.Display.mostConstrained], "Most constrained",
+                               icon == QuotaReport.Display.mostConstrained))
+        let registered = report.accounts.filter { $0.entry != nil }
+        entries += registered.compactMap { account in
+            account.entry.map { display(["--icon", $0.id], $0.name ?? account.title, icon == $0.id) }
+        }
+        if !registered.isEmpty {
+            entries.append(.header("Show accounts"))
+            entries += registered.compactMap { account in
+                account.entry.map { entry in
+                    .item(MenuItemSpec(title: entry.name ?? account.title, checked: !entry.hidden,
+                                       action: .run(["accounts", "set", entry.id, "--hidden", entry.hidden ? "false" : "true"])))
+                }
+            }
+        }
+        entries += [
+            .separator,
+            .item(MenuItemSpec(title: "Edit Names and Order…", action: .open(stateRoot.appending(path: "config.toml")))),
+            .separator,
+            .note("Add accounts with provenant accounts register --plan", nil),
+        ]
+        return entries
     }
 
     /// The account's label beside its provider's name, left out when it only repeats the provider.
