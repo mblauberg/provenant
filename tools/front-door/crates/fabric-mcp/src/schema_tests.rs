@@ -581,7 +581,11 @@ fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
     for tool in catalogue() {
         let name = tool["name"].as_str().expect("tool name");
         let root = &tool["inputSchema"];
-        for operation in root["oneOf"].as_array().expect("operation schemas") {
+        let operations = root["oneOf"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![root.clone()]);
+        for operation in &operations {
             let mut request = sample(root, operation).expect("generated valid operation");
             normalise(name, &mut request);
             compare(name, root, &request, "operation", true, &mut counts);

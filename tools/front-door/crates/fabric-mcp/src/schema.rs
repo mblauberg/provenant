@@ -349,11 +349,31 @@ fn build_catalogue() -> Vec<Value> {
                         }
                     }
             }
+            // A single-operation tool is a plain object: a one-variant `oneOf`
+            // is rendered by clients as "exactly one of" over the union of its
+            // properties, which contradicts the required fields. `op` is then
+            // optional because only one value exists.
+            if let Some([only]) = input["oneOf"].as_array().map(Vec::as_slice) {
+                let mut only = only.clone();
+                if let Some(required) = only["required"].as_array_mut() {
+                    required.retain(|field| field != "op");
+                }
+                input = only;
+            }
             input["type"] = json!("object");
             input["$defs"] = definitions();
             json!({"name":name,"description":description,"inputSchema":input,"outputSchema":output_schema(*kind)})
         })
         .collect()
+}
+
+/// The only operation of a single-operation tool, which callers may omit.
+pub fn sole_operation(name: &str) -> Option<&'static str> {
+    let input = &catalogue().iter().find(|tool| tool["name"] == name)?["inputSchema"];
+    if input["oneOf"].is_array() {
+        return None;
+    }
+    input["properties"]["op"]["const"].as_str()
 }
 
 pub fn catalogue() -> &'static [Value] {
@@ -406,7 +426,13 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
                 };
             }
         }
-        return Some(path.to_owned());
+        // No discriminator present: name the first one the variants use.
+        let missing = ["op", "scope", "kind"].into_iter().find(|tag| {
+            options
+                .iter()
+                .any(|s| s["properties"][*tag]["const"].is_string())
+        });
+        return Some(missing.map_or_else(|| path.to_owned(), |tag| format!("{path}.{tag}")));
     }
     let valid_type = match schema["type"].as_str() {
         Some("object") => value.is_object(),

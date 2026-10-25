@@ -175,3 +175,36 @@ fn coordination_mutations_accept_only_valid_top_level_operation_ids() {
         .is_err()
     );
 }
+
+#[test]
+fn submit_accepts_the_single_operation_with_or_without_op() {
+    let task = json!({"prompt":"review","route":{"adapter":"codex"},"timeout_ms":1_800_000,"access":"read_only","worktree":"/tmp/work"});
+    let bare = json!({"operation_id":"review-pr1486-codex","tasks":[task]});
+    let mut tagged = bare.clone();
+    tagged["op"] = json!("submission");
+    assert!(matches!(
+        ToolCall::parse("fabric_submit", bare.clone()),
+        Ok(ToolCall::Submit(_))
+    ));
+    assert!(matches!(
+        ToolCall::parse("fabric_submit", tagged),
+        Ok(ToolCall::Submit(_))
+    ));
+    let schema = &crate::schema::catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_submit")
+        .map(|tool| tool["inputSchema"].clone())
+        .unwrap_or_default();
+    assert!(schema.get("oneOf").is_none());
+    assert!(
+        !schema["required"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|f| f == "op"))
+    );
+    let mut bad = bare;
+    bad["tasks"][0]["timeout_ms"] = json!("soon");
+    assert!(matches!(
+        ToolCall::parse("fabric_submit", bad),
+        Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].timeout_ms"
+    ));
+}
