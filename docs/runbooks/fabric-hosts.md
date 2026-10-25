@@ -4,7 +4,7 @@ Status: current Rust operator surface
 
 Fabric uses bounded SSH calls and host-owned state. Each host keeps its own
 provider sign-ins. The [accepted specification](../specs/fabric-hosts.md)
-records the original requirements; the [Rust Fabric design](../specs/rust-port/design/fabric.md)
+records the original requirements; the [Rust Fabric design](../specs/fabric.md)
 owns the replacement boundaries.
 
 ## Commands

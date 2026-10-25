@@ -1,9 +1,9 @@
 # State and config
 
 Design for the workshop chair and Rust build lanes. Author route:
-`codex/gpt-6.1-sol@high`. [PORTING v7](../PORTING.md), the
-[rewrite plan](../README.md) and the binding
-[cross-area decisions](README.md#cross-area-decisions) govern this design.
+`codex/gpt-6.1-sol@high`. [PORTING v7](rust-workspace.md), the
+[rewrite plan](README.md) and the binding
+[cross-area decisions](README.md#cross-cutting-decisions) govern this design.
 State publishes the frozen paths and flags below; other areas cite this
 contract. CLI owns command rendering and exit codes.
 
@@ -241,7 +241,7 @@ config/install MCP tools. Processes use an immutable startup snapshot.
 
 ## Commands and installation
 
-CLI's [binding command contract](README.md#cross-area-decisions) supplies the
+CLI's [binding command contract](README.md#cross-cutting-decisions) supplies the
 JSON envelope (`schema_version`, `command`, `status`, `data`, `error`), 1 MiB
 result cap and exit mapping. Config returns typed outcomes. Install success
 or no-op is `ok`; drift is findings; foreign selectors are refused; malformed

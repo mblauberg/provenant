@@ -8,11 +8,11 @@ pure review coverage check; for PR work the PR carries the evidence. Cut workflo
 engines, generated reference runs, duplicated queues and the entire bespoke UI
 runtime. Skills conduct the work using `git`, `gh`, Fabric and browser tools.
 
-This design records the accepted workflow contract. The binding [cross-area decisions](README.md#cross-area-decisions)
-and [PORTING v7](../PORTING.md)
+This design records the accepted workflow contract. The binding [cross-area decisions](README.md#cross-cutting-decisions)
+and [PORTING v7](rust-workspace.md)
 govern this design; the table wins any conflict, including older R1 import
 wording. V7 supersedes the transition, compatibility and parity sections of
-[ADR 0028](../../../adr/0028-rust-port-dependencies.md) and the [port plan](../README.md).
+[ADR 0028](../adr/0028-rust-port-dependencies.md) and the [port plan](README.md).
 Their dependency allowlist, typed errors, serde records, crate layering,
 process custody and sole unsafe boundary in `supervisor::sys` still apply.
 ADR 0028's small stderr diagnostic module governs the conflicting R8 reference
@@ -26,7 +26,7 @@ for retired paths. Each Rust owner removes its old source and obsolete tests;
 installation changes once, after the complete Rust product is ready.
 
 Apply the agreed v7 rule, “The stable install during the rewrite”, in the
-[port README](../README.md) and [PORTING R11](../PORTING.md): the primary checkout
+[port README](README.md) and [PORTING R11](rust-workspace.md): the primary checkout
 on each Mac is the frozen live install. Never pull, check out another revision
 or reinstall it until cut-over. All work uses worktrees from `origin/main`.
 Deletions may merge to main freely while that checkout stays frozen. Do not
@@ -836,7 +836,7 @@ caller deletions integrate only in the dependency order below.
 At J, use the table's `install [--dry-run]`, `check install` and `uninstall` commands,
 with `--legacy-checkout ABS`. Re-applying `install` is recovery; rollback
 reinstalls `pre-rust-rewrite`. The compiled cut-over link/command inventory
-belongs in [state.md's installer section](https://github.com/mblauberg/provenant/blob/docs/rewrite-state/docs/specs/rust-port/design/state.md#proposed-commands-and-installer-behaviour),
+belongs in [state.md's installer section](state.md#commands-and-installation),
 whose older command proposal must conform to the table. State matches exact
 commands/link targets beneath the supplied checkout, reads links with
 `readlink` only and prints every harness-config change before applying it.
@@ -875,7 +875,7 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 | config/state | Typed risk/review settings and bounds from one root-owned `config.toml` plus compiled defaults, with optional `profile =`; no layers/project overlays/per-knob env or mutation verbs. Root `~/.local/share/provenant/v1`, `--state-dir` over `PROVENANT_STATE_DIR`; accept workflow subtree row. Own `install [--dry-run]`, `check install`, `uninstall`, `--legacy-checkout` inventory and authorised instruction updates; preserve unrelated/user-owned entries. Writing data stays with skills. |
 | supervisor | Safe FS: stable lock inode, no-follow open, atomic replace/no-replace, file/directory sync; expose bounded `FileHandle::lock(LockOptions)` polling non-blocking `flock` through confinement, with cancellation. `run_utility` for fixed git/gh reads. Test-only fixture launch/kill support. |
 | confinement | Own `Grant`, `Workspace`, `RepoHandle`; `open_workflow_store`, `open_artifact`, `narrow`, safe `git_facts` with replacement objects off/alternates ignored. `StoreRoot::lock(..., Deadline, CancelToken)` returns a held record for bounded `read`/atomic `publish`; ordinary path/phase/cause I/O diagnostics, no workflow uncertain-commit protocol. |
-| run | `AttemptReader::attempt(AttemptId) -> AttemptFact` (fact type in `records`, `Serialize` only; see execution-run.md): terminal state/exit, subject, output ref/digest, route and reviewer. Terminal records carry `DeliveryId` for stats. Own top-level `dispatch`, `lanes`, `output`, `cancel`, `resume`, `reconcile`, git-evidence helper and entire run-directory deletion contract; remove finaliser before C deletes its import. No work-snapshot/frontier ask. |
+| run | `AttemptReader::attempt(AttemptId) -> AttemptFact` (fact type in `records`, `Serialize` only; see run.md): terminal state/exit, subject, output ref/digest, route and reviewer. Terminal records carry `DeliveryId` for stats. Own top-level `dispatch`, `lanes`, `output`, `cancel`, `resume`, `reconcile`, git-evidence helper and entire run-directory deletion contract; remove finaliser before C deletes its import. No work-snapshot/frontier ask. |
 | providers | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; keep adapter, endpoint and model family separate. ChairAttested never fills cross-family coverage. Workflow consumes edge-built facts, without a providers dependency. |
 | routing | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`: tiers, all author families, expiry and quota/config/capability/family-slot blockers. No probes under the receipt lock. Quota feeds routing, with no workflow call. |
 | telemetry | No workflow write/report API or ledger; CLI reads `acceptance` for the accepted-delivery join. `telemetry stats` reads terminal run records with prices; receipt plus run records remain the record. Keep old ledger on disk without import/deletion; retire OTel at cut-over. |

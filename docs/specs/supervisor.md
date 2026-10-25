@@ -1,10 +1,10 @@
 # Supervisor and confinement
 
-Proposal for chair acceptance under [PORTING.md v7](https://github.com/mblauberg/provenant/blob/1b3d48e4c549811ce3636edc30b047f36fd24ada/docs/specs/rust-port/PORTING.md).
+Proposal for chair acceptance under [PORTING.md v7](rust-workspace.md).
 Author: `codex/gpt-6.1-sol@high` via Fabric. Source baseline:
 `1b3d48e4c549811ce3636edc30b047f36fd24ada`; also reuse the bounded OS APIs in
 [PR #1348](https://github.com/mblauberg/provenant/pull/1348), with the corrections
-below. The [cross-area decisions](README.md#cross-area-decisions) bind state,
+below. The [cross-area decisions](README.md#cross-cutting-decisions) bind state,
 layout, commands, waits, records and hooks; cli owns the exact flag freeze.
 
 ## Audit implementation notes
@@ -19,7 +19,7 @@ reservation commit hook is reserved for the final cleanup facts. Census retries
 and journal failures warn once per failure episode. The reservation's census
 completeness describes the latest observation; exit warnings retain prior journal
 failures. Terminal grace uses `root_flush_ms`; the unused private `terminal_ms`
-field is removed. See the crate's [port notes](../../../../tools/front-door/crates/supervisor/PORT.md#supervisor-audit-corrections)
+field is removed. See the crate's [crate notes](../../tools/front-door/crates/supervisor/README.md#spawn-polling-and-publication)
 for the remaining consumer wiring and platform limits. `PathIo`, strict utility
 text decoding and typed reconcile remain required APIs despite missing callers.
 
@@ -39,7 +39,7 @@ owns identity, coordination and federation routing (R2 as amended by the chair).
 
 ## Keep and remove
 
-Keep the custody invariants in the [supervisor spec](../../harness/rust-supervisor.md#structural-guarantees),
+Keep the custody invariants in the [supervisor spec](harness/rust-supervisor.md#structural-guarantees),
 subject to v7's abort profile and single Rust implementation:
 
 - Register child observation before spawn, reset inherited signal dispositions
@@ -379,7 +379,7 @@ holder's provider-exit callback joins that worker before descendant cleanup;
 errors become warnings and never provider stop reasons. Host-launched child
 guardians are siblings of the provider and retain their own custody; they do
 not enter its descendant sparing registry. The host holder forwards explicit
-parent stop requests to its own accepted child scopes. See execution-route.md
+parent stop requests to its own accepted child scopes. See routing.md
 for the queued submission path.
 
 Shell-capable Claude writers use the same Rust recipe as Codex, with
@@ -507,7 +507,7 @@ passes only its just-merged scope; it cannot trigger an unscoped repository swee
 
 ## Commands and MCP
 
-The [cross-area decisions](README.md#cross-area-decisions) own the command
+The [cross-area decisions](README.md#cross-cutting-decisions) own the command
 contract, wait budgets, run verbs and `HookSpec`. CLI supplies its JSON envelope,
 1 MiB result cap, exits and exact flags; this area defines none separately.
 Diagnostics stay on redacted stderr. Supervisor adds no run verbs or MCP tools;
@@ -667,7 +667,7 @@ frames in memory before redacting retained bytes.
 Required from providers: argv/environment plus selected authentication inputs,
 a fixture-proven permission profile and bounded decoding into Progress,
 Terminal or closed ProtocolRejected events; no Python observer or signalling
-callback. Run (`design/execution-run.md`) owns atomic admission/operation
+callback. Run (`run.md`) owns atomic admission/operation
 insertion in its durable store, the run registry,
 attempts, status, retry generations, child registration, cancel scope, settlement
 and the single terminal bundle.
@@ -675,7 +675,7 @@ It commits referenced evidence before its terminal marker and returns custody
 on error. Dirty/changed/unreadable writer evidence prevents automatic retry;
 silence never proves an untouched tree.
 
-`fabric-runtime` (`design/fabric.md`) owns identity and federation routing,
+`fabric-runtime` (`fabric.md`) owns identity and federation routing,
 supplies graph reservation permits and consumes ID-scoped registry/status/output/
 cancel through Run. Its store may index Run IDs but owns no competing run
 registry or lifecycle status. Transport cancellation
@@ -708,7 +708,7 @@ baseline: they are required build inputs, not evidence already collected.
 
 ## Tests and acceptance
 
-Follow [R9](https://github.com/mblauberg/provenant/blob/1b3d48e4c549811ce3636edc30b047f36fd24ada/docs/specs/rust-port/PORTING.md#r9-tests-prove-the-new-design): beside-module unit tests
+Follow [R9](rust-workspace.md#tests): beside-module unit tests
 use explicit clocks and injected observations. Cover transitions/idempotence,
 natural-exit precedence, unknown identities, failed signals, stale generations,
 registration versus publication, integer/size bounds, secret chunk splits,

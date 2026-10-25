@@ -2,7 +2,7 @@
 
 > Legacy source references below describe the pre-rewrite implementation.
 > Use `provenant help` for current Rust commands and the accepted
-> [Rust designs](../specs/rust-port/design/README.md) for owners.
+> [Rust designs](../specs/README.md) for owners.
 
 **Status:** Accepted 2026-07-18 (user, [issue
 #266](https://github.com/mblauberg/provenant/issues/266)); amended by [ADR
@@ -18,7 +18,7 @@ amended on 2026-10-22 to add the `lease` row (see
 > snapshot. Its daemon-era command and provider-execution ownership statements
 > are historical evidence, not current operational guidance. Current Fabric
 > commands and configuration are owned by
-> [Fabric Rust design](../specs/rust-port/design/fabric.md); Fabric now
+> [Fabric Rust design](../specs/fabric.md); Fabric now
 > coordinates messages, tasks and activity, and its thin MCP façade can start
 > the same provider owners available through the direct CLI.
 > The current front door delegates `route`, `worktree`, `check`, `fabric`,

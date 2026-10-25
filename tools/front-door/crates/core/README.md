@@ -1,7 +1,6 @@
 # provenant-core
 
-Pure shared values for [state design step 1](../../../../docs/specs/rust-port/design/state.md)
-under PORTING.md version 7. Implementation route: `codex/gpt-6.1-sol@high`.
+Pure shared values for the [state spec](../../../../docs/specs/state.md).
 
 - Distinct generated identities accept 16 supplied bytes or 32 lowercase hex
   digits. `OperationId` uses execution-run's caller-key grammar instead.

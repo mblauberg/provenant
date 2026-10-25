@@ -14,8 +14,8 @@ and explicit SSH peers. Keep bounded graph execution with ordered route fallback
 Remove named sessions, interpreter bridges,
 parallel status engines, permissive input repair and duplicated routing policy.
 
-The [binding cross-area decisions](README.md#cross-area-decisions)
-govern shared contracts and win over conflicting area prose. [PORTING v7](../PORTING.md)
+The [binding cross-area decisions](README.md#cross-cutting-decisions)
+govern shared contracts and win over conflicting area prose. [PORTING v7](rust-workspace.md)
 supersedes transition/parity rules; the dependency allowlist, crate layering,
 typed errors, serde records, bounded inputs and `supervisor::sys` unsafe boundary
 still apply. There is no async runtime. Only provider wire forms, harness hook
@@ -47,7 +47,7 @@ not prerequisites to merge wholesale.
 | Orchestration skills | Correlated requests and replies, owned worktrees, actual route receipts and restartable work | `skills/orchestrate/SKILL.md:11–23` names dispatch, status, continuation and output; dispatch/batch execution stays with `run` |
 | Hooks and workflow helpers | Stable hook stdin/stdout, bounded context and notifications | The CLI-owned `HookSpec` registry defines recorded hook protocols; legacy Python hook configuration retires at state cut-over. `scripts/routing_context_hook.py` is legacy survey evidence, not an installer API. |
 | Another host | Explicit placement, host-owned status/cancel, committed code transport and bounded output | Historical Python survey: `scripts/fabric_hosts.py`, `scripts/fabric_lanes.py` and `scripts/fabric_git.py`; current behaviour is owned by `fabric-runtime`. |
-| Installer and MCP clients | Register the same installed binary while preserving unrelated client configuration | Historical installer survey: `scripts/configure-fabric-mcp.py`; current registration is owned by config and `fabric-mcp`; see the [registration runbook](../../../runbooks/fabric-mcp-registration.md). |
+| Installer and MCP clients | Register the same installed binary while preserving unrelated client configuration | Historical installer survey: `scripts/configure-fabric-mcp.py`; current registration is owned by config and `fabric-mcp`; see the [registration runbook](../runbooks/fabric-mcp-registration.md). |
 | Other library owners | One run/status API and one policy loader | `fabric_policy.py` is also imported by lint, secret scan and provider execution; its filename does not make those policies Fabric-owned |
 
 The source paths abbreviated as `src/` in this table are below `runtime/fabric/`.
@@ -480,7 +480,7 @@ root. The shared CLI/run submission path preserves that scope, verifies its
 project registration and acquires the supervisor writer lease before compiling
 confinement. A terminal Git sequencer check can turn provider success into a
 failed attempt. Lost custody retains the reservation for chair recovery; see
-[worktrees](../../../worktrees.md#writer-custody-recovery).
+[worktrees](../worktrees.md#writer-custody-recovery).
 The run owner must enforce those permissions before launching a provider.
 A graph attempt may use its next route after an auth refusal, usage limit or
 unavailable adapter when no provider launched. After launch, only read-only
@@ -538,10 +538,10 @@ deriving schemas from the typed params would require a new proc-macro crate.
 Support `2025-11-25` and `2026-07-28`; do not add `2025-06-18` to the supported
 versions. Verbatim first-request stdio fixtures captured on 24 October 2026
 provide shipped-client evidence for each era:
-[Claude Code 2.1.309](../../../../tools/front-door/crates/fabric-mcp/tests/fixtures/claude-code-2.1.309-discover.json)
+[Claude Code 2.1.309](../../tools/front-door/crates/fabric-mcp/tests/fixtures/claude-code-2.1.309-discover.json)
 negotiates `2026-07-28` through `server/discover`, with an
-[`initialize` fallback](../../../../tools/front-door/crates/fabric-mcp/tests/fixtures/claude-code-2.1.309-initialize.json).
-[Codex 0.159.0](../../../../tools/front-door/crates/fabric-mcp/tests/fixtures/codex-0.159.0-initialize.json)
+[`initialize` fallback](../../tools/front-door/crates/fabric-mcp/tests/fixtures/claude-code-2.1.309-initialize.json).
+[Codex 0.159.0](../../tools/front-door/crates/fabric-mcp/tests/fixtures/codex-0.159.0-initialize.json)
 sends only `initialize`, requesting `2025-06-18`, and receives the supported
 `2025-11-25` version through legacy negotiation. Both eras therefore serve a
 shipped client; transport tests assert each fixture's reply.

@@ -9,8 +9,8 @@ installs as it goes - that's fine!")
 (continuous landing behind selectors), 5's PyYAML comparison gate and YAML
 migration lane, and 7's retention of Python CI tooling during a transition.
 ADR 0028's dependency allowlist (decisions 3, 4 and 6) stands. Plan and
-rulebook: [Rust rewrite](../specs/rust-port/README.md),
-[PORTING.md](../specs/rust-port/PORTING.md).
+rulebook: [Rust rewrite](https://github.com/mblauberg/provenant/blob/577cfe3f/docs/specs/rust-port/README.md),
+[PORTING.md](https://github.com/mblauberg/provenant/blob/577cfe3f/docs/specs/rust-port/PORTING.md).
 
 ## Context
 
