@@ -192,6 +192,12 @@ fn cached(roots: &Roots) -> Result<Vec<AvailabilityRecord>, EdgeError> {
     }
     Ok(records)
 }
+/// The OpenCode snapshot reports the Go plan's pools, which only govern models
+/// served by the `opencode-go` provider. Free (Zen) and other configured
+/// providers must not inherit its account-level exhaustion.
+fn snapshot_governs(adapter: &str, model: &ModelId) -> bool {
+    adapter != "opencode" || model.model().starts_with("opencode-go/")
+}
 fn quota_observations(
     catalogue: &Catalogue,
     availability: &[AvailabilityRecord],
@@ -233,6 +239,7 @@ fn quota_observations(
                 available.adapter, observed_model
             ))?);
         }
+        models.retain(|model| snapshot_governs(&available.adapter, model));
         if observations.len().saturating_add(models.len()) > 256 {
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
         }
@@ -869,6 +876,53 @@ mod route_tests {
         assert_eq!(super::free_pools("opencode", || true), ["opencode-free"]);
         assert!(super::free_pools("opencode", || false).is_empty());
         assert!(super::free_pools("codex", || true).is_empty());
+    }
+
+    #[test]
+    fn exhausted_go_plan_binds_only_go_models() -> Result<(), Box<dyn Error>> {
+        use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
+        let account = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account,
+            revision: 0,
+            status: QuotaStatus::Exhausted,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: Vec::new(),
+        });
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "opencode".into(),
+            version: "fixture".into(),
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "fixture".into(),
+            account_key: Some("go".into()),
+            observed_models: vec![
+                "opencode-go/glm-5.1".into(),
+                "opencode/glm-5.3-flash-free".into(),
+                "openrouter/some-model".into(),
+            ],
+            last_preflight_error: None,
+            observed_unix_seconds: 100,
+            expires_unix_seconds: 200,
+        }];
+        let catalogue = super::Catalogue::bundled()?;
+        let observed = super::quota_observations(&catalogue, &availability, &[record])?;
+        let bound: Vec<_> = observed.iter().map(|o| o.model.as_str()).collect();
+        assert!(bound.contains(&"opencode/opencode-go/glm-5.1"));
+        assert!(!bound.contains(&"opencode/opencode/glm-5.3-flash-free"));
+        assert!(!bound.contains(&"opencode/openrouter/some-model"));
+        assert!(bound.iter().all(|m| m.starts_with("opencode/opencode-go/")));
+        Ok(())
     }
 
     fn resolved(adapter: &str, model: &str, roll: u64) -> ResolvedRoute {
