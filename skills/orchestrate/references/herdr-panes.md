@@ -35,8 +35,10 @@ rule). Dispatch through Fabric, observe with
 `provenant output RUN/TASK/ATTEMPT --part events`, read
 bounded slices with `fabric_output`'s `read` operation, and steer with
 `fabric_mail`'s `send` operation or `fabric_run`'s `resume` operation using
-`target: { attempt: ATTEMPT }`, `expected_generation`, `operation_id` and the
-prompt (`resume` also answers `input_required` lanes).
+`target: { attempt: ATTEMPT }`, `expected_generation: 0` (it counts earlier
+continuations, not the attempt record's `generation`), `operation_id` and the
+prompt (`resume` also answers `input_required` lanes). On a conflict the
+attempt already has a continuation: target the child attempt.
 
 Long-running watchable processes go to a background shell with output to a run
 file.
@@ -221,8 +223,8 @@ means integration or detection is not yet reliable.
 For answer-bearing Fabric work, read the correlated reply with
 `fabric_mail`'s `read` operation (`after`, `limit`) and verify its artifact.
 When there is no local work, observe the project activity events with
-`fabric_events`'s `read` operation (`after`, `limit`, `wait_ms`), then read the inbox
-again. Each wait has an explicit budget. A deadline does not cancel work;
+`fabric_events`'s `read` operation (`after`, `limit`, `wait_ms`), then read
+the inbox again. Each wait has an explicit budget. A deadline does not cancel work;
 pane state remains advisory and never proves completion.
 
 ## Finish

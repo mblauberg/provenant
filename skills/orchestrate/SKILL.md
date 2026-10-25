@@ -7,7 +7,7 @@ description: "Use to coordinate bounded work across agents, research lanes or in
 
 ## Quickstart
 
-One surface per action. Fabric MCP tools cover submit, graph, status, resume, cancel, claim, landing leases and bounded stdout or stderr reads (`fabric_output`). Mail, identity and activity events use `fabric_mail`, `fabric_identity` and `fabric_events`. CLI only: `provenant lanes` (list and wait), `provenant route list`, `provenant output` (`--part events|result|prompt`, `--tail`), `provenant reconcile` and `provenant fabric landing push|reconcile`. A terminal without MCP cancels with `provenant cancel RUN/TASK`, which cancels every attempt of the task (`fabric_run` cancels one).
+One surface per action. Fabric MCP tools cover submit, graph, status, resume, cancel, claim, landing leases and bounded stdout or stderr reads (`fabric_output`). Mail, identity and activity events use `fabric_mail`, `fabric_identity` and `fabric_events`. CLI only: `provenant lanes` (list and wait), `provenant route list`, `provenant output` (`--part events|result|prompt`, `--tail`), `provenant reconcile` and `provenant fabric landing push|reconcile`. A terminal without MCP cancels with `provenant cancel RUN[/TASK[/ATTEMPT]]`: RUN/TASK/ATTEMPT cancels one attempt like `fabric_run`, RUN/TASK every attempt of the task.
 
 1. [Native first](references/routing-and-tiers.md#native-first): use native subagents for your own provider when the native tool supports the work. Claude callers use native Claude subagents; Claude models remain in the route pools for non-Claude chairs. Use Fabric for other providers, detached work and sandboxed worktree writers.
 2. Call `fabric_submit` with its `submission` operation; each task has one route choice. Use `provenant route list --adapter <id>` to inspect model ids, pool membership and cached availability.
@@ -25,7 +25,7 @@ One surface per action. Fabric MCP tools cover submit, graph, status, resume, ca
    worktree reserved and follow [chair recovery](../../docs/worktrees.md#writer-custody-recovery).
 5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
-7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting `target: { attempt: ATTEMPT }` and providing `expected_generation` and `operation_id`.
+7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting `target: { attempt: ATTEMPT }` and providing `expected_generation: 0` (it counts earlier continuations, not the attempt record's `generation`) and `operation_id`. On a conflict the attempt already has a continuation: target the child attempt.
 8. Use `fabric_run`'s `cancel` operation with an explicit target and operation ID to stop a run; use `fabric_output`'s `read` operation with a target, part, offset and byte limit for a bounded slice.
 
 ## Rules
@@ -41,7 +41,7 @@ One surface per action. Fabric MCP tools cover submit, graph, status, resume, ca
   - Before fan-out, run `provenant route list`. A named pool tries members in order and does not spread repeated tasks across them. For family diversity, select distinct exact model IDs from the listing and submit one task per model. Set effort only when the catalogue records that exact control.
   - Set the exact model for each native subagent when its tool allows it. Claude callers use native Claude subagents; non-Claude chairs can dispatch Claude pool members through Fabric. Brief native subagents with paths; end each when its deliverable lands.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
-  - agy lanes are OS-confined to their `cwd` and `add_dirs`; pass briefs through `prompt` or `prompt_file` (read by Fabric), rather than paths for the lane to open.
+  - agy lanes are OS-confined to their `cwd` and `add_dirs`; put the brief inline in the task `prompt` (`prompt_file` is CLI-only), rather than paths for the lane to open.
   - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.
   - Wait once: run one `provenant lanes --wait N` in the background, or one status wait. Never sleep or poll loops.
   - Wait with `provenant lanes --wait N` or `gh pr checks --watch` as a background command; never a bare sleep or a manual polling loop.

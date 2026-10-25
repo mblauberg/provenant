@@ -135,7 +135,7 @@ as leaves where it belongs, then close it once its done-when is verified.
   Read diffs by stat first and open only what a verdict hinges on.
 - Never read images in the chair. Captures go to reviewers, who look at them
   and return verdicts.
-- Keep briefs in files and pass `prompt_file`; do not paste diffs into prompts.
+- Keep briefs short and inline in the task `prompt` (`prompt_file` is CLI-only); do not paste diffs into prompts.
 
 ## Reviewer git-verb denylist
 
