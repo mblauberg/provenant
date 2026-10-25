@@ -158,8 +158,12 @@ pub fn detect(
     home: &Path,
     user: &OsStr,
     directory: &Path,
+    probe_root: &Path,
 ) -> Result<String, ProviderError> {
-    detect_with_org(executor, adapter, executable, home, user, directory).map(|(key, _)| key)
+    detect_with_org(
+        executor, adapter, executable, home, user, directory, probe_root,
+    )
+    .map(|(key, _)| key)
 }
 /// The account key and, for Claude, the organisation fingerprint when exposed.
 pub fn detect_with_org(
@@ -169,10 +173,12 @@ pub fn detect_with_org(
     home: &Path,
     user: &OsStr,
     directory: &Path,
+    probe_root: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
     let cwd = Path::new(crate::claude::PROBE_CWD);
     if adapter == "agy" {
-        return detect_agy(executor, executable, home, user, cwd).map(|key| (key, None));
+        return detect_agy(executor, executable, home, user, cwd, probe_root)
+            .map(|key| (key, None));
     }
     if adapter == "codex" {
         let bytes = read_following(
@@ -271,23 +277,13 @@ fn detect_agy(
     home: &Path,
     user: &OsStr,
     cwd: &Path,
+    probe_root: &Path,
 ) -> Result<String, ProviderError> {
-    use provenant_supervisor::fs::{Directory, temporary_name};
-    struct Scratch(PathBuf);
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let parent =
-        std::fs::canonicalize(std::env::temp_dir()).map_err(|_| ProviderError::UnknownIdentity)?;
-    let anchor = Directory::open_anchor(&parent).map_err(|_| ProviderError::UnknownIdentity)?;
-    let name = temporary_name().map_err(|_| ProviderError::UnknownIdentity)?;
-    anchor
-        .mkdir(&name, 0o700)
-        .map_err(|_| ProviderError::UnknownIdentity)?;
-    let scratch = Scratch(parent.join(name));
-    let log = scratch.0.join("cli.log");
+    // Production callers construct HostProbeExecutor first, which sweeps
+    // directories left by crashed owners under this same host state root.
+    let scratch = crate::host::HostProbeDir::create(probe_root)
+        .map_err(|error| ProviderError::ProbeDirectory(error.to_string()))?;
+    let log = scratch.path().join("cli.log");
     let argv: Vec<OsString> = [
         executable.as_os_str(),
         OsStr::new("-p"),

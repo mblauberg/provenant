@@ -168,8 +168,9 @@ the host state root; directories left by owners that died are swept.
 - Codex hashes `tokens.account_id`; Cursor hashes the subject claim of its
   access token. Neither fingerprints token text. Keys carry `codex-` and
   `cursor-` prefixes.
-- Agy has no signed-in identity source, so it is not given an inferred one.
-  Agy stays unavailable rather than inheriting a shared `default` cooldown.
+- Agy fingerprints the signed-in Google email from its probe log, with an
+  `agy-google-` prefix. An undetectable identity stays unavailable rather than
+  inheriting a shared `default` cooldown.
 - Quota capture checks identity before and after the probe and refuses a
   changed attribution.
 - Registrations live in `config.toml` under

@@ -185,6 +185,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             home,
             &user,
             &directory,
+            roots.state.as_path(),
         );
         // OpenCode's local ledger has no sign-in identity.
         let (key, org_fingerprint) = match detected {

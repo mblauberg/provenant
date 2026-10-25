@@ -211,6 +211,10 @@ impl<'a> HostProbeExecutor<'a> {
             path: host_root.to_owned(),
         })
     }
+
+    pub fn root(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl Executor for HostProbeExecutor<'_> {

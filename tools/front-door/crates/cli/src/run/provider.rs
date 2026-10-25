@@ -114,6 +114,7 @@ fn prepare_with(
                 &home,
                 &user,
                 &directory,
+                executor.root(),
             )
         {
             entries.push(provenant_providers::accounts::Registration {
@@ -889,6 +890,7 @@ fn observe_account(
             home,
             user,
             &directory,
+            executor.root(),
         )
         .map_err(|e| {
             format!(
