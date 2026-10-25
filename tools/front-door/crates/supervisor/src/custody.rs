@@ -1608,6 +1608,23 @@ impl CustodyLease {
 
 /// Reattach only a generation already named by the durable redacted summary.
 pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
+    reattach_inner(directory, scope, None)
+}
+/// Reattach for a requester the caller holds, not the one the summary names.
+/// A host whose attempt directory a lane can write uses this, so a rewritten
+/// summary cannot make the guardian ignore its stop request.
+pub fn reattach_for(
+    directory: Directory,
+    scope: Scope,
+    requester: ActorId,
+) -> Result<CustodyHandle> {
+    reattach_inner(directory, scope, Some(requester))
+}
+fn reattach_inner(
+    directory: Directory,
+    scope: Scope,
+    held: Option<ActorId>,
+) -> Result<CustodyHandle> {
     #[derive(Deserialize)]
     struct Summary {
         scope: Scope,
@@ -1620,7 +1637,7 @@ pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
     Ok(CustodyHandle {
         directory,
         scope,
-        requester: summary.requester,
+        requester: held.unwrap_or(summary.requester),
     })
 }
 

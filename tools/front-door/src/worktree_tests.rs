@@ -2370,6 +2370,7 @@ fn verify_lane_profile(
     // parent cannot read Codex credentials.
     let attempt_id = admit(&nested_frames)?;
     let store = provenant_run::RunStore::open(&child_context, &call)?;
+    let forged = provenant_core::ActorId::from_bytes([66; 16]);
     if cancel_child {
         let run = store.record(attempt_id, &call)?.run_id;
         wait_for_path(
@@ -2378,6 +2379,14 @@ fn verify_lane_profile(
             )),
             Duration::from_secs(8),
         )?;
+        // The lane can rewrite its child's launch summary. The host must still
+        // stop the child for the requester its guardian holds.
+        let path = child.join(format!("runs/{run}/attempts/{attempt_id}/launch.json"));
+        let mut summary: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
+        summary["requester"] = serde_json::to_value(forged)?;
+        fs::remove_file(&path)?;
+        fs::write(&path, serde_json::to_vec(&summary)?)?;
         host.provider_exited(
             &parent.encode()?,
             Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
@@ -2410,14 +2419,23 @@ fn verify_lane_profile(
         assert_eq!(record.provider_launched, Some(true), "{reason}");
     }
     assert_eq!(record.provider_launched, Some(true), "{reason}");
-    // The lane stamps its own actor on the child's run record. The host must
-    // still launch for the requester sealed in the parent's holder context.
-    assert_ne!(store.run(record.run_id, &call)?.actor_id, parent.actor_id);
-    let summary: Value = serde_json::from_slice(&fs::read(child.join(format!(
-        "runs/{}/attempts/{attempt_id}/launch.json",
-        record.run_id
-    )))?)?;
-    assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
+    // The lane's operation keeps its own actor. The host launches for, and
+    // records as owner, the requester sealed in the parent's holder context.
+    let actor: String = rusqlite::Connection::open(child.join("run.sqlite3"))?.query_row(
+        "SELECT actor FROM operations WHERE run=?1",
+        [record.run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_ne!(actor, parent.actor_id.to_string());
+    assert_eq!(store.run(record.run_id, &call)?.actor_id, parent.actor_id);
+    assert_eq!(record.verified_owner, Some(parent.actor_id));
+    if !cancel_child {
+        let summary: Value = serde_json::from_slice(&fs::read(child.join(format!(
+            "runs/{}/attempts/{attempt_id}/launch.json",
+            record.run_id
+        )))?)?;
+        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
+    }
     let provider_state = child.join(format!(
         "runs/{}/attempts/{attempt_id}/provider-state",
         record.run_id

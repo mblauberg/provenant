@@ -152,7 +152,13 @@ impl RunStore {
                 _ => {}
             }
             let dir = self.attempt_dir(record.run_id, id, false)?;
-            match custody::reattach(dir, Self::scope(&record)) {
+            // A lane can rewrite its child's launch summary; the host stops
+            // for the requester its guardian holds.
+            let handle = match self.sealed_requester {
+                Some(requester) => custody::reattach_for(dir, Self::scope(&record), requester),
+                None => custody::reattach(dir, Self::scope(&record)),
+            };
+            match handle {
                 Ok(handle) => {
                     return Ok(
                         match custody::stop(&handle, StopReason::ExplicitCancellation) {

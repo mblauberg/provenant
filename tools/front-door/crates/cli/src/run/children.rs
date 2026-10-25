@@ -202,7 +202,10 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             &call,
         )
         .map_err(|error| error.to_string())?
-        .with_writer_registry(roots.state.as_path()),
+        .with_writer_registry(roots.state.as_path())
+        // Launch, ownership and cancellation of children use the requester
+        // sealed in this attempt's host-built context, never the lane's actor.
+        .with_sealed_requester(context.actor_id),
         context: run::ExecutionContext {
             state_root: child_state,
             project_id: context.project_id,
@@ -292,15 +295,9 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 };
                 accepted.insert((record.attempt_id, generation));
             }
-            // The child launches for this attempt's sealed requester, never
-            // the actor its lane-written run record names.
-            if let Err(error) = launch_on_host(
-                &session,
-                id,
-                &edge,
-                &call,
-                Some((launch, &validated, context.actor_id)),
-            ) {
+            if let Err(error) =
+                launch_on_host(&session, id, &edge, &call, Some((launch, &validated)))
+            {
                 launch_error = Some(error.message);
             }
         }

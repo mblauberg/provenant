@@ -271,7 +271,8 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let store = RunStore::open(&context(temp.path())?, &call)?
+        .with_sealed_requester(provenant_core::ActorId::from_bytes([7; 16]));
     let parent_task = input().request.tasks[0].clone();
     let mut nested = input();
     nested.request.lane_depth = Some(2);
@@ -300,7 +301,6 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
         store.start_child(
             record.run_id,
             &validated,
-            context(temp.path())?.actor_id,
             &fake,
             &|_, _| unreachable!(),
             &call
@@ -319,7 +319,6 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     store.start_child(
         record.run_id,
         &swapped,
-        context(temp.path())?.actor_id,
         &refuse,
         &|_, _| unreachable!(),
         &call,
@@ -386,7 +385,8 @@ fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult 
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let lane = context(temp.path())?;
+        let mut store = RunStore::open(&lane, &call)?;
         let mut prepared = input();
         if child {
             prepared.request.lane_depth = Some(2);
@@ -414,13 +414,78 @@ fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult 
                 2,
                 &call,
             )?;
-            store.start_child(record.run_id, &validated, sealed, &Ready, &holder, &call)?
+            // Only the host's view, opened from the sealed context, launches.
+            assert!(matches!(
+                store.start_child(record.run_id, &validated, &Ready, &holder, &call),
+                Err(RunError::Validation(
+                    "child launch lacks a sealed requester"
+                ))
+            ));
+            store = store.with_sealed_requester(sealed);
+            store.start_child(record.run_id, &validated, &Ready, &holder, &call)?
         } else {
             store.start(record.run_id, &Ready, &holder, &call)?
         };
         assert!(matches!(started[..], [Started::Refused { .. }]));
         // A top-level store is host-written, so its record stays the source.
-        assert_eq!(seen.get(), Some(if child { sealed } else { forged }));
+        let owner = if child { sealed } else { forged };
+        assert_eq!(seen.get(), Some(owner));
+        // A started child records the sealed owner. The lane's operation keeps
+        // its own actor, so its replay still finds it.
+        assert_eq!(store.run(record.run_id, &call)?.actor_id, owner);
+        let attempt = store.record(prepared.attempts[0].attempt_id, &call)?;
+        let stamped = if child { sealed } else { lane.actor_id };
+        assert_eq!(attempt.verified_owner, Some(stamped));
+        let operation = store
+            .operation(&prepared.operation_id, &call)?
+            .ok_or("lane operation")?;
+        assert_eq!(operation.actor_id, lane.actor_id);
+    }
+    Ok(())
+}
+
+#[test]
+fn host_cancels_a_child_for_its_sealed_requester_not_its_summary() -> TestResult {
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let forged = provenant_core::ActorId::from_bytes([66; 16]);
+    for host in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        if host {
+            store = store.with_sealed_requester(sealed);
+        }
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(id, &route(), &[], None, &call)?;
+        // The lane rewrites the requester in its child's launch summary.
+        let scope = provenant_supervisor::custody::Scope {
+            run: run.run_id,
+            attempt: id,
+            generation: 1,
+        };
+        let summary = serde_json::json!({"schema_version": 1, "scope": scope, "requester": forged});
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        artifacts::seal(
+            &dir,
+            "launch.json",
+            &serde_json::to_vec(&summary)?,
+            RECORD_LIMIT,
+        )?;
+        assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
+        let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            store
+                .context
+                .state_root
+                .as_path()
+                .join(format!("runs/{}/attempts/{id}/cancel.json", run.run_id)),
+        )?)?;
+        // The guardian honours only its own requester. A lane's view of its
+        // own child has nothing better than the summary.
+        let expected = if host { sealed } else { forged };
+        assert_eq!(request["requester"], serde_json::to_value(expected)?);
     }
     Ok(())
 }

@@ -629,6 +629,45 @@ fn cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root: &Path) 
     assert!(root.join("cancel-writer/reservation.json").is_file());
     Ok(())
 }
+fn reattach_for_stops_for_the_held_requester_not_a_rewritten_summary(root: &Path) -> Result<()> {
+    let socket = root.join("held.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (writer, _handle) = start(
+        root,
+        "held",
+        "socket-blocked",
+        &[socket.into_os_string()],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    // A lane that can write the attempt directory renames the requester its
+    // guardian launched for, so a summary-sourced stop would go unheard.
+    let summary = root.join("held-attempt/launch.json");
+    let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&summary)?)?;
+    let requester = provenant_core::ActorId::from_bytes([4; 16]);
+    assert_eq!(record["requester"], serde_json::to_value(requester)?);
+    record["requester"] = serde_json::to_value(provenant_core::ActorId::from_bytes([66; 16]))?;
+    std::fs::remove_file(&summary)?;
+    std::fs::write(&summary, serde_json::to_vec(&record)?)?;
+    let handle = reattach_for(
+        Directory::open_anchor(&root.join("held-attempt"))?,
+        scope(),
+        requester,
+    )?;
+    assert_eq!(
+        stop(&handle, StopReason::ExplicitCancellation)?,
+        StopReceipt::Requested
+    );
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
+    drop(writer);
+    Ok(())
+}
 fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Path) -> Result<()> {
     let socket = root.join("pending.sock");
     let listener = UnixListener::bind(&socket)?;
@@ -1676,6 +1715,10 @@ const CASES: &[Case] = &[
     (
         "live_provider_publishes_initial_checkpoint",
         live_provider_publishes_initial_checkpoint,
+    ),
+    (
+        "reattach_for_stops_for_the_held_requester_not_a_rewritten_summary",
+        reattach_for_stops_for_the_held_requester_not_a_rewritten_summary,
     ),
     (
         "descendant_journal_failure_is_reported",

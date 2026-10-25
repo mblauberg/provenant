@@ -329,11 +329,15 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   re-read request no longer matches the digest sealed at hand-off. Invalid
   proposals terminate as rejected before provider preparation. A child
   launches for its parent's requester, sealed in the host-built holder context,
-  never the actor its run record names. Child storage is writable by the
-  submitting lane, so it is not independent evidence against that lane.
+  never the actor its run record names. On start the host records that
+  requester as the run's actor and the attempt's verified owner. The lane's
+  operation keeps the lane's actor, which scopes its replay and listing. Child
+  storage is writable by the submitting lane, so it is not independent evidence
+  against that lane.
 - The guardian stops its worker on observed provider exit. Parent cancellation,
   deadline or supervisor signal cancels only the child scopes this worker
-  accepted; normal parent completion leaves their custody intact.
+  accepted; normal parent completion leaves their custody intact. The host
+  stops a child for the sealed requester, not the one its launch summary names.
 - Git is resolved once on the host (`PROVENANT_GIT` override, otherwise the
   fixed list preferring package-manager Git), canonicalised, pinned in provider
   and MCP environments, and the only Git path lanes may execute.

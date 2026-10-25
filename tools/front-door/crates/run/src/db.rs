@@ -64,9 +64,18 @@ pub struct RunStore {
     pub(crate) context: ExecutionContext,
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
+    pub(crate) sealed_requester: Option<ActorId>,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
+    /// The host's view of a child store, opened from the parent attempt's
+    /// sealed holder context. The lane can write this store and its attempt
+    /// summaries, so launch, the started attempt's owner and host cancellation
+    /// all use this requester instead of any actor they name.
+    pub fn with_sealed_requester(mut self, requester: ActorId) -> Self {
+        self.sealed_requester = Some(requester);
+        self
+    }
     /// The trusted host config root owns worktree registrations and the host
     /// admission ledger even when this store contains nested runs. Supplied by
     /// the host composition edge.
@@ -116,6 +125,7 @@ impl RunStore {
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
+            sealed_requester: None,
             _owner: PhantomData,
         }))
     }
@@ -130,6 +140,7 @@ impl RunStore {
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
+            sealed_requester: None,
             _owner: PhantomData,
         };
         store.write(request, |tx| {
