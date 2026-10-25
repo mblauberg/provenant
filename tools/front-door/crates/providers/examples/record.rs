@@ -1052,9 +1052,12 @@ fn main() -> Result<()> {
     });
     // Claude binds the token to the signed-in identity, so the key is that
     // identity's fingerprint; Codex recording uses a fixed label.
+    // Host probes get a fresh private cwd under the run root, not the
+    // supervisor's `/`.
+    let probe = provenant_providers::host::HostProbeExecutor::new(&executor, &args.root)?;
     let account_key = if args.adapter == "claude" {
         claude_account_key(
-            &executor,
+            &probe,
             &args.executable,
             &home,
             &user,
@@ -1096,8 +1099,6 @@ fn main() -> Result<()> {
             };
             let now = || now_ms().unwrap_or(u64::MAX);
             let deadline = now().saturating_add(90_000);
-            // A fresh private cwd under the run root, not the supervisor's `/`.
-            let probe = provenant_providers::host::HostProbeExecutor::new(&executor, &args.root)?;
             Some(refresh_for_account(
                 &probe, &login, account, &now, deadline,
             )?)

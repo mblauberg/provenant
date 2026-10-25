@@ -46,8 +46,9 @@ impl HostProbeDir {
         host_root: &Path,
         locked: &dyn Fn(&Path),
     ) -> fs::Result<Self> {
-        // A sweep can unlink the lock file between our open and our flock;
-        // that lock is then worthless, so retry with a fresh id.
+        // A sweeper may hold, unlink or replace this id's lock file around our
+        // open and flock (timeout, ENOENT, a refused race, or a lock on an
+        // unlinked inode). None of those is a lease, so retry with a fresh id.
         for _ in 0..8 {
             let staging = temporary_name()?;
             let id = staging
@@ -61,7 +62,14 @@ impl HostProbeDir {
             let lock_name = OsString::from(format!("{PREFIX}{id}{LOCK_SUFFIX}"));
             let lock_path = host_root.join(&lock_name);
             // Lock first: any directory a sweeper can see is already leased.
-            let lock = root.try_lock(&lock_name, LockMode::Exclusive)?;
+            let lock = match root.try_lock(&lock_name, LockMode::Exclusive) {
+                Ok(lock) => lock,
+                // A sweeper holds, unlinked or replaced this fresh name: its
+                // lease is not ours, so try another id.
+                Err(fs::FsError::LockTimeout { .. } | fs::FsError::RaceRefused { .. }) => continue,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            };
             locked(&lock_path);
             if !holds_entry(root, &lock_name, &lock) {
                 continue;
@@ -118,6 +126,12 @@ fn probe_id(name: &OsStr) -> Option<&str> {
 /// holds it, so its directory is never touched. Best effort; an entry that
 /// cannot be inspected is left for the next sweep.
 fn sweep_stale(root: &Directory, host_root: &Path) {
+    sweep_checked(root, host_root, &|_| {});
+}
+
+/// `locked` runs after the sweeper's lock is taken and before its entry is
+/// checked: the window in which a live owner's replacement can appear.
+fn sweep_checked(root: &Directory, host_root: &Path, locked: &dyn Fn(&Path)) {
     let Ok(entries) = root.entries() else {
         return;
     };
@@ -133,6 +147,7 @@ fn sweep_stale(root: &Directory, host_root: &Path) {
         let Ok(lease) = root.try_lock(&lock_name, LockMode::Exclusive) else {
             continue;
         };
+        locked(&host_root.join(&lock_name));
         // Skip a lock that was unlinked after we opened it: a live owner may
         // hold the replacement, so this lease proves nothing.
         if !holds_entry(root, &lock_name, &lease) {
@@ -317,15 +332,39 @@ mod tests {
         );
 
         // A replaced (not just unlinked) lock file is refused the same way.
-        let replaced = std::cell::Cell::new(true);
+        let runs = std::cell::Cell::new(0);
         let second = HostProbeDir::create_checked(&root, host_root.path(), &|lock_path| {
-            if replaced.replace(false) {
+            runs.set(runs.get() + 1);
+            if runs.get() == 1 {
                 std::fs::remove_file(lock_path).unwrap();
                 std::fs::write(lock_path, b"").unwrap();
             }
         })
         .unwrap();
+        assert_eq!(runs.get(), 2, "the replaced lease is retried with a new id");
         assert!(second.path().is_dir());
         assert_ne!(second.path(), probe.path());
+    }
+
+    #[test]
+    fn the_sweeper_skips_a_lock_replaced_after_it_locked() {
+        let host_root = tempfile::tempdir().unwrap();
+        let root = Directory::open_anchor(host_root.path()).unwrap();
+        std::fs::create_dir(host_root.path().join(STALE)).unwrap();
+        let lock = host_root.path().join(format!("{STALE}.lock"));
+        std::fs::write(&lock, b"").unwrap();
+        let runs = std::cell::Cell::new(0);
+        // A live owner's lease on a replacement file: the sweeper's own lock
+        // is on an unlinked inode and proves nothing about that owner.
+        sweep_checked(&root, host_root.path(), &|path| {
+            runs.set(runs.get() + 1);
+            std::fs::remove_file(path).unwrap();
+            std::fs::write(path, b"").unwrap();
+        });
+        assert_eq!(runs.get(), 1);
+        assert!(
+            host_root.path().join(STALE).is_dir(),
+            "a directory leased through a replaced lock survives"
+        );
     }
 }
