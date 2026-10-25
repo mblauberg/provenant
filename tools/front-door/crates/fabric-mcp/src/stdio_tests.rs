@@ -392,14 +392,16 @@ fn worker_panic_completes_its_request_and_other_workers_remain_available() {
 fn all_workers_dead_is_fatal() {
     let gate = Arc::new(Gate::default());
     gate.panic_next(WORKERS);
-    // Production polls for dead workers once per event interval and joins the
-    // reader after one input interval, which alone nears TEST_WAIT under load.
+    gate.state.lock().unwrap().panic_in_maintenance = true;
+    // Panic before opening SQLite or creating a completion guard. A failed
+    // service open must not consume one of the requests intended to kill a worker.
+    // Worker exits must wake the dispatcher even with no completion or new input.
     let server = Server::start_with_timeouts(
-        FakeFactory::new(gate),
+        FakeFactory::new(gate.clone()),
         false,
         Timeouts {
             input_read: Duration::from_millis(40),
-            event: Duration::from_millis(2),
+            event: Duration::from_secs(30),
             ..TIMEOUTS
         },
     );
@@ -414,7 +416,53 @@ fn all_workers_dead_is_fatal() {
         )));
     }
     server.send_bytes(&calls);
-    let result = server.wait_result(Duration::from_secs(30));
+    assert!(gate.wait_for_entered(WORKERS, TEST_WAIT));
+    gate.release();
+    let result = server.wait_result(TEST_WAIT);
+    assert!(matches!(result, Err(Error::Worker)), "result: {result:?}");
+}
+
+#[test]
+fn all_workers_dead_after_service_open_failure_is_fatal() {
+    let gate = Arc::new(Gate::default());
+    gate.panic_next(WORKERS);
+    gate.state.lock().unwrap().panic_in_open = true;
+    let factory = FakeFactory::new(gate);
+    factory.fail_next_open(1);
+    let server = Server::start_with_timeouts(
+        factory,
+        false,
+        Timeouts {
+            input_read: Duration::from_millis(40),
+            event: Duration::from_secs(30),
+            ..TIMEOUTS
+        },
+    );
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    // The failed open leaves its worker alive. Panic on subsequent opens before
+    // touching SQLite, with a completion guard already protecting each request.
+    for index in 0..=WORKERS {
+        server.send(&tool_call(
+            &format!("panic-{index}"),
+            "fabric_identity",
+            json!({"op":"inspect"}),
+        ));
+        let frames = server.wait_for_frames(index + 2, TEST_WAIT).unwrap();
+        let code = if index == 0 {
+            "owner_unavailable"
+        } else {
+            "worker_panicked"
+        };
+        assert!(
+            frames[index + 1]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(code),
+            "frames: {frames:?}"
+        );
+    }
+    let result = server.wait_result(TEST_WAIT);
     assert!(matches!(result, Err(Error::Worker)), "result: {result:?}");
 }
 
@@ -600,6 +648,7 @@ fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
         live.insert(id.clone(), cancel.clone());
         let send = send.clone();
         workers.push(thread::spawn(move || {
+            let _exit = WorkerExitGuard(send.clone());
             let deadline = Instant::now() + TEST_WAIT;
             while !cancel.is_cancelled() && Instant::now() < deadline {
                 thread::park_timeout(Duration::from_millis(1));
@@ -608,6 +657,10 @@ fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
         }));
     }
     let mut output = BrokenDrain(0);
+    let mut workers = Workers {
+        remaining: workers.len(),
+        threads: workers,
+    };
     let result = shutdown_workers(
         &events,
         &mut output,
@@ -625,7 +678,7 @@ fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
     );
     assert!(tokens.iter().all(CancelToken::is_cancelled));
     assert!(live.is_empty());
-    assert!(workers.is_empty());
+    assert!(workers.threads.is_empty());
     assert_eq!(
         output.0, 1,
         "late completions must not attempt another write"
@@ -781,6 +834,8 @@ struct GateState {
     returned: usize,
     released: bool,
     panic_remaining: usize,
+    panic_in_maintenance: bool,
+    panic_in_open: bool,
     run_cancel_calls: usize,
     output_bytes: Vec<u8>,
     submit_error: Option<FacadeError>,
@@ -824,7 +879,7 @@ impl Gate {
             }
         };
         if should_panic {
-            panic!("simulated facade panic");
+            panic!("simulated worker panic");
         }
     }
     fn run_cancel_call(&self) {
@@ -992,6 +1047,13 @@ impl Factory for FakeFactory {
         = FakeFacade
     where
         Self: 'a;
+    fn maintain_usage(&self) {
+        let panic_in_maintenance = self.0.gate.state.lock().unwrap().panic_in_maintenance;
+        if panic_in_maintenance {
+            self.0.gate.hold(&CancelToken::new());
+            self.0.gate.maybe_panic();
+        }
+    }
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError> {
         {
             let mut failures = self.0.open_failures.lock().unwrap();
@@ -999,6 +1061,10 @@ impl Factory for FakeFactory {
                 *failures -= 1;
                 return Err(ServiceError::Facade(FacadeError::OwnerUnavailable));
             }
+        }
+        let panic_in_open = self.0.gate.state.lock().unwrap().panic_in_open;
+        if panic_in_open {
+            self.0.gate.maybe_panic();
         }
         let budget = WaitBudget::mcp(self.0.clock.mono_now(), 5)?;
         let coordination = CoordinationService::open(

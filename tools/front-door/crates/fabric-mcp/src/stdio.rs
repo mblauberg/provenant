@@ -145,6 +145,7 @@ enum Event {
     InputError(io::Error),
     Oversize,
     Completed(Completion),
+    WorkerExited,
 }
 
 fn failure(tool: Option<&str>, code: &str) -> Value {
@@ -184,6 +185,18 @@ fn write_before(output: &mut impl Output, value: &Value, deadline: Instant) -> R
 }
 fn write(output: &mut impl Output, value: &Value, timeouts: Timeouts) -> Result<(), Error> {
     write_before(output, value, Instant::now() + timeouts.write)
+}
+
+struct WorkerExitGuard(SyncSender<Event>);
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(Event::WorkerExited);
+    }
+}
+
+struct Workers {
+    threads: Vec<thread::JoinHandle<()>>,
+    remaining: usize,
 }
 
 struct CompletionGuard {
@@ -312,10 +325,16 @@ fn serve_with_timeouts(
     let receive = Arc::new(Mutex::new(receive));
     let (events_tx, events) = mpsc::sync_channel::<Event>(EVENT_QUEUE);
     let reader_events = events_tx.clone();
-    let mut workers = Vec::with_capacity(WORKERS);
+    let mut workers = Workers {
+        threads: Vec::with_capacity(WORKERS),
+        remaining: WORKERS,
+    };
     for _ in 0..WORKERS {
         let (factory, receive, events) = (factory.clone(), receive.clone(), events_tx.clone());
-        workers.push(thread::spawn(move || {
+        workers.threads.push(thread::spawn(move || {
+            // Declared first so service cleanup and completion guards run before
+            // the exit event, including panics outside request execution.
+            let _exit = WorkerExitGuard(events.clone());
             let mut service = None;
             loop {
                 let received = match receive.lock() {
@@ -377,7 +396,7 @@ fn serve_with_timeouts(
             &jobs,
             output,
             &mut live,
-            &workers,
+            &mut workers.remaining,
             timeouts,
             factory.as_ref(),
         );
@@ -397,9 +416,9 @@ fn serve_with_timeouts(
         // input_read interval remains. A reader blocked sending to the bounded
         // event queue is released by this drain; no producer can refill it
         // indefinitely once admission stops and the finite job queue drains.
-        // Polling adds at most one event interval before the scoped join.
+        // Poll no slower than the input deadline when only the reader remains.
         while !reader.is_finished() {
-            let _ = events.recv_timeout(timeouts.event);
+            let _ = events.recv_timeout(timeouts.event.min(timeouts.input_read));
         }
         if reader.join().is_err() {
             return Err(Error::Worker);
@@ -409,7 +428,7 @@ fn serve_with_timeouts(
             Ok(()) => run,
         }
     });
-    for worker in workers {
+    for worker in workers.threads {
         if worker.is_finished() {
             let _ = worker.join();
         }
@@ -422,7 +441,7 @@ fn serve_loop(
     jobs: &SyncSender<Job>,
     output: &mut impl Output,
     live: &mut BTreeMap<Id, CancelToken>,
-    workers: &[thread::JoinHandle<()>],
+    workers_remaining: &mut usize,
     timeouts: Timeouts,
     factory: &impl Factory,
 ) -> Result<(), Error> {
@@ -533,11 +552,14 @@ fn serve_loop(
                     write(output, &completion.reply, timeouts)?;
                 }
             }
+            Ok(Event::WorkerExited) => {
+                *workers_remaining -= 1;
+                if *workers_remaining == 0 {
+                    return Err(Error::Worker);
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Error::Worker),
-        }
-        if workers.iter().all(thread::JoinHandle::is_finished) {
-            return Err(Error::Worker);
         }
     }
 }
@@ -559,7 +581,7 @@ fn shutdown_workers(
     events: &Receiver<Event>,
     output: &mut impl Output,
     live: &mut BTreeMap<Id, CancelToken>,
-    workers: &mut Vec<thread::JoinHandle<()>>,
+    workers: &mut Workers,
     cancel_now: bool,
     timeouts: Timeouts,
     factory: &impl Factory,
@@ -578,8 +600,8 @@ fn shutdown_workers(
         if now >= deadline {
             return Err(Error::Shutdown);
         }
-        let finished = workers.iter().all(thread::JoinHandle::is_finished);
-        // Once every worker has returned, all completion guards have sent.
+        let finished = workers.remaining == 0;
+        // Once every worker has reported its exit, all completion guards have sent.
         // Drain those queued completions without waiting for another sender.
         let wake = if cancelled {
             deadline
@@ -594,6 +616,7 @@ fn shutdown_workers(
                 .ok()
         };
         match event {
+            Some(Event::WorkerExited) => workers.remaining -= 1,
             Some(Event::Completed(completion)) => {
                 record_completion(factory, &completion);
                 if let Some(cancel) = live.remove(&completion.id)
@@ -614,6 +637,7 @@ fn shutdown_workers(
         }
     }
     let panicked = workers
+        .threads
         .drain(..)
         .map(|worker| worker.join().is_err())
         .filter(|failed| *failed)
