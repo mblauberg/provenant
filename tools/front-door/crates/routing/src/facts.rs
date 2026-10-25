@@ -1,50 +1,12 @@
 use crate::{Catalogue, ModelId, RoutingError};
 use provenant_providers::{AvailabilityRecord, VerifiedLineage};
 use provenant_quota::QuotaSnapshot;
-use provenant_records::RouteExclusionReason;
 #[cfg(test)]
-use provenant_records::{ResolvedRoute, RouteReadiness};
+use provenant_records::{ResolvedRoute, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::BTreeMap;
 
-/// Cached provider availability, independent of launch permissions.
-#[derive(Debug, Clone, Serialize)]
-pub struct AvailabilityView {
-    pub adapter: String,
-    pub record: Option<AvailabilitySummary>,
-    pub age_seconds: Option<u64>,
-    pub reason: Option<RouteExclusionReason>,
-}
-/// Public cached projection. Exact observations stay in the bounded input used
-/// by resolve; listing their count keeps the unpaged CLI result bounded.
-#[derive(Debug, Clone, Serialize)]
-pub struct AvailabilitySummary {
-    pub executable: String,
-    pub version: String,
-    pub fixture_ref: String,
-    pub catalogue_revision: String,
-    pub account_key: Option<String>,
-    pub observed_model_count: u64,
-    pub last_preflight_error: Option<provenant_providers::PreflightFailure>,
-    pub observed_unix_seconds: i64,
-    pub expires_unix_seconds: i64,
-}
-impl From<&AvailabilityRecord> for AvailabilitySummary {
-    fn from(record: &AvailabilityRecord) -> Self {
-        Self {
-            executable: record.executable.clone(),
-            version: record.version.clone(),
-            fixture_ref: record.fixture_ref.clone(),
-            catalogue_revision: record.catalogue_revision.clone(),
-            account_key: record.account_key.clone(),
-            observed_model_count: record.observed_models.len() as u64,
-            last_preflight_error: record.last_preflight_error,
-            observed_unix_seconds: record.observed_unix_seconds,
-            expires_unix_seconds: record.expires_unix_seconds,
-        }
-    }
-}
 pub fn validate_availability(
     record: &AvailabilityRecord,
     adapter: &str,

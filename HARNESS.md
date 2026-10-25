@@ -115,7 +115,8 @@ headroom against the remaining window (clamped to 0.25 to 2.0), and `spend` and
 not read it.
 Routing overrides live in the state root's `config.toml`. Use
 `provenant route set` or `provenant route pacing` to change routing, and
-`provenant route list` to inspect effective weights, factors and readiness.
+`provenant route list` to inspect configured weights; it does not probe, and
+pacing and readiness apply at dispatch.
 `task_class` presets affect knobs only and do not alias routes.
 When several families are available, use the tiered-council method by
 submitting separate tasks for distinct exact models, then synthesise in the

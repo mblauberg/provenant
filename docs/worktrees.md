@@ -108,7 +108,7 @@ authority for that exact reservation:
    call `settle_reconciled`. Both paths hold the writer lock while settling
    classified scratch and clearing the reservation.
 
-The CLI does not expose this clearance yet: `--abandon-uncertain` still refuses.
+The CLI does not expose this clearance yet.
 When custody is lost without a durable exit, this revision cannot create the
 required terminal receipt, so the fence cannot yet be cleared. Retain it and use
 a fresh registered worktree. A failed provider or an unfinished Git operation

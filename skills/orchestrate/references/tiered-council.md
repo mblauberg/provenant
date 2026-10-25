@@ -6,7 +6,7 @@ fine-grained passes. Seniors judge that work, make the medium decisions and
 delegate to juniors. Principals make the critical calls. `junior`, `senior` and
 `principal` are ordered route pools, so one task names one pool. The `writing`
 and `design` pools are craft choices, not extra risk tiers. `provenant route
-list` shows members in preference order and their cached availability.
+list` shows members in preference order.
 
 | Tier | Route | Job |
 |---|---|---|

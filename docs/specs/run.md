@@ -55,7 +55,7 @@ and `provenant help <verb>` lists the flags.
 | `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. |
 | `cancel` | Target `RUN[/TASK[/ATTEMPT]]` with a required `--operation-id`, optional `--reason` and `--wait`. It returns requested, already terminal or unobservable, plus custody. Accepted cancellation does not prove exit. |
 | `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
-| `reconcile` | Settles open runs (all, or `--id`, repeatable) and reports uncertain custody. `--abandon-uncertain` is refused in this build. It never replays an uncertain launch. |
+| `reconcile` | Settles open runs (all, or `--id`, repeatable) and reports uncertain custody. It never replays an uncertain launch. |
 
 Route and access inputs on `dispatch`:
 

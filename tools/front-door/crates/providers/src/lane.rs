@@ -175,7 +175,6 @@ impl LaneRuntime<'_> {
         profile
             .process_executables
             .extend([exact(self.executable), exact(self.git)]);
-        setup.push(SetupStep::CreateDir(self.state.join("routing")));
         profile.runtime_reads.extend([
             exact(self.executable),
             exact(self.git),
@@ -189,10 +188,9 @@ impl LaneRuntime<'_> {
                 .into_iter()
                 .map(exact),
         );
-        profile.runtime_reads.extend([
-            subtree(self.state.join("projects")),
-            subtree(self.state.join("routing")),
-        ]);
+        profile
+            .runtime_reads
+            .push(subtree(self.state.join("projects")));
         // The parent pre-creates anchors. Run databases and custody are private
         // to child_state. Shared SQLite still needs writes even for reads:
         // Store::open enables WAL and checks migrations. The lane MCP guard is

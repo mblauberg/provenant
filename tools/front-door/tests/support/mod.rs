@@ -104,7 +104,6 @@ impl TestRig {
             ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
             ("GIT_CONFIG_SYSTEM", root.join("git-system")),
             ("PROVENANT_STATE_DIR", state.clone()),
-            ("PROVENANT_USAGE_STATE_DIR", root.join("usage-state")),
             ("PROVENANT_ROOT", project.clone()),
             ("TMPDIR", root.clone()),
         ]
@@ -153,10 +152,6 @@ impl TestRig {
             .into());
         }
         Ok(rig)
-    }
-    pub fn enable_usage(&mut self) {
-        self.env
-            .retain(|(key, _)| key != "PROVENANT_USAGE_STATE_DIR");
     }
     pub fn command(&self, args: &[&str]) -> Result<ExecOutcome> {
         let mut arguments = vec![
