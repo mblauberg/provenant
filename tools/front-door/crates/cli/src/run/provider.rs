@@ -589,32 +589,86 @@ fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
         .find(|path| holds(path, session, 8, &mut 100_000))
 }
 
-/// Copy regular files and directories. Symlinks are skipped: setup recreates
-/// the ones a provider needs, and a copy never follows one out of the state.
+/// Copy regular files and directories. Symlinks and other entries are
+/// skipped: setup recreates the links a provider needs. A leftover process may
+/// still change the tree, so every entry is opened from its parent's handle
+/// without following a link, and the opened descriptor is checked and copied.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
-    let error = |error: std::io::Error| format!("copying retained provider state: {error}");
-    if !std::fs::symlink_metadata(from).map_err(error)?.is_dir() {
+    let error = |error: provenant_supervisor::fs::FsError| {
+        format!("copying retained provider state: {error}")
+    };
+    // The anchor opens without following its final component; this stat only
+    // names the common refusal.
+    let metadata = std::fs::symlink_metadata(from)
+        .map_err(|failure| format!("copying retained provider state: {failure}"))?;
+    if !metadata.is_dir() {
         return Err("retained provider state is not a directory".into());
     }
-    std::fs::create_dir_all(to).map_err(error)?;
-    for entry in std::fs::read_dir(from).map_err(error)? {
-        let entry = entry.map_err(error)?;
-        let target = to.join(entry.file_name());
-        let kind = entry.file_type().map_err(error)?;
-        if kind.is_dir() {
-            copy_state(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            // A hard link can name a host file the lane could not otherwise
-            // read; the host copy would then publish its contents.
-            use std::os::unix::fs::MetadataExt;
-            if std::fs::symlink_metadata(entry.path())
-                .map_err(error)?
-                .nlink()
-                > 1
-            {
-                return Err("retained provider state holds a hard-linked file".into());
+    let source = Directory::open_anchor(from).map_err(error)?;
+    std::fs::create_dir_all(to)
+        .map_err(|failure| format!("copying retained provider state: {failure}"))?;
+    let target = Directory::open_anchor(to).map_err(error)?;
+    copy_tree(&source, &target).map_err(|failure| match failure {
+        CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
+        CopyRefusal::Fs(failure) => error(failure),
+    })
+}
+
+enum CopyRefusal {
+    HardLink,
+    Fs(provenant_supervisor::fs::FsError),
+}
+
+impl From<provenant_supervisor::fs::FsError> for CopyRefusal {
+    fn from(error: provenant_supervisor::fs::FsError) -> Self {
+        Self::Fs(error)
+    }
+}
+
+fn copy_tree(from: &Directory, to: &Directory) -> Result<(), CopyRefusal> {
+    use provenant_supervisor::fs::FsError;
+    // An entry swapped for a link after the stat fails to open and is skipped.
+    let skipped =
+        |error: &FsError| error.is_symlink() || matches!(error, FsError::NotRegular { .. });
+    for name in from.entries()? {
+        let name = name?;
+        match from.metadata_at(&name, false)?.kind {
+            FileKind::Directory => {
+                let child = match from.open_directory(&name) {
+                    Ok(child) => child,
+                    Err(error) if skipped(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                match to.mkdir(&name, 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                copy_tree(&child, &to.open_directory(&name)?)?;
             }
-            std::fs::copy(entry.path(), &target).map_err(error)?;
+            FileKind::Regular => {
+                let mut file = match from.open_read(&name) {
+                    Ok(file) => file,
+                    Err(error) if skipped(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                // A hard link can name a host file the lane could not otherwise
+                // read; the host copy would then publish its contents.
+                let opened = file.metadata()?;
+                if opened.links > 1 {
+                    return Err(CopyRefusal::HardLink);
+                }
+                let mut copy = to.create_new(&name)?;
+                std::io::copy(&mut file, &mut copy).map_err(|source| FsError::Io {
+                    operation: "copy file",
+                    path: name.clone().into(),
+                    source,
+                })?;
+                if opened.mode & 0o100 != 0 {
+                    copy.make_owner_executable()?;
+                }
+            }
+            FileKind::Symlink | FileKind::Other => {}
         }
     }
     Ok(())
@@ -1287,6 +1341,44 @@ mod tests {
             Err("retained provider state holds a hard-linked file".into())
         );
         assert!(!copied.join("fixture-session/linked").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_skips_nested_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(base.join("outside/secrets"))?;
+        std::fs::write(base.join("outside/host-secret"), "host")?;
+        std::fs::write(base.join("outside/secrets/token"), "host")?;
+        std::fs::create_dir_all(source.join("sessions/2026"))?;
+        std::fs::write(source.join("config.toml"), "lane")?;
+        std::fs::write(source.join("sessions/2026/rollout.jsonl"), "turn")?;
+        std::fs::write(source.join("tool"), "#!/bin/sh\n")?;
+        std::fs::set_permissions(source.join("tool"), std::fs::Permissions::from_mode(0o755))?;
+        std::os::unix::fs::symlink(base.join("outside/host-secret"), source.join("file-link"))?;
+        std::os::unix::fs::symlink(base.join("outside/secrets"), source.join("dir-link"))?;
+        std::os::unix::fs::symlink(
+            base.join("outside/host-secret"),
+            source.join("sessions/2026/nested-link"),
+        )?;
+        let copied = base.join("copy");
+        copy_state(&source, &copied)?;
+        assert_eq!(std::fs::read_to_string(copied.join("config.toml"))?, "lane");
+        assert_eq!(
+            std::fs::read_to_string(copied.join("sessions/2026/rollout.jsonl"))?,
+            "turn"
+        );
+        let tool = std::fs::metadata(copied.join("tool"))?.permissions().mode();
+        assert_eq!(tool & 0o100, 0o100, "owner execute survives the copy");
+        for skipped in ["file-link", "dir-link", "sessions/2026/nested-link"] {
+            assert!(
+                std::fs::symlink_metadata(copied.join(skipped)).is_err(),
+                "{skipped} must not be copied"
+            );
+        }
         Ok(())
     }
 
