@@ -189,7 +189,7 @@ re-apply instruction. Harness changes are printed before they are applied
 | --- | --- |
 | `root` | Prints the absolute release root as one line, so `$(provenant root)/skills/...` works. No Git, SQLite, state creation or provider probes. |
 | `config show\|set\|unset`, `check config` | Effective configuration and origins, knob edits, and validation findings. |
-| `install [--dry-run]` | Requires `--source ABS` (a staged release) and one or more `--harness NAME` (`claude`, `codex`, `cursor`, `agy`, `opencode`). Optional `--bin-dir`, `--hooks on\|off` (default off), `--adopt-existing`, `--legacy-checkout ABS`. Validates every destination and prints every replace, remove and create before writing. Dry-run creates no root, lock or receipt. |
+| `install [--dry-run]` | Requires `--source ABS` (a staged release) and one or more `--harness NAME` (`claude`, `codex`, `cursor`, `agy`, `opencode`). Optional `--bin-dir`, `--hooks on\|off` (omission preserves hook ownership; disabled on first install), `--adopt-existing`, `--legacy-checkout ABS`. Validates every destination and prints every replace, remove and create before writing. Dry-run creates no root, lock or receipt. |
 | `check install` | Optional `--source ABS`. Compares the installed binary, assets, receipt and owned harness selectors without repair. |
 | `uninstall` | Explicit `--harness NAME`. Removes unchanged owned entries only and keeps state, release assets, user skills, config and the running binary. |
 
@@ -234,6 +234,33 @@ Install replaces only the selected targets and carries the rest over, and
 `check install` verifies every recorded target. Uninstall selects the target
 matching the environment's home, or else every recorded target of the harness.
 No cross-file or cross-host atomicity is claimed.
+
+Omitting `--hooks` on re-install retains and refreshes the selected target's
+unchanged owned hook registrations and the shared legacy Git pre-push launcher.
+Edited hooks and launchers are preserved, relinquished from the receipt and
+reported. The receipt's legacy record names each relinquished Git hook in
+`relinquished_hooks`, so `check install` stops auditing that hook while other
+legacy hooks in the same directory stay audited. Missing launchers also leave
+the receipt. The legacy checkout flag
+need not be repeated. Explicit `--hooks on` refuses edited Claude hooks and
+names `--hooks off` as recovery. Explicit `--hooks off` removes exact owned
+matches, relinquishes modified entries and reports them.
+
+On macOS, installation into the account's default state root also owns
+`~/Library/LaunchAgents/dev.provenant.peer.plist`. The plist participates in
+the preview, receipt and `check install`. Publication refuses symlinks at
+the plist or any parent, stages with `O_NOFOLLOW | O_EXCL`, then renames.
+Its PATH starts with `/usr/bin:/bin:/usr/sbin:/sbin`, followed by the absolute
+install bin directory and existing absolute directories holding resolved
+Claude, Codex and Git executables, when known. Empty and relative entries are
+excluded. Uninstall of the last recorded target boots out the service before
+removing an exact receipt match. A modified plist and its service are kept
+and reported; failed bootout leaves the plist owned for retry.
+The earlier installer's unreceipted plist is recognised only when its complete
+bytes match the historical template for the validated receipt's binary path
+and state root, with mode 0600 or 0644. Upgrade replaces it with the sanitised
+rendering and records ownership; uninstall can remove it directly. Unknown
+or modified historical plists are preserved.
 
 ### Harness registry
 
