@@ -217,11 +217,24 @@ fn check_internal_edges(manifest: &DocumentMut, workspace: &DocumentMut) -> Resu
 fn internal_edges_obey_the_layering_table() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = read_manifest(&root.join("Cargo.toml"))?;
+    let mut checked = Vec::new();
     for path in member_manifests(root, &workspace)? {
         let manifest = read_manifest(&path)?;
         check_internal_edges(&manifest, &workspace)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        let package = manifest["package"]["name"].as_str().unwrap_or_default();
+        checked.push(
+            package
+                .strip_prefix("provenant-")
+                .unwrap_or(package)
+                .to_owned(),
+        );
     }
+    // Every row names a real member, so a missed crate cannot pass unchecked.
+    checked.sort();
+    let mut rows: Vec<_> = LAYERS.iter().map(|(name, _)| (*name).to_owned()).collect();
+    rows.sort();
+    assert_eq!(checked, rows, "layering rows and workspace members differ");
     Ok(())
 }
 
