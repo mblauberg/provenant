@@ -1088,14 +1088,11 @@ fn main() -> Result<()> {
         .transpose()?;
     let token = match (args.adapter.as_str(), &account) {
         ("claude", Some(account)) => {
-            let scratch = args.root.join("refresh");
-            private_dir(&scratch)?;
             let login = Login {
                 executable: &args.executable,
                 home: &home,
                 user: &user,
                 config_dir: account.directory(),
-                scratch: &scratch,
             };
             let now = || now_ms().unwrap_or(u64::MAX);
             let deadline = now().saturating_add(90_000);

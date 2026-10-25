@@ -1433,7 +1433,6 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
             home: Path::new("/home/u"),
             user: OsStr::new("u"),
             config_dir: Path::new("/home/u/.claude-pro"),
-            scratch: supplied_cwd,
         };
         let key = crate::accounts::detect(
             &executor,
@@ -1493,7 +1492,6 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
             home: Path::new("/home/u"),
             user: OsStr::new("u"),
             config_dir: Path::new(config),
-            scratch: Path::new("/scratch/empty"),
         };
         let result = refresh_if_expiring(&script, &login, &|| now, deadline, None);
         (result, script.calls.into_inner().unwrap())
@@ -1525,7 +1523,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
         ]
     );
     assert!(!env.iter().any(|v| v.starts_with("CLAUDE_CONFIG_DIR=")));
-    assert_eq!(cwd, Path::new("/scratch/empty"));
+    assert_eq!(cwd, Path::new("/"));
 
     // Inside the window the CLI refreshes once, in the empty scratch directory
     // with hooks, MCP servers, slash commands and session files off.
@@ -1546,7 +1544,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
     ] {
         assert!(argv.iter().any(|a| a == flag), "{flag}");
     }
-    assert_eq!(cwd, Path::new("/scratch/empty"));
+    assert_eq!(cwd, Path::new("/"));
     assert_eq!(calls.len(), 3);
 
     // The CLI may keep a token inside the window; one with a minute left is
@@ -1988,7 +1986,6 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                         home: Path::new("/fixture/home"),
                         user: "fixture".as_ref(),
                         config_dir: &dir,
-                        scratch: Path::new("/fixture/scratch"),
                     },
                     &account,
                     &|| 1000,

@@ -355,7 +355,7 @@ fn prepare_with(
             Some(_) => ConfinedPlan::new(request)
                 .map(|plan| (plan, None))
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, state_root, project_id, &cwd, &git, request),
+            None => read_only_plan(roots, project_id, &cwd, &git, request),
         }) {
             Ok(planned) => planned,
             Err(error) => {
@@ -370,7 +370,6 @@ fn prepare_with(
                 home: &home,
                 user: &user,
                 config_dir: account.directory(),
-                scratch,
             };
             let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
@@ -932,11 +931,17 @@ fn confinement_request(
     })
 }
 
+/// Home and TMPDIR for the host's Git utility: a fresh private directory under
+/// the host root, never the run state root. Inside a lane that is the
+/// lane-writable child store, where the lane could pre-create or populate it.
+fn host_git_home(host_root: &Path) -> Result<provenant_providers::host::HostProbeDir, String> {
+    provenant_providers::host::HostProbeDir::create(host_root).map_err(|error| error.to_string())
+}
+
 /// Verify the selected repository on the host and match the persisted dispatch
 /// project before deriving any Git read authority from that binding.
 fn read_only_plan(
     roots: &provenant_core::Roots,
-    state_root: &Path,
     project: ProjectId,
     cwd: &Path,
     git: &Path,
@@ -945,11 +950,8 @@ fn read_only_plan(
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
     // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
-    // Its home lives under the run state root: inside a lane that is the
-    // child store, since the shared state root is not writable there.
-    let utility_home = state_root.join("tmp/git-home");
-    crate::fabric::private_dir(state_root, &utility_home).map_err(|error| error.to_string())?;
-    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home)
+    let utility_home = host_git_home(roots.state.as_path())?;
+    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home.path())
         .map_err(|error| error.to_string())?;
     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
@@ -1221,6 +1223,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_git_home_is_private_and_outside_a_prepopulated_child_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let host_root = temp.path().canonicalize()?;
+        // The lane controls its child store, including the old git-home path.
+        let child_store = host_root.join("children/parent-attempt");
+        let planted = child_store.join("tmp/git-home");
+        std::fs::create_dir_all(&planted)?;
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))?;
+
+        let home = host_git_home(&host_root)?;
+        let path = home.path();
+        assert_eq!(path.parent(), Some(host_root.as_path()));
+        assert!(!path.starts_with(&child_store));
+        assert_ne!(path, planted);
+        assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::read_dir(path)?.count(), 0);
+        // The runtime accepts it, so Git really runs with this home.
+        let git = provenant_supervisor::git::git_executable().ok_or("git unavailable")?;
+        provenant_confinement::UtilityRuntime::new(
+            std::sync::Arc::new(provenant_supervisor::fs::LocalFs),
+            canonical(&git)?,
+            path,
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn credential_authority_never_follows_links_below_the_host_root()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{AttemptId, OperationId, RunId};
@@ -1250,7 +1282,6 @@ mod tests {
             home: &base.join("home"),
             user: std::ffi::OsStr::new("fixture"),
             config_dir: &config,
-            scratch: &paths.scratch,
         };
         credential_authority(&host_root, &paths, &login)?;
         let record = attempt.join("credential-authority.json");

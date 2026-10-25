@@ -107,10 +107,13 @@ pub struct Login<'a> {
     pub home: &'a Path,
     pub user: &'a OsStr,
     pub config_dir: &'a Path,
-    /// An empty private directory: the refresh's working directory, so no
-    /// project settings, hooks or instructions apply.
-    pub scratch: &'a Path,
 }
+
+/// Placeholder working directory for host probes. The caller's executor owns
+/// the real one: `HostProbeExecutor` replaces it with a fresh private
+/// directory, so no project settings, hooks or instructions apply. No caller
+/// can name a lane-writable directory here.
+const PROBE_CWD: &str = "/";
 
 /// Keychain service suffix for a non-default `CLAUDE_CONFIG_DIR`: the first
 /// eight hex digits of the directory path's digest.
@@ -194,8 +197,8 @@ fn keychain_source(login: &Login<'_>) -> CredentialSource {
 /// within the refresh window, runs the CLI once at zero cost to refresh it,
 /// then reads again and accepts a token with at least a minute left. The
 /// refresh runs with every customisation off (safe mode, no hooks, no MCP
-/// servers, no slash commands, no session file) in the empty scratch
-/// directory. Every subprocess is capped by the caller's `deadline_ms` on the
+/// servers, no slash commands, no session file) in the executor's private
+/// working directory. Every subprocess is capped by the caller's `deadline_ms` on the
 /// `now_ms` clock. The token is never logged, printed or persisted.
 pub fn refresh_if_expiring(
     executor: &dyn Executor,
@@ -259,7 +262,11 @@ pub fn refresh_if_expiring(
         ]
         .map(OsString::from)
         .to_vec();
-        let mut options = ExecOptions::new(&argv, login.scratch, budget(Duration::from_secs(10))?);
+        let mut options = ExecOptions::new(
+            &argv,
+            Path::new(PROBE_CWD),
+            budget(Duration::from_secs(10))?,
+        );
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
         options.stderr = StreamPolicy::Discard;
@@ -301,7 +308,11 @@ pub fn refresh_if_expiring(
     ]
     .map(OsString::from)
     .to_vec();
-    let mut options = ExecOptions::new(&argv, login.scratch, budget(Duration::from_secs(60))?);
+    let mut options = ExecOptions::new(
+        &argv,
+        Path::new(PROBE_CWD),
+        budget(Duration::from_secs(60))?,
+    );
     options.env = Some(&env);
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
@@ -375,7 +386,7 @@ fn refresh_account(
         ];
         let mut options = ExecOptions::new(
             &argv,
-            login.scratch,
+            Path::new(PROBE_CWD),
             Duration::from_millis(remaining.min(4000)),
         );
         options.env = Some(&env);
