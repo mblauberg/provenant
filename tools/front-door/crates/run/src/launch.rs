@@ -175,9 +175,11 @@ fn child_access_within(
 impl RunStore {
     /// Validate lane-writable ingress against the host's recorded parent and
     /// its sealed task. A child never gains authority its parent lacks: a
-    /// read-only parent cannot propose a writer, delivery must already be
+    /// writer child keeps its parent's worktree, delivery must already be
     /// granted to the parent for the same remote, branch and pull request,
-    /// and access must sit within the parent's.
+    /// and access must sit within the parent's. A child cannot continue an
+    /// attempt, whose retained state the host would copy. The lane can rewrite
+    /// its store at any time, so launch only the request returned here.
     pub fn validate_child(
         &self,
         run: RunId,
@@ -186,7 +188,7 @@ impl RunStore {
         parent_depth: u64,
         maximum: u64,
         call: &Request<'_>,
-    ) -> Result<()> {
+    ) -> Result<CanonicalRequest> {
         let expected = next_lane_depth(parent_depth, maximum)?;
         let request = self.request(run, call)?;
         if request.parent_attempt != Some(parent) || request.lane_depth != Some(expected) {
@@ -194,10 +196,15 @@ impl RunStore {
                 "child request does not match host parent record",
             ));
         }
+        if request.parent.is_some() {
+            return Err(RunError::Validation(
+                "a child run cannot continue an attempt",
+            ));
+        }
         for task in &request.tasks {
-            if task.writer.is_some() && parent_task.writer.is_none() {
+            if task.writer.is_some() && task.writer != parent_task.writer {
                 return Err(RunError::Validation(
-                    "read-only parent cannot launch a writer child",
+                    "a writer child must use its parent's writer worktree",
                 ));
             }
             if let Some(deliver) = &task.deliver {
@@ -214,7 +221,7 @@ impl RunStore {
             }
             child_access_within(parent_task, task, self.context.state_root.as_path())?;
         }
-        Ok(())
+        Ok(request)
     }
     /// Refuse queued proposals without touching any launched provider.
     pub fn refuse_queued(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
@@ -318,6 +325,36 @@ impl RunStore {
                     call.clock,
                 )
             },
+            None,
+            call,
+        )
+    }
+    /// Start a child run from the request `validate_child` returned. The lane
+    /// may have rewritten its store since, so a request whose digest no longer
+    /// matches is refused rather than launched.
+    pub fn start_child(
+        &self,
+        run: RunId,
+        validated: &CanonicalRequest,
+        providers: &dyn Providers,
+        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        call: &Request<'_>,
+    ) -> Result<Vec<Started>> {
+        self.start_inner(
+            run,
+            providers,
+            context,
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            Some(validated.digest()?),
             call,
         )
     }
@@ -334,9 +371,11 @@ impl RunStore {
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
+        validated: Option<&CanonicalRequest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        self.start_inner(run, providers, context, acquire_writer, call)
+        let validated = validated.map(CanonicalRequest::digest).transpose()?;
+        self.start_inner(run, providers, context, acquire_writer, validated, call)
     }
     fn start_inner(
         &self,
@@ -348,9 +387,18 @@ impl RunStore {
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
+        validated: Option<provenant_core::Digest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
+        // Every later use reads this one value, never the store again.
         let request = self.request(run, call)?;
+        if let Some(digest) = validated
+            && request.digest()? != digest
+        {
+            return Err(RunError::Validation(
+                "child request changed after validation",
+            ));
+        }
         let resume = request
             .parent
             .map(|prior| self.record(prior, call))

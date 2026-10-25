@@ -549,7 +549,9 @@ fn continuation_for(
 }
 
 /// The `candidate-N` directory of `provider_state` holding a file or directory
-/// named for `session`, searched to a bounded depth and size.
+/// named for `session`, searched to a bounded depth and size. The prior lane
+/// wrote this tree, so the path must already be canonical and a candidate
+/// must be a real directory, never a symlink out of the state.
 fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
     fn holds(dir: &Path, session: &str, depth: u32, budget: &mut u32) -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -570,6 +572,9 @@ fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
         }
         false
     }
+    if provenant_supervisor::fs::canonicalize(provider_state).ok()? != provider_state {
+        return None;
+    }
     std::fs::read_dir(provider_state)
         .ok()?
         .flatten()
@@ -578,6 +583,7 @@ fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
                 .file_name()
                 .to_string_lossy()
                 .starts_with("candidate-")
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
         })
         .map(|entry| entry.path())
         .find(|path| holds(path, session, 8, &mut 100_000))
@@ -587,6 +593,9 @@ fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
 /// the ones a provider needs, and a copy never follows one out of the state.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
     let error = |error: std::io::Error| format!("copying retained provider state: {error}");
+    if !std::fs::symlink_metadata(from).map_err(error)?.is_dir() {
+        return Err("retained provider state is not a directory".into());
+    }
     std::fs::create_dir_all(to).map_err(error)?;
     for entry in std::fs::read_dir(from).map_err(error)? {
         let entry = entry.map_err(error)?;
@@ -1231,6 +1240,29 @@ mod tests {
                 assert!(continuation_for(&prior, &route, "fixture", state, state).is_err());
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_never_follows_a_symlink() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let state = base.join("provider-state");
+        std::fs::create_dir_all(base.join("outside/fixture-session"))?;
+        std::fs::create_dir_all(&state)?;
+        std::os::unix::fs::symlink(base.join("outside"), state.join("candidate-0"))?;
+        assert_eq!(find_session_state(&state, "fixture-session"), None);
+        std::fs::create_dir_all(state.join("candidate-1/fixture-session"))?;
+        assert_eq!(
+            find_session_state(&state, "fixture-session"),
+            Some(state.join("candidate-1"))
+        );
+        std::os::unix::fs::symlink(&state, base.join("alias"))?;
+        assert_eq!(
+            find_session_state(&base.join("alias"), "fixture-session"),
+            None
+        );
+        assert!(copy_state(&state.join("candidate-0"), &base.join("copy")).is_err());
         Ok(())
     }
 

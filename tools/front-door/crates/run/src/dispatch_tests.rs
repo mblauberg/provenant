@@ -89,6 +89,11 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     writing.writer = Some(writer());
     let mut delivering = writing.clone();
     delivering.deliver = Some(deliver("feature", false));
+    let mut elsewhere = writing.clone();
+    elsewhere.writer = Some(WriterRequest {
+        project: "/project".into(),
+        worktree: "/project/.worktrees/other".into(),
+    });
     for (parent_task, writer_child, child_delivery, valid, case) in [
         (
             &read_only,
@@ -112,6 +117,13 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
             "delivery child of read-only parent",
         ),
         (&writing, true, None, true, "writer child of writer parent"),
+        (
+            &elsewhere,
+            true,
+            None,
+            false,
+            "writer child in another worktree",
+        ),
         (
             &writing,
             true,
@@ -261,6 +273,73 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
         assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
     }
+    Ok(())
+}
+
+#[test]
+fn host_launches_only_the_validated_child_request() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let parent_task = input().request.tasks[0].clone();
+    let mut nested = input();
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    let record = store.create(&nested, &call)?;
+    let validated = store.validate_child(record.run_id, parent, &parent_task, 1, 2, &call)?;
+
+    // The lane swaps its sealed request and the recorded digest together.
+    let mut swapped = validated.clone();
+    swapped.tasks[0].access.network = Some(NetworkAccess::Open);
+    store.run_dir(record.run_id, false)?.atomic_write(
+        std::ffi::OsStr::new("request.json"),
+        ".swap-",
+        &crate::db::bytes(&swapped)?,
+        provenant_supervisor::fs::PublishMode::Replace,
+    )?;
+    let mut run = store.run(record.run_id, &call)?;
+    run.request_digest = swapped.digest()?;
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&run)?, run.run_id.to_string()],
+    )?;
+    assert_eq!(store.request(record.run_id, &call)?, swapped);
+    let fake = Fake::default();
+    assert!(matches!(
+        store.start_child(record.run_id, &validated, &fake, &|_| unreachable!(), &call),
+        Err(RunError::Validation(
+            "child request changed after validation"
+        ))
+    ));
+    assert_eq!(fake.prompt.borrow().as_str(), "");
+
+    // A child cannot continue an attempt, whose retained state the host copies.
+    let refuse = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start_child(record.run_id, &swapped, &refuse, &|_| unreachable!(), &call)?;
+    let continued = store.resume(
+        &Resume {
+            prior: nested.attempts[0].attempt_id,
+            expected_generation: 0,
+            operation_id: provenant_core::OperationId::parse("continue")
+                .map_err(|_| RunError::Validation("operation"))?,
+            run_id: provenant_core::RunId::from_bytes([20; 16]),
+            attempt_id: AttemptId::from_bytes([21; 16]),
+            prompt: "answer".into(),
+            created_at: WallTime::from_micros(100).map_err(|_| RunError::Validation("time"))?,
+        },
+        &call,
+    )?;
+    assert!(matches!(
+        store.validate_child(continued.run_id, parent, &parent_task, 1, 2, &call),
+        Err(RunError::Validation(
+            "a child run cannot continue an attempt"
+        ))
+    ));
     Ok(())
 }
 
