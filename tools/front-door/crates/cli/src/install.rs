@@ -4,7 +4,7 @@ use crate::{Harness, Switch};
 use clap::builder::TypedValueParser;
 use provenant_config::{
     self as config, InstallContext, InstallError, InstallOutcome, InstallReporter, Release,
-    ReleaseSmoke, Snapshots, Targets,
+    ReleaseSmoke, Targets,
 };
 use provenant_core::Roots;
 use provenant_supervisor::fs::SafeFs;
@@ -92,9 +92,7 @@ pub fn execute_install(
         return Err(InstallError::Conflict(args.source.clone()));
     }
     let release = Release::read(&args.source, target, context.fs)?;
-    let snapshots = Snapshots::capture(&release, &targets, context.fs)?;
-    let plan = config::plan_install(release, targets, snapshots)?;
-    config::install(&plan, context, reporter, smoke, args.dry_run)
+    config::plan_and_install(&release, &targets, context, reporter, smoke, args.dry_run)
 }
 
 pub fn execute_uninstall(

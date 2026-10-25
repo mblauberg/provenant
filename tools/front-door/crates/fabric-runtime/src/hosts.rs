@@ -43,6 +43,10 @@ pub enum PeerError {
     Project,
     #[error("peer is unavailable")]
     Unavailable,
+    /// A read-only exchange failed for a known cause. Same wire code as
+    /// [`PeerError::Unavailable`]; only the message carries the detail.
+    #[error("peer is unavailable: {0}")]
+    Failed(String),
     #[error("peer mutation outcome is unknown for operation {operation_id}")]
     Unknown { operation_id: OperationId },
     #[error("peer request was cancelled")]
@@ -57,7 +61,7 @@ impl PeerError {
         match self {
             Self::Version => "peer_version",
             Self::Project => "invalid_input",
-            Self::Unavailable => "home_unavailable",
+            Self::Unavailable | Self::Failed(_) => "home_unavailable",
             Self::Unknown { .. } => "launch_unknown",
             Self::Cancelled => "cancelled",
             Self::Frame => "state_corrupt",
@@ -329,6 +333,15 @@ pub struct PeerResponse {
 pub fn decode_request(bytes: &[u8]) -> Result<PeerRequest, PeerError> {
     provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
 }
+/// First non-empty stderr line, control characters removed, bounded.
+fn stderr_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().filter(|c| !c.is_control()).take(200).collect())
+        .unwrap_or_default()
+}
 pub trait PeerTransport {
     fn exchange(
         &self,
@@ -417,32 +430,44 @@ impl SshTransport<'_> {
         options.stderr = StreamPolicy::Capture { limit: 4096 };
         options.cancel = Some(cancel);
         options.stop_on_output_limit = true;
-        let outcome = self.executor.execute(options).map_err(|_| {
+        let uncertain = |cause: String| {
             request
                 .operation()
-                .map_or(PeerError::Unavailable, |operation_id| PeerError::Unknown {
-                    operation_id,
-                })
-        })?;
-        let uncertain = || {
-            request
-                .operation()
-                .map_or(PeerError::Unavailable, |operation_id| PeerError::Unknown {
-                    operation_id,
+                .map_or(PeerError::Failed(cause), |operation_id| {
+                    PeerError::Unknown { operation_id }
                 })
         };
-        if outcome.termination != Termination::Exit(0)
-            || outcome.timed_out
-            || outcome.cancelled
-            || outcome.stdout.truncated
-            || outcome.stdout.read_failed
-            || outcome.drain_truncated
-        {
-            return Err(uncertain());
+        let outcome = self
+            .executor
+            .execute(options)
+            .map_err(|error| uncertain(format!("ssh could not be run: {error}")))?;
+        if outcome.cancelled {
+            return Err(uncertain("the request was cancelled".to_owned()));
+        }
+        if outcome.timed_out {
+            return Err(uncertain(format!(
+                "ssh timed out after {}s",
+                timeout.as_secs().max(1)
+            )));
+        }
+        if let Termination::Exit(code) = outcome.termination {
+            if code != 0 {
+                let line = stderr_line(&outcome.stderr.bytes);
+                return Err(uncertain(if line.is_empty() {
+                    format!("ssh exited with status {code}")
+                } else {
+                    format!("ssh exited with status {code}: {line}")
+                }));
+            }
+        } else if let Termination::Signal(signal) = outcome.termination {
+            return Err(uncertain(format!("ssh was killed by signal {signal}")));
+        }
+        if outcome.stdout.truncated || outcome.stdout.read_failed || outcome.drain_truncated {
+            return Err(uncertain("peer reply was truncated".to_owned()));
         }
         let response: PeerResponse =
             provenant_records::decode(outcome.stdout.bytes.as_slice(), Limits::CONFIG)
-                .map_err(|_| uncertain())?;
+                .map_err(|_| uncertain("peer reply is not a valid frame".to_owned()))?;
         if response.version != 1
             || response.host != peer.host
             || response.project != request.project.key
@@ -591,6 +616,91 @@ mod tests {
             Some(operation)
         );
         assert!(request.project.resolve(Path::new("/home/b")).is_ok());
+    }
+
+    struct Canned(Mutex<Option<Result<ExecOutcome, ExecError>>>);
+    impl Executor for Canned {
+        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            self.0.lock().unwrap().take().unwrap()
+        }
+    }
+    fn outcome(exit: i64, stderr: &str, timed_out: bool) -> ExecOutcome {
+        ExecOutcome {
+            termination: Termination::Exit(exit),
+            stdout: CapturedStream::default(),
+            stderr: CapturedStream {
+                bytes: stderr.as_bytes().to_vec(),
+                ..Default::default()
+            },
+            timed_out,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        }
+    }
+    fn read_only_failure(result: Result<ExecOutcome, ExecError>) -> PeerError {
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let host = HostId::from_bytes([2; 16]);
+        let request = PeerRequest {
+            version: 1,
+            target_host: host,
+            source_host: HostId::from_bytes([1; 16]),
+            agent: "chair".into(),
+            project: ProjectLocator {
+                key: CrossHostProjectKey::from_home(
+                    Path::new("/home/a"),
+                    Path::new("/home/a/repo/.git"),
+                )
+                .unwrap(),
+                common_dir: "repo/.git".into(),
+            },
+            action: PeerAction::RunStatuses { targets: vec![] },
+        };
+        let peer = Peer {
+            host,
+            destination: "worker".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        };
+        let executor = Canned(Mutex::new(Some(result)));
+        let transport = SshTransport {
+            executor: &executor,
+            clock: &clock,
+            home: Path::new("/home/a"),
+            cwd: Path::new("/home/a/repo"),
+            executable: "/usr/bin/ssh".into(),
+            seconds: 30,
+        };
+        transport
+            .exchange(&peer, &request, budget, &CancelToken::new())
+            .unwrap_err()
+    }
+    #[test]
+    fn read_only_failures_name_their_cause_on_the_same_wire_code() {
+        let error = read_only_failure(Ok(outcome(
+            255,
+            "\nssh: connect to host w port 22: Connection refused\nmore",
+            false,
+        )));
+        assert_eq!(error.code(), "home_unavailable");
+        let text = error.to_string();
+        assert!(text.contains("status 255"), "{text}");
+        assert!(text.contains("Connection refused"), "{text}");
+        assert!(!text.contains("more"), "{text}");
+        assert!(
+            read_only_failure(Ok(outcome(0, "", true)))
+                .to_string()
+                .contains("timed out")
+        );
+        assert!(
+            read_only_failure(Err(ExecError::Busy))
+                .to_string()
+                .contains("could not be run")
+        );
+        let bad = read_only_failure(Ok(outcome(0, "", false)));
+        assert!(bad.to_string().contains("valid frame"), "{bad}");
     }
 
     #[test]

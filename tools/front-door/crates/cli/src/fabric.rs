@@ -3,7 +3,7 @@ mod context;
 
 pub(crate) use context::private_dir;
 /// Shared identity/config setup for CLI leaves and the binary MCP transport.
-pub use context::{Context, publish};
+pub use context::{Context, PeerFailure, publish};
 
 /// Trusted project and actor identity for sibling leaves such as workflow.
 pub(crate) fn identity(
