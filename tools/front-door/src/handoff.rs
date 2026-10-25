@@ -193,17 +193,6 @@ fn short_branch(reference: &str) -> String {
         .to_owned()
 }
 
-/// Whether a worktree has tracked changes or untracked, unignored files. A
-/// failed status counts as dirty.
-fn uncommitted(path: &Path) -> Result<bool, Refusal> {
-    let (ok, status) = git(
-        path,
-        &["status", "--porcelain", "-z", "--untracked-files=all"],
-        GIT_TIMEOUT,
-    )?;
-    Ok(!ok || !status.is_empty())
-}
-
 /// One worktree of this project, as the hand-off sees it.
 #[derive(Debug, Clone, Serialize)]
 struct Tree {
@@ -296,15 +285,14 @@ fn inspect(roots: &provenant_core::Roots, project: &Path) -> Result<Vec<Tree>, R
             None => (None, false),
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
-        // The listing counts ignored files as dirty, which suits removal but
-        // not a hand-off: build output and `.worktrees/` are not lost work.
-        let dirty = info.dirty == WorktreeCondition::Dirty && uncommitted(&path)?;
         trees.push(Tree {
             primary: primary.as_deref() == Some(path.as_path()),
             path,
             branch,
             head,
-            dirty,
+            // Ignored files, such as build output and `.worktrees/`, are not
+            // lost work.
+            dirty: info.dirty == WorktreeCondition::Dirty,
             unknown: matches!(
                 info.dirty,
                 WorktreeCondition::Unknown | WorktreeCondition::GitOperationInProgress
@@ -340,7 +328,9 @@ fn wip(tree: &Tree) -> Result<(), Refusal> {
         step(&["add", "--update"])?;
         step(&["commit", "--message", "WIP: session hand-off"])?;
     }
-    step(&["push", "--set-upstream", "origin", branch])
+    // A full refspec cannot be confused with a tag of the same name.
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    step(&["push", "--set-upstream", "origin", &refspec])
 }
 /// Untracked files Git does not ignore. `--wip` commits tracked changes only,
 /// so these would stay behind.
@@ -1378,7 +1368,10 @@ fn worktree_warning(
             info.head
         ));
     }
-    if info.dirty != WorktreeCondition::Clean {
+    if !matches!(
+        info.dirty,
+        WorktreeCondition::Clean | WorktreeCondition::Ignored
+    ) {
         found.push("the worktree has uncommitted changes or unknown state".to_owned());
     }
     (!found.is_empty()).then(|| found.join("; "))
@@ -1688,37 +1681,6 @@ mod tests {
     fn listed_refs_become_branch_names() {
         assert_eq!(short_branch("refs/heads/feat/x"), "feat/x");
         assert_eq!(short_branch("main"), "main");
-    }
-
-    #[test]
-    fn ignored_files_are_not_uncommitted_work() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path();
-        let run = |args: &[&str]| {
-            let config = [
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ];
-            let argv: Vec<&str> = config.iter().chain(args).copied().collect();
-            let (ok, text) = git(repo, &argv, GIT_TIMEOUT).unwrap();
-            assert!(ok, "git {args:?}: {text}");
-        };
-        run(&["init", "-q"]);
-        fs::write(repo.join(".gitignore"), "target/\n.worktrees/\n").unwrap();
-        run(&["add", ".gitignore"]);
-        run(&["commit", "-q", "-m", "init"]);
-        fs::create_dir_all(repo.join("target")).unwrap();
-        fs::write(repo.join("target/out"), "built").unwrap();
-        assert!(!uncommitted(repo).unwrap());
-        fs::write(repo.join("notes.md"), "draft").unwrap();
-        assert!(uncommitted(repo).unwrap());
-        fs::remove_file(repo.join("notes.md")).unwrap();
-        fs::write(repo.join(".gitignore"), "target/\n").unwrap();
-        assert!(uncommitted(repo).unwrap());
     }
 
     fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {

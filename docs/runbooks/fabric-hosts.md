@@ -229,7 +229,8 @@ On the calling host the command:
    512 KiB in total;
 3. checks that each registered worktree of the project is clean and pushed
    to `origin/<branch>`. Ignored files, such as build output, do not count as
-   changes. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
+   changes; they stay on the source and are not transferred. Files ignored
+   only by a global excludes file still count. Without a flag it refuses with `WORKTREE_DIRTY` and lists the
    problem trees. `--wip` commits the tracked changes in each dirty or
    unpushed linked worktree as `WIP: session hand-off` and pushes it. It
    refuses the primary checkout, a detached tree, a tree with a live writer
@@ -245,8 +246,8 @@ refuses with the valid labels when it does not match. It then claims
 `handoff/<project-id>/op-<operation-id>/` in its state directory, fetches
 `origin` and recreates each branch's worktree from `origin/<branch>`. An
 existing worktree, or an existing local branch, is reused; when its commit
-differs from origin or it has uncommitted changes, the receipt and the
-prompt say so. The peer writes `prompt.md`, the attachments and
+differs from origin or it has uncommitted changes other than ignored files,
+the receipt and the prompt say so. The peer writes `prompt.md`, the attachments and
 `launch.command` into the operation directory and runs
 `open -a Terminal launch.command`. The script runs
 `claude -- "$(cat prompt.md)"` with `CLAUDE_CONFIG_DIR` set to the account's
