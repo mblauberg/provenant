@@ -327,6 +327,134 @@ fn jiff_time() -> Result<i64> {
 }
 
 #[test]
+fn agy_registration_and_quota_follow_the_google_identity() -> Result {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let mut rig = quota_rig()?;
+    support::clear_accounts(&rig)?;
+    let bin = rig.root.join("bin");
+    fs::create_dir(&bin)?;
+    let agy = bin.join("agy");
+    fs::write(
+        &agy,
+        r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--log-file" ]; then shift; log=$1; fi
+    shift
+done
+printf 'OAuth: authenticated successfully as %s\n' "$(cat "$HOME/agy-email")" > "$log"
+cat "$HOME/agy-usage"
+"#,
+    )?;
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../crates/providers/src/quota/fixtures/agy.json"
+    ))?;
+    fs::write(
+        rig.home.join("agy-usage"),
+        serde_json::to_vec(&fixture["payload"])?,
+    )?;
+    let register = || -> Result<serde_json::Value> {
+        let out = rig.command(&[
+            "accounts",
+            "register",
+            "work",
+            "--adapter",
+            "agy",
+            "--directory",
+            rig.home.to_str().ok_or("home path")?,
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stdout.bytes)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("@example.test"));
+        Ok(value["data"]["entries"]["agy-work"]["key"].clone())
+    };
+    fs::write(rig.home.join("agy-email"), "one@example.test")?;
+    let one = register()?.as_str().ok_or("account key")?.to_owned();
+    let fingerprint = provenant_providers::identity::fingerprint("one@example.test")
+        .ok_or("fixture fingerprint")?;
+    assert_eq!(one, format!("agy-google-{}", &fingerprint[..12]));
+    let out = rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?;
+    assert_eq!(code(&out), 0);
+    let record_path = rig.state.join("quota").join(&one).join("agy.json");
+    let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&record_path)?)?;
+    assert_eq!(
+        record["snapshot"]["details"]["fingerprint"],
+        format!("google-{}", &fingerprint[..12])
+    );
+    let at = jiff_time()?;
+    record["refusals"] = serde_json::json!([{
+        "account": record["account"], "model": "fixture-model", "pool": null,
+        "observed_unix_seconds": at, "resets_unix_seconds": at + 300
+    }]);
+    fs::write(&record_path, serde_json::to_vec(&record)?)?;
+
+    fs::write(rig.home.join("agy-email"), "two@example.test")?;
+    let two = register()?.as_str().ok_or("second account key")?.to_owned();
+    assert_ne!(one, two);
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
+        0
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&record_path)?)?,
+        record
+    );
+    let second: serde_json::Value = serde_json::from_slice(&fs::read(
+        rig.state.join("quota").join(&two).join("agy.json"),
+    )?)?;
+    assert_eq!(second["account"]["account_key"], two);
+    assert_eq!(second["refusals"], serde_json::json!([]));
+    fs::write(rig.home.join("agy-email"), "one@example.test")?;
+    assert_eq!(register()?, one);
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
+        0
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&record_path)?)?,
+        record
+    );
+
+    // A changed sign-in must never publish usage into the registered scope.
+    record["last_attempt_unix_seconds"] = serde_json::json!(at - 60);
+    fs::write(&record_path, serde_json::to_vec(&record)?)?;
+    fs::write(rig.home.join("agy-email"), "two@example.test")?;
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
+        0
+    );
+    let refused: serde_json::Value = serde_json::from_slice(&fs::read(&record_path)?)?;
+    assert_eq!(refused["last_error"], "auth");
+    assert_eq!(refused["snapshot"], record["snapshot"]);
+
+    // Missing identity cannot silently register a label-based account.
+    fs::write(rig.home.join("agy-email"), "")?;
+    let out = rig.command(&[
+        "accounts",
+        "register",
+        "missing",
+        "--adapter",
+        "agy",
+        "--directory",
+        rig.home.to_str().ok_or("home path")?,
+        "--json",
+    ])?;
+    assert_ne!(code(&out), 0);
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn registered_accounts_have_distinct_quota_keys() -> Result {
     use std::fs;
     let rig = quota_rig()?;
@@ -457,6 +585,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         });
         let records = [record];
         let admission = Admission {
+            policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: at,
             records: &records,
             pools: &[],

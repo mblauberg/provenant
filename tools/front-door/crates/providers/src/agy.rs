@@ -6,6 +6,21 @@ use provenant_confinement::permissions::{
 use serde::Deserialize;
 use std::ffi::OsString;
 pub struct Agy;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &Agy,
+    quota_source: Some(&Agy),
+    display_name: "Agy",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "agy",
+        timer_seconds: 1200,
+        panel_seconds: 900,
+        probe_seconds: 30,
+        low_power: false,
+        solo: true,
+    },
+};
+
 crate::adapter!(Agy, "agy", prepare);
 const MODEL_ON_WIRE: bool = true;
 
@@ -28,7 +43,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    // Agy has no signed-in identity source: a registered account is unsupported.
+    // Agy's keychain sign-in cannot be selected through a registered directory.
     if plan.selected_authentication.as_deref() != Some("keychain") || input.account.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }

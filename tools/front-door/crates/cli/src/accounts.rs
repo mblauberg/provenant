@@ -80,11 +80,9 @@ pub fn execute(
             &directory,
             cwd,
         );
-        // Adapters without an identity probe are keyed by their label.
+        // OpenCode's local ledger has no sign-in identity.
         let (key, org_fingerprint) = match detected {
-            Err(provenant_providers::ProviderError::UnknownIdentity)
-                if !matches!(adapter.as_str(), "claude" | "codex" | "cursor") =>
-            {
+            Err(provenant_providers::ProviderError::UnknownIdentity) if adapter == "opencode" => {
                 (format!("{adapter}-{label}"), None)
             }
             other => other.map_err(|e| e.to_string())?,

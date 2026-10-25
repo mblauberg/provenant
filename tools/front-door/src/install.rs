@@ -437,13 +437,13 @@ fn install_target(path: &Path) -> &'static str {
         || path.ends_with("/.claude")
         || path.ends_with("/.claude.json")
     {
-        "Claude"
+        provenant_providers::claude::REGISTRATION.display_name
     } else if path.contains("/.codex/") || path.ends_with("/.codex") {
-        "Codex"
+        provenant_providers::codex::REGISTRATION.display_name
     } else if path.contains("/.cursor/") || path.ends_with("/.cursor") {
-        "Cursor"
+        provenant_providers::cursor::REGISTRATION.display_name
     } else if path.contains("/.config/opencode/") {
-        "OpenCode"
+        provenant_providers::opencode::REGISTRATION.display_name
     } else if path.contains("/.config/agents/") {
         "Agents"
     } else {

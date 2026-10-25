@@ -7,6 +7,21 @@ use serde::Deserialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
 pub struct OpenCode;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &OpenCode,
+    quota_source: Some(&OpenCode),
+    display_name: "OpenCode",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "opencode",
+        timer_seconds: 300,
+        panel_seconds: 120,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    },
+};
+
 crate::adapter!(OpenCode, "opencode", prepare);
 /// The JSON run stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;

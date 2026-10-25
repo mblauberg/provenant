@@ -1,6 +1,44 @@
 //! Provider-owned wire decoding and supervisor effect contracts.
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug)]
+pub struct QuotaPolicy {
+    pub adapter: &'static str,
+    pub timer_seconds: u64,
+    pub panel_seconds: u64,
+    pub probe_seconds: u64,
+    pub low_power: bool,
+    pub solo: bool,
+}
+
+#[cfg(test)]
+pub(crate) const TEST_POLICIES: &[QuotaPolicy] = &[
+    QuotaPolicy {
+        adapter: "claude",
+        timer_seconds: 300,
+        panel_seconds: 120,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    },
+    QuotaPolicy {
+        adapter: "agy",
+        timer_seconds: 1200,
+        panel_seconds: 900,
+        probe_seconds: 30,
+        low_power: false,
+        solo: true,
+    },
+    QuotaPolicy {
+        adapter: "opencode",
+        timer_seconds: 300,
+        panel_seconds: 120,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    },
+];
+
 /// Opaque, non-secret provider identity; never an email, credential or auth path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
