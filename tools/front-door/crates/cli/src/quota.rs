@@ -407,6 +407,16 @@ fn decorate(
     display: &Display,
 ) {
     report.display = display.clone();
+    report.display_icon_warning =
+        if display.icon != MOST_CONSTRAINED && !accounts.entries.contains_key(&display.icon) {
+            report.display.icon = MOST_CONSTRAINED.into();
+            Some(format!(
+                "display.icon names unregistered account '{}'; using most_constrained",
+                display.icon
+            ))
+        } else {
+            None
+        };
     for row in &mut report.accounts {
         row.display = accounts
             .entries
@@ -651,6 +661,9 @@ pub fn run(
                 "Quota: {}/{} current readings\n",
                 report.coverage.known, report.coverage.total
             );
+            if let Some(warning) = &report.display_icon_warning {
+                human.push_str(&format!("Warning: {warning}\n"));
+            }
             for row in &report.accounts {
                 let status = serde_json::to_value(row.status)
                     .ok()
@@ -731,4 +744,52 @@ pub fn run(
         publish,
     );
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_icon_resolves_against_registered_accounts() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let accounts = serde_json::from_value(serde_json::json!({
+            "entries": {"codex-work": {
+                "adapter": "codex", "label": "work", "key": "opaque", "directory": "/work"
+            }}
+        }))?;
+        // No rows are shown, as when an adapter filter excludes the icon account.
+        let mut report = schedule::report(
+            &[],
+            &[],
+            &[],
+            &QuotaQuery { adapter: None },
+            0,
+            "/report.json".into(),
+        )?;
+        for (icon, expected) in [
+            ("codex-removed", MOST_CONSTRAINED),
+            ("codex-work", "codex-work"),
+            (MOST_CONSTRAINED, MOST_CONSTRAINED),
+        ] {
+            let display = Display {
+                headline: Headline::Weekly,
+                icon: icon.into(),
+            };
+            decorate(&mut report, &accounts, &display);
+            assert_eq!(report.display.icon, expected);
+            assert_eq!(report.display.headline, Headline::Weekly);
+            assert_eq!(display.icon, icon);
+            let json = serde_json::to_value(&report)?;
+            if icon == "codex-removed" {
+                assert_eq!(
+                    json["display_icon_warning"],
+                    "display.icon names unregistered account 'codex-removed'; using most_constrained"
+                );
+            } else {
+                assert!(json.get("display_icon_warning").is_none());
+            }
+        }
+        Ok(())
+    }
 }

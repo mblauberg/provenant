@@ -282,6 +282,8 @@ pub struct QuotaReport {
     pub report_path: String,
     #[serde(default)]
     pub display: crate::Display,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_icon_warning: Option<String>,
 }
 
 #[cfg(test)]
