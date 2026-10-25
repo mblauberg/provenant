@@ -116,11 +116,68 @@ pub enum RefusalKind {
     WorktreeBusy,
 }
 
+/// A child's network reach may not exceed its parent's, each write root must
+/// sit inside a parent write root and each read root inside any parent root.
+/// The lane wrote the child's roots, so the host repeats the submission
+/// edge's checks against its own filesystem view: a root counts only while it
+/// is an existing directory, already canonical and clear of the state root.
+fn child_access_within(
+    parent: &TaskRequest,
+    child: &TaskRequest,
+    state_root: &std::path::Path,
+) -> Result<()> {
+    let reach = |network| match network {
+        NetworkAccess::Provider => 0,
+        NetworkAccess::Local => 1,
+        NetworkAccess::Open => 2,
+    };
+    if reach(child.access.network(child.writer.is_some()))
+        > reach(parent.access.network(parent.writer.is_some()))
+    {
+        return Err(RunError::Validation("child network exceeds parent access"));
+    }
+    let state = provenant_supervisor::fs::canonicalize(state_root)
+        .unwrap_or_else(|_| state_root.to_path_buf());
+    let resolve = |root: &PathBuf| {
+        provenant_supervisor::fs::canonicalize(root)
+            .ok()
+            .filter(|canonical| {
+                canonical == root
+                    && canonical.is_dir()
+                    && !canonical.starts_with(&state)
+                    && !state.starts_with(canonical)
+            })
+    };
+    let writes: Vec<PathBuf> = parent
+        .access
+        .write_roots
+        .iter()
+        .filter_map(resolve)
+        .collect();
+    let reads: Vec<PathBuf> = parent
+        .access
+        .read_roots
+        .iter()
+        .filter_map(resolve)
+        .chain(writes.iter().cloned())
+        .collect();
+    let within = |roots: &[PathBuf], granted: &[PathBuf]| {
+        roots.iter().all(|root| {
+            resolve(root).is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
+        })
+    };
+    if !within(&child.access.write_roots, &writes) || !within(&child.access.read_roots, &reads) {
+        return Err(RunError::Validation("child root exceeds parent access"));
+    }
+    Ok(())
+}
+
 impl RunStore {
     /// Validate lane-writable ingress against the host's recorded parent and
     /// its sealed task. A child never gains authority its parent lacks: a
-    /// read-only parent cannot propose a writer, and delivery must already be
-    /// granted to the parent for the same remote, branch and pull request.
+    /// read-only parent cannot propose a writer, delivery must already be
+    /// granted to the parent for the same remote, branch and pull request,
+    /// and access must sit within the parent's.
     pub fn validate_child(
         &self,
         run: RunId,
@@ -155,6 +212,7 @@ impl RunStore {
                     ));
                 }
             }
+            child_access_within(parent_task, task, self.context.state_root.as_path())?;
         }
         Ok(())
     }

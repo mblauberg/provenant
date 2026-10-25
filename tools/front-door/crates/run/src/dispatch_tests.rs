@@ -157,6 +157,113 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    for name in ["reads/sub", "writes/sub", "outside", "home/.config"] {
+        std::fs::create_dir_all(base.join(name))?;
+    }
+    std::os::unix::fs::symlink(base.join("outside"), base.join("reads/alias"))?;
+    let access = |network, reads: &[&str], writes: &[&str]| LaneAccess {
+        network,
+        read_roots: reads.iter().map(|path| base.join(path)).collect(),
+        write_roots: writes.iter().map(|path| base.join(path)).collect(),
+    };
+    let task = |writer: bool, access: LaneAccess| {
+        let mut task = input().request.tasks[0].clone();
+        task.writer = writer.then(|| WriterRequest {
+            project: "/project".into(),
+            worktree: "/project/.worktrees/sibling".into(),
+        });
+        task.access = access;
+        task
+    };
+    let read_only = task(false, LaneAccess::default());
+    let granted = task(
+        false,
+        access(Some(NetworkAccess::Local), &["reads"], &["writes"]),
+    );
+    let quiet_writer = task(true, access(Some(NetworkAccess::Provider), &[], &[]));
+    for (parent_task, child, valid, case) in [
+        (
+            &read_only,
+            task(false, LaneAccess::default()),
+            true,
+            "default child",
+        ),
+        (
+            &read_only,
+            task(false, access(None, &[], &["writes"])),
+            false,
+            "write root under a read-only parent",
+        ),
+        (
+            &read_only,
+            task(false, access(None, &["home/.config"], &[])),
+            false,
+            "extra read root under a read-only parent",
+        ),
+        (
+            &read_only,
+            task(false, access(Some(NetworkAccess::Open), &[], &[])),
+            false,
+            "network under a read-only parent",
+        ),
+        (
+            &granted,
+            task(
+                false,
+                access(
+                    Some(NetworkAccess::Local),
+                    &["reads/sub", "writes"],
+                    &["writes/sub"],
+                ),
+            ),
+            true,
+            "child within parent roots",
+        ),
+        (
+            &granted,
+            task(false, access(Some(NetworkAccess::Open), &[], &[])),
+            false,
+            "network beyond parent network",
+        ),
+        (
+            &granted,
+            task(false, access(None, &[], &["reads/sub"])),
+            false,
+            "write root inside a parent read root",
+        ),
+        (
+            &granted,
+            task(false, access(None, &["reads/alias"], &[])),
+            false,
+            "symlinked read root escaping the parent root",
+        ),
+        (
+            &quiet_writer,
+            task(true, LaneAccess::default()),
+            false,
+            "writer default network beyond parent network",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut nested = input();
+        nested.request.lane_depth = Some(2);
+        nested.request.parent_attempt = Some(parent);
+        nested.request.tasks[0] = child;
+        let record = store.create(&nested, &call)?;
+        let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
+        assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
+    }
+    Ok(())
+}
+
 struct Host {
     available: u64,
 }
