@@ -96,23 +96,63 @@ pub fn render<T: Serialize>(
         Err(error) => Err(RenderError::Write(error)),
     }
 }
+/// Characters that could hide or reorder text on a terminal: DEL, C1 controls
+/// and the Cf, Zl and Zp categories.
+fn is_unsafe(c: char) -> bool {
+    matches!(c,
+        '\u{7f}'..='\u{9f}' | '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}'
+        | '\u{70f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+        | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+/// Quote text outside the conservative bare set `[A-Za-z0-9._:/@+%,-]`.
+fn quoted(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:/@+%,-".contains(c))
+    {
+        return text.to_owned();
+    }
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() || is_unsafe(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
 /// Terse human text for a result: one line per record, never pretty JSON.
 ///
 /// An array, or an `items` array one object deep, yields one `key=value` line
-/// per element, keys sorted; remaining scalars share a header line. Nulls and empty arrays
-/// are dropped, and nested values stay compact JSON. Every line ends in LF.
+/// per element, keys sorted; remaining scalars share a header line. Nulls and
+/// empty arrays are dropped from the header, and null fields from records.
+/// Strings outside a conservative bare set are quoted, with control, bidi and
+/// other format characters escaped as `\u{..}`; nested values are compact JSON
+/// with the same escapes. Every line ends in LF.
 pub fn terse(value: &serde_json::Value) -> String {
     use serde_json::Value;
     fn scalar(value: &Value) -> String {
         match value {
-            Value::String(text)
-                if !text.is_empty()
-                    && !text
-                        .chars()
-                        .any(|c| c.is_whitespace() || c == '"' || c.is_control()) =>
-            {
-                text.clone()
-            }
+            Value::String(text) => quoted(text),
+            Value::Array(_) | Value::Object(_) => value
+                .to_string()
+                .chars()
+                .map(|c| {
+                    if c.is_control() || is_unsafe(c) {
+                        format!("\\u{{{:x}}}", c as u32)
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect(),
             other => other.to_string(),
         }
     }
@@ -187,6 +227,29 @@ mod tests {
             "a=1\na=[2]\n"
         );
         assert_eq!(terse(&serde_json::json!([])), "");
+    }
+    #[test]
+    fn terse_quotes_and_escapes_anything_that_could_mislead_a_terminal() {
+        for (raw, shown) in [
+            ("a=b", "\"a=b\""),
+            ("a\nb", "\"a\\nb\""),
+            ("\u{1b}[2J", "\"\\u{1b}[2J\""),
+            ("x\u{202e}y", "\"x\\u{202e}y\""),
+            ("x\u{85}y", "\"x\\u{85}y\""),
+            ("x\u{2028}y", "\"x\\u{2028}y\""),
+            ("\u{2800}", "\"\u{2800}\""),
+            ("", "\"\""),
+            ("ok-1.2:/a@b+c%d,e", "ok-1.2:/a@b+c%d,e"),
+        ] {
+            assert_eq!(
+                terse(&serde_json::json!([{ "k": raw }])),
+                format!("k={shown}\n")
+            );
+        }
+        assert_eq!(
+            terse(&serde_json::json!([{ "k": ["x\u{202e}"] }])),
+            "k=[\"x\\u{202e}\"]\n"
+        );
     }
     #[test]
     fn oversize_is_rejected_before_any_stdout_and_lf_counts() {
