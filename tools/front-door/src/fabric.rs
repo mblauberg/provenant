@@ -2218,7 +2218,16 @@ impl Factory {
                 id,
                 &provenant_supervisor::fs::LocalFs,
             )
-            .map_err(|_| FacadeError::StateCorrupt)?
+            .map_err(|error| {
+                use provenant_fabric_runtime::graph::JournalError;
+                match error {
+                    // Unreadable is not corrupt: a denied or vanished read stays Io.
+                    JournalError::Filesystem(_)
+                    | JournalError::Io(_)
+                    | JournalError::DurabilityUnconfirmed(_) => FacadeError::Io,
+                    _ => FacadeError::StateCorrupt,
+                }
+            })?
             .ok_or(FacadeError::NotFound)?;
             return Ok(graph_snapshot(checkpoint));
         }
