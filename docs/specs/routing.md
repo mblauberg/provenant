@@ -320,9 +320,10 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   a child cannot continue an attempt. The host launches only the request it
   validated and refuses one whose digest changed after validation or whose
   re-read request no longer matches the digest sealed at hand-off. Invalid
-  proposals terminate as rejected before provider preparation.
-  Child storage is writable by the submitting lane, so it is not independent
-  evidence against that lane.
+  proposals terminate as rejected before provider preparation. A child
+  launches for its parent's requester, sealed in the host-built holder context,
+  never the actor its run record names. Child storage is writable by the
+  submitting lane, so it is not independent evidence against that lane.
 - The guardian stops its worker on observed provider exit. Parent cancellation,
   deadline or supervisor signal cancels only the child scopes this worker
   accepted; normal parent completion leaves their custody intact.

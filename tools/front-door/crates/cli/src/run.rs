@@ -1195,17 +1195,23 @@ pub fn launch(
     }
     launch_on_host(session, run, edge, call, None)
 }
-/// `child` carries a lane's child launch: the inherited host context and the
-/// request `validate_child` returned, which is the only copy launched from.
+/// `child` carries a lane's child launch: the inherited host context, the
+/// request `validate_child` returned, which is the only copy launched from,
+/// and the requester sealed into the parent attempt's host-built holder
+/// context. The lane can write the child's run record, so it names neither.
 fn launch_on_host(
     session: &Session,
     run: RunId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
-    child: Option<(&run::HostLaunchContext, &run::CanonicalRequest)>,
+    child: Option<(
+        &run::HostLaunchContext,
+        &run::CanonicalRequest,
+        provenant_core::ActorId,
+    )>,
 ) -> Result<Vec<run::Started>, Fail> {
     let host = match child {
-        Some((host, _)) => host.clone(),
+        Some((host, _, _)) => host.clone(),
         None => run::HostLaunchContext {
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
@@ -1225,23 +1231,22 @@ fn launch_on_host(
             fixture_state_write: false,
         },
     };
-    let validated = child.map(|(_, request)| request);
+    let validated = child.map(|(_, request, requester)| (request, requester));
     let read;
     let request = match validated {
-        Some(request) => request,
+        Some((request, _)) => request,
         None => {
             read = session.store.request(run, call)?;
             &read
         }
     };
     let request_digest = request.digest().map_err(run::RunError::from)?;
-    let requester = session.store.run(run, call)?.actor_id;
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
         state_root: session.context.state_root.as_path().into(),
     };
-    let holder = |attempt: &run::AttemptRecord| {
+    let holder = |attempt: &run::AttemptRecord, requester| {
         let mut host = host.clone();
         if let Some(writer) = request
             .tasks
@@ -1304,9 +1309,9 @@ fn launch_on_host(
         )?);
     }
     Ok(match validated {
-        Some(request) => session
+        Some((request, requester)) => session
             .store
-            .start_child(run, request, &registry, &holder, call)?,
+            .start_child(run, request, requester, &registry, &holder, call)?,
         None => session.store.start(run, &registry, &holder, call)?,
     })
 }

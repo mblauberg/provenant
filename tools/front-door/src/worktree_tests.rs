@@ -641,7 +641,7 @@ fn start_writer(
     Ok(store.start_with_writer_lease(
         run,
         provider,
-        holder,
+        &|record, _| holder(record),
         &|directory, scope, binding| {
             provenant_supervisor::fixture::acquire_writer_with_binding(
                 directory,

@@ -2,7 +2,7 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{AttemptId, OperationId, RunId};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
@@ -290,12 +290,14 @@ impl RunStore {
     }
     /// Hand each queued attempt of `run` to its own guardian, which admits it
     /// and later commits its terminal record. `context` builds the opaque
-    /// holder reference for one attempt.
+    /// holder reference for one attempt and the requester it launches for.
+    /// Only the host writes a top-level store, so its run record names the
+    /// requester.
     pub fn start(
         &self,
         run: RunId,
         providers: &dyn Providers,
-        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         self.start_inner(
@@ -318,13 +320,16 @@ impl RunStore {
     }
     /// Start a child run from the request `validate_child` returned. The lane
     /// may have rewritten its store since, so a request whose digest no longer
-    /// matches is refused rather than launched.
+    /// matches is refused rather than launched. For the same reason the child
+    /// launches for `requester`, the parent attempt's from its host-built
+    /// holder context, never the actor the child's run record names.
     pub fn start_child(
         &self,
         run: RunId,
         validated: &CanonicalRequest,
+        requester: ActorId,
         providers: &dyn Providers,
-        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         self.start_inner(
@@ -341,7 +346,7 @@ impl RunStore {
                     call.clock,
                 )
             },
-            Some(validated.digest()?),
+            Some((validated.digest()?, requester)),
             call,
         )
     }
@@ -352,40 +357,47 @@ impl RunStore {
         &self,
         run: RunId,
         providers: &dyn Providers,
-        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
             provenant_supervisor::fs::Directory,
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
-        validated: Option<&CanonicalRequest>,
+        child: Option<(&CanonicalRequest, ActorId)>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        let validated = validated.map(CanonicalRequest::digest).transpose()?;
-        self.start_inner(run, providers, context, acquire_writer, validated, call)
+        let child = match child {
+            Some((request, requester)) => Some((request.digest()?, requester)),
+            None => None,
+        };
+        self.start_inner(run, providers, context, acquire_writer, child, call)
     }
+    /// `child` is a validated child request's digest and its host-held
+    /// requester; a top-level run takes its requester from its own record.
     fn start_inner(
         &self,
         run: RunId,
         providers: &dyn Providers,
-        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
             provenant_supervisor::fs::Directory,
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
-        validated: Option<provenant_core::Digest>,
+        child: Option<(provenant_core::Digest, ActorId)>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         // Every later use reads this one value, never the store again.
         let request = self.request(run, call)?;
-        if let Some(digest) = validated
-            && request.digest()? != digest
-        {
-            return Err(RunError::Validation(
-                "child request changed after validation",
-            ));
-        }
+        let requester = match child {
+            Some((digest, _)) if request.digest()? != digest => {
+                return Err(RunError::Validation(
+                    "child request changed after validation",
+                ));
+            }
+            Some((_, requester)) => requester,
+            None => self.run(run, call)?.actor_id,
+        };
         let resume = request
             .parent
             .map(|prior| self.record(prior, call))
@@ -505,7 +517,15 @@ impl RunStore {
                     Err(error) => return Err(error),
                 };
             started.push(
-                match self.hand_off(task, plan, context, acquire_writer, &record, call) {
+                match self.hand_off(
+                    task,
+                    plan,
+                    requester,
+                    context,
+                    acquire_writer,
+                    &record,
+                    call,
+                ) {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
                     Err(error @ (HandOff::Local(_) | HandOff::Busy)) => {
@@ -540,11 +560,16 @@ impl RunStore {
         }
         Ok(started)
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the requester is resolved once per run, not per attempt"
+    )]
     fn hand_off(
         &self,
         task: &TaskRequest,
         mut plan: PreparedLaunch,
-        context: &dyn Fn(&AttemptRecord) -> Result<Vec<u8>>,
+        requester: ActorId,
+        context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
             provenant_supervisor::fs::Directory,
             Scope,
@@ -564,7 +589,7 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
-        let mut holder_context = context(record).map_err(|e| local(&e))?;
+        let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
@@ -665,10 +690,7 @@ impl RunStore {
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
             task: task.task_id,
-            requester: self
-                .run(record.run_id, call)
-                .map_err(|error| local(&error))?
-                .actor_id,
+            requester,
             protected_commands: vec![],
             config_environment: vec![],
             argv: plan.argv,
