@@ -258,6 +258,12 @@ one, update the next onto the new `main`, rerun the exact-head checks and
 independent review (an update-merge is a new commit and invalidates prior
 exact-head evidence), then merge it.
 
+### Rust build cache
+
+Both Rust cache steps cache `tools/front-door/target`, including Cargo's
+nested build-dir layout. A `build.build-dir` outside that tree is not cached
+unless its path is added to the action's `cache-directories`.
+
 ### Reproducing a CI failure locally
 
 When a suite passes locally but fails in CI, the difference is usually developer

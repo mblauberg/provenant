@@ -215,6 +215,11 @@ pub(crate) fn rust_tools(
         ("RUSTUP_HOME".into(), rustup.into_os_string()),
         ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
         ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
+        // Override build.build-dir inherited from host or ancestor Cargo config.
+        (
+            "CARGO_BUILD_BUILD_DIR".into(),
+            target.clone().into_os_string(),
+        ),
     ]);
     // Cargo's system LibreSSL reads its public default configuration
     // (openssl.cnf) and the TLS trust roots (cert.pem, certs/) to download
