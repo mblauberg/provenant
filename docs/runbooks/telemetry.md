@@ -44,13 +44,13 @@ counters.
 
 `provenant quota show` reads cached observations. `provenant quota tick`
 refreshes due accounts; use `--trigger` and `--power` to record why the
-refresh ran and the current power source. `provenant quota display
-[--headline auto|5h|weekly] [--icon most_constrained|ACCOUNT]` sets the menu
-bar choices, then shows quota. `provenant telemetry stats --usage` reports local invocation
+refresh ran and the current power source. `provenant quota display [--headline
+auto|5h|weekly] [--icon most_constrained|ACCOUNT]` sets the menu bar choices,
+then shows quota. `provenant telemetry stats --usage` reports local invocation
 counts. Quota is admission advice; a reset or bookkeeping failure never grants
 permission to stop a healthy provider.
 
 ## Routing
 
-`provenant route list` shows the catalogue and pools. Select a route or exact model
-on dispatch and retain the resolved route from the attempt record.
+`provenant route list` shows the catalogue and pools. Select a route or exact
+model on dispatch and retain the resolved route from the attempt record.
