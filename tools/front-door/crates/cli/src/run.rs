@@ -343,6 +343,21 @@ impl run::Providers for Registry<'_> {
             }
             reason.push_str(repair);
             decoded.reason = Some(reason);
+        } else if let Some(ProviderEvent::RateLimited { message }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::RateLimited { .. }))
+        {
+            decoded.outcome = run::Outcome::RateLimited;
+            let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_else(|| "provider rate limited (message redaction unavailable)".into());
+            let mut end = reason.len().min(8192);
+            while !reason.is_char_boundary(end) {
+                end -= 1;
+            }
+            reason.truncate(end);
+            decoded.reason = Some(reason);
         }
         Ok(decoded)
     }
@@ -2605,6 +2620,46 @@ mod tests {
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
+        }
+    }
+
+    #[test]
+    fn codex_rate_limit_reaches_the_decoded_outcome() {
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_supervisor::exec::Termination::Exit(1));
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6-luna".into()),
+            ..Default::default()
+        };
+        let registry = Registry::default();
+        for (message, expected) in [
+            (
+                "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
+                "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
+            ),
+            (
+                "429 Too Many Requests for ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+                "429 Too Many Requests for [REDACTED]".into(),
+            ),
+            (
+                format!("429 Too Many Requests {}", "☀".repeat(3000)),
+                format!("429 Too Many Requests {}", "☀".repeat(2723)),
+            ),
+        ] {
+            let stream = [
+                json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
+                json!({"type":"error","message":message}),
+                json!({"type":"turn.failed","error":{"message":message}}),
+            ]
+            .map(|frame| format!("{frame}\n"))
+            .concat();
+            let decoded = registry
+                .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
+                .unwrap();
+            assert_eq!(decoded.outcome, run::Outcome::RateLimited);
+            assert_eq!(decoded.reason.as_deref(), Some(expected.as_str()));
+            assert!(decoded.reason.unwrap().len() <= 8192);
         }
     }
 

@@ -211,6 +211,9 @@ and unsupported.
 - OpenCode decodes its structured `provider.quota` body. A free-usage limit
   names the shared `opencode-free` pool and blocks other free models on the
   same account key until reset or the one-hour backoff.
+- Codex decodes an `error` event reporting `429 Too Many Requests` (retries
+  exhausted) as a rate limit, never a quota refusal; a `Reconnecting` message
+  stays transient.
 - Claude `api_error_status = 401` is `AuthRequired`. Provider prose that
   mentions expiry or quota is ordinary text and asserts nothing.
 - Tick TTLs (timer and panel seconds): Claude 300 and 120, Codex 900 and 300,
