@@ -3,13 +3,14 @@ mod claude;
 mod opencode;
 
 use provenant_core::Roots;
+use provenant_providers::host::PROBE_DIR_OPERATION;
 use provenant_providers::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
     QuotaError, QuotaProbePlan,
 };
 use provenant_supervisor::exec::{
-    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
 use serde_json::{Value, json};
 use std::{
@@ -23,6 +24,15 @@ use std::{
 };
 
 const LIMIT: usize = 1_048_576;
+fn command_error(error: ExecError) -> ProbeFailure {
+    match error {
+        ExecError::Io {
+            operation: PROBE_DIR_OPERATION,
+            ..
+        } => ProbeFailure::ProbeDirectory,
+        _ => ProbeFailure::MissingCli,
+    }
+}
 struct Account {
     scope: AccountScope,
     identity_dir: PathBuf,
@@ -143,7 +153,7 @@ impl LiveQuota {
         }
         let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::MissingCli)?;
         let executor = provenant_providers::host::HostProbeExecutor::new(&system, &self.state)
-            .map_err(|_| ProbeFailure::Network)?;
+            .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let mut argv = vec![OsString::from(program)];
         argv.extend(args.iter().map(OsString::from));
         let mut env = vec![
@@ -159,6 +169,7 @@ impl LiveQuota {
         if let Some((key, path)) = selector {
             env.push((key.into(), path.as_os_str().to_owned()));
         }
+        // HostProbeExecutor replaces this `/` cwd with a fresh private directory.
         let mut options = ExecOptions::new(
             &argv,
             Path::new("/"),
@@ -169,9 +180,7 @@ impl LiveQuota {
         options.stdout = StreamPolicy::Capture { limit: LIMIT };
         options.stderr = StreamPolicy::Discard;
         options.stop_on_output_limit = true;
-        executor
-            .execute(options)
-            .map_err(|_| ProbeFailure::MissingCli)
+        executor.execute(options).map_err(command_error)
     }
     fn json_command(
         &self,
@@ -400,7 +409,7 @@ impl LiveQuota {
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
         let scratch = provenant_providers::host::HostProbeDir::create(&self.state)
-            .map_err(|_| ProbeFailure::Network)?;
+            .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let log = scratch.path().join("cli.log");
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(
@@ -459,4 +468,90 @@ pub(crate) fn registered_claude(
     }
     Accounts::new(accounts.clone())?;
     Ok(accounts)
+}
+
+#[cfg(test)]
+mod tests {
+    // The worktree driver includes this module without libtest.
+    #[allow(unused_imports)]
+    use super::*;
+    #[allow(unused_imports)]
+    use provenant_supervisor::exec::ExecError;
+
+    #[allow(dead_code)]
+    fn quota(home: &Path, state: PathBuf) -> LiveQuota {
+        LiveQuota {
+            home: home.to_owned(),
+            state,
+            accounts: Vec::new(),
+            refresh_expired: false,
+            claude_default: RefCell::new(None),
+        }
+    }
+
+    #[test]
+    fn command_names_probe_directory_setup_failures() {
+        let home = tempfile::tempdir().unwrap();
+        let quota = quota(home.path(), home.path().join("missing"));
+        let failure = quota
+            .command("unused-provider", &[], None, None, now() + 60, 1)
+            .unwrap_err();
+        assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+    }
+
+    #[test]
+    fn agy_names_probe_log_directory_failures() {
+        let home = tempfile::tempdir().unwrap();
+        let quota = quota(home.path(), home.path().join("missing"));
+        let account = Account {
+            scope: AccountScope {
+                adapter: "agy".into(),
+                account_key: "agy-test".into(),
+                label: "test".into(),
+            },
+            identity_dir: home.path().to_owned(),
+            options: Value::Null,
+        };
+        let failure = quota
+            .agy(&account, now() + 60, &mut QuotaDetails::default())
+            .unwrap_err();
+        assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+    }
+
+    #[test]
+    fn command_names_per_command_probe_directory_failures() {
+        let failure = command_error(ExecError::Io {
+            operation: PROBE_DIR_OPERATION,
+            source: std::io::Error::other("test directory failure"),
+        });
+        assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+        for failure in [
+            ExecError::Busy,
+            ExecError::Io {
+                operation: "spawn",
+                source: std::io::Error::other("test spawn failure"),
+            },
+        ] {
+            assert_eq!(command_error(failure), ProbeFailure::MissingCli);
+        }
+    }
+
+    #[test]
+    fn claude_does_not_hide_probe_directory_failures_as_auth() {
+        let home = tempfile::tempdir().unwrap();
+        let quota = quota(home.path(), home.path().join("missing"));
+        let account = Account {
+            scope: AccountScope {
+                adapter: "claude".into(),
+                account_key: "test".into(),
+                label: "test".into(),
+            },
+            identity_dir: home.path().join(".claude-work"),
+            options: Value::Null,
+        };
+        let failure = quota
+            .claude(&account, None, now() + 60, &mut QuotaDetails::default())
+            .unwrap_err();
+        assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+    }
 }

@@ -16,6 +16,8 @@ pub enum ProviderError {
     IdentityMismatch,
     #[error("provider continuation identity is unknown")]
     UnknownIdentity,
+    #[error("provider probe could not prepare its private directory: {0}")]
+    ProbeDirectory(String),
     #[error(
         "claude reports no login for this config directory; run `claude auth login` there once \
          interactively, or over SSH unlock the login keychain first (`security unlock-keychain`); \

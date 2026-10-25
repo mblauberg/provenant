@@ -61,50 +61,108 @@ fn may_refresh(
         .and_then(Value::as_str);
     Ok(!fixed.is_some_and(|fixed| Some(fixed) == default))
 }
+
+// Missing credentials or CLI output may leave an identity unknown, but a
+// failure to prepare its private directory must reach the quota report.
+fn optional_probe<T>(result: Result<T, ProbeFailure>) -> Result<Option<T>, ProbeFailure> {
+    match result {
+        Err(ProbeFailure::ProbeDirectory) => Err(ProbeFailure::ProbeDirectory),
+        other => Ok(other.ok()),
+    }
+}
+
+fn refresh(
+    executor: &dyn Executor,
+    login: &provenant_providers::claude::Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+) -> Result<(), ProbeFailure> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // The shared refresh tolerates failed credential reads. Remember directory
+    // failures even if it makes another call and discards the original error.
+    struct Watch<'a> {
+        executor: &'a dyn Executor,
+        directory_failed: AtomicBool,
+    }
+    impl Executor for Watch<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let result = self.executor.execute(options);
+            if matches!(
+                &result,
+                Err(ExecError::Io {
+                    operation: PROBE_DIR_OPERATION,
+                    ..
+                })
+            ) {
+                self.directory_failed.store(true, Ordering::Relaxed);
+            }
+            result
+        }
+    }
+    let watched = Watch {
+        executor,
+        directory_failed: AtomicBool::new(false),
+    };
+    let _ = provenant_providers::claude::refresh_if_expiring(
+        &watched,
+        login,
+        now_ms,
+        deadline_ms,
+        None,
+    );
+    if watched.directory_failed.load(Ordering::Relaxed) {
+        Err(ProbeFailure::ProbeDirectory)
+    } else {
+        Ok(())
+    }
+}
+
 impl LiveQuota {
     fn claude_selector<'a>(&self, dir: &'a Path) -> Option<(&'static str, &'a Path)> {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
     }
-    fn claude_identity(&self, dir: &Path, deadline: i64) -> Identity {
-        let state = self
-            .json_command(
-                "claude",
-                &["auth", "status", "--json"],
-                self.claude_selector(dir),
-                deadline,
-                4,
-            )
-            .ok();
+    fn claude_identity(&self, dir: &Path, deadline: i64) -> Result<Identity, ProbeFailure> {
+        let state = optional_probe(self.json_command(
+            "claude",
+            &["auth", "status", "--json"],
+            self.claude_selector(dir),
+            deadline,
+            4,
+        ))?;
         let fingerprint = state
             .as_ref()
             .and_then(|s| s.get("email").and_then(Value::as_str))
             .map(|s| fingerprint(s, 16));
-        let (token, expires) = self
-            .claude_token(dir, deadline)
+        let (token, expires) = optional_probe(self.claude_token(dir, deadline))?
             .map_or((None, None), |(t, e)| (Some(t), Some(e)));
         // The default session can rotate while a tick is in flight. Confirm
         // the identity after reading its credential before attributing it.
         if dir == self.home.join(".claude") {
-            let after = self
-                .json_command("claude", &["auth", "status", "--json"], None, deadline, 4)
-                .ok();
+            let after = optional_probe(self.json_command(
+                "claude",
+                &["auth", "status", "--json"],
+                None,
+                deadline,
+                4,
+            ))?;
             let confirmed = after
                 .as_ref()
                 .and_then(|s| s.get("email").and_then(Value::as_str))
                 .map(|s| super::fingerprint(s, 16));
             if confirmed != fingerprint {
-                return Identity {
+                return Ok(Identity {
                     fingerprint: None,
                     token: None,
                     expires: None,
-                };
+                });
             }
         }
-        Identity {
+        Ok(Identity {
             fingerprint,
             token,
             expires,
-        }
+        })
     }
     fn claude_credentials(&self, dir: &Path, deadline: i64) -> Result<Value, ProbeFailure> {
         let raw = if cfg!(target_os = "macos") {
@@ -198,10 +256,10 @@ impl LiveQuota {
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
         if self.claude_default.borrow().is_none() {
-            let default = self.claude_identity(&self.home.join(".claude"), deadline);
+            let default = self.claude_identity(&self.home.join(".claude"), deadline)?;
             *self.claude_default.borrow_mut() = Some(default);
         }
-        let mut fixed = self.claude_identity(&account.identity_dir, deadline);
+        let mut fixed = self.claude_identity(&account.identity_dir, deadline)?;
         let expected = expected_fingerprint(
             account.options.get("fingerprint").and_then(Value::as_str),
             previous
@@ -233,11 +291,12 @@ impl LiveQuota {
                 claude_executable(),
                 std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME")),
             ) && let Ok(system) = SystemExecutor::new(1)
+            {
                 // Each command gets a fresh private cwd under the stable host
                 // state root, so a killed run's leftovers are swept next time.
-                && let Ok(executor) =
+                let executor =
                     provenant_providers::host::HostProbeExecutor::new(&system, &self.state)
-            {
+                        .map_err(|_| ProbeFailure::ProbeDirectory)?;
                 let login = provenant_providers::claude::Login {
                     executable: &executable,
                     home: &self.home,
@@ -247,15 +306,9 @@ impl LiveQuota {
 
                 let now_ms = || (now().max(0) as u64).saturating_mul(1000);
                 let deadline_ms = (deadline.max(0) as u64).saturating_mul(1000);
-                let _ = provenant_providers::claude::refresh_if_expiring(
-                    &executor,
-                    &login,
-                    &now_ms,
-                    deadline_ms,
-                    None,
-                );
+                refresh(&executor, &login, &now_ms, deadline_ms)?;
             }
-            fixed = self.claude_identity(&account.identity_dir, deadline);
+            fixed = self.claude_identity(&account.identity_dir, deadline)?;
         }
         let borrowed = self.claude_default.borrow();
         let default = borrowed.as_ref().ok_or(ProbeFailure::Auth)?;
@@ -279,6 +332,33 @@ impl LiveQuota {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refresh_preserves_a_probe_directory_failure_even_if_the_next_call_differs() {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Fail(AtomicUsize);
+        impl Executor for Fail {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(ExecError::Io {
+                        operation: PROBE_DIR_OPERATION,
+                        source: std::io::Error::other("private directory refused"),
+                    })
+                } else {
+                    Err(ExecError::Busy)
+                }
+            }
+        }
+        let login = provenant_providers::claude::Login {
+            executable: Path::new("/bin/claude"),
+            home: Path::new("/home/test"),
+            user: OsStr::new("test"),
+            config_dir: Path::new("/home/test/.claude"),
+        };
+        let result = refresh(&Fail(AtomicUsize::new(0)), &login, &|| 1, 1000);
+        assert_eq!(result, Err(ProbeFailure::ProbeDirectory));
+    }
+
     #[test]
     fn fixed_refresh_skips_byte_identical_default_refresh_token() {
         use super::{ProbeFailure, may_refresh};

@@ -191,6 +191,7 @@ pub enum ProbeFailure {
     RateLimited,
     Auth,
     MissingCli,
+    ProbeDirectory,
     Disabled,
     Malformed,
 }

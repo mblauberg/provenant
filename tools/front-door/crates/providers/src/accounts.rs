@@ -1,8 +1,8 @@
 //! Durable non-secret registrations and host identity checks.
-use crate::{ProviderError, identity::RegisteredAccount};
+use crate::{ProviderError, host::PROBE_DIR_OPERATION, identity::RegisteredAccount};
 use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
 use provenant_supervisor::{
-    exec::{ExecOptions, Executor, StreamPolicy, Termination},
+    exec::{ExecError, ExecOptions, Executor, StreamPolicy, Termination},
     fs::{ReadOptions, read_following},
 };
 use serde::{Deserialize, Serialize};
@@ -139,6 +139,16 @@ fn defaults(_: Profile) -> &'static str {
 }
 pub const SECTION: DomainSection = DomainSection::new::<Settings>("accounts", defaults);
 
+fn exec_error(error: ExecError) -> ProviderError {
+    match error {
+        ExecError::Io {
+            operation: PROBE_DIR_OPERATION,
+            source,
+        } => ProviderError::ProbeDirectory(source.to_string()),
+        _ => ProviderError::UnknownIdentity,
+    }
+}
+
 /// Status output is projected immediately to its fingerprint; email is never retained.
 /// Claude Code selects its keychain account from `USER`, so the probe carries it.
 pub fn detect(
@@ -186,9 +196,7 @@ pub fn detect_with_org(
         options.stdout = StreamPolicy::Capture { limit: 65536 };
         options.stderr = StreamPolicy::Discard;
         options.stop_on_output_limit = true;
-        let out = executor
-            .execute(options)
-            .map_err(|_| ProviderError::UnknownIdentity)?;
+        let out = executor.execute(options).map_err(exec_error)?;
         if out.termination != Termination::Exit(0) || out.stdout.truncated || out.timed_out {
             return Err(ProviderError::UnknownIdentity);
         }
@@ -220,9 +228,7 @@ pub fn detect_with_org(
     options.stdout = StreamPolicy::Capture { limit: 65536 };
     options.stderr = StreamPolicy::Discard;
     options.stop_on_output_limit = true;
-    let out = executor
-        .execute(options)
-        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let out = executor.execute(options).map_err(exec_error)?;
     if out.termination != Termination::Exit(0)
         || out.stdout.truncated
         || out.stdout.read_failed
