@@ -951,7 +951,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 },
                 fallback,
                 task.delivery_id,
-                task.account.or_else(|| command.account.clone()),
+                task.account,
                 task.deliver.or_else(|| flag_delivery.clone()),
             ));
         }

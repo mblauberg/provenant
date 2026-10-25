@@ -266,6 +266,7 @@ fn build_model(passive: bool) -> clap::Command {
                         "model",
                         "route",
                         "effort",
+                        "account",
                         "fallback",
                         "mode",
                         "worktree",

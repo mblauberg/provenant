@@ -201,7 +201,7 @@ makes a count approximate and never fails the command.
 | Cross-host summaries, top-level `stats` and `retro` aliases, read-time refresh | Stats is local and read-only. |
 | Weekly quota history and ledger fallback | Routing owns any window history; costs never reconstruct it. |
 | Model heuristics, parent rollups, compaction telemetry | Exact recorded identity suffices; parent references never add a second usage total. |
-| An `--account` flag | No dispatch set one; account label comes from the resolved route. |
+| An account selector in telemetry | The account label comes from the resolved route and `dispatch --account` pins it at dispatch, so reports need no selector. |
 | Telemetry MCP tool | Reports are an operator command, not an agent surface. |
 
 ## Verification

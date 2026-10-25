@@ -91,6 +91,98 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     )?)?;
     assert_eq!(saved["tasks"][0]["account"], "fixture-account");
     assert_eq!(pinned["data"]["lanes"][0]["state"], "rejected", "{pinned}");
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    let lanes: serde_json::Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let reason = |run: &str| {
+        lanes["data"]["lanes"]
+            .as_array()
+            .and_then(|all| all.iter().find(|lane| lane["run_id"] == run))
+            .and_then(|lane| lane["reason"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(
+        reason(run).contains("account fixture-account is not registered"),
+        "{lanes}"
+    );
+    // The same pin reaches a writer lane beside the access flags.
+    let project = rig.project.to_str().ok_or("project")?;
+    let commit = rig.execute(
+        std::path::Path::new("/usr/bin/git"),
+        &[
+            "-C",
+            project,
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&commit),
+        0,
+        "{}",
+        String::from_utf8_lossy(&commit.stderr.bytes)
+    );
+    let created = rig.command(&["worktree", "create", "fixture", "--json"])?;
+    assert_eq!(
+        code(&created),
+        0,
+        "{}",
+        String::from_utf8_lossy(&created.stdout.bytes)
+    );
+    let worktree = rig.project.join(".worktrees/fixture");
+    let writer = rig.execute(
+        binary,
+        &[
+            "--state-dir",
+            &state,
+            "dispatch",
+            "--prompt-stdin",
+            "--model",
+            "codex/id",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree.to_str().ok_or("worktree")?,
+            "--account",
+            "fixture-account",
+            "--operation-id",
+            "account-writer",
+            "--json",
+        ],
+        Some(b"hello"),
+    )?;
+    assert_eq!(
+        code(&writer),
+        0,
+        "{}",
+        String::from_utf8_lossy(&writer.stdout.bytes)
+    );
+    let writer: serde_json::Value = serde_json::from_slice(&writer.stdout.bytes)?;
+    let run = writer["data"]["run_id"].as_str().ok_or("run")?;
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        rig.state.join("runs").join(run).join("request.json"),
+    )?)?;
+    assert_eq!(saved["tasks"][0]["account"], "fixture-account");
+    assert!(!saved["tasks"][0]["writer"].is_null(), "{saved}");
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    let lanes: serde_json::Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let writer_reason = lanes["data"]["lanes"]
+        .as_array()
+        .and_then(|all| all.iter().find(|lane| lane["run_id"] == run))
+        .and_then(|lane| lane["reason"].as_str())
+        .unwrap_or_default();
+    assert!(
+        writer_reason.contains("account fixture-account is not registered"),
+        "{lanes}"
+    );
     // Replaying the operation returns the same run.
     let again: serde_json::Value =
         serde_json::from_slice(&rig.execute(binary, &args, Some(b"hello"))?.stdout.bytes)?;
@@ -169,7 +261,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         String::from_utf8_lossy(&stats.stdout.bytes)
     );
     let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
-    assert_eq!(value["data"]["totals"]["attempts"], 3);
+    assert_eq!(value["data"]["totals"]["attempts"], 4);
     rig.assert_legacy_unchanged()
 }
 

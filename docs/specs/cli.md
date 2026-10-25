@@ -133,7 +133,7 @@ Route flags, shared by `dispatch`, `route resolve` and `bench`: one of
 classifier selector exists.
 
 `dispatch` alone takes `--account NAME`, pinning a registered account key or
-label as a manifest task's `account` does; manifest tasks default to it.
+label as a manifest task's `account` does. It conflicts with `--manifest`.
 
 Access flags: `--mode read-only|worktree-write` (default read-only),
 `--worktree PATH`, repeatable `--read-root PATH` and `--write-root PATH`,

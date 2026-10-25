@@ -130,7 +130,7 @@ The CLI grammar uses `provenant dispatch` for one prompt or a batch
 manifest; `--host` names explicit placement on a configured peer, by label or
 host ID. The peer resolves the route, confines the lane and runs it in its own
 checkout of the same project, at the same path under its home directory, with
-its own provider sign-ins. The calling host keeps only a placement record under
+its own provider sign-ins; a `--account` pin is checked against the peer's registrations. The calling host keeps only a placement record under
 `fabric/remote-runs/` in its state directory. `lanes --id`, `output` and `cancel` find that record and forward to
 the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
 keep running after the SSH call returns. The Fabric MCP `fabric_submit` tool
