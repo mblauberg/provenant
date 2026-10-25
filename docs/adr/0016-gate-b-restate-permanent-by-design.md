@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted 2026-07-21 (RESTATE decision, issue #354).
+Superseded by [ADR 0029](0029-rust-rewrite-in-one-pass.md); accepted
+2026-07-21 (RESTATE decision, issue #354).
 
 ## Context
 

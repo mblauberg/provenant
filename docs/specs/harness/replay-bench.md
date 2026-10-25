@@ -307,7 +307,7 @@ benched.
 
 ## Related
 
-- [Operating model](operating-model.md) R4 (ledger, accepted task) and R9
+- [Operating model](https://github.com/mblauberg/provenant/blob/cfe1084619a93cfbb898efd4c347fbf177f354dc/docs/specs/harness/operating-model.md) R4 (ledger, accepted task) and R9
   (box).
 - [ADR 0014](../../adr/0014-comparative-skill-evals-on-suspicion.md):
   conditional held-out evals for skills.

@@ -83,6 +83,37 @@ Documentation claims sit in three tiers, and the third is deliberate:
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.
 
+## Ambient doctrine rules
+
+These rules keep the always-loaded files small. They are review-owned; the
+Rust harness asset checks enforce the machine-checkable subset.
+
+1. `AGENTS.md` and `HARNESS.md` are the only ambient doctrine owners.
+   `AGENTS.md` stays minimal; `HARNESS.md` is the compact constitution for
+   topology, lifecycle, user gates, risk, Git, routing and memory. A
+   provider-bootstrap import shim, such as `CLAUDE.md`, may point only to
+   those owners and adds no policy.
+2. Operational depth has one skill owner: compaction and checkpoints in
+   `session`, routing and degradation in `orchestrate`, and receipt detail in
+   `deliver`. Ambient files name skills, then load depth only when triggered.
+3. Nothing outside an owning skill names a file under its `references/`
+   directory. Cross-skill references use the skill name only.
+4. `AGENTS.md` and `HARNESS.md` contain no repository-relative `docs/`,
+   `config/` or `scripts/` paths, with one deliberate exception: the
+   `AGENTS.md` link to `docs/runbooks/shell-pitfalls.md`. Runnable commands are
+   PATH-resolved. Fabric identity derives from the working directory.
+5. `HARNESS.md` is the sole ambient skill resolver. It names the installed
+   Claude and Codex skill roots; `AGENTS.md` names neither an installed root
+   nor an instance skill directory. A named skill loads its `SKILL.md` and is
+   binding, while provider-native discovery may implement resolution.
+6. Ambient files carry no dates. Git records revision provenance.
+7. `orchestrate` remains one skill. Skill changes use targeted,
+   evidence-backed pruning; no new catalogue entry or duplicate policy is
+   introduced without its own accepted scope and ownership boundary.
+8. The repository process and GitHub mechanics live on repository-scoped
+   surfaces. Durable decisions and specifications precede dependent
+   implementation; `session` owns temporary handoff lifecycle.
+
 ## Change a skill
 
 1. Confirm the capability belongs globally and is not better kept in a project.
@@ -170,19 +201,21 @@ live backup folders as the normal safety boundary.
 The `provenant-config` crate owns source stamping, typed `release.json`,
 immutable release installation and the managed-file receipt. Its library
 supports dry-run previews, digest checks and removal of unchanged owned entries.
-The Rust CLI ships `install`, `check install` and `uninstall`; the old Python
-manager commands are retired.
+The Rust CLI ships `install`, `check install` and `uninstall`.
 
 ## Change the delivery kernel
 
-Keep delivery invariants in `crates/workflow`. A new domain should compose an existing base profile and a domain
-skill first. Add a base profile only when its artifacts, deterministic gates,
-judgement gates and release meaning are materially distinct.
+Keep delivery invariants in `crates/workflow`. A new domain should compose the existing workflow
+and a domain skill first. Add a workflow check or receipt kind only when its
+artefacts, deterministic gates, judgement gates and release meaning are
+materially distinct.
 
 Trigger fixtures remain mandatory. Contract tests follow the
 machine-enforced-invariant test in **Change a skill** step 7. The ADR 0014 eval
 triggers under **Change a skill** apply unchanged. When they fire here, use the
-held-out portfolio and lifecycle dataset with repeated trials, recording raw
+held-out portfolio ([`docs/evals/skill-portfolio-2026`](docs/evals/skill-portfolio-2026/README.md))
+and lifecycle ([`docs/evals/lifecycle-routing-2026-07`](docs/evals/lifecycle-routing-2026-07/README.md))
+datasets with repeated trials, recording raw
 numerator and denominator, model and harness versions.
 
 ## Public and third-party hygiene
@@ -220,6 +253,13 @@ provenant check harness
 provenant check release
 git diff --check
 ```
+
+Use `provenant check writing PATHS --rules general` for prose, with
+`--rules academic` or `--rules legal` where they apply. Git pre-push
+protection uses `provenant hook git pre-push REMOTE LOCATION`, and
+`install --hooks on` owns hook registration. Follow the
+[branch and commit doctrine](skills/setup-repo/references/doctrine.md) when
+preparing changes.
 
 Each check returns ordered findings, exits 1 for findings, 2 for malformed
 command input and 3 for unreadable evidence. Use `--limit N` and the returned
