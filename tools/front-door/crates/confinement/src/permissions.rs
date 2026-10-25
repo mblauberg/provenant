@@ -363,14 +363,18 @@ pub fn worktree_cargo_cache(
     Ok(grant)
 }
 
-/// Why a lane cache was (or would be) removed.
+/// Why a lane cache was removed, would be removed or was kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheGcReason {
-    /// The recorded owner worktree incarnation no longer exists.
+    /// The recorded owner path no longer exists.
     Orphaned,
     /// Nothing under the cache was written since the idle threshold.
     Idle,
+    /// A detached cache left by an interrupted sweep.
+    Tombstone,
+    /// An existing owner outside the selected project; always kept.
+    Foreign,
 }
 
 /// What a lane cache sweep removes besides orphans.
@@ -381,6 +385,8 @@ pub struct CacheGcPolicy {
     pub idle_before_ns: Option<i128>,
     /// Report without deleting.
     pub dry_run: bool,
+    /// Canonical worktrees listed by the selected project.
+    pub project_owners: BTreeSet<PathBuf>,
     /// Canonical owner worktrees with a live or unobservable writer; never removed.
     pub protected_owners: std::collections::BTreeSet<PathBuf>,
 }
@@ -396,22 +402,50 @@ pub struct CacheGcEntry {
 pub struct CacheGcReport {
     pub dry_run: bool,
     pub removed: Vec<CacheGcEntry>,
+    /// Foreign caches are reported without traversing their contents.
+    pub kept: Vec<CacheGcEntry>,
     pub bytes_freed: u64,
 }
 
-/// Remove only marked lane caches whose recorded worktree incarnation is absent.
-/// A sweep can race a lane preparing its cache only if the lane forged its own marker.
-pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, PermissionError> {
+/// A failed sweep still reports completed removals and bytes already freed.
+#[derive(Debug, Error)]
+#[error("{source}")]
+pub struct CacheGcError {
+    pub report: CacheGcReport,
+    #[source]
+    pub source: Box<PermissionError>,
+}
+
+/// Remove marked orphan caches and retry detached remnants from earlier sweeps.
+pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, CacheGcError> {
     gc_worktree_cargo_caches(home, &CacheGcPolicy::default()).map(|report| report.removed.len())
 }
 
 /// Sweep the lane cache root: orphaned caches always, idle ones when the policy
-/// sets a threshold. Entries must be hex-named directories directly under the
-/// root and are opened without following symlinks.
+/// sets a threshold and lists the owner in this project. Retry GC tombstones
+/// too. Directories are opened without following symlinks or crossing devices.
 pub fn gc_worktree_cargo_caches(
     home: &Path,
     policy: &CacheGcPolicy,
-) -> Result<CacheGcReport, PermissionError> {
+) -> Result<CacheGcReport, CacheGcError> {
+    let mut report = CacheGcReport {
+        dry_run: policy.dry_run,
+        ..CacheGcReport::default()
+    };
+    match sweep_worktree_cargo_caches(home, policy, &mut report) {
+        Ok(()) => Ok(report),
+        Err(source) => Err(CacheGcError {
+            report,
+            source: Box::new(source),
+        }),
+    }
+}
+
+fn sweep_worktree_cargo_caches(
+    home: &Path,
+    policy: &CacheGcPolicy,
+    report: &mut CacheGcReport,
+) -> Result<(), PermissionError> {
     use provenant_supervisor::fs::LocalFs;
     use std::io;
 
@@ -420,28 +454,32 @@ pub fn gc_worktree_cargo_caches(
     match std::fs::symlink_metadata(&cache_root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
-            return Ok(CacheGcReport {
-                dry_run: policy.dry_run,
-                ..CacheGcReport::default()
-            });
+            return Ok(());
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(CacheGcReport {
-                dry_run: policy.dry_run,
-                ..CacheGcReport::default()
-            });
+            return Ok(());
         }
         Err(error) => return Err(PermissionError::CacheSweepIo(error)),
     }
     let root = LocalFs
         .open_anchor(&cache_root)
         .map_err(PermissionError::Filesystem)?;
-    let mut report = CacheGcReport {
-        dry_run: policy.dry_run,
-        ..CacheGcReport::default()
-    };
+    sweep_cache_root(root.as_ref(), &cache_root, policy, report)
+}
+
+fn sweep_cache_root(
+    root: &dyn provenant_supervisor::fs::SafeDir,
+    cache_root: &Path,
+    policy: &CacheGcPolicy,
+    report: &mut CacheGcReport,
+) -> Result<(), PermissionError> {
     let mut failures = Vec::new();
-    for entry in root.entries().map_err(PermissionError::Filesystem)? {
+    // Snapshot names so newly detached tombstones are retried on a later run.
+    let entries: Vec<_> = root
+        .entries()
+        .map_err(PermissionError::Filesystem)?
+        .collect();
+    for entry in entries {
         let name = match entry {
             Ok(name) => name,
             Err(error) => {
@@ -449,13 +487,8 @@ pub fn gc_worktree_cargo_caches(
                 continue;
             }
         };
-        match prune_worktree_cache(root.as_ref(), &cache_root, &name, policy) {
-            Ok(Some(entry)) => {
-                report.bytes_freed = report.bytes_freed.saturating_add(entry.bytes);
-                report.removed.push(entry);
-            }
-            Ok(None) => {}
-            Err(error) => failures.push(format!("{:?}: {error}", name)),
+        if let Err(error) = prune_worktree_cache(root, cache_root, &name, policy, report) {
+            failures.push(format!("{:?}: {error}", name));
         }
     }
     if !failures.is_empty() {
@@ -463,7 +496,7 @@ pub fn gc_worktree_cargo_caches(
             failures.join("; "),
         )));
     }
-    Ok(report)
+    Ok(())
 }
 
 fn prune_worktree_cache(
@@ -471,30 +504,215 @@ fn prune_worktree_cache(
     cache_root: &Path,
     name: &OsStr,
     policy: &CacheGcPolicy,
-) -> Result<Option<CacheGcEntry>, PermissionError> {
-    use std::io;
-
+    report: &mut CacheGcReport,
+) -> Result<(), PermissionError> {
     let Some(digest) = name.to_str() else {
-        return Ok(None);
+        return Ok(());
     };
-    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Ok(None);
+    let tombstone = cache_tombstone(digest);
+    if tombstone.is_none() && !is_cache_digest(digest) {
+        return Ok(());
     }
     let metadata = match root.metadata_at(name, false) {
         Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
-        Ok(_) => return Ok(None),
-        Err(error) if error.is_not_found() => return Ok(None),
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_not_found() => return Ok(()),
         Err(error) => return Err(PermissionError::Filesystem(error)),
     };
     if metadata.uid != provenant_supervisor::fs::effective_uid() || metadata.mode & 0o7777 != 0o700
     {
-        return Ok(None);
+        return Ok(());
     }
     let cache = match root.open_verified_directory(name) {
         Ok(cache) => cache,
-        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) if error.is_not_found() => return Ok(()),
         Err(error) => return Err(PermissionError::Filesystem(error)),
     };
+    let opened = cache.metadata().map_err(PermissionError::Filesystem)?;
+    if !metadata.same_identity(&opened) {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    verify_cache_metadata(&opened)?;
+    let owner = read_cache_owner(cache.as_ref())?;
+    let reason = if let Some((device, inode, fingerprint)) = tombstone {
+        // Bind retry authority to what GC intended to rename, even if a
+        // process stopped before verification or quarantine could complete.
+        if opened.device != device
+            || opened.inode != inode
+            || owner
+                .as_ref()
+                .is_some_and(|owner| cache_owner_fingerprint(owner) != fingerprint)
+        {
+            return Err(PermissionError::AnchorMismatch);
+        }
+        // A crash after marker unlink but before rmdir can leave a remnant.
+        // Tombstone names reserve detached directories for collection, even
+        // if another held writer added a file after marker deletion.
+        if owner.is_none() {
+            match cache.metadata_at(OsStr::new(CARGO_CACHE_OWNER), false) {
+                Err(error) if error.is_not_found() => {}
+                Ok(_) => return Ok(()),
+                Err(error) => return Err(PermissionError::Filesystem(error)),
+            }
+        }
+        CacheGcReason::Tombstone
+    } else {
+        let Some(owner) = owner.as_ref() else {
+            return Ok(());
+        };
+        let Some(reason) = cache_gc_reason(cache.as_ref(), owner, policy)? else {
+            return Ok(());
+        };
+        if reason == CacheGcReason::Foreign {
+            report.kept.push(CacheGcEntry {
+                path: cache_root.join(name),
+                bytes: 0,
+                reason,
+            });
+            return Ok(());
+        }
+        reason
+    };
+    let (bytes, _) = measure_cache(cache.as_ref(), 0)?;
+    if policy.dry_run {
+        report.bytes_freed = report.bytes_freed.saturating_add(bytes);
+    } else {
+        let detached;
+        let removal_name = if tombstone.is_some() {
+            name
+        } else {
+            let original_owner = owner.as_ref().ok_or(PermissionError::AnchorMismatch)?;
+            detached = OsString::from(format!(
+                ".gc-{:016x}{:016x}{}-{}",
+                opened.device,
+                opened.inode,
+                cache_owner_fingerprint(original_owner),
+                std::process::id()
+            ));
+            // Measurement may take time. Recheck the marker, owner and last
+            // write immediately before detaching the cache from the lane path.
+            if read_cache_owner(cache.as_ref())? != owner {
+                return Ok(());
+            }
+            let current_reason = cache_gc_reason(cache.as_ref(), original_owner, policy)?;
+            if current_reason == Some(CacheGcReason::Foreign) {
+                report.kept.push(CacheGcEntry {
+                    path: cache_root.join(name),
+                    bytes: 0,
+                    reason: CacheGcReason::Foreign,
+                });
+            }
+            if current_reason != Some(reason) {
+                return Ok(());
+            }
+            root.rename_noreplace(name, &detached)
+                .map_err(PermissionError::Filesystem)?;
+            detached.as_os_str()
+        };
+        let detached_cache = match verify_detached_cache(root, removal_name, &opened, &owner) {
+            Ok(cache) => cache,
+            Err(error) => {
+                // A refused replacement is not an authorised tombstone.
+                // Quarantine it so another sweep cannot turn refusal into
+                // deletion. Never replace a freshly created lane path.
+                let rejected =
+                    OsString::from(format!(".gc-refused-{}", removal_name.to_string_lossy()));
+                root.rename_noreplace(removal_name, &rejected)
+                    .map_err(PermissionError::Filesystem)?;
+                return Err(error);
+            }
+        };
+        remove_cache_contents(detached_cache.as_ref(), &mut report.bytes_freed)?;
+        // The top-level marker survives every earlier failure.
+        let marker_name = OsStr::new(CARGO_CACHE_OWNER);
+        match detached_cache.metadata_at(marker_name, false) {
+            Ok(marker) => {
+                detached_cache
+                    .unlink(marker_name)
+                    .map_err(PermissionError::Filesystem)?;
+                report.bytes_freed = report
+                    .bytes_freed
+                    .saturating_add(marker.allocated.max(marker.size));
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        }
+        root.rmdir(removal_name)
+            .map_err(PermissionError::Filesystem)?;
+    }
+    report.removed.push(CacheGcEntry {
+        path: cache_root.join(name),
+        bytes,
+        reason,
+    });
+    Ok(())
+}
+
+fn verify_detached_cache(
+    root: &dyn provenant_supervisor::fs::SafeDir,
+    name: &OsStr,
+    expected: &provenant_supervisor::fs::Metadata,
+    owner: &Option<CacheOwner>,
+) -> Result<Box<dyn provenant_supervisor::fs::SafeDir>, PermissionError> {
+    // The held original descriptor alone cannot identify what was renamed.
+    let after = root
+        .metadata_at(name, false)
+        .map_err(PermissionError::Filesystem)?;
+    verify_cache_metadata(&after)?;
+    if !expected.same_identity(&after) {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    let cache = root
+        .open_verified_directory(name)
+        .map_err(PermissionError::Filesystem)?;
+    let verified = cache.metadata().map_err(PermissionError::Filesystem)?;
+    verify_cache_metadata(&verified)?;
+    if !expected.same_identity(&verified) || &read_cache_owner(cache.as_ref())? != owner {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    Ok(cache)
+}
+
+fn is_cache_digest(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn cache_tombstone(name: &str) -> Option<(u64, u64, &str)> {
+    let (hex, pid) = name
+        .strip_prefix(".gc-")
+        .and_then(|rest| rest.split_once('-'))?;
+    if !is_cache_digest(hex) || pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((
+        u64::from_str_radix(&hex[..16], 16).ok()?,
+        u64::from_str_radix(&hex[16..32], 16).ok()?,
+        &hex[32..],
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CacheOwner {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
+    let mut digest = Sha256::new();
+    digest.update(CARGO_CACHE_OWNER_PREFIX);
+    digest.update(owner.device.to_le_bytes());
+    digest.update(owner.inode.to_le_bytes());
+    digest.update(owner.path.as_os_str().as_encoded_bytes());
+    digest.finalize()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn read_cache_owner(
+    cache: &dyn provenant_supervisor::fs::SafeDir,
+) -> Result<Option<CacheOwner>, PermissionError> {
     let marker_name = OsStr::new(CARGO_CACHE_OWNER);
     let marker_meta = match cache.metadata_at(marker_name, false) {
         Ok(metadata)
@@ -556,35 +774,39 @@ fn prune_worktree_cache(
     {
         return Ok(None);
     }
-    let reason = match std::fs::symlink_metadata(&owner) {
-        Ok(metadata) if metadata.dev() == recorded_device && metadata.ino() == recorded_inode => {
+    Ok(Some(CacheOwner {
+        path: owner,
+        device: recorded_device,
+        inode: recorded_inode,
+    }))
+}
+
+fn cache_gc_reason(
+    cache: &dyn provenant_supervisor::fs::SafeDir,
+    owner: &CacheOwner,
+    policy: &CacheGcPolicy,
+) -> Result<Option<CacheGcReason>, PermissionError> {
+    use std::io;
+
+    let reason = match std::fs::symlink_metadata(&owner.path) {
+        Ok(_) if !policy.project_owners.contains(&owner.path) => CacheGcReason::Foreign,
+        Ok(_) if policy.protected_owners.contains(&owner.path) => return Ok(None),
+        Ok(metadata) if metadata.dev() == owner.device && metadata.ino() == owner.inode => {
             let Some(threshold) = policy.idle_before_ns else {
                 return Ok(None);
             };
-            if policy.protected_owners.contains(&owner) {
-                return Ok(None);
-            }
-            let (_, newest) = measure_cache(cache.as_ref(), 0)?;
+            let (_, newest) = measure_cache(cache, 0)?;
             if newest >= threshold {
                 return Ok(None);
             }
             CacheGcReason::Idle
         }
-        Ok(_) => CacheGcReason::Orphaned,
+        // A replacement owner may be launching with a fresh incarnation.
+        Ok(_) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound => CacheGcReason::Orphaned,
         Err(error) => return Err(PermissionError::CacheSweepIo(error)),
     };
-    let (bytes, _) = measure_cache(cache.as_ref(), 0)?;
-    if !policy.dry_run {
-        remove_cache_contents(cache.as_ref())?;
-        drop(cache);
-        root.rmdir(name).map_err(PermissionError::Filesystem)?;
-    }
-    Ok(Some(CacheGcEntry {
-        path: cache_root.join(name),
-        bytes,
-        reason,
-    }))
+    Ok(Some(reason))
 }
 
 /// Disk bytes and the newest modification time (ns since the epoch) under a
@@ -597,7 +819,10 @@ fn measure_cache(
         return Err(PermissionError::CacheSweepDepth);
     }
     let mut bytes = 0_u64;
-    let mut newest = 0_i128;
+    let mut newest = directory
+        .metadata()
+        .map_err(PermissionError::Filesystem)?
+        .modified_ns;
     for entry in directory.entries().map_err(PermissionError::Filesystem)? {
         let name = entry.map_err(PermissionError::Filesystem)?;
         let metadata = directory
@@ -619,19 +844,24 @@ fn measure_cache(
 
 fn remove_cache_contents(
     directory: &dyn provenant_supervisor::fs::SafeDir,
+    bytes_freed: &mut u64,
 ) -> Result<(), PermissionError> {
-    remove_cache_contents_at(directory, 0)
+    remove_cache_contents_at(directory, 0, bytes_freed)
 }
 
 fn remove_cache_contents_at(
     directory: &dyn provenant_supervisor::fs::SafeDir,
     depth: usize,
+    bytes_freed: &mut u64,
 ) -> Result<(), PermissionError> {
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
     }
     for entry in directory.entries().map_err(PermissionError::Filesystem)? {
         let name = entry.map_err(PermissionError::Filesystem)?;
+        if depth == 0 && name == CARGO_CACHE_OWNER {
+            continue;
+        }
         let metadata = directory
             .metadata_at(&name, false)
             .map_err(PermissionError::Filesystem)?;
@@ -639,7 +869,7 @@ fn remove_cache_contents_at(
             let child = directory
                 .open_verified_directory(&name)
                 .map_err(PermissionError::Filesystem)?;
-            remove_cache_contents_at(child.as_ref(), depth + 1)?;
+            remove_cache_contents_at(child.as_ref(), depth + 1, bytes_freed)?;
             drop(child);
             directory
                 .rmdir(&name)
@@ -649,6 +879,7 @@ fn remove_cache_contents_at(
                 .unlink(&name)
                 .map_err(PermissionError::Filesystem)?;
         }
+        *bytes_freed = bytes_freed.saturating_add(metadata.allocated.max(metadata.size));
     }
     Ok(())
 }
@@ -4004,7 +4235,7 @@ mod tests {
     }
 
     #[test]
-    fn lane_cache_sweep_removes_only_marked_caches_for_missing_worktrees()
+    fn lane_cache_gc_sweep_removes_only_marked_caches_for_missing_worktrees()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -4026,7 +4257,6 @@ mod tests {
         std::fs::create_dir(&old_worktree)?;
         let old_identity = std::fs::metadata(&old_worktree)?;
         std::fs::rename(&old_worktree, home.join("previous-worktree"))?;
-        std::fs::create_dir(&old_worktree)?;
         for (cache, owner, identity) in [
             (&orphan, old_worktree, old_identity),
             (
@@ -4062,7 +4292,8 @@ mod tests {
     }
 
     #[test]
-    fn lane_cache_sweep_skips_deep_cache_and_continues() -> Result<(), Box<dyn std::error::Error>> {
+    fn lane_cache_gc_sweep_skips_deep_cache_and_continues() -> Result<(), Box<dyn std::error::Error>>
+    {
         use std::os::unix::fs::PermissionsExt;
 
         let temporary = tempfile::tempdir()?;
@@ -4094,6 +4325,542 @@ mod tests {
         assert!(error.to_string().contains(&"a".repeat(64)));
         assert!(deep.is_dir());
         assert!(!ordinary.exists());
+        assert_eq!(error.report.removed.len(), 1);
+        assert!(error.report.bytes_freed > 0);
+        Ok(())
+    }
+
+    // Exercise races and I/O failures at the filesystem boundary, without
+    // timing-dependent threads or production-only test hooks.
+    mod gc_faults {
+        use super::*;
+        use provenant_core::{Clock, WaitBudget};
+        use provenant_supervisor::fs::{
+            FsError, LocalFs, LockGuard, LockMode, Metadata, Publication, SafeDir, SafeFile,
+        };
+        use std::{io, os::unix::fs::PermissionsExt, sync::Arc};
+
+        type Event = Arc<dyn Fn(&str, &Path) -> io::Result<()> + Send + Sync>;
+
+        struct EventDir {
+            inner: Box<dyn SafeDir>,
+            path: PathBuf,
+            event: Event,
+        }
+
+        impl EventDir {
+            fn notify(&self, event: &str, name: &OsStr) -> Result<(), FsError> {
+                let path = self.path.join(name);
+                (self.event)(event, &path).map_err(|source| FsError::Io {
+                    operation: "GC test event",
+                    path,
+                    source,
+                })
+            }
+        }
+
+        macro_rules! forward {
+            ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+                $(fn $name(&self, $($arg: $ty),*) -> $ret {
+                    self.inner.$name($($arg),*)
+                })*
+            };
+        }
+
+        impl SafeDir for EventDir {
+            forward! {
+                metadata() -> Result<Metadata, FsError>;
+                metadata_at(name: &OsStr, follow: bool) -> Result<Metadata, FsError>;
+                open_directory(name: &OsStr, follow: bool) -> Result<Box<dyn SafeDir>, FsError>;
+                create_new(name: &OsStr) -> Result<Box<dyn SafeFile>, FsError>;
+                mkdir(name: &OsStr, mode: u32) -> Result<(), FsError>;
+                make_writable() -> Result<(), FsError>;
+                lock(name: &OsStr, mode: LockMode, budget: WaitBudget, cancel: &CancelToken, clock: &dyn Clock) -> Result<LockGuard, FsError>;
+                replace(source: &OsStr, destination: &OsStr) -> Result<(), FsError>;
+                symlink(target: &Path, name: &OsStr) -> Result<(), FsError>;
+                read_link(name: &OsStr) -> Result<PathBuf, FsError>;
+                sync() -> Result<(), FsError>;
+                atomic_write(name: &OsStr, prefix: &str, bytes: &[u8], permissions: u32, mode: PublishMode) -> Result<Publication, FsError>;
+                replace_link(name: &OsStr, target: &Path) -> Result<Publication, FsError>;
+            }
+            fn open_verified_directory(&self, name: &OsStr) -> Result<Box<dyn SafeDir>, FsError> {
+                Ok(Box::new(Self {
+                    inner: self.inner.open_verified_directory(name)?,
+                    path: self.path.join(name),
+                    event: self.event.clone(),
+                }))
+            }
+            fn open_read(&self, name: &OsStr) -> Result<Box<dyn SafeFile>, FsError> {
+                self.notify("read", name)?;
+                self.inner.open_read(name)
+            }
+            fn entries(
+                &self,
+            ) -> Result<Box<dyn Iterator<Item = Result<OsString, FsError>>>, FsError> {
+                let mut entries: Vec<_> = self.inner.entries()?.collect();
+                entries.sort_by(|a, b| a.as_ref().ok().cmp(&b.as_ref().ok()));
+                Ok(Box::new(entries.into_iter()))
+            }
+            fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<(), FsError> {
+                self.notify("before rename", source)?;
+                self.inner.rename_noreplace(source, destination)?;
+                self.notify("after rename", source)
+            }
+            fn unlink(&self, name: &OsStr) -> Result<(), FsError> {
+                self.notify("unlink", name)?;
+                self.inner.unlink(name)
+            }
+            fn rmdir(&self, name: &OsStr) -> Result<(), FsError> {
+                self.notify("rmdir", name)?;
+                self.inner.rmdir(name)
+            }
+        }
+
+        fn sweep(
+            home: &Path,
+            policy: &CacheGcPolicy,
+            event: Event,
+        ) -> Result<CacheGcReport, CacheGcError> {
+            let path = home.join("Library/Caches/provenant-lane-cargo");
+            let mut report = CacheGcReport {
+                dry_run: policy.dry_run,
+                ..CacheGcReport::default()
+            };
+            let result = LocalFs
+                .open_anchor(&path)
+                .map_err(PermissionError::Filesystem)
+                .and_then(|inner| {
+                    sweep_cache_root(
+                        &EventDir {
+                            inner,
+                            path: path.clone(),
+                            event,
+                        },
+                        &path,
+                        policy,
+                        &mut report,
+                    )
+                });
+            result
+                .map(|()| report.clone())
+                .map_err(|source| CacheGcError {
+                    report,
+                    source: Box::new(source),
+                })
+        }
+
+        fn cache(home: &Path, name: &str, owner: &Path) -> io::Result<PathBuf> {
+            let path = home.join("Library/Caches/provenant-lane-cargo").join(name);
+            std::fs::create_dir_all(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            let identity = std::fs::metadata(owner).ok();
+            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+            marker.extend_from_slice(&identity.as_ref().map_or(1, MetadataExt::dev).to_le_bytes());
+            marker.extend_from_slice(&identity.as_ref().map_or(2, MetadataExt::ino).to_le_bytes());
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(path.join(CARGO_CACHE_OWNER), marker)?;
+            std::fs::write(path.join("artifact"), b"cached build")?;
+            Ok(path)
+        }
+
+        #[test]
+        fn gc_detaches_before_deleting_and_keeps_a_new_lane_cache()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
+            let report = sweep(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|event, path| {
+                    if event == "after rename" {
+                        std::fs::create_dir(path)?;
+                        std::fs::write(path.join("fresh"), b"new lane")?;
+                    }
+                    Ok(())
+                }),
+            )?;
+            assert_eq!(report.removed.len(), 1);
+            assert_eq!(std::fs::read(path.join("fresh"))?, b"new lane");
+            assert!(!path.join("artifact").exists());
+            Ok(())
+        }
+
+        #[test]
+        fn gc_rechecks_orphan_and_idle_conditions_before_detaching()
+        -> Result<(), Box<dyn std::error::Error>> {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            for idle in [false, true] {
+                let temporary = tempfile::tempdir()?;
+                let home = temporary.path();
+                let owner = home.join("owner");
+                if idle {
+                    std::fs::create_dir(&owner)?;
+                }
+                let path = cache(home, &"a".repeat(64), &owner)?;
+                for file in [
+                    path.join(CARGO_CACHE_OWNER),
+                    path.join("artifact"),
+                    path.clone(),
+                ] {
+                    std::fs::File::open(file)?.set_modified(std::time::UNIX_EPOCH)?;
+                }
+                let policy = CacheGcPolicy {
+                    idle_before_ns: Some(1),
+                    project_owners: [owner.clone()].into(),
+                    ..CacheGcPolicy::default()
+                };
+                let reads = AtomicUsize::new(0);
+                let report = sweep(
+                    home,
+                    &policy,
+                    Arc::new(move |event, marker| {
+                        if event == "read" && reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                            if idle {
+                                std::fs::write(
+                                    marker.with_file_name("artifact"),
+                                    b"launching lane",
+                                )?;
+                            } else {
+                                std::fs::create_dir(&owner)?;
+                            }
+                        }
+                        Ok(())
+                    }),
+                )?;
+                assert!(report.removed.is_empty());
+                assert!(path.join(CARGO_CACHE_OWNER).is_file());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn gc_refuses_replacement_identity_after_rename() -> Result<(), Box<dyn std::error::Error>>
+        {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
+            let error = sweep(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|event, path| {
+                    if event == "before rename"
+                        && path
+                            .file_name()
+                            .and_then(OsStr::to_str)
+                            .is_some_and(is_cache_digest)
+                    {
+                        std::fs::rename(path, path.with_file_name("saved"))?;
+                        std::fs::create_dir(path)?;
+                        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+                        std::fs::write(path.join("replacement"), b"must survive")?;
+                    }
+                    Ok(())
+                }),
+            )
+            .expect_err("replacement identity must be refused");
+            assert_eq!(error.report.bytes_freed, 0);
+            assert!(path.with_file_name("saved").join("artifact").is_file());
+            let tombstone = std::fs::read_dir(path.parent().ok_or("cache parent")?)?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .find(|entry| entry.file_name().to_string_lossy().starts_with(".gc-"))
+                .ok_or("tombstone")?;
+            assert!(tombstone.path().join("replacement").is_file());
+            assert!(
+                gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?
+                    .removed
+                    .is_empty()
+            );
+            assert!(tombstone.path().join("replacement").is_file());
+            Ok(())
+        }
+
+        #[test]
+        fn gc_quarantines_changed_owner_after_rename() -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
+            let root = path.parent().ok_or("cache parent")?.to_path_buf();
+            let foreign = home.join("foreign");
+            std::fs::create_dir(&foreign)?;
+            let foreign_cache = cache(home, "foreign-marker", &foreign)?;
+            let marker = std::fs::read(foreign_cache.join(CARGO_CACHE_OWNER))?;
+            let scan_root = root.clone();
+            let error = sweep(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(move |event, path| {
+                    if event == "after rename"
+                        && path
+                            .file_name()
+                            .and_then(OsStr::to_str)
+                            .is_some_and(is_cache_digest)
+                    {
+                        for entry in std::fs::read_dir(&scan_root)? {
+                            let entry = entry?;
+                            if entry.file_name().to_string_lossy().starts_with(".gc-") {
+                                std::fs::write(entry.path().join(CARGO_CACHE_OWNER), &marker)?;
+                            }
+                        }
+                    }
+                    Ok(())
+                }),
+            )
+            .expect_err("changed owner must be refused");
+            assert_eq!(error.report.bytes_freed, 0);
+            assert!(
+                gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?
+                    .removed
+                    .is_empty()
+            );
+            let rejected = std::fs::read_dir(root)?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gc-refused-")
+                })
+                .ok_or("quarantine")?;
+            assert!(rejected.path().join("artifact").is_file());
+            Ok(())
+        }
+
+        #[test]
+        fn gc_failure_keeps_marker_reports_progress_and_retries_tombstone()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
+            std::fs::write(path.join("z-fail"), b"cannot remove yet")?;
+            let artifact = std::fs::metadata(path.join("artifact"))?;
+            let bytes = artifact.blocks() * 512;
+            let ordinary = cache(home, &"b".repeat(64), &home.join("also-missing"))?;
+            let error = sweep(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|event, path| {
+                    if event == "unlink" && path.file_name() == Some(OsStr::new("z-fail")) {
+                        assert!(path.with_file_name(CARGO_CACHE_OWNER).is_file());
+                        return Err(io::ErrorKind::PermissionDenied.into());
+                    }
+                    Ok(())
+                }),
+            )
+            .expect_err("injected unlink failure");
+            assert_eq!(error.report.removed.len(), 1);
+            assert!(!ordinary.exists());
+            assert_eq!(
+                error.report.bytes_freed,
+                bytes + error.report.removed[0].bytes
+            );
+            let root = path.parent().ok_or("cache parent")?;
+            let tombstone = std::fs::read_dir(root)?.next().ok_or("tombstone")??.path();
+            assert!(tombstone.join(CARGO_CACHE_OWNER).is_file());
+            assert!(!tombstone.join("artifact").exists());
+            let report = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?;
+            assert_eq!(report.removed.len(), 1);
+            assert_eq!(report.removed[0].reason, CacheGcReason::Tombstone);
+            assert!(!tombstone.exists());
+            Ok(())
+        }
+
+        #[test]
+        fn gc_retry_refuses_unverified_tombstone_when_quarantine_failed()
+        -> Result<(), Box<dyn std::error::Error>> {
+            for change_owner in [false, true] {
+                let temporary = tempfile::tempdir()?;
+                let home = temporary.path();
+                let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
+                let root = path.parent().ok_or("cache parent")?.to_path_buf();
+                let foreign = home.join("foreign");
+                std::fs::create_dir(&foreign)?;
+                let foreign_cache = cache(home, "foreign-marker", &foreign)?;
+                let marker = std::fs::read(foreign_cache.join(CARGO_CACHE_OWNER))?;
+                let scan_root = root.clone();
+                let error = sweep(
+                    home,
+                    &CacheGcPolicy::default(),
+                    Arc::new(move |event, path| {
+                        let original = path
+                            .file_name()
+                            .and_then(OsStr::to_str)
+                            .is_some_and(is_cache_digest);
+                        if event == "before rename" {
+                            if !original {
+                                return Err(io::ErrorKind::PermissionDenied.into());
+                            }
+                            if !change_owner {
+                                std::fs::rename(path, path.with_file_name("saved"))?;
+                                std::fs::create_dir(path)?;
+                                std::fs::set_permissions(
+                                    path,
+                                    std::fs::Permissions::from_mode(0o700),
+                                )?;
+                                std::fs::write(path.join("artifact"), b"replacement")?;
+                            }
+                        }
+                        if event == "after rename" && change_owner {
+                            for entry in std::fs::read_dir(&scan_root)? {
+                                let entry = entry?;
+                                if entry.file_name().to_string_lossy().starts_with(".gc-") {
+                                    std::fs::write(entry.path().join(CARGO_CACHE_OWNER), &marker)?;
+                                }
+                            }
+                        }
+                        Ok(())
+                    }),
+                )
+                .expect_err("quarantine fails after verification refuses replacement");
+                assert_eq!(error.report.bytes_freed, 0);
+                let tombstone = std::fs::read_dir(root)?
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .and_then(cache_tombstone)
+                            .is_some()
+                    })
+                    .ok_or("unverified tombstone")?;
+                let retry = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())
+                    .expect_err("retry must still refuse the replacement");
+                assert_eq!(retry.report.bytes_freed, 0);
+                assert!(retry.report.removed.is_empty());
+                assert!(tombstone.path().join("artifact").is_file());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn gc_preserves_name_mode_and_symlink_protections() -> Result<(), Box<dyn std::error::Error>>
+        {
+            use std::os::unix::fs::symlink;
+
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let missing = home.join("missing");
+            let outside = home.join("outside");
+            std::fs::create_dir(&outside)?;
+            std::fs::write(outside.join("precious"), b"keep")?;
+            let invalid_name = cache(home, "not-a-cache", &missing)?;
+            let unsafe_mode = cache(home, &"a".repeat(64), &missing)?;
+            std::fs::set_permissions(&unsafe_mode, std::fs::Permissions::from_mode(0o755))?;
+            let linked_marker = cache(home, &"b".repeat(64), &missing)?;
+            std::fs::remove_file(linked_marker.join(CARGO_CACHE_OWNER))?;
+            symlink(
+                outside.join("precious"),
+                linked_marker.join(CARGO_CACHE_OWNER),
+            )?;
+            let collectible = cache(home, &"c".repeat(64), &missing)?;
+            symlink(&outside, collectible.join("outside-link"))?;
+            let root = collectible.parent().ok_or("cache parent")?;
+            let linked_cache = root.join("d".repeat(64));
+            symlink(&outside, &linked_cache)?;
+            let linked_tombstone = root.join(format!(".gc-{}-123", "e".repeat(64)));
+            symlink(&outside, &linked_tombstone)?;
+            let invalid_tombstone = cache(home, ".gc-invalid-123", &missing)?;
+            let report = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?;
+            assert_eq!(report.removed.len(), 1);
+            assert!(!collectible.exists());
+            for retained in [
+                invalid_name,
+                unsafe_mode,
+                linked_marker,
+                linked_cache,
+                linked_tombstone,
+                invalid_tombstone,
+            ] {
+                assert!(retained.exists());
+            }
+            assert_eq!(std::fs::read(outside.join("precious"))?, b"keep");
+            Ok(())
+        }
+
+        #[test]
+        fn gc_retries_tombstone_after_final_rmdir_failure() -> Result<(), Box<dyn std::error::Error>>
+        {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
+            let error = sweep(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|event, path| {
+                    if event == "rmdir"
+                        && path
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with(".gc-"))
+                    {
+                        assert!(!path.join(CARGO_CACHE_OWNER).exists());
+                        return Err(io::ErrorKind::PermissionDenied.into());
+                    }
+                    Ok(())
+                }),
+            )
+            .expect_err("injected rmdir failure");
+            assert!(error.report.removed.is_empty());
+            assert!(error.report.bytes_freed > 0);
+            // A held writer can leave content after the marker was deleted.
+            let tombstone = std::fs::read_dir(path.parent().ok_or("cache parent")?)?
+                .next()
+                .ok_or("tombstone")??
+                .path();
+            std::fs::write(tombstone.join("late-write"), b"writer remnant")?;
+            let report = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?;
+            assert_eq!(report.removed.len(), 1);
+            assert!(report.bytes_freed > 0);
+            assert_eq!(
+                std::fs::read_dir(path.parent().ok_or("cache parent")?)?.count(),
+                0
+            );
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lane_cache_gc_keeps_existing_foreign_owners_even_with_old_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&root)?;
+        let owner = home.join("other-project");
+        std::fs::create_dir(&owner)?;
+        let identity = std::fs::metadata(&owner)?;
+        for (letter, inode) in [("a", identity.ino()), ("b", identity.ino() + 1)] {
+            let cache = root.join(letter.repeat(64));
+            std::fs::create_dir(&cache)?;
+            std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
+            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+            marker.extend_from_slice(&identity.dev().to_le_bytes());
+            marker.extend_from_slice(&inode.to_le_bytes());
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
+        }
+        let policy = CacheGcPolicy {
+            idle_before_ns: Some(i128::MAX),
+            ..CacheGcPolicy::default()
+        };
+        let report = gc_worktree_cargo_caches(home, &policy)?;
+        assert!(
+            report.removed.is_empty(),
+            "existing foreign owners must be kept"
+        );
+        assert_eq!(report.kept.len(), 2);
+        assert!(
+            report
+                .kept
+                .iter()
+                .all(|entry| entry.reason == CacheGcReason::Foreign)
+        );
+        assert!(root.join("a".repeat(64)).is_dir());
+        assert!(root.join("b".repeat(64)).is_dir());
         Ok(())
     }
 
@@ -4126,6 +4893,7 @@ mod tests {
         let mut policy = CacheGcPolicy {
             idle_before_ns: Some(i128::MAX),
             dry_run: true,
+            project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
             protected_owners: [caches[2].1.clone()].into(),
         };
 

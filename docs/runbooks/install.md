@@ -32,8 +32,14 @@ Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry
 `~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
 a lane cache for a host build. `provenant worktree remove` deletes the caches
 of worktrees that no longer exist, and `provenant gc [--dry-run] [--idle-days N]`
-also removes caches idle for N days (default 7), sparing any whose worktree has a
-live writer.
+also removes caches idle for N days (default 7) for the selected project's
+worktrees, sparing live or unobservable writers. Existing owners outside that
+project are reported as kept (foreign). Before deletion, GC atomically renames
+each cache to a tombstone so a launching lane can create a fresh cache. Later
+sweeps retry interrupted tombstones. Entries that fail identity verification
+are quarantined under `.gc-refused-*` and kept for inspection. The owner marker
+is deleted last, and a failed sweep reports completed removals and bytes
+already freed alongside the error.
 
 The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
 workspace's `target/release/provenant` without that variable. Pass
