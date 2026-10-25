@@ -3,7 +3,6 @@ mod bench;
 mod chair;
 mod checks;
 #[cfg(test)]
-#[path = "../tests/support/compose.rs"]
 mod compose_tests;
 mod fabric;
 mod hooks;
@@ -16,7 +15,6 @@ mod release_smoke;
 mod roots;
 mod usage;
 #[cfg(test)]
-#[path = "../tests/support/worktrees.rs"]
 mod worktree_tests;
 mod worktrees;
 use provenant_cli::{Command, ParseOutcome, RenderError, RenderMode};
