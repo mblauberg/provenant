@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::repo::{GitRefName, VerifiedWorktree};
+pub use provenant_records::run::NetworkAccess;
 
 const MAX_PATH_BYTES: usize = 4096;
 const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
@@ -48,7 +49,6 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "macos")]
 const DYLD_BOOTSTRAP_RULES: &str = r#"
 (deny file-link)
-(deny file-write-create (vnode-type SYMLINK))
 (allow file-read* (subpath "/System/Library"))
 (allow file-read* (subpath "/usr/bin"))
 (allow file-read* (subpath "/usr/lib"))
@@ -122,6 +122,14 @@ const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 "#;
 #[cfg(target_os = "macos")]
 const PROBE_PROCESS_RULES: &str = "(allow process-exec (literal \"/usr/bin/true\"))\n(allow process-exec (literal \"/bin/cat\"))\n";
+/// Localhost services a build or test run talks to: any loopback TCP port,
+/// its own listeners, and a local Postgres server's Unix socket.
+#[cfg(target_os = "macos")]
+const LOCAL_SERVICE_RULES: &str = r##"(allow network-bind (local ip "localhost:*"))
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+(allow network-outbound (remote unix-socket (path-regex #"^/private/tmp/\.s\.PGSQL\.[0-9]+$")))
+"##;
 #[cfg(target_os = "macos")]
 const PROFILE_LIMIT: usize = 64 * 1024;
 #[cfg(target_os = "macos")]
@@ -237,30 +245,6 @@ pub struct NetworkEndpoint {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum NetworkGrant {
-    Tcp { endpoint: NetworkEndpoint },
-    UnixSocket { root: PathGrant },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    BrowserIpc,
-    PostgresIpc,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CapabilityGrant {
-    pub capability: Capability,
-    #[serde(default)]
-    pub mach_services: Vec<String>,
-    #[serde(default)]
-    pub unix_socket_roots: Vec<PathGrant>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticationProfile {
     pub mechanism: String,
@@ -293,12 +277,14 @@ pub struct ProviderProfileSpec {
     /// providers whose file reading goes through a shell. Exec only: reading
     /// them needs the runtime baseline or another grant.
     pub tool_exec_roots: Vec<PathGrant>,
+    /// Shared toolchain stores and caches the provider's tools write, such as
+    /// the Cargo registry and the pnpm store. Read and write, never executable
+    /// toolchain directories and never a credential root.
+    pub tool_writes: Vec<PathGrant>,
     pub provider_api: Vec<NetworkEndpoint>,
     /// The CLI talks to its own private server over loopback TCP: bind,
     /// accept and connect on `localhost` only.
     pub loopback_server: bool,
-    pub network: Vec<NetworkGrant>,
-    pub capabilities: Vec<CapabilityGrant>,
     pub native_controls: Vec<String>,
 }
 
@@ -779,8 +765,10 @@ pub struct PlanPermissions {
     pub secret_roots: Vec<PathGrant>,
     pub selected_authentication: Option<String>,
     pub include_continuation: bool,
-    pub network: Vec<NetworkGrant>,
-    pub capabilities: Vec<Capability>,
+    /// Extra directories the dispatch made writable, such as a project lock
+    /// directory beside the repository. Read and write, outside Git metadata.
+    pub write_roots: Vec<PathGrant>,
+    pub network: NetworkAccess,
     pub nested_confinement: bool,
 }
 
@@ -820,8 +808,6 @@ pub enum FixtureOperation {
     KeychainTool,
     KeychainRead,
     LoopbackServer,
-    BrowserIpc,
-    PostgresIpc,
 }
 
 /// Typed provider policy consumed by the permission compiler. Providers own
@@ -1047,11 +1033,6 @@ pub fn required_anchors(
         .collect();
     if plan.include_continuation {
         grants.extend(&spec.continuation_reads);
-    }
-    for grant in plan.network.iter().chain(&spec.network) {
-        if let NetworkGrant::UnixSocket { root } = grant {
-            grants.push(root);
-        }
     }
     if let Some(read_only) = &plan.read_only {
         grants.extend(read_only.git_reads.iter().chain(&read_only.writes));
@@ -1312,8 +1293,7 @@ fn compile_sbpl(
     if plan.read_roots.len() > MAX_PATH_GRANTS
         || plan.protected_roots.len() > MAX_PATH_GRANTS
         || plan.secret_roots.len() > MAX_PATH_GRANTS
-        || plan.network.len() > MAX_NETWORK_GRANTS
-        || plan.capabilities.len() > 16
+        || plan.write_roots.len() > MAX_PATH_GRANTS
     {
         return Err(PermissionError::ProfileTooLarge);
     }
@@ -1379,19 +1359,11 @@ fn compile_sbpl(
         read_grants.extend(profile.spec.continuation_reads.iter().cloned());
     }
 
-    let selected_capabilities: BTreeSet<Capability> = plan.capabilities.iter().copied().collect();
-    let profile_capabilities: BTreeSet<Capability> = profile
-        .spec
-        .capabilities
+    let shared_writes: Vec<&PathGrant> = plan
+        .write_roots
         .iter()
-        .map(|grant| grant.capability)
+        .chain(&profile.spec.tool_writes)
         .collect();
-    if !selected_capabilities.is_subset(&profile_capabilities) {
-        return Err(PermissionError::PermissionNotRecorded);
-    }
-    if !is_network_subset(&plan.network, &profile.spec.network) {
-        return Err(PermissionError::PermissionNotRecorded);
-    }
     for grant in &read_grants {
         anchors.verify_grant_held(grant)?;
     }
@@ -1438,20 +1410,7 @@ fn compile_sbpl(
     if let Some(read_only) = &plan.read_only {
         scratch_exclusions.extend(read_only.git_reads.iter().chain(&read_only.writes));
     }
-    scratch_exclusions.extend(plan.network.iter().chain(&profile.spec.network).filter_map(
-        |grant| match grant {
-            NetworkGrant::UnixSocket { root } => Some(root),
-            NetworkGrant::Tcp { .. } => None,
-        },
-    ));
-    scratch_exclusions.extend(
-        profile
-            .spec
-            .capabilities
-            .iter()
-            .filter(|grant| plan.capabilities.contains(&grant.capability))
-            .flat_map(|grant| &grant.unix_socket_roots),
-    );
+    scratch_exclusions.extend(&shared_writes);
     if let Some(grants) = &worktree_grants {
         scratch_exclusions.extend([
             &grants.worktree,
@@ -1481,16 +1440,7 @@ fn compile_sbpl(
         }
         verify_private_scratch(state, &scratch_exclusions, anchors)?;
     }
-    for grant in &plan.network {
-        verify_network_anchor(grant, anchors)?;
-    }
-    for capability in &profile.spec.capabilities {
-        if selected_capabilities.contains(&capability.capability) {
-            for root in &capability.unix_socket_roots {
-                anchors.verify_grant_held(root)?;
-            }
-        }
-    }
+    verify_shared_writes(plan, &shared_writes, anchors)?;
 
     for secret in &plan.secret_roots {
         secret.validate()?;
@@ -1528,6 +1478,7 @@ fn compile_sbpl(
         &read_grants,
         &credential_writes,
         worktree_grants.as_ref(),
+        anchors.home,
     )?;
     if profile_bytes.len() > PROFILE_LIMIT {
         return Err(PermissionError::ProfileTooLarge);
@@ -1625,6 +1576,62 @@ fn verify_state_write(
         PathScope::Exact => anchors.verify_single_link_grant(grant)?,
     }
     Ok(())
+}
+
+/// Shared tool stores and dispatch write roots are deliberately not censused:
+/// they can be large (a pnpm store), and the child cannot add hard links.
+/// They still stay clear of every secret, protected, private and Git root.
+#[cfg(target_os = "macos")]
+fn verify_shared_writes(
+    plan: &PlanPermissions,
+    writes: &[&PathGrant],
+    anchors: &Anchors<'_>,
+) -> Result<(), PermissionError> {
+    for grant in writes {
+        validate_noncredential_grant(grant)?;
+        if plan
+            .secret_roots
+            .iter()
+            .chain(&plan.protected_roots)
+            .chain(std::iter::once(&plan.scratch))
+            .chain(&plan.private_state)
+            .chain(plan.read_only.iter().flat_map(|grants| &grants.git_reads))
+            .any(|root| grant.overlaps(root))
+            || hard_denied(anchors.home)
+                .iter()
+                .any(|(path, _)| path_overlaps(&grant.path, path))
+        {
+            return Err(PermissionError::ProtectedOverlap);
+        }
+        if let Some((verified, _)) = anchors.worktree {
+            for path in [
+                verified.repo().private_git_dir(),
+                verified.repo().common_git_dir(),
+            ] {
+                if path_overlaps(&grant.path, path) {
+                    return Err(PermissionError::ProtectedOverlap);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Credential and preservation paths no lane may read or write, whatever
+/// else its profile grants. Rendered last so they override every allow.
+#[cfg(target_os = "macos")]
+fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 8] {
+    [
+        (".ssh", PathScope::Subtree),
+        (".aws", PathScope::Subtree),
+        (".kube", PathScope::Subtree),
+        (".secrets", PathScope::Subtree),
+        ("Monero", PathScope::Subtree),
+        ("Archives/git-preservation", PathScope::Subtree),
+        (".cargo/credentials", PathScope::Exact),
+        (".cargo/credentials.toml", PathScope::Exact),
+    ]
+    .map(|(relative, scope)| (home.join(relative), scope))
 }
 
 #[cfg(target_os = "macos")]
@@ -1744,6 +1751,7 @@ fn render_profile(
     reads: &[PathGrant],
     credential_writes: &[PathGrant],
     worktree_grants: Option<&WorktreeWriteGrants>,
+    home: &Path,
 ) -> Result<Vec<u8>, PermissionError> {
     let mut source = String::from("(version 1)\n(deny default)\n");
     // Apple dyld bootstrap rules are shared with the backend probe to keep
@@ -1794,6 +1802,11 @@ fn render_profile(
             PathScope::Exact,
         )?;
     }
+    for grant in plan.write_roots.iter().chain(&profile.spec.tool_writes) {
+        for operation in ["file-read*", "file-write*"] {
+            push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
+        }
+    }
     for private in std::iter::once(&plan.scratch).chain(&plan.private_state) {
         for operation in ["file-read*", "file-write*"] {
             push_rule(
@@ -1804,6 +1817,14 @@ fn render_profile(
                 PathScope::Subtree,
             )?;
         }
+    }
+    // Package managers link inside projects and stores; the host reads
+    // provider state back, so no link may be planted there.
+    for grant in profile.spec.state_writes.iter().chain(&plan.private_state) {
+        source.push_str(&format!(
+            "(deny file-write-create (require-all (vnode-type SYMLINK) (subpath \"{}\")))\n",
+            sbpl_path(&grant.path)?
+        ));
     }
 
     if let Some(read_only) = &plan.read_only {
@@ -1848,35 +1869,11 @@ fn render_profile(
             "(allow network-outbound (remote ip \"localhost:*\"))\n",
         ));
     }
-    for grant in &plan.network {
-        match grant {
-            NetworkGrant::Tcp { endpoint } => {
-                push_network_endpoint(&mut source, endpoint)?;
-            }
-            NetworkGrant::UnixSocket { root } => {
-                push_unix_socket_rule(&mut source, root)?;
-            }
-        }
+    if matches!(plan.network, NetworkAccess::Local | NetworkAccess::Open) {
+        source.push_str(LOCAL_SERVICE_RULES);
     }
-    for grant in &profile.spec.capabilities {
-        if !plan.capabilities.contains(&grant.capability) {
-            continue;
-        }
-        for service in &grant.mach_services {
-            if service.is_empty()
-                || service
-                    .bytes()
-                    .any(|byte| byte.is_ascii_control() || byte == b'"' || byte == b'\\')
-            {
-                return Err(PermissionError::InvalidPath);
-            }
-            source.push_str(&format!(
-                "(allow mach-lookup (global-name \"{service}\"))\n"
-            ));
-        }
-        for root in &grant.unix_socket_roots {
-            push_unix_socket_rule(&mut source, root)?;
-        }
+    if plan.network == NetworkAccess::Open {
+        source.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
     }
 
     // Protected controls stay readable but immutable; secret roots stay hidden
@@ -1887,6 +1884,10 @@ fn render_profile(
     }
     for grant in &plan.protected_roots {
         push_rule(&mut source, "deny", "file-write*", &grant.path, grant.scope)?;
+    }
+    for (path, scope) in hard_denied(home) {
+        push_rule(&mut source, "deny", "file-read*", &path, scope)?;
+        push_rule(&mut source, "deny", "file-write*", &path, scope)?;
     }
     if let Some(grants) = worktree_grants {
         let git_marker = grants.worktree.path.join(".git");
@@ -1902,19 +1903,6 @@ fn render_profile(
         return Err(PermissionError::ProfileTooLarge);
     }
     Ok(source.into_bytes())
-}
-
-#[cfg(target_os = "macos")]
-fn push_unix_socket_rule(source: &mut String, grant: &PathGrant) -> Result<(), PermissionError> {
-    let path = sbpl_path(&grant.path)?;
-    let filter = match grant.scope {
-        PathScope::Exact => "path-literal",
-        PathScope::Subtree => "subpath",
-    };
-    source.push_str(&format!(
-        "(allow network-outbound (remote unix-socket ({filter} \"{path}\")))\n"
-    ));
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2041,9 +2029,8 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         || spec.continuation_reads.len() > MAX_PATH_GRANTS
         || spec.state_writes.len() > MAX_PATH_GRANTS
         || spec.tool_exec_roots.len() > MAX_PATH_GRANTS
+        || spec.tool_writes.len() > MAX_PATH_GRANTS
         || spec.provider_api.len() > MAX_NETWORK_GRANTS
-        || spec.network.len() > MAX_NETWORK_GRANTS
-        || spec.capabilities.len() > 16
         || spec.native_controls.len() > 64
     {
         return Err(PermissionError::InvalidFixture);
@@ -2126,30 +2113,11 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
             return Err(PermissionError::CredentialRoot);
         }
     }
+    for grant in &spec.tool_writes {
+        validate_noncredential_grant(grant)?;
+    }
     for endpoint in &spec.provider_api {
         validate_endpoint(endpoint)?;
-    }
-    for grant in &spec.network {
-        validate_network_grant(grant)?;
-    }
-    for capability in &spec.capabilities {
-        if capability.mach_services.iter().any(|service| {
-            service.is_empty()
-                || service.len() > 256
-                || service
-                    .bytes()
-                    .any(|byte| byte.is_ascii_control() || byte == b'"' || byte == b'\\')
-        }) || capability.mach_services.len() > 128
-            || capability.unix_socket_roots.len() > MAX_PATH_GRANTS
-        {
-            return Err(PermissionError::InvalidFixture);
-        }
-        for grant in &capability.unix_socket_roots {
-            validate_noncredential_grant(grant)?;
-            if grant.scope != PathScope::Subtree {
-                return Err(PermissionError::InvalidPath);
-            }
-        }
     }
     if spec.native_controls.iter().any(|control| {
         control.is_empty()
@@ -2274,7 +2242,8 @@ fn is_credential_root(path: &Path) -> bool {
         })
         .collect();
     let single = [
-        ".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude", ".cursor", ".gemini",
+        ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".secrets", ".codex", ".claude", ".cursor",
+        ".gemini", "Monero",
     ];
     if components
         .iter()
@@ -2286,6 +2255,7 @@ fn is_credential_root(path: &Path) -> bool {
         (pair[0] == OsStr::new(".config")
             && (pair[1] == OsStr::new("gh") || pair[1] == OsStr::new("gcloud")))
             || (pair[0] == OsStr::new("Library") && pair[1] == OsStr::new("Keychains"))
+            || (pair[0] == OsStr::new("Archives") && pair[1] == OsStr::new("git-preservation"))
     }) || components.windows(3).any(|triple| {
         triple[0] == OsStr::new("Library")
             && triple[1] == OsStr::new("Application Support")
@@ -2297,11 +2267,6 @@ fn path_overlaps(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
-#[cfg(target_os = "macos")]
-fn is_network_subset(requested: &[NetworkGrant], allowed: &[NetworkGrant]) -> bool {
-    requested.iter().all(|item| allowed.contains(item))
-}
-
 #[cfg(any(target_os = "macos", test))]
 fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), PermissionError> {
     if endpoint.port == 0
@@ -2311,31 +2276,6 @@ fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), PermissionError> 
         return Err(PermissionError::InvalidFixture);
     }
     Ok(())
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn validate_network_grant(grant: &NetworkGrant) -> Result<(), PermissionError> {
-    match grant {
-        NetworkGrant::Tcp { endpoint } => validate_endpoint(endpoint),
-        NetworkGrant::UnixSocket { root } => {
-            validate_noncredential_grant(root)?;
-            if root.scope != PathScope::Subtree {
-                return Err(PermissionError::InvalidPath);
-            }
-            Ok(())
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn verify_network_anchor(
-    grant: &NetworkGrant,
-    anchors: &Anchors<'_>,
-) -> Result<(), PermissionError> {
-    match grant {
-        NetworkGrant::Tcp { .. } => Ok(()),
-        NetworkGrant::UnixSocket { root } => anchors.verify_grant_held(root),
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2492,15 +2432,35 @@ mod tests {
             };
             assert!(grant.validate().is_err(), "{path}");
         }
-        for path in ["/Users/alice/.ssh", "/Users/alice/.config/gh"] {
+        for path in [
+            "/Users/alice/.ssh",
+            "/Users/alice/.config/gh",
+            "/Users/alice/.kube",
+            "/Users/alice/.secrets/tokens",
+            "/Users/alice/Monero",
+            "/Users/alice/Archives/git-preservation/repo",
+        ] {
             let grant = PathGrant {
                 path: PathBuf::from(path),
                 scope: PathScope::Subtree,
             };
-            assert!(matches!(
-                validate_noncredential_grant(&grant),
-                Err(PermissionError::CredentialRoot)
-            ));
+            assert!(
+                matches!(
+                    validate_noncredential_grant(&grant),
+                    Err(PermissionError::CredentialRoot)
+                ),
+                "{path}"
+            );
+            // A shared tool store under a credential root is refused too.
+            let spec = ProviderProfileSpec {
+                process_executables: vec![PathGrant {
+                    path: PathBuf::from("/usr/bin/true"),
+                    scope: PathScope::Exact,
+                }],
+                tool_writes: vec![grant],
+                ..ProviderProfileSpec::default()
+            };
+            assert!(validate_profile_spec(&spec).is_err(), "{path}");
         }
         for path in [
             "/private/tmp/scoped",
@@ -2658,8 +2618,8 @@ mod tests {
                     secret_roots: vec![],
                     selected_authentication: None,
                     include_continuation: false,
-                    network: vec![],
-                    capabilities: vec![],
+                    write_roots: vec![],
+                    network: NetworkAccess::Provider,
                     nested_confinement: false,
                 },
                 codex: CodexPolicy::Clean,
@@ -2765,7 +2725,13 @@ mod tests {
                 tool.display()
             )));
         }
-        assert!(!source.contains("credentials"));
+        // Cargo credentials appear only as hard denies.
+        assert!(
+            source
+                .lines()
+                .filter(|line| line.contains("credentials"))
+                .all(|line| line.starts_with("(deny "))
+        );
         assert!(!source.contains(&format!(
             "(allow file-read* (subpath \"{}\"))",
             home.join(".cargo").display()
@@ -3249,6 +3215,15 @@ mod tests {
         std::fs::write(&inside, b"")?;
         let symlink_path = linked.path().join("symlink");
         symlink(&protected_file, &symlink_path)?;
+        // Shared tool stores and dispatch write roots are writable; Cargo
+        // credentials stay hidden inside an otherwise readable Cargo home.
+        let cargo = provenant_supervisor::fs::canonicalize(&fixture.home)?.join(".cargo");
+        std::fs::create_dir_all(cargo.join("registry"))?;
+        std::fs::create_dir_all(cargo.join("bin"))?;
+        let cargo_credentials = cargo.join("credentials.toml");
+        std::fs::write(&cargo_credentials, b"token")?;
+        let project_locks = root.join("agent-run");
+        std::fs::create_dir(&project_locks)?;
         let private = linked.repo().private_git_dir().to_owned();
         let common = linked.repo().common_git_dir().to_owned();
         let private_logs = private.join("logs");
@@ -3274,6 +3249,14 @@ mod tests {
                 }],
                 deny_keychain_access: true,
                 allow_process_fork: true,
+                runtime_reads: vec![PathGrant {
+                    path: cargo.clone(),
+                    scope: PathScope::Subtree,
+                }],
+                tool_writes: vec![PathGrant {
+                    path: cargo.join("registry"),
+                    scope: PathScope::Subtree,
+                }],
                 tool_exec_roots: ["/bin", "/usr/bin", "/usr/libexec"]
                     .map(|path| PathGrant {
                         path: path.into(),
@@ -3307,6 +3290,7 @@ mod tests {
                 ),
                 (FixtureOperation::ProcessFork, FixtureOutcome::Allowed),
                 (FixtureOperation::StateWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::RuntimeRead, FixtureOutcome::Allowed),
                 (FixtureOperation::ShellExec, FixtureOutcome::Allowed),
                 (FixtureOperation::KeychainTool, FixtureOutcome::Denied),
                 (FixtureOperation::KeychainRead, FixtureOutcome::Denied),
@@ -3343,13 +3327,17 @@ mod tests {
             secret_roots: Vec::new(),
             selected_authentication: None,
             include_continuation: false,
-            network: Vec::new(),
-            capabilities: Vec::new(),
+            write_roots: vec![PathGrant {
+                path: project_locks.clone(),
+                scope: PathScope::Subtree,
+            }],
+            network: NetworkAccess::Provider,
             nested_confinement: false,
         };
         let safe_fs = LocalFs;
         let mut anchor_paths = vec![
             root.clone(),
+            cargo.clone(),
             scratch.clone(),
             cache.clone(),
             provider_state.clone(),
@@ -3473,17 +3461,44 @@ mod tests {
             inside_outcome.termination,
             String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
-        let mut probes = vec![
+        // Package managers link into node_modules; a link grants nothing,
+        // since the sandbox checks the resolved path.
+        let new_link = linked.path().join("new-link");
+        for (name, outcome) in [
             (
-                "new symlink in provider state",
+                "tool store write",
+                run(&executables[0], &[&cargo.join("registry/crate")]),
+            ),
+            (
+                "write root",
+                run(&executables[0], &[&project_locks.join("lock")]),
+            ),
+            (
+                "new symlink in worktree",
                 run(
                     &executables[2],
-                    &[
-                        Path::new("-s"),
-                        &protected_file,
-                        &provider_state.join("new-link"),
-                    ],
+                    &[Path::new("-s"), &protected_file, &new_link],
                 ),
+            ),
+        ] {
+            assert!(
+                successful_probe(&outcome),
+                "{name}: {:?}",
+                outcome.termination
+            );
+        }
+        let mut probes = vec![
+            (
+                "cargo credentials read",
+                run(&executables[4], &[&cargo_credentials]),
+            ),
+            (
+                "cargo bin write",
+                run(&executables[0], &[&cargo.join("bin/cargo")]),
+            ),
+            (
+                "write through new symlink",
+                run(&executables[0], &[&new_link]),
             ),
             (
                 "keychain tool",
@@ -3494,25 +3509,11 @@ mod tests {
                 "sibling cache",
                 run(&executables[0], &[&cache.with_file_name("other-lane")]),
             ),
-            (
-                "new symlink in cache",
-                run(
-                    &executables[2],
-                    &[Path::new("-s"), &protected_file, &cache.join("new-link")],
-                ),
-            ),
             ("protected write", run(&executables[0], &[&protected_file])),
             ("symlink write", run(&executables[0], &[&symlink_path])),
             (
                 "new hardlink",
                 run(&executables[2], &[&protected_file, &hardlink_path]),
-            ),
-            (
-                "new symlink in scratch",
-                run(
-                    &executables[2],
-                    &[Path::new("-s"), &protected_file, &scratch.join("new-link")],
-                ),
             ),
             (
                 "nested git write",
@@ -3592,13 +3593,15 @@ mod tests {
             secret_roots: Vec::new(),
             selected_authentication: None,
             include_continuation: false,
-            network: Vec::new(),
-            capabilities: Vec::new(),
+            write_roots: vec![],
+            network: NetworkAccess::Provider,
             nested_confinement: false,
         };
-        let rendered =
-            String::from_utf8(render_profile(&plan, &profile, &[], &[], None).expect("SBPL"))
-                .expect("UTF-8 SBPL");
+        let rendered = String::from_utf8(
+            render_profile(&plan, &profile, &[], &[], None, Path::new("/Users/fixture"))
+                .expect("SBPL"),
+        )
+        .expect("UTF-8 SBPL");
         assert!(rendered.contains("(allow process-exec (literal \"/usr/bin/true\"))"));
         assert!(rendered.contains("(allow process-fork)"));
         assert!(!rendered.contains("localhost"));
@@ -3609,14 +3612,90 @@ mod tests {
             spec,
             observations: BTreeMap::new(),
         };
-        let rendered =
-            String::from_utf8(render_profile(&plan, &profile, &[], &[], None).expect("SBPL"))
-                .expect("UTF-8 SBPL");
+        let rendered = String::from_utf8(
+            render_profile(&plan, &profile, &[], &[], None, Path::new("/Users/fixture"))
+                .expect("SBPL"),
+        )
+        .expect("UTF-8 SBPL");
         assert!(!rendered.contains("(allow process-fork)"));
         // A private server binds and is reached on loopback only.
         assert!(rendered.contains("(allow network-bind (local ip \"localhost:*\"))"));
         assert!(rendered.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
         assert!(!rendered.contains("\"*:*\""));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn network_levels_shared_writes_and_hard_denies_render_in_order() {
+        let grant = |path: &str| PathGrant {
+            path: PathBuf::from(path),
+            scope: PathScope::Subtree,
+        };
+        let profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                process_executables: vec![PathGrant {
+                    path: PathBuf::from("/usr/bin/true"),
+                    scope: PathScope::Exact,
+                }],
+                tool_writes: vec![grant("/Users/fixture/.cargo/registry")],
+                ..ProviderProfileSpec::default()
+            },
+            observations: BTreeMap::new(),
+        };
+        let mut plan = PlanPermissions {
+            read_only: None,
+            private_state: None,
+            mode: AccessMode::ReadOnly,
+            scratch: grant("/tmp/attempt-scratch"),
+            read_roots: Vec::new(),
+            protected_roots: Vec::new(),
+            secret_roots: Vec::new(),
+            selected_authentication: None,
+            include_continuation: false,
+            write_roots: vec![grant("/work/repo/.agent-run")],
+            network: NetworkAccess::Provider,
+            nested_confinement: false,
+        };
+        let render = |plan: &PlanPermissions| {
+            let bytes = render_profile(plan, &profile, &[], &[], None, Path::new("/Users/fixture"))
+                .expect("SBPL");
+            String::from_utf8(bytes).expect("UTF-8 SBPL")
+        };
+        let provider = render(&plan);
+        assert!(!provider.contains("localhost"));
+        assert!(!provider.contains("PGSQL"));
+        assert!(!provider.contains("\"*:*\""));
+        let last_allow = ["/Users/fixture/.cargo/registry", "/work/repo/.agent-run"]
+            .map(|path| {
+                provider
+                    .find(&format!("(allow file-write* (subpath \"{path}\"))"))
+                    .expect(path)
+            })
+            .into_iter()
+            .max()
+            .expect("allow rules");
+        for denied in [
+            "(deny file-read* (subpath \"/Users/fixture/.ssh\"))",
+            "(deny file-write* (subpath \"/Users/fixture/.kube\"))",
+            "(deny file-read* (subpath \"/Users/fixture/Monero\"))",
+            "(deny file-write* (subpath \"/Users/fixture/Archives/git-preservation\"))",
+            "(deny file-read* (literal \"/Users/fixture/.cargo/credentials.toml\"))",
+        ] {
+            assert!(
+                provider.find(denied).expect(denied) > last_allow,
+                "{denied}"
+            );
+        }
+        plan.network = NetworkAccess::Local;
+        let local = render(&plan);
+        assert!(local.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
+        assert!(local.contains("(allow network-bind (local ip \"localhost:*\"))"));
+        assert!(local.contains("\\.s\\.PGSQL\\."));
+        assert!(!local.contains("\"*:*\""));
+        plan.network = NetworkAccess::Open;
+        let open = render(&plan);
+        assert!(open.contains("(allow network-outbound (remote ip \"*:*\"))"));
+        assert!(open.contains("PGSQL"));
     }
 
     #[cfg(target_os = "macos")]

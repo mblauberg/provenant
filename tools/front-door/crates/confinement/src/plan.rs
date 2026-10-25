@@ -95,8 +95,22 @@ impl ConfinedPlan {
         if p.nested_confinement {
             return Err(PermissionError::NestedConfinementUnsupported.into());
         }
-        if p.read_roots.len() + p.protected_roots.len() + p.secret_roots.len() > 128 {
+        if p.read_roots.len() + p.protected_roots.len() + p.secret_roots.len() + p.write_roots.len()
+            > 128
+        {
             return Err(PlanError::InvalidRoots);
+        }
+        for grant in &p.write_roots {
+            crate::permissions::validate_noncredential_grant(grant)?;
+            if p.protected_roots
+                .iter()
+                .chain(&p.secret_roots)
+                .chain(std::iter::once(&p.scratch))
+                .chain(&p.private_state)
+                .any(|g| grant.overlaps(g))
+            {
+                return Err(PlanError::InvalidRoots);
+            }
         }
         for grant in &p.read_roots {
             crate::permissions::validate_read_exec_grant(grant)?;

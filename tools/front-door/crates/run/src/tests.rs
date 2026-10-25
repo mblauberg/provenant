@@ -63,6 +63,7 @@ pub(super) fn input() -> PreparedRun {
                 provider_timeout_seconds: 3600,
                 delivery_id: None,
                 deliver: None,
+                access: Default::default(),
             }],
             concurrency: 1,
             parent: None,
