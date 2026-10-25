@@ -472,9 +472,13 @@ pub(crate) fn registered_claude(
 
 #[cfg(test)]
 mod tests {
+    // The worktree driver includes this module without libtest.
+    #[allow(unused_imports)]
     use super::*;
+    #[allow(unused_imports)]
     use provenant_supervisor::exec::ExecError;
 
+    #[allow(dead_code)]
     fn quota(home: &Path, state: PathBuf) -> LiveQuota {
         LiveQuota {
             home: home.to_owned(),
