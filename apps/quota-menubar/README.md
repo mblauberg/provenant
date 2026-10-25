@@ -2,9 +2,22 @@
 
 An optional macOS menu-bar app that displays account quota snapshots from Provenant. It does not install or start itself.
 
-The status item shows the highest-use available account and its percentage, beside the Provenant mark while usage is below the alert threshold and a gauge or warning symbol above it. Clicking it opens a standard macOS menu, with system highlighting, keyboard navigation and light and dark appearance. The menu has one section per provider. Each account row shows its label, its state, and its binding window's use and reset time; a reading that is stale or more than 30 minutes old also shows its age, such as "7h ago". Each account's submenu lists every reported window and the account's details. The menu keeps the last good report visible if a refresh fails. Rows without a snapshot show their reported status and error. When the CLI has no account snapshots, the menu shows how many quota report rows have known account data. At the bottom are Refresh (⌘R), Open Report Folder and Quit Quota (⌘Q).
+The status item shows the highest-use available account and its percentage, beside the Provenant mark while usage is below the alert threshold and a gauge or warning symbol above it. Clicking it opens a standard macOS menu, with system highlighting, keyboard navigation, VoiceOver labels and light and dark appearance. The menu keeps the last good report visible if a refresh fails.
 
-Binding limits must have a reset time and must not be advisory. Rust `credit_only` accounts have spent their plan allowance and appear as "Exhausted, drawing on credits", with the allowance reset time when known.
+## Menu design
+
+The menu follows the first-party menu extras of macOS 26, such as Wi-Fi and Battery: system fonts and metrics, one circular icon per row, colour only for state, one figure per row, and short secondary text.
+
+- **Title row.** "Quota" and how fresh the data is: "Updated 2m ago", or "Refreshing…" while a refresh runs.
+- **Accounts.** One row per account, kept together by provider in the order of each provider's most pressing account. The title is the provider's name, followed in the secondary colour by the account's label unless the label only repeats the provider. The trailing figure is the binding window's use, and the figures of every row end in one column beside the submenu arrows. The subtitle says what limits the account, such as "Weekly · resets Sun 1 Nov".
+- **Icons.** A use ring shows the binding window's use: green below the alert threshold, orange above it. A full red ring is a spent allowance, whose subtitle says when it is back; a full blue ring is an account drawing on credits ("On credits until Sat 3:41 am"). Neither shows a figure, since the ring already does. A grey ring is a stale or unknown reading, whose dimmed figure is the last reading and whose subtitle says when it was checked. An orange ring around "!" asks for sign-in. A fresh reading carries no age; one older than 30 minutes adds "checked 2h ago".
+- **Submenu.** Each account's submenu opens level with its row. It lists every reported window with its use bar and exact reset time, then the plan, credits, banked resets, when the reading was taken, priority and identity, then any note or error. It does not repeat the row's state, and no row with a submenu has a tooltip, which would cover the submenu.
+- **Needs attention.** Lanes that need attention, each with its kind and how long ago it began.
+- **Commands.** Refresh, Open Report Folder and Quit Quota. ⌘R and ⌘Q work while the menu is open, but no shortcut column is drawn, as in first-party menu extras, so the figures stay beside the arrows.
+
+The menu's width depends only on its widest title or subtitle, with a minimum, so it does not shift as times and figures change. Rows without a snapshot show their reported status and error. When the CLI has no account snapshots, the menu shows how many quota report rows have known account data.
+
+Binding limits must have a reset time and must not be advisory. Rust `credit_only` accounts have spent their plan allowance and appear as drawing on credits, with the allowance reset time when known.
 
 The app reads all quota data from the CLI. It does not read credentials, tokens or the Keychain. The menu shows the configured account label, plan, usage windows, and available credit or reset details; an unavailable reading keeps its reported status and is never represented as zero.
 
@@ -30,7 +43,7 @@ The CLI command response is a versioned envelope containing the report. The watc
 
 ## Render the menu
 
-`--render` draws the menu's content from a saved raw report into a PNG without running the CLI. AppKit draws a real menu only while it is open, so the PNG is a preview at standard menu metrics, built from the same items as the menu. `--expand <account id>` shows that account's submenu beside its highlighted row, and `--lanes` adds a saved `provenant lanes --json` page. The clock defaults to `generated_unix_seconds`; `--now` selects another instant. Rendering uses 2x scale unless `--scale` sets another factor.
+`--render` draws the menu's content from a saved raw report into a PNG without running the CLI. AppKit draws a real menu only while it is open, so the PNG is a preview at macOS 26 menu metrics. It uses the same entries, attributed titles, icons and information views as the menu, and imitates only the native items' frame and the menu's glass background. `--expand <account id>` shows that account's submenu beside its highlighted row, and `--lanes` adds a saved `provenant lanes --json` page. The clock defaults to `generated_unix_seconds`; `--now` selects another instant. Rendering uses 2x scale unless `--scale` sets another factor.
 
 ```bash
 .build/debug/quota-menubar --render Fixtures/current.json current.png --lanes Fixtures/lanes.json
@@ -69,4 +82,3 @@ The supported way to start the app at login is a LaunchAgent. Adding the bare ex
 
 Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.provenant.quota-menubar.plist`. To stop it, run `launchctl bootout gui/$(id -u)/dev.provenant.quota-menubar` and delete the file. With `KeepAlive` false, quitting from the menu keeps the app closed until the next login.
 
-The status item uses the Provenant glyph for loading and healthy quota states, with the existing gauge and error symbols retained for warnings and failures.

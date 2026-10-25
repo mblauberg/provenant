@@ -6,37 +6,68 @@ enum MenuAction: Equatable {
     case open(URL)
 }
 
-/// A system colour for an item's symbol. Each maps to a semantic `NSColor`, so it adapts to light, dark and
-/// Increase Contrast.
-enum MenuTint: Equatable { case green, orange, red, blue, secondary }
+/// A system colour that marks state. Each maps to a semantic `NSColor`, so it adapts to light, dark and
+/// Increase Contrast. Colour is used for state only; everything else uses the menu's text colours.
+enum MenuTint: Equatable, Hashable { case green, orange, red, blue, secondary }
+
+/// The circular icon at the start of a row, one shape language for every row.
+enum MenuIcon: Equatable, Hashable {
+    /// A use ring: a faint track with an arc for the fraction used. A nil fraction draws the track alone.
+    case ring(Double?, MenuTint)
+    /// A full ring around a small SF Symbol, for a state that has no use figure.
+    case mark(String, MenuTint)
+    /// A plain monochrome SF Symbol, for commands.
+    case symbol(String)
+}
 
 /// One entry of the quota menu. The same list builds the `NSMenu` (StatusMenu.swift) and the `--render` preview
 /// (Render.swift), so a rendered PNG checks exactly what the menu shows.
 enum MenuEntry: Equatable {
+    /// The menu's title row and how fresh its data is.
+    case title(String, String?)
     case header(String)
     case item(MenuItemSpec)
+    /// A usage window in an account's submenu: name, figure, bar and reset.
+    case window(WindowSpec)
+    /// A labelled fact in an account's submenu.
+    case fact(String, String)
+    /// A line of text in an account's submenu, tinted when it reports a problem.
+    case note(String, MenuTint?)
     case separator
 }
 
-/// A standard menu item: title, optional subtitle beneath, a trailing badge, an SF Symbol, and a ⌘ shortcut.
+/// A standard menu item: a title with optional secondary detail, a subtitle beneath, a trailing figure that lines
+/// up across rows, a circular icon, and a ⌘ shortcut.
 struct MenuItemSpec: Equatable {
     var title: String
+    var detail: String? = nil     // after the title in the secondary colour, such as an account label
     var subtitle: String? = nil
-    var badge: String? = nil   // trailing text, such as "84%"
-    var symbol: String? = nil
-    var tint: MenuTint? = nil
+    var value: String? = nil      // trailing figure, such as "84%"
+    var dimValue = false          // a figure that may be out of date
+    var icon: MenuIcon? = nil
     var shortcut: String? = nil   // a key used with ⌘
+    var hidden = false            // carries only its shortcut, as first-party menu extras show none
     var enabled = true
     var action: MenuAction? = nil
     var submenu: [MenuEntry]? = nil
-    var help: String? = nil
-    var id: String? = nil   // an account id, for `--render --expand`
+    var help: String? = nil       // never set on a row with a submenu, where it would cover the submenu
+    var id: String? = nil         // an account id, for `--render --expand`
+}
+
+/// A usage window in an account's submenu.
+struct WindowSpec: Equatable {
+    var title: String
+    var value: String
+    var fraction: Double?   // nil once the window has reset since the reading
+    var tint: MenuTint
+    var caption: String?
 }
 
 /// Builds the menu from the model's data. Presentation only: what an account's state means stays in Report.swift.
 enum QuotaMenu {
+    static let title = "Quota"
     static let attentionLimit = 5
-    /// A reading older than this shows its age on its row.
+    /// A reading older than this shows when it was checked on its row.
     static let agedAfter: TimeInterval = 1800
 
     @MainActor
@@ -48,154 +79,205 @@ enum QuotaMenu {
 
     static func entries(report: QuotaReport?, error: String?, updatedAt: Date?, refreshing: Bool,
                         lanes: [AttentionLane], stateRoot: URL, now: Date) -> [MenuEntry] {
-        var entries = notices(report: report, error: error)
-        if let report {
+        let freshness = refreshing ? "Refreshing…" : updatedAt.map { "Updated \(Fmt.ago($0, now: now))" }
+        var entries: [MenuEntry] = [.title(title, freshness)]
+        entries += notices(report: report, error: error)
+        if let report, !report.accounts.isEmpty {
+            // Accounts stay together by provider, in the order of each provider's most pressing account.
             let sorted = report.sorted(now: now)
-            var adapters: [String] = []
-            for account in sorted where !adapters.contains(account.provider) { adapters.append(account.provider) }
-            for adapter in adapters {
-                let members = sorted.filter { $0.provider == adapter }
-                section(&entries, members[0].providerName ?? Fmt.human(adapter),
-                        members.map { .item(account($0, now: now, alert: report.alertPercent)) })
+            var providers: [String] = []
+            for account in sorted where !providers.contains(account.provider) { providers.append(account.provider) }
+            entries.append(.separator)
+            for provider in providers {
+                entries += sorted.filter { $0.provider == provider }
+                    .map { .item(account($0, now: now, alert: report.alertPercent)) }
             }
         }
         if !lanes.isEmpty {
-            var items: [MenuEntry] = lanes.prefix(attentionLimit).map { item in
+            entries += [.separator, .header("Needs attention")]
+            entries += lanes.prefix(attentionLimit).map { item in
                 .item(MenuItemSpec(title: item.lane.route, subtitle: "\(item.kind.title) · \(Fmt.ago(item.since, now: now))",
-                                   symbol: item.kind.symbol, tint: tint(item.kind),
+                                   icon: .mark(mark(item.kind), tint(item.kind)),
                                    action: .open(LaneBoard.runDirectory(item.lane, stateRoot: stateRoot)),
                                    help: "Open the run directory"))
             }
             if lanes.count > attentionLimit {
-                items.append(.item(MenuItemSpec(title: "\(lanes.count - attentionLimit) more", enabled: false)))
+                entries.append(.item(MenuItemSpec(title: "\(lanes.count - attentionLimit) more", enabled: false)))
             }
-            section(&entries, "Needs attention", items)
         }
-        let updated = updatedAt.map { "Updated \(Fmt.ago($0, now: now))" } ?? "Not updated yet"
-        let status = refreshing ? "Refreshing…"
-            : ([updated] + [report?.nextCheck.map { Fmt.next($0, now: now) }].compactMap { $0 }).joined(separator: " · ")
-        if !entries.isEmpty { entries.append(.separator) }
         entries += [
-            .item(MenuItemSpec(title: status, enabled: false, help: report?.nextCheck.map { Fmt.nextInFull($0, now: now) })),
-            .item(MenuItemSpec(title: "Refresh", shortcut: "r", enabled: !refreshing, action: .refresh)),
-            .item(MenuItemSpec(title: "Open Report Folder", enabled: report != nil,
+            .separator,
+            .item(MenuItemSpec(title: "Refresh", icon: .symbol("arrow.clockwise"), enabled: !refreshing, action: .refresh)),
+            .item(MenuItemSpec(title: "Open Report Folder", icon: .symbol("folder"), enabled: report != nil,
                                action: report.map { .open(URL(fileURLWithPath: $0.reportPath).deletingLastPathComponent()) })),
             .separator,
-            .item(MenuItemSpec(title: "Quit Quota", shortcut: "q", action: .quit)),
+            .item(MenuItemSpec(title: "Quit Quota", icon: .symbol("power"), action: .quit)),
+            // ⌘R and ⌘Q work while the menu is open without a shortcut column widening every row.
+            .item(MenuItemSpec(title: "Refresh", shortcut: "r", hidden: true, enabled: !refreshing, action: .refresh)),
+            .item(MenuItemSpec(title: "Quit Quota", shortcut: "q", hidden: true, action: .quit)),
         ]
         return entries
-    }
-
-    /// A header over its items, after a separator unless it opens the menu.
-    private static func section(_ entries: inout [MenuEntry], _ title: String, _ items: [MenuEntry]) {
-        if !entries.isEmpty { entries.append(.separator) }
-        entries.append(.header(title))
-        entries += items
     }
 
     /// A failed refresh, a report still loading, or a report with no account snapshots.
     private static func notices(report: QuotaReport?, error: String?) -> [MenuEntry] {
-        let warning = "exclamationmark.triangle.fill"
+        let warning = MenuIcon.mark("exclamationmark", .orange)
         guard let report else {
-            return [.item(error.map {
-                MenuItemSpec(title: "Quota unavailable", subtitle: clip($0), symbol: warning, tint: .orange, enabled: false, help: $0)
+            return [.separator, .item(error.map {
+                MenuItemSpec(title: "Quota unavailable", subtitle: clip($0), icon: warning, enabled: false, help: $0)
             } ?? MenuItemSpec(title: "Loading…", enabled: false))]
         }
         var entries: [MenuEntry] = []
         if let error {
-            entries.append(.item(MenuItemSpec(title: "Last refresh failed", subtitle: "Showing the last report · " + clip(error),
-                                              symbol: warning, tint: .orange, enabled: false, help: error)))
+            entries.append(.item(MenuItemSpec(title: "Refresh failed", subtitle: "Showing the last report · " + clip(error, 40),
+                                              icon: warning, enabled: false, help: error)))
         }
         if report.accounts.isEmpty {
             entries.append(.item(MenuItemSpec(
                 title: "No account snapshots",
-                subtitle: "\(report.coverage.known) of \(report.coverage.total) quota report rows have current account data",
-                enabled: false)))
+                subtitle: "\(report.coverage.known) of \(report.coverage.total) report rows have account data",
+                icon: .ring(nil, .secondary), enabled: false)))
             entries += report.sources.map { source in
-                .item(MenuItemSpec(title: source.title, subtitle: source.error.map { clip($0) }, badge: source.statusTitle, enabled: false))
+                .item(MenuItemSpec(title: source.title, subtitle: source.error.map { clip(Fmt.sentence($0)) },
+                                   value: source.statusTitle, dimValue: true, icon: .ring(nil, .secondary), enabled: false))
             }
         }
-        return entries
+        return entries.isEmpty ? [] : [.separator] + entries
     }
 
-    /// One account: its label, its binding window's use and reset, its state when that is not plain availability,
-    /// and the reading's age once it is old.
+    /// One account: provider and label, the binding window's use as the row's one figure, and a short line saying
+    /// what limits it. The ring's colour carries the state, so the line never repeats it, and a spent allowance
+    /// shows when it comes back rather than a figure the full ring already gives.
     static func account(_ account: QuotaReport.Account, now: Date, alert: Double) -> MenuItemSpec {
-        let rank = account.rank(now), binding = account.binding(now: now)
+        let binding = account.binding(now: now)
         let shown = account.hasReading ? account.display(now: now, alert: alert) : nil
-        let age = Self.age(account, now: now)
+        var row = MenuItemSpec(title: account.providerName ?? Fmt.human(account.provider), detail: label(account),
+                               submenu: details(account, now: now, alert: alert), id: account.id)
         var parts: [String?] = []
-        var badge: String? = nil, symbol: String, tint: MenuTint
-        switch rank {
+        switch account.rank(now) {
         case 0:
-            badge = shown.map { Fmt.percent($0.usedPercent ?? 0) }
-            parts = shown.map { [$0.fullTitle, Fmt.resets($0.resetAt, now: now)] } ?? ["No current reading"]
-            parts += account.spentPools(now: now).map { Fmt.spent($0, now: now) }
-            let used = shown?.usedPercent ?? 0
-            (symbol, tint) = (MenuLabel.gauge(used), used >= alert ? .orange : .green)
+            if let shown {
+                let used = shown.usedPercent ?? 0
+                row.value = Fmt.percent(used)
+                row.icon = .ring(used / 100, used >= alert ? .orange : .green)
+                parts = [windowName(shown), Fmt.resets(shown.resetAt, now: now)]
+                parts += account.spentPools(now: now).map { Fmt.spent($0, now: now) }
+                parts.append(checked(account, now: now))
+            } else {
+                row.icon = .ring(nil, .secondary)
+                parts = ["No current reading"]
+            }
         case 1:
-            let back = binding?.pace.state == "exhausted" ? binding?.resetAt.map { "allowance " + Fmt.back($0, now: now) } : nil
-            parts = ["Drawing on credits", back ?? "allowance spent"]
-            (symbol, tint) = ("creditcard.fill", .blue)
+            row.icon = .ring(1, .blue)
+            let until = binding?.pace.state == "exhausted" ? binding?.resetAt.flatMap { $0 > now ? $0 : nil } : nil
+            parts = [until.map { "On credits until \(Fmt.moment($0, now: now))" } ?? "On credits"]
         case 3:
-            parts = ["Exhausted", Fmt.back(account.back(now: now), now: now)]
-            (symbol, tint) = (MenuLabel.gauge(100), .red)
+            row.icon = .ring(1, .red)
+            parts = [Fmt.sentence(Fmt.back(account.back(now: now), now: now))]
         case 4:
-            parts = [account.statusTitle]
-            (symbol, tint) = ("person.crop.circle.badge.exclamationmark", .orange)
+            row.icon = .mark("exclamationmark", .orange)
+            parts = ["Sign-in required"]
         default:
-            // Stale, unknown or unsupported: the last reading, if any, keeps its figure but is marked by its state.
-            badge = shown.map { Fmt.percent($0.usedPercent ?? 0) }
-            parts = [account.statusTitle] + (shown.map { [$0.fullTitle, Fmt.resets($0.resetAt, now: now)] } ?? [account.error.map { clip($0) }])
-            (symbol, tint) = (account.status == .stale ? "clock.badge.exclamationmark" : "questionmark.circle", .secondary)
+            // Stale, unknown or unsupported: the last reading keeps its figure, dimmed, beside when it was taken.
+            if let shown {
+                let used = shown.usedPercent ?? 0
+                row.value = Fmt.percent(used)
+                row.dimValue = true
+                row.icon = .ring(used / 100, .secondary)
+                let when = account.observedAt.map { "last checked \(Fmt.ago($0, now: now))" }
+                parts = [windowName(shown), account.status == .stale ? when ?? "out of date" : account.statusTitle.lowercased()]
+            } else {
+                row.icon = .mark("questionmark", .secondary)
+                parts = [account.error.map { clip(Fmt.sentence($0)) } ?? account.statusTitle]
+            }
         }
-        if let age { parts.append(age) }
-        return MenuItemSpec(title: account.displayName ?? "Default", subtitle: parts.compactMap { $0 }.joined(separator: " · "),
-                            badge: badge, symbol: symbol, tint: tint, submenu: details(account, now: now),
-                            help: account.id, id: account.id)
+        row.subtitle = parts.compactMap { $0 }.joined(separator: " · ")
+        return row
     }
 
-    /// "7h ago" for a stale reading or one older than half an hour; nil while it is fresh.
-    static func age(_ account: QuotaReport.Account, now: Date) -> String? {
-        guard let observed = account.observedAt else { return nil }
-        guard account.status == .stale || now.timeIntervalSince(observed) > agedAfter else { return nil }
-        return Fmt.ago(observed, now: now)
+    /// The account's label beside its provider's name, left out when it only repeats the provider.
+    static func label(_ account: QuotaReport.Account) -> String? {
+        guard var label = account.displayName?.trimmingCharacters(in: .whitespaces), !label.isEmpty else { return nil }
+        let provider = (account.providerName ?? account.provider).lowercased()
+        if label.lowercased().hasPrefix(provider + " ") { label = String(label.dropFirst(provider.count + 1)) }
+        return [provider, account.provider.lowercased()].contains(label.lowercased()) ? nil : Fmt.sentence(label)
     }
 
-    /// An account's submenu: every reported window, then its credits and details, as information items.
-    static func details(_ account: QuotaReport.Account, now: Date) -> [MenuEntry] {
+    /// "Gemini weekly" or "5-hour": a window's name as a short phrase.
+    static func windowName(_ window: QuotaReport.Window) -> String {
+        guard let pool = window.poolLabel else { return window.title }
+        return "\(pool) \(window.title.prefix(1).lowercased() + window.title.dropFirst())"
+    }
+
+    /// "checked 7h ago" for a reading older than half an hour; nil while it is fresh.
+    static func checked(_ account: QuotaReport.Account, now: Date) -> String? {
+        guard let observed = account.observedAt, now.timeIntervalSince(observed) > agedAfter else { return nil }
+        return "checked \(Fmt.ago(observed, now: now))"
+    }
+
+    /// An account's submenu: every reported window with its bar, then the details the row has no room for. The row
+    /// already shows the state, so it is not repeated here.
+    static func details(_ account: QuotaReport.Account, now: Date, alert: Double) -> [MenuEntry] {
         // A window the provider did not report is left out: missing never means 0%.
         let windows: [MenuEntry] = account.windows.filter { $0.usedPercent != nil }.map { window in
-            let expired = window.isExpired(now)
-            let fact = expired ? window.resetAt.map { "Reset since \(Fmt.moment($0, now: now))" }
-                : window.pace.state == "exhausted" ? "Exhausted · " + Fmt.back(window.resetAt, now: now)
-                : Fmt.resets(window.resetAt, now: now).map(Fmt.sentence)
-            let estimate = expired ? nil : Fmt.projection(window, now: now)
             let used = window.usedPercent ?? 0
-            return .item(MenuItemSpec(
-                title: window.fullTitle, subtitle: [fact, estimate].compactMap { $0 }.joined(separator: " · "),
-                badge: expired ? "–" : Fmt.used(window), symbol: MenuLabel.gauge(expired ? 0 : used),
-                tint: expired ? .secondary : window.pace.state == "exhausted" ? .red : .secondary, enabled: false,
-                help: window.resetAt.map { (expired ? "Reset " : "Resets ") + Fmt.exact($0) } ?? "Reset time not reported"))
+            if window.isExpired(now) {
+                return .window(WindowSpec(title: windowName(window), value: "–", fraction: nil, tint: .secondary,
+                                          caption: window.resetAt.map { "Reset since \(Fmt.moment($0, now: now))" }))
+            }
+            let exhausted = window.pace.state == "exhausted"
+            let reset = exhausted ? Fmt.sentence(Fmt.back(window.resetAt, now: now)) : resetsInFull(window.resetAt, now: now)
+            let tint: MenuTint = account.status == .stale || !window.setsState ? .secondary
+                : exhausted ? .red : used >= alert ? .orange : .green
+            return .window(WindowSpec(title: windowName(window), value: Fmt.used(window), fraction: min(used, 100) / 100,
+                                      tint: tint, caption: [reset, Fmt.projection(window, now: now)].compactMap { $0 }
+                                          .joined(separator: " · ")))
         }
-        let burn = account.isDrawing(now: now) ? account.creditBurnPerHour : nil
         let facts: [(String, String?)] = [
-            ("Status", account.statusTitle),
             ("Plan", account.planTitle),
-            ("Read", account.observedAt.map { Fmt.ago($0, now: now) }),
-            ("Identity", account.fingerprint),
+            ("Credits", account.creditBalance.map(credits)),
+            ("Banked resets", account.banked.map(banked)),
+            ("Checked", account.observedAt.map { Fmt.ago($0, now: now) }),
             ("Priority", account.priority.map { $0.formatted(.number.precision(.fractionLength(0))) }),
-            ("Credit balance", account.creditBalance),
+            ("Identity", account.fingerprint),
         ]
-        var info: [MenuEntry] = facts.compactMap { key, value in
-            value.map { .item(MenuItemSpec(title: key, badge: $0, enabled: false)) }
+        let info: [MenuEntry] = facts.compactMap { key, value in value.map { .fact(key, $0) } }
+        let notes: [MenuEntry] = [
+            account.note.map { .note(clip($0), nil) },
+            account.error.map { .note(clip(Fmt.sentence($0)), .orange) },
+            account.status == .stale && account.error == nil ? .note("Window reset since reading", nil) : nil,
+        ].compactMap { $0 }
+        return [windows, info, notes].filter { !$0.isEmpty }.reduce([]) { $0.isEmpty ? $1 : $0 + [.separator] + $1 }
+    }
+
+    /// "Resets in 3h 48m" within a day, otherwise the exact time, which the row has no room for.
+    static func resetsInFull(_ date: Date?, now: Date) -> String {
+        guard let date else { return "Reset time not reported" }
+        guard date > now else { return "Reset since \(Fmt.moment(date, now: now))" }
+        if date.timeIntervalSince(now) < 86_400, let remaining = Fmt.until(date, now: now) { return "Resets in \(remaining)" }
+        return "Resets \(Fmt.date(date)), \(date.formatted(date: .omitted, time: .shortened))"
+    }
+
+    /// "16,569" from the provider's decimal string; the string itself if it is not a number.
+    static func credits(_ balance: String) -> String {
+        guard let value = Double(balance) else { return balance }
+        return value >= 100 ? value.formatted(.number.precision(.fractionLength(0)))
+            : value.formatted(.number.precision(.fractionLength(0...2)))
+    }
+
+    /// "2 · soonest expires 3 Nov".
+    static func banked(_ resets: QuotaReport.Resets) -> String {
+        let lead = resets.expiresAt.count > 1 ? "soonest expires" : "expires"
+        return ["\(resets.available)", resets.expiresAt.first.map { "\(lead) \(Fmt.day($0))" }].compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
+    private static func mark(_ kind: Attention) -> String {
+        switch kind {
+        case .inputRequired: "questionmark"
+        case .failed: "xmark"
+        case .stalled: "pause.fill"
         }
-        let lines = account.credits.map { Fmt.credit($0, burn: burn) } + (account.banked.map { [Fmt.resets($0)] } ?? [])
-            + [account.note, account.error.map { "Error: " + clip($0) },
-               account.status == .stale && account.error == nil ? "Window reset since reading" : nil]
-                .compactMap { $0 }
-        info += lines.map { .item(MenuItemSpec(title: $0, enabled: false)) }
-        return (windows.isEmpty ? [] : [.header("Windows")] + windows + [.separator]) + [.header("Details")] + info
     }
 
     private static func tint(_ kind: Attention) -> MenuTint {
@@ -206,7 +288,7 @@ enum QuotaMenu {
         }
     }
 
-    /// A menu grows to its widest item, so free text is kept to one short line; the full text is in the tooltip.
+    /// A menu grows to its widest item, so free text is kept to one short line.
     static func clip(_ text: String, _ limit: Int = 60) -> String {
         let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         return line.count > limit ? line.prefix(limit - 1) + "…" : line
