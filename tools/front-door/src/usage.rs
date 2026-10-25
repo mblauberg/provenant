@@ -2,13 +2,12 @@
 use provenant_cli::{Globals, Stats};
 use provenant_core::Roots;
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::fs::{Directory, FsError, LockMode};
+use provenant_supervisor::fs::{Directory, LockMode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
     io::{Read, Write},
-    path::Path,
 };
 
 pub const EVENT_KINDS: &[&str] = &["cli.verb", "mcp.tool"];
@@ -38,25 +37,6 @@ pub fn selected_roots(globals: &Globals) -> Option<Roots> {
     };
     let assets = crate::roots::product_root().unwrap_or_else(|_| project.clone());
     crate::roots::roots(globals, &assets, &project).ok()
-}
-
-fn directory(path: &Path) -> Result<Directory, FsError> {
-    match Directory::open_anchor(path) {
-        Ok(directory) => Ok(directory),
-        Err(error) if error.is_not_found() => {
-            let Some((parent, name)) = path.parent().zip(path.file_name()) else {
-                return Err(error);
-            };
-            let parent = directory(parent)?;
-            match parent.mkdir(name, 0o700) {
-                Ok(()) => {}
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error),
-            }
-            parent.open_verified_directory(name)?.into_anchor()
-        }
-        Err(error) => Err(error),
-    }
 }
 
 fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
@@ -96,7 +76,8 @@ fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     if line.len() > LINE_CAP {
         return None;
     }
-    let directory = directory(roots.state.as_path()).ok()?;
+    // Counting never creates the state root: reads and help create no state.
+    let directory = Directory::open_anchor(roots.state.as_path()).ok()?;
     if rotate_log {
         let _ = rotate(&directory, line.len() as u64);
     }

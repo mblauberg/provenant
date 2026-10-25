@@ -127,7 +127,8 @@ an API-equivalent estimate, not a bill.
 
 ### Local demand counters
 
-The binary edge writes a best-effort `usage.jsonl` under the state root, shared
+The binary edge writes a best-effort `usage.jsonl` under an existing state root (it
+never creates one), shared
 by CLI completion and the Fabric MCP transport. Records have kind `cli.verb`
 or `mcp.tool`, the canonical verb or installed tool name (`unknown` for
 unrecognised tools), a timestamp, a duration in milliseconds, and the CLI exit

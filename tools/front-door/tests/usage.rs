@@ -1,11 +1,13 @@
 mod support;
 use serde_json::{Value, json};
-use std::{fs, path::Path};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 use support::{Result, TestRig, code, mcp::McpClient};
 
 #[test]
 fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
     let rig = TestRig::new()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
     let out = rig.command(&["output", "--id", "sensitive-argument", "--json"])?;
     assert_ne!(code(&out), 0);
     assert_eq!(code(&rig.command(&["root", "--json"])?), 0);

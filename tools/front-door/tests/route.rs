@@ -223,7 +223,15 @@ fn named_routes_are_read_only_and_fail_closed() -> Result {
     let resolved = call(&rig, &["route", "resolve", "--route", "review"], 0)?;
     assert_eq!(resolved["data"]["model"], "openrouter/vendor/exact");
     assert_eq!(fs::read_to_string(rig.state.join("config.toml"))?, config);
-    assert_eq!(fs::read_dir(&rig.state)?.count(), 1);
+    // Only the usage counter may appear beside the config.
+    let names = fs::read_dir(&rig.state)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert!(
+        names
+            .iter()
+            .all(|n| n == "config.toml" || n == "usage.jsonl")
+    );
     fs::write(rig.state.join("config.toml"), "schema_version=2\n")?;
     call(&rig, &["route", "list"], 2)?;
     fs::remove_file(rig.state.join("config.toml"))?;
