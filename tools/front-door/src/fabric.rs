@@ -1105,7 +1105,9 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
         RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
         RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
-        RunError::Conflict | RunError::OperationConflict => FacadeError::Conflict,
+        RunError::Conflict | RunError::OperationConflict | RunError::Nonterminal => {
+            FacadeError::Conflict
+        }
         RunError::Cancelled => FacadeError::Cancelled,
         RunError::Validation(_) | RunError::Decode(_) | RunError::ArtifactMismatch => {
             FacadeError::StateCorrupt
@@ -1125,8 +1127,15 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         "CONFLICT" | "OPERATION_CONFLICT" | "NONTERMINAL" => FacadeError::Conflict,
         "CANCELLED" => FacadeError::Cancelled,
         "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
-        "UNSUPPORTED" => FacadeError::ContinuationUnsupported,
+        "UNSUPPORTED" => FacadeError::ConfinementRefused,
         _ => FacadeError::Io,
+    }
+}
+/// A resume refusal of `UNSUPPORTED` comes from `check_continuable`.
+fn resume_fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
+    match fail.code {
+        "UNSUPPORTED" => FacadeError::ContinuationUnsupported,
+        _ => fail_error(fail),
     }
 }
 impl BinaryRunOwner<'_> {
@@ -1174,6 +1183,13 @@ impl BinaryRunOwner<'_> {
         &self,
         action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> Result<T, provenant_cli::run::Fail>,
     ) -> Result<T, FacadeError> {
+        self.with_edge_as(fail_error, action)
+    }
+    fn with_edge_as<T>(
+        &self,
+        map: fn(provenant_cli::run::Fail) -> FacadeError,
+        action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> Result<T, provenant_cli::run::Fail>,
+    ) -> Result<T, FacadeError> {
         let assets = crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?;
         action(&provenant_cli::run::Edge {
             roots: &self.factory.context.roots,
@@ -1181,7 +1197,7 @@ impl BinaryRunOwner<'_> {
             assets: &assets,
             cwd: &self.factory.cwd,
         })
-        .map_err(fail_error)
+        .map_err(map)
     }
     /// The attempts of a run this owner just accepted or continued.
     fn receipt(
@@ -1936,7 +1952,7 @@ impl BinaryRunOwner<'_> {
                 }
                 let session = self.session(budget, cancel)?;
                 let call = self.call(budget, cancel);
-                let (run, started) = self.with_edge(|edge| {
+                let (run, started) = self.with_edge_as(resume_fail_error, |edge| {
                     provenant_cli::run::continue_attempt(
                         &session,
                         edge,
@@ -2647,6 +2663,47 @@ pub fn events(
 }
 #[cfg(test)]
 mod peer_tests {
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
+    fn fail(code: &'static str) -> provenant_cli::run::Fail {
+        provenant_cli::run::Fail {
+            status: provenant_records::Outcome::Refused,
+            code,
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn unsupported_is_continuation_only_on_resume() {
+        assert!(matches!(
+            super::resume_fail_error(fail("UNSUPPORTED")),
+            super::FacadeError::ContinuationUnsupported
+        ));
+        assert!(matches!(
+            super::fail_error(fail("UNSUPPORTED")),
+            super::FacadeError::ConfinementRefused
+        ));
+    }
+
+    #[test]
+    fn resume_mapper_defers_other_codes() {
+        assert!(matches!(
+            super::resume_fail_error(fail("NONTERMINAL")),
+            super::FacadeError::Conflict
+        ));
+        assert!(matches!(
+            super::resume_fail_error(fail("NOT_FOUND")),
+            super::FacadeError::NotFound
+        ));
+    }
+
+    #[test]
+    fn nonterminal_run_error_is_conflict() {
+        assert!(matches!(
+            super::run_error(provenant_run::RunError::Nonterminal),
+            super::FacadeError::Conflict
+        ));
+    }
+
     #[test]
     fn peer_refusal_codes_keep_their_facade_meaning() {
         for code in [

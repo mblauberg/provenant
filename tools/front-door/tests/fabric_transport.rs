@@ -2075,9 +2075,16 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
         );
     } else {
         // Confined launch is macOS-only, so the peer rejects before any
-        // output exists; the read is still the peer's, not a local miss.
+        // output exists. The peer's nonterminal refusal maps to a conflict,
+        // and the read is still the peer's, not a local miss.
         assert_eq!(lane["state"], "rejected", "{placed}");
-        assert_eq!(stderr["error"]["code"], "PEER", "{stderr}");
+        assert_eq!(stderr["error"]["code"], "CONFLICT", "{stderr}");
+        assert!(
+            stderr["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("peer:")),
+            "{stderr}"
+        );
     }
     let (status, tail) = json_command(&rig, &["output", &target, "--tail", "5", "--json"])?;
     assert_ne!(status, 0);
