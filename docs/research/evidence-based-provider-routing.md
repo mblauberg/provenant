@@ -5,7 +5,7 @@ Status: Durable research reference
 Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
 
 Normative owners: evidence and review; provider actions and adapters; the
-[harness route and topology evidence boundary](../specs/harness/lifecycle.md#route-and-topology-evidence-boundary);
+[harness route and topology evidence boundary](../specs/workflow.md#route-and-topology-evidence-boundary);
 the activation capability contract; review-bundle custody; and operational
 observation.
 

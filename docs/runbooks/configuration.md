@@ -11,9 +11,39 @@ Profiles are `balanced`, `economy` and `rigorous`; task-class presets include
 `provenant config show --task-class mechanical` and override a wired knob for
 one run with `provenant dispatch --knob NAME=VALUE`.
 
+## Precedence and stamps
+
+The header requires `schema_version = 1`. `profile` selects `balanced`,
+`economy` or `rigorous`, and a missing file selects defaults; a malformed or
+unsupported file fails. Knob overrides live in a `[knobs]` table:
+
+```toml
+schema_version = 1
+profile = "economy"
+```
+
+A knob in `[knobs]` wins over the profile preset, which wins over the registry
+default. There is no project JSON overlay or `PROVENANT_KNOB_*` environment
+layer. `config set|unset|show` read and write this file, and `config show
+[--task-class NAME]` reports each value and its source. Dispatch accepts
+repeated `--knob NAME=VALUE`, and `fabric_submit` accepts `knobs:
+["NAME=VALUE"]`; these validated overrides win over configuration and
+task-class presets. Each sealed task and attempt records the profile name,
+task class, effective knob values and exact dispatch overrides, and
+continuations keep that stamp.
+
+Batch concurrency resolves `lanes.max_concurrency` from the base profile, so
+task-class values do not apply. The registry default is 8, and an explicit
+`--concurrency N` or Fabric `concurrency` wins.
+
+## Knob registry
+
 `config/harness-knobs.json` owns the workflow knob registry and presets.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
-are not a second source for the workflow knob values.
+are not a second source for the workflow knob values. The binary embeds the
+registry at build time and `config set` validates against it. Skill-read knobs
+(review, repair, council, writing and summary policy) take effect when the
+skill reads `provenant config show`.
 
 The registry marks these knobs `wired`: `chair.auto_switch`,
 `chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,

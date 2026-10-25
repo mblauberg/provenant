@@ -4,7 +4,7 @@
 
 **Amends:** [ADR 0020](0020-retire-the-daemon-fabric.md) and [ADR
 0022](0022-thin-fabric-mcp-execution-facade.md). Requirements:
-[Fabric across the user's own hosts](../specs/fabric-hosts.md).
+[Fabric across the user's own hosts](https://github.com/mblauberg/provenant/blob/577cfe3f/docs/specs/fabric-hosts.md).
 
 ## Context
 

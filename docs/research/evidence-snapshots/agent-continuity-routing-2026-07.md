@@ -3,7 +3,7 @@
 Status: Dated pre-ADR-0020 descriptive evidence; not implementation authority
 
 Current owners: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md),
-[Fabric Rust design](../../specs/rust-port/design/fabric.md),
+[Fabric Rust design](../../specs/fabric.md),
 [provider recordings](../../../tools/front-door/tests/fixtures/providers/README.md),
 and [`HARNESS.md`](../../../HARNESS.md). Daemon and Console references below
 are retained as evidence, not current paths.
@@ -66,7 +66,7 @@ for the subjects cited here are:
 | Persistence | Persistence |
 | Route and review evidence | Evidence and review and review custody |
 | Provider actions, activation and wire | Provider actions and adapters, activation and daemon and wire |
-| Harness lifecycle and skill routing | [Harness lifecycle](../../specs/harness/lifecycle.md) |
+| Harness lifecycle and skill routing | [Workflow](../../specs/workflow.md) |
 
 Later numeric labels 01–05 and their section numbers are provenance keys, not
 live paths. The old `thread/compacted` claim remains a dated compatibility lead

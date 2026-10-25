@@ -2,7 +2,7 @@
 
 > Legacy source references below describe the pre-rewrite implementation.
 > Use `provenant help` for current Rust commands and the accepted
-> [Rust designs](../specs/rust-port/design/README.md) for owners.
+> [Rust designs](../specs/README.md) for owners.
 
 Acceptance policy note (21 October 2026): historical references below to a
 mandatory final human gate describe the policy at the recorded revision.

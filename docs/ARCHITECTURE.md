@@ -83,7 +83,7 @@ Fabric MCP reaches the same run service as the CLI through the Fabric runtime.
 Confined lanes run through `confinement` and `supervisor`; the CLI never grants
 a lane more than its access plan. The menu bar app reads the CLI's reports and
 never reads credentials. The subsystem contracts are in the
-[Rust design index](specs/rust-port/design/README.md).
+[specifications](specs/README.md).
 
 ## Lifecycle and user gates
 
