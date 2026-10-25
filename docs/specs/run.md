@@ -109,14 +109,16 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
     provider-state/            # retained provider history; no credentials
     quarantine/                # retained patches and blobs
-    scratch/                   # disposable launch staging only
+    scratch/                   # account probe staging; unknown contents retained
     tmp/                       # attempt-private temporary data, mode 0700
 ```
 
 The supervisor file names inside an attempt directory are the run and
 supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
 Structured events live in SQLite, and provider parsing uses the live stream, not
-a second copy. Empty generated `scratch/` is deleted at settlement; unknown
+a second copy. Writer and read-only lanes stage provider temporary files in
+`tmp/candidate-N`, with a separate directory for each fallback candidate.
+Empty generated `scratch/` is deleted at settlement; unknown
 contents, history and transcripts stay retained. Terminal commit also attempts
 best-effort removal of attempt-private `tmp/`. `reconcile` includes terminal
 attempts and retries only when no reservation remains, using directory-relative,

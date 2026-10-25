@@ -136,8 +136,8 @@ pub(crate) fn admit(
     Ok((access, session))
 }
 
-/// Minimal environment: the user's identity, a fixed search path and the
-/// attempt's scratch as temporary directory. Callers append provider keys.
+/// Minimal environment: the user's identity, a fixed search path and TMPDIR
+/// under the attempt's private tmp directory. Callers append provider keys.
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,

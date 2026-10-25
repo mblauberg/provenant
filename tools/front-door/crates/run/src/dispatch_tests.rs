@@ -1095,6 +1095,58 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     Ok(())
 }
 
+#[test]
+fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> TestResult {
+    for withdrawn in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let mut run = input();
+        run.request.tasks[0].writer = Some(WriterRequest {
+            project: temp.path().join("checkout"),
+            worktree: temp.path().join("checkout/.worktrees/lane"),
+        });
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let scratch = artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
+        let temporary = store.temporary_path(id, &call)?;
+        let candidate = temporary.join("candidate-0");
+        std::fs::create_dir(&candidate)?;
+        std::fs::write(candidate.join("provider.tmp"), "discard")?;
+        if withdrawn {
+            store.withdraw(
+                id,
+                AttemptState::Queued,
+                Outcome::Cancelled,
+                "cancelled before start",
+                WallTime::from_micros(150)?,
+                &call,
+            )?;
+        } else {
+            let observed = exit();
+            seal_exit(&store, &observed)?;
+            store.publish_terminal(id, 1, &super::tests::publication(), &observed, &call)?;
+        }
+        // The launch/guardian settlement edge removes empty probe staging.
+        drop(scratch);
+        crate::writer::settle_launch_staging(&attempt)?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
+        assert!(
+            attempt
+                .metadata_at(std::ffi::OsStr::new("scratch"), false)
+                .is_err_and(|e| e.is_not_found())
+        );
+        assert!(!temporary.exists());
+    }
+    Ok(())
+}
+
 fn terminal(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<Outcome> {
     match store.record(id, call)?.state {
         AttemptState::Terminal { outcome, .. } => Ok(outcome),
@@ -1685,11 +1737,17 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let call = call(&clock, &cancel);
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
-    let run = input();
+    let mut run = input();
+    run.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("checkout/.worktrees/lane"),
+    });
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
     let temporary = store.temporary_path(id, &call)?;
-    std::fs::write(temporary.join("keep.lock"), "keep")?;
+    let candidate = temporary.join("candidate-0");
+    std::fs::create_dir(&candidate)?;
+    std::fs::write(candidate.join("x.lock"), "keep")?;
     store.mark_starting(id, &route(), &[], None, &call)?;
     let custody = context
         .state_root
@@ -1698,7 +1756,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
         .join(context.project_id.to_string())
         .join("lane");
     std::fs::create_dir_all(&custody)?;
-    let _held = provenant_supervisor::fixture::acquire_writer(
+    let held = provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         RunStore::scope(&store.record(id, &call)?),
         call.budget,
@@ -1713,8 +1771,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
         WallTime::from_micros(150)?,
         &call,
     )?;
-    let temporary = store.temporary_path(id, &call)?;
-    std::fs::write(temporary.join("keep"), "keep")?;
+    assert_eq!(std::fs::read_to_string(candidate.join("x.lock"))?, "keep");
     // An unreadable sibling must not hide this attempt's readable reservation.
     let corrupt = custody.with_file_name("corrupt");
     std::fs::create_dir_all(&corrupt)?;
@@ -1725,7 +1782,27 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
         [(attempt, Reconciled::Uncertain { reason })]
         if *attempt == id && reason.contains("writer reservation retained"))
     );
-    assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "keep");
+    assert_eq!(std::fs::read_to_string(candidate.join("x.lock"))?, "keep");
+    // Reconcile can withdraw the prepared reservation after its lock is released.
+    drop(held);
+    assert!(matches!(
+        store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
+        [(attempt, Reconciled::Withdrawn)] if *attempt == id
+    ));
+    assert!(store.writer_fences()?.is_empty());
+    assert!(candidate.join("x.lock").exists());
+    // The unreadable sibling remains a separate barrier until removed.
+    assert!(matches!(
+        store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
+        [(attempt, Reconciled::TemporaryRetained { .. })] if *attempt == id
+    ));
+    assert!(candidate.join("x.lock").exists());
+    std::fs::remove_file(corrupt.join("reservation.json"))?;
+    assert_eq!(
+        store.reconcile(run.run_id, &Fake::default(), &call)?,
+        vec![(id, Reconciled::TemporaryRemoved)]
+    );
+    assert!(!temporary.exists());
     Ok(())
 }
 

@@ -26,6 +26,9 @@ worktrees keep per-lane targets (`provenant worktree remove` and
 `provenant gc` prune the lane caches), because a target shared across
 worktrees can run another checkout's stale test binaries.
 
+A writer's `TMPDIR` lives in the attempt's `tmp/candidate-N`, which terminal
+commit and unreserved reconciliation collect. Account probes still use `scratch/`.
+
 A writer can exec build scripts and other binaries under its write roots
 (`--write-root DIR` or `writer_writes`), but not in scratch, its `TMPDIR` or
 other state it can write. An env var alone grants nothing, and the lane then

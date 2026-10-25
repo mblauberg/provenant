@@ -54,8 +54,10 @@ provenant worktree remove --merged --integration OID --since PRE_MERGE_OID
 
 The integration OID and scope prevent a hook from sweeping unrelated branches.
 Install owns fixture-backed hook registration; merged pruning is an explicit
-worktree operation. Guardian settlement owns classified scratch cleanup;
-retained history stays on disk.
+worktree operation. Writer temporary files live in the attempt's `tmp/candidate-N`;
+terminal commit attempts removal, and reconciliation retries once no reservation
+remains. Guardian settlement removes empty `scratch/`; unknown scratch contents
+and retained history stay on disk.
 
 Never share `CARGO_TARGET_DIR` across worktrees. Confined writers use
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical
