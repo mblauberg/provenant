@@ -1,7 +1,7 @@
 # Model routing
 
 Run `provenant route list` to inspect the catalogue, effective pool weights,
-pacing factors and cached availability. Use `provenant --json route list` for
+and pacing factors. Use `provenant --json route list` for
 records, `--adapter NAME` to narrow it, or `--pool NAME` for one pool. Resolve a pool with
 `provenant route resolve --route NAME`, or select an exact model with
 `--model ADAPTER/ID` and optional `--effort LEVEL`.

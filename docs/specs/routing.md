@@ -22,8 +22,8 @@ effect.
 
 ## Boundaries
 
-- Routing never starts a process. `route list` and `route resolve` read cached
-  catalogue, availability and quota snapshots.
+- Routing never starts a process. `route list` and `route resolve` read the
+  bundled catalogue and cached quota snapshots.
 - Providers never signal a process or publish run completion. Terminal answer
   and process exit are separate facts.
 - Quota never imports providers. The binary injects the providers' registry of
@@ -112,7 +112,7 @@ the flag lists.
 
 | Command | Behaviour |
 | --- | --- |
-| `route list` | Catalogue revision, exact models and efforts, pools with weight, factor, pacing and readiness, and cached availability with reason and age. No probe. |
+| `route list` | Catalogue revision, exact models and efforts, pools with weight, factor, pacing and readiness. No probe. |
 | `route resolve` | Pure preview of one `--model` or `--route`, with `--effort`, `--fallback`, `--confidential` and `--allow-free`. No admission or state mutation. Dispatch uses the same fields. |
 | `route set`, `remove`, `reset`, `pacing` | Edit user pool overrides in `config.toml`: add or update a member (weight 0 to 100, effort), remove one, restore a bundled pool, set a provider's pacing policy. |
 | `quota show` | Cached windows, reset, source, age and coverage. No refresh. |
@@ -135,7 +135,6 @@ closed. Every adapter with a launch form is enabled by default.
 
 | Path under the state root | Contents |
 | --- | --- |
-| `routing/availability/<adapter>.json` | Executable and version evidence, exact observed IDs, catalogue revision, account label, observation and expiry, last preflight error. |
 | `quota/<account-key>/<adapter>.json` | Last good windows, source and observation time, scoped refusals, refresh revision, claim and deadline, backoff. Account keys are opaque and host-local. |
 | `quota/report.json` | Current account rows, coverage, generated time, refreshing IDs, next due. No ledger or history. |
 

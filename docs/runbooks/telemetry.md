@@ -52,5 +52,5 @@ permission to stop a healthy provider.
 
 ## Routing
 
-`provenant route list` shows cached availability. Select a route or exact model
+`provenant route list` shows the catalogue and pools. Select a route or exact model
 on dispatch and retain the resolved route from the attempt record.

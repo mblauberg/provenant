@@ -740,7 +740,6 @@ fn observe_account(
         catalogue_revision: catalogue_revision.into(),
         account_key: Some(entry.key.clone()),
         observed_models: Vec::new(),
-        last_preflight_error: None,
         observed_unix_seconds: timestamp,
         expires_unix_seconds: timestamp.saturating_add(300),
     })

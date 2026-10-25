@@ -65,10 +65,6 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     call(&rig, &["route", "--help"], 0)?;
     let listed = call(&rig, &["route", "list", "--adapter", "opencode"], 0)?;
     assert_eq!(listed["command"], "route list");
-    assert_eq!(
-        listed["data"]["availability"][0]["reason"],
-        "unknown_availability"
-    );
     assert!(
         listed["data"]["models"]
             .as_array()
@@ -219,7 +215,7 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
 }
 
 #[test]
-fn named_routes_and_cached_availability_are_read_only_and_fail_closed() -> Result {
+fn named_routes_are_read_only_and_fail_closed() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
     let config = "schema_version=1\n[domains.routing.routes.review]\nmodel='opencode/openrouter/vendor/exact'\n";
@@ -235,31 +231,6 @@ fn named_routes_and_cached_availability_are_read_only_and_fail_closed() -> Resul
     call(&rig, &["route", "list"], 3)?;
     fs::remove_file(rig.state.join("config.toml"))?;
     fs::write(rig.state.join("config.toml"), config)?;
-    let cache = rig.state.join("routing/availability");
-    fs::create_dir_all(&cache)?;
-    let record = serde_json::json!({"schema_version":1,"adapter":"codex","executable":"/fixture/codex","version":"fixture","fixture_ref":"recording","catalogue_revision":"route-pools-20261025-v2","account_key":"opaque-account","observed_models":["exact"],"last_preflight_error":null,"observed_unix_seconds":1,"expires_unix_seconds":2});
-    let bytes = serde_json::to_vec(&record)?;
-    fs::write(cache.join("codex.json"), &bytes)?;
-    let listed = call(&rig, &["route", "list", "--adapter", "codex"], 0)?;
-    assert!(listed["data"]["availability"][0]["age_seconds"].is_u64());
-    assert_eq!(
-        listed["data"]["availability"][0]["record"]["account_key"],
-        "opaque-account"
-    );
-    assert_eq!(fs::read(cache.join("codex.json"))?, bytes);
-    let mut diagnostic = record.clone();
-    diagnostic["last_preflight_error"] = "secret-bearing-provider-diagnostic".into();
-    fs::write(cache.join("codex.json"), serde_json::to_vec(&diagnostic)?)?;
-    let rejected = call(&rig, &["route", "list"], 2)?;
-    assert!(!serde_json::to_string(&rejected)?.contains("secret-bearing-provider-diagnostic"));
-    fs::write(
-        cache.join("codex.json"),
-        "{\"schema_version\":1,\"schema_version\":1}",
-    )?;
-    call(&rig, &["route", "list"], 2)?;
-    fs::remove_file(cache.join("codex.json"))?;
-    std::os::unix::fs::symlink(rig.root.join("foreign"), cache.join("codex.json"))?;
-    call(&rig, &["route", "list"], 3)?;
     Ok(())
 }
 #[test]
@@ -305,27 +276,5 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
         call(&rig, &args, 2)?;
     }
     assert!(!rig.state.exists());
-    Ok(())
-}
-
-#[test]
-fn large_cached_observation_sets_have_a_compact_bounded_projection() -> Result {
-    let rig = rig()?;
-    let cache = rig.state.join("routing/availability");
-    fs::create_dir_all(&cache)?;
-    for adapter in ["codex", "claude", "cursor", "agy", "opencode"] {
-        let record = serde_json::json!({"schema_version":1,"adapter":adapter,"executable":"/fixture/provider","version":"fixture","fixture_ref":"recording","catalogue_revision":"route-pools-20261025-v2","account_key":"opaque-account","observed_models":vec!["\"".repeat(512); 256],"last_preflight_error":null,"observed_unix_seconds":1,"expires_unix_seconds":2});
-        fs::write(
-            cache.join(format!("{adapter}.json")),
-            serde_json::to_vec(&record)?,
-        )?;
-    }
-    let listed = call(&rig, &["route", "list"], 0)?;
-    for row in listed["data"]["availability"]
-        .as_array()
-        .ok_or("availability")?
-    {
-        assert_eq!(row["record"]["observed_model_count"], 256);
-    }
     Ok(())
 }

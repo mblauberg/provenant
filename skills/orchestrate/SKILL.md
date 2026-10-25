@@ -8,7 +8,7 @@ description: "Use to coordinate bounded work across agents, research lanes or in
 ## Quickstart
 
 1. [Native first](references/routing-and-tiers.md#native-first): use native subagents for your own provider when the native tool supports the work. Claude callers use native Claude subagents; Claude models remain in the route pools for non-Claude chairs. Use Fabric for other providers, detached work and sandboxed worktree writers.
-2. Call `fabric_submit` with its `submission` operation; each task has one route choice. Use `provenant route list --adapter <id>` to inspect model ids, pool membership and cached availability.
+2. Call `fabric_submit` with its `submission` operation; each task has one route choice. Use `provenant route list --adapter <id>` to inspect model ids and pool membership.
 3. For a graph workflow, use `fabric_graph` with `op: run|status|cancel|resume`; pass the project-local graph document path to `run` and `resume`, and its `id` to `status` and `cancel`.
 4. For writers, pass `access: "worktree_write"` and the registered `worktree`
    as an absolute path or relative to the selected repository's primary root,
