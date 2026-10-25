@@ -1368,12 +1368,18 @@ pub fn writer_fixture_plan(
     writer: &run::WriterLaunch,
     assets: &Path,
 ) -> Result<ConfinedPlan, String> {
+    let scratch = paths.temporary.join("candidate-0");
+    apply_setup(
+        &[SetupStep::CreateDir(scratch.clone())],
+        &[&paths.temporary],
+        None,
+    )?;
     let request = confinement_request(
         project,
         ConfinementRoots {
             cwd,
             home,
-            scratch: &paths.scratch,
+            scratch: &scratch,
             private_state: &paths.provider_state,
             assets,
         },
@@ -1423,7 +1429,11 @@ mod tests {
             exec::{ExecOptions, Executor, SystemExecutor, Termination},
             fs::{LocalFs, SafeFs},
         };
-        use std::{os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
+        use std::{
+            os::unix::fs::{DirBuilderExt, PermissionsExt},
+            sync::Arc,
+            time::Duration,
+        };
 
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
@@ -1509,8 +1519,12 @@ mod tests {
             },
             &cancel,
         )?;
-        // Cursor's local account needs only --version. Git stands in for that
-        // executable boundary; this test prepares a plan without launching it.
+        // Cursor's local account needs only --version. Keep its executable
+        // inside the fixture assets, independent of host packages and PATH.
+        let executable = assets.join("cursor/bin/agent");
+        std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
+        std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
         let attempt = state.join("attempt");
         let paths = run::LaunchPaths {
             attempt_id: AttemptId::from_bytes([1; 16]),
@@ -1564,13 +1578,19 @@ mod tests {
             None,
             |adapter| {
                 if adapter == "cursor" {
-                    Ok(git.clone())
+                    Ok(executable.clone())
                 } else {
                     Err("unavailable".into())
                 }
             },
             None,
         )?;
+        assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
+        assert_eq!(
+            launch.route.model.as_deref(),
+            Some("cursor/gpt-5.3-codex-low")
+        );
+        assert_eq!(launch.argv[0], executable.as_os_str());
         let confinement = launch.confinement.ok_or("writer confinement missing")?;
         assert!(confinement.writer.is_some());
         assert_eq!(

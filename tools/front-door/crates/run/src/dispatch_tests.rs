@@ -931,7 +931,8 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     assert!(prompt.contains(&path.join("result.md").display().to_string()));
     assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
     assert!(prompt.contains("only durable outputs"));
-    assert!(prompt.contains("deleted"));
+    assert!(prompt.contains("Files in $TMPDIR are discarded when the attempt ends."));
+    assert!(prompt.contains("Provider history is kept."));
     assert!(prompt.ends_with("exact prompt"));
     let fact = store.attempt(run.attempts[0].attempt_id, &call)?;
     assert_eq!(
