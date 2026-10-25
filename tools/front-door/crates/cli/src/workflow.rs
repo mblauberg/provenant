@@ -76,6 +76,61 @@ pub enum Session {
         /// Session ID
         session_id: String,
     },
+    /// Hand this session to a fresh Claude session on a peer host
+    #[command(long_about = HANDOFF_ABOUT)]
+    Handoff(Box<Handoff>),
+}
+const HANDOFF_ABOUT: &str = "Hand this chair or task session to a fresh Claude session on a peer \
+Fabric host. The peer gets a generated prompt, not the transcript: the session checkpoint, each \
+branch with its pushed commit, the lanes still running here and any notes. The peer checks the \
+account against its own registrations, recreates each branch's worktree from origin, stores the \
+prompt and opens Terminal running `claude` under that account.
+
+Worktrees must be clean and pushed. --wip commits and pushes them first; --allow-dirty proceeds \
+and lists them in the prompt. --dry-run prints the prompt and plan and sends nothing.";
+/// `workflow session handoff`. The binary composes it: it needs worktree and
+/// peer owners that this crate does not hold.
+#[derive(Debug, Args)]
+pub struct Handoff {
+    /// Peer host, by label or host ID
+    #[arg(long)]
+    pub to: String,
+    /// Registered Claude account on the peer
+    #[arg(long)]
+    pub account: String,
+    /// Add a line to the prompt (repeatable)
+    #[arg(long = "note", value_name = "TEXT")]
+    pub notes: Vec<String>,
+    /// Send this file with the prompt (repeatable; 512 KiB in total)
+    #[arg(long = "attach", value_name = "PATH")]
+    pub attachments: Vec<std::path::PathBuf>,
+    /// Use this Markdown file as the prompt body instead of the generated one
+    #[arg(long, value_name = "PATH")]
+    pub prompt_file: Option<std::path::PathBuf>,
+    /// Neither read nor save the session checkpoint
+    #[arg(long)]
+    pub no_checkpoint: bool,
+    /// Provider for the new session; only `claude` is supported
+    #[arg(long, default_value = "claude")]
+    pub provider: String,
+    /// Model for the new session
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Commit and push dirty or unpushed worktrees as WIP first
+    #[arg(long, conflicts_with = "allow_dirty")]
+    pub wip: bool,
+    /// Proceed with dirty or unpushed worktrees and list them in the prompt
+    #[arg(long)]
+    pub allow_dirty: bool,
+    /// Print the prompt and plan without sending anything
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Deliver everything but do not open Terminal on the peer
+    #[arg(long)]
+    pub no_launch: bool,
+    /// Source session ID; defaults to CLAUDE_CODE_SESSION_ID, then CLAUDE_SESSION_ID
+    #[arg(long)]
+    pub session_id: Option<String>,
 }
 impl Workflow {
     pub fn path(&self) -> &'static str {
@@ -85,6 +140,7 @@ impl Workflow {
             Self::Receipt(Receipt::Save { .. }) => "workflow receipt save",
             Self::Session(Session::Save { .. }) => "workflow session save",
             Self::Session(Session::Show { .. }) => "workflow session show",
+            Self::Session(Session::Handoff(_)) => "workflow session handoff",
         }
     }
     fn read_only(&self) -> bool {
@@ -371,6 +427,9 @@ fn execute(
                 .ok_or(Error::Missing)?;
             Ok(serde_json::to_value(checkpoint).map_err(|e| invalid(e.to_string()))?)
         }
+        Workflow::Session(Session::Handoff(_)) => Err(invalid(
+            "workflow session handoff is composed by the provenant binary",
+        )),
     }
 }
 fn save(

@@ -5,6 +5,7 @@ mod checks;
 #[cfg(test)]
 mod compose_tests;
 mod fabric;
+mod handoff;
 mod hooks;
 mod hosts;
 mod install;
@@ -444,6 +445,9 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 ),
             }
         }
+        Command::Workflow(provenant_cli::Workflow::Session(
+            provenant_cli::workflow::Session::Handoff(args),
+        )) => handoff::run(*args, globals),
         Command::Workflow(cmd) => {
             let resolved = (|| -> Result<_, roots::RootError> {
                 let assets = roots::product_root()?;

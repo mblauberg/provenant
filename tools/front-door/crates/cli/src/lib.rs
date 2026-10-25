@@ -629,6 +629,55 @@ mod tests {
         invalid(&["lanes", "--host", "workshop", "--cursor", "1"]);
     }
     #[test]
+    fn session_handoff_names_a_peer_and_an_account() {
+        valid(&[
+            "workflow",
+            "session",
+            "handoff",
+            "--to",
+            "workshop",
+            "--account",
+            "work",
+        ]);
+        valid(&[
+            "workflow",
+            "session",
+            "handoff",
+            "--to",
+            "workshop",
+            "--account",
+            "work",
+            "--note",
+            "one",
+            "--note",
+            "two",
+            "--attach",
+            "a.md",
+            "--prompt-file",
+            "p.md",
+            "--no-checkpoint",
+            "--model",
+            "opus",
+            "--wip",
+            "--dry-run",
+            "--no-launch",
+            "--session-id",
+            "explicit",
+        ]);
+        invalid(&["workflow", "session", "handoff", "--to", "workshop"]);
+        invalid(&[
+            "workflow",
+            "session",
+            "handoff",
+            "--to",
+            "w",
+            "--account",
+            "a",
+            "--wip",
+            "--allow-dirty",
+        ]);
+    }
+    #[test]
     fn manifest_and_writer_authority_do_not_mix() {
         valid(&[
             "route",

@@ -542,6 +542,19 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 None,
                 PeerResult::RunStatuses,
             ),
+            PeerAction::SessionHandoff { input } => {
+                PeerResult::SessionHandoff(crate::handoff::receive(
+                    &crate::handoff::Target {
+                        context,
+                        cwd: &cwd,
+                        source: request.source_host,
+                        clock: &clock,
+                        budget,
+                    },
+                    input,
+                    &crate::handoff::Terminal,
+                ))
+            }
             PeerAction::Health => PeerResult::Health(HostHealth {
                 host: context.identity.host,
                 available: true,
@@ -921,7 +934,7 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
 
 /// Git variables that would redirect a fetch away from the peer's clone or
 /// let it prompt.
-const GIT_REDIRECTS: &[&str] = &[
+pub(crate) const GIT_REDIRECTS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -941,6 +954,16 @@ fn fetch_remote_base(
     project: &Path,
     base: &str,
     timeout: std::time::Duration,
+) -> Result<provenant_core::GitOid, FacadeError> {
+    remote_base(project, base, timeout, true)
+}
+/// [`fetch_remote_base`], skipping the fetch when `fetch` is false so a caller
+/// pinning several bases fetches once.
+pub(crate) fn remote_base(
+    project: &Path,
+    base: &str,
+    timeout: std::time::Duration,
+    fetch: bool,
 ) -> Result<provenant_core::GitOid, FacadeError> {
     use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
     let git = crate::roots::git_binary().ok_or(FacadeError::OwnerUnavailable)?;
@@ -976,7 +999,9 @@ fn fetch_remote_base(
         }
         Ok(output.stdout.bytes)
     };
-    git_output(&["fetch", "--all", "--no-tags", "--no-recurse-submodules"])?;
+    if fetch {
+        git_output(&["fetch", "--all", "--no-tags", "--no-recurse-submodules"])?;
+    }
     let contains = format!("--contains={base}");
     let refs = git_output(&[
         "for-each-ref",

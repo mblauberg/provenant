@@ -236,6 +236,10 @@ pub enum PeerAction {
         all: bool,
         limit: u16,
     },
+    /// Start a fresh session on the peer from a hand-off prompt.
+    SessionHandoff {
+        input: Box<crate::handoff::SessionHandoff>,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -252,6 +256,7 @@ impl PeerRequest {
         match &self.action {
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
             PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
+            PeerAction::SessionHandoff { input } => Some(input.operation_id.clone()),
             PeerAction::Submit {
                 input: facade::SubmitInput::Submission { operation_id, .. },
             }
@@ -318,6 +323,7 @@ pub enum PeerResult {
     Push(provenant_fabric_store::PushOperation),
     Health(HostHealth),
     Coordination(CoordinationResult),
+    SessionHandoff(crate::handoff::HandoffReceipt),
     Error {
         code: String,
         operation_id: Option<OperationId>,
@@ -596,6 +602,83 @@ mod tests {
             Some(operation)
         );
         assert!(request.project.resolve(Path::new("/home/b")).is_ok());
+    }
+
+    #[test]
+    fn session_handoff_fits_one_frame_and_keeps_its_operation_on_a_lost_reply() {
+        use crate::handoff::{
+            ATTACHMENT_LIMIT, Attachment, PROMPT_LIMIT, SessionHandoff, encode_base64,
+        };
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let local = HostId::from_bytes([1; 16]);
+        let host = HostId::from_bytes([2; 16]);
+        let operation = OperationId::parse("handoff-1").unwrap();
+        // The largest hand-off: a full prompt of characters JSON escapes and
+        // the whole attachment allowance.
+        let input = SessionHandoff {
+            operation_id: operation.clone(),
+            account: "work".into(),
+            model: None,
+            prompt: "\"".repeat(PROMPT_LIMIT),
+            branches: (0..64).map(|i| format!("feat/branch-{i}")).collect(),
+            attachments: vec![Attachment {
+                name: "bundle.bin".into(),
+                base64: encode_base64(&vec![0xff; ATTACHMENT_LIMIT]),
+            }],
+            launch: false,
+        };
+        input.validate().unwrap();
+        let request = PeerRequest {
+            version: 1,
+            target_host: host,
+            source_host: local,
+            agent: "chair".into(),
+            project: ProjectLocator {
+                key: CrossHostProjectKey::from_home(
+                    Path::new("/home/a"),
+                    Path::new("/home/a/repo/.git"),
+                )
+                .unwrap(),
+                common_dir: "repo/.git".into(),
+            },
+            action: PeerAction::SessionHandoff {
+                input: Box::new(input.clone()),
+            },
+        };
+        let frame = serde_json::to_vec(&request).unwrap();
+        assert!(frame.len() < MAX_FRAME, "{} bytes", frame.len());
+        let decoded = decode_request(&frame).unwrap();
+        assert!(
+            matches!(&decoded.action, PeerAction::SessionHandoff { input: got } if **got == input)
+        );
+        let peer = Peer {
+            host,
+            destination: "worker".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        };
+        let ssh = Ssh {
+            request: Mutex::new(None),
+            lose_reply: true,
+            calls: AtomicUsize::new(0),
+            expected_executable: "/usr/bin/ssh".into(),
+            expected_connect_timeout: "-oConnectTimeout=10".into(),
+            expected_remote_command: "provenant fabric peer".into(),
+            expected_timeout: None,
+        };
+        let transport = SshTransport {
+            executor: &ssh,
+            clock: &clock,
+            home: Path::new("/home/a"),
+            cwd: Path::new("/home/a/repo"),
+            executable: "/usr/bin/ssh".into(),
+            seconds: 30,
+        };
+        assert!(
+            matches!(transport.exchange(&peer, &request, budget, &CancelToken::new()), Err(PeerError::Unknown { operation_id }) if operation_id == operation)
+        );
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
