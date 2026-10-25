@@ -130,8 +130,9 @@ One host-local SQLite database holds all coordination state: bundled rusqlite,
 WAL, `foreign_keys=ON`, `synchronous=FULL`, a 250 ms busy timeout per attempt
 inside the request deadline, a private 0700 root and 0600 database files, and
 numbered embedded migrations (a future `user_version` is refused before any
-mutation). Symlinked state components are refused. A connection belongs to one
-worker.
+mutation). Symlinked state components are refused. `-wal`/`-shm` companions must
+be private regular files with one link; a zero-link observation is re-read,
+never accepted. A connection belongs to one worker.
 
 | Table | Meaning |
 |---|---|

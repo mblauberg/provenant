@@ -28,7 +28,8 @@ entropy boundary and are omitted from task reads, events and Debug output.
 
 Every coordination mutation and its event commit together. Event reads replay
 ordered project sequences. Consumer cursors are explicit, durable and monotonic.
-Only SQLite BUSY/LOCKED retries; rollback precedes bounded, cancellable backoff.
+SQLite BUSY/LOCKED and a companion observed mid-unlink (zero links) retry within
+the request deadline. Rollback precedes bounded, cancellable backoff for SQLite retries.
 Other commit failures propagate and are never replayed automatically. The edge
 must preserve the original IDs if explicitly retrying an uncertain mutation.
 
