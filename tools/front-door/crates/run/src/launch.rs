@@ -64,7 +64,7 @@ pub struct LaunchPaths {
     pub deadline_unix_ms: u64,
     pub scratch: PathBuf,
     pub provider_state: PathBuf,
-    /// Private temporary directory for a read-only lane, never a shared system
+    /// Private temporary directory for a lane, never a shared system
     /// one. Terminal commit and withdrawal remove it best-effort.
     pub temporary: PathBuf,
 }
@@ -440,7 +440,7 @@ impl RunStore {
                 .as_path()
                 .join(format!("runs/{run}/attempts/{id}"));
             let prompt = format!(
-                "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Empty attempt scratch is deleted at settlement; unknown contents and provider history remain retained. Files left in scratch are not deliverables.\n\n{prompt}",
+                "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. Files left in $TMPDIR are not deliverables.\n\n{prompt}",
                 result = directory.join("result.md").display(),
                 exit = directory.join("process-exit.json").display(),
                 stdout = directory.join("stdout.log").display(),

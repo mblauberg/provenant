@@ -5,8 +5,8 @@ use provenant_core::{AttemptId, WorkScope};
 use std::{ffi::OsStr, path::PathBuf};
 
 impl RunStore {
-    /// The read-only lane's private temporary directory, `LaunchPaths::temporary`.
-    /// Provider scratch and build output live below this attempt, never in a
+    /// The lane's private temporary directory, `LaunchPaths::temporary`.
+    /// Provider temporary files live below this attempt, never in a
     /// shared system temporary directory. Settlement removes it best-effort.
     pub fn temporary_path(&self, id: AttemptId, call: &Request<'_>) -> Result<PathBuf> {
         let record = self.record(id, call)?;

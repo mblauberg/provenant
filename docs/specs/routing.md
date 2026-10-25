@@ -303,9 +303,10 @@ explicitly, and deny `/usr/bin/security`, `securityd` and keychain reads.
 Every lane at every tier can use Fabric and the utility models, except Agy.
 
 - The installer owns the stdio MCP generator; adapters reuse it. Claude writes
-  two private JSON files in attempt scratch and loads only those. Codex injects
-  the same entry with `-c`. Hooks are the installer's shared registrations. User
-  hook and MCP configuration is excluded.
+  two private JSON files in attempt `tmp/candidate-N` and loads only those;
+  terminal cleanup removes them. Codex injects the same entry with `-c`.
+  Hooks are the installer's shared registrations. User hook and MCP
+  configuration is excluded.
 - Each attempt gets a child run store at `RUN_STATE/children/<AttemptId>/`. The
   launch layer creates it and grants only that subtree, never `STATE/runs/` or
   the parent database. `PROVENANT_RUN_STATE_DIR` selects it for CLI run commands

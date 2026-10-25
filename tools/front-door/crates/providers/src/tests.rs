@@ -723,6 +723,45 @@ pub(super) fn fixture_input<'a>(
 }
 
 #[test]
+fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for entry in REGISTRY {
+            let id = entry.adapter.id();
+            let authentication = match id {
+                "codex" | "cursor" => Some("login"),
+                "agy" => Some("keychain"),
+                _ => None,
+            };
+            let plan = fixture_access_plan(access, authentication, false);
+            let mut route = route(id, "fixture-model");
+            route.account_key = None;
+            let spec = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            ))?;
+            for key in
+                std::iter::once("TMPDIR").chain((id == "claude").then_some("CLAUDE_CODE_TMPDIR"))
+            {
+                assert_eq!(
+                    spec.env
+                        .iter()
+                        .find(|(name, _)| name == key)
+                        .map(|(_, value)| value),
+                    Some(&plan.permissions().scratch.path.as_os_str().to_owned()),
+                    "{id} {access:?} {key}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = std::path::Path::new("/fixture/repo");

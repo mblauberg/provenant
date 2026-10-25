@@ -294,14 +294,9 @@ fn prepare_with(
                 continue;
             }
         };
-        // A read-only lane's scratch is its private temporary directory, which
-        // terminal commit and withdrawal remove; writer scratch keeps settlement.
+        // Every lane stages temporary files under tmp for terminal cleanup.
         // A failed setup never poisons the next explicit fallback candidate.
-        let staging = if writer.is_some() {
-            &paths.scratch
-        } else {
-            &paths.temporary
-        };
+        let staging = &paths.temporary;
         let scratch = staging.join(format!("candidate-{candidate}"));
         let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
         if let Err(error) = apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging], None)
@@ -1373,12 +1368,18 @@ pub fn writer_fixture_plan(
     writer: &run::WriterLaunch,
     assets: &Path,
 ) -> Result<ConfinedPlan, String> {
+    let scratch = paths.temporary.join("candidate-0");
+    apply_setup(
+        &[SetupStep::CreateDir(scratch.clone())],
+        &[&paths.temporary],
+        None,
+    )?;
     let request = confinement_request(
         project,
         ConfinementRoots {
             cwd,
             home,
-            scratch: &paths.scratch,
+            scratch: &scratch,
             private_state: &paths.provider_state,
             assets,
         },
@@ -1415,6 +1416,189 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writer_plan_stages_scratch_in_private_temporary_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
+        use provenant_core::{
+            AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
+        };
+        use provenant_supervisor::{
+            clock::SystemClock,
+            exec::{ExecOptions, Executor, SystemExecutor, Termination},
+            fs::{LocalFs, SafeFs},
+        };
+        use std::{
+            os::unix::fs::{DirBuilderExt, PermissionsExt},
+            sync::Arc,
+            time::Duration,
+        };
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let state = base.join("state");
+        let project = base.join("repo");
+        let assets = base.join("release");
+        let git_home = base.join("git-home");
+        for path in [&home, &state, &project, &assets, &git_home] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let git = provenant_supervisor::git::git_executable()
+            .ok_or("git unavailable")?
+            .canonicalize()?;
+        let executor = SystemExecutor::new(1)?;
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        ] {
+            let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.into_iter().map(Into::into))
+                .collect();
+            let env = [
+                ("HOME".into(), git_home.as_os_str().to_owned()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ];
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+            options.env = Some(&env);
+            let output = executor.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        }
+        let roots = provenant_core::RootInputs {
+            state_dir: Some(state.clone()),
+            ..provenant_core::RootInputs::new(home.clone(), project.clone())
+        }
+        .resolve(&LocalFs)?;
+        let utility = UtilityRuntime::new(Arc::new(LocalFs), &git, &git_home)?;
+        let cancel = CancelToken::new();
+        let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+        let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+            &LocalFs,
+        )?;
+        let worktree_state = state
+            .join("worktrees")
+            .join(binding.project_id().to_string());
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&worktree_state)?;
+        let project_state = LocalFs.open_anchor(&worktree_state)?;
+        let clock = SystemClock::new();
+        worktrees::create(
+            &worktrees::WorktreeContext {
+                home: &home,
+                repo: &repo,
+                binding: &binding,
+                project_state: project_state.as_ref(),
+                executor: &executor,
+                utility: &utility,
+                workers: &worktrees::SystemWorkerObserver,
+                clock: &clock,
+                utility_budget: budget,
+                mutation_budget: budget,
+                lock_budget: WaitBudget::cli(clock.mono_now(), 5)?,
+            },
+            worktrees::WorktreeCreate {
+                branch: "writer".into(),
+                base: Some("HEAD".into()),
+            },
+            &cancel,
+        )?;
+        // Cursor's local account needs only --version. Keep its executable
+        // inside the fixture assets, independent of host packages and PATH.
+        let executable = assets.join("cursor/bin/agent");
+        std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
+        std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let attempt = state.join("attempt");
+        let paths = run::LaunchPaths {
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            operation_id: OperationId::parse("writer-temporary")?,
+            task_index: 0,
+            lane_depth: 1,
+            run_id: RunId::from_bytes([2; 16]),
+            deadline_unix_ms: u64::MAX,
+            scratch: attempt.join("scratch"),
+            provider_state: attempt.join("provider-state"),
+            temporary: attempt.join("tmp"),
+        };
+        for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+            std::fs::create_dir_all(path)?;
+        }
+        let task = run::TaskRequest {
+            task_id: TaskId::from_bytes([3; 16]),
+            profile: Default::default(),
+            prompt_digest: provenant_records::CanonicalV1::file_digest(b"fixture prompt"),
+            route: run::RequestedRoute::Model {
+                provider: "cursor".into(),
+                model: "cursor/gpt-5.3-codex-low".into(),
+                effort: None,
+            },
+            account: None,
+            fallback: vec![],
+            authority_digest: Digest::from_bytes([4; 32]),
+            writer: Some(run::WriterRequest {
+                project: project.clone(),
+                worktree: project.join(".worktrees/writer"),
+            }),
+            deliver: None,
+            provider_timeout_seconds: 20,
+            delivery_id: None,
+            access: Default::default(),
+        };
+        let registry = Registry {
+            roots: Some(&roots),
+            home: Some(&home),
+            assets: Some(&assets),
+            cwd: Some(&project),
+            state_root: Some(&state),
+            project_id: Some(binding.project_id()),
+            host: None,
+        };
+        let launch = prepare_with(
+            &registry,
+            &task,
+            "fixture prompt",
+            &paths,
+            None,
+            |adapter| {
+                if adapter == "cursor" {
+                    Ok(executable.clone())
+                } else {
+                    Err("unavailable".into())
+                }
+            },
+            None,
+        )?;
+        assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
+        assert_eq!(
+            launch.route.model.as_deref(),
+            Some("cursor/gpt-5.3-codex-low")
+        );
+        assert_eq!(launch.argv[0], executable.as_os_str());
+        let confinement = launch.confinement.ok_or("writer confinement missing")?;
+        assert!(confinement.writer.is_some());
+        assert_eq!(
+            confinement.plan.permissions().scratch.path,
+            paths.temporary.join("candidate-0")
+        );
+        Ok(())
+    }
 
     #[test]
     fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()

@@ -1722,11 +1722,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
             fs::create_dir_all(path)?;
         }
-        let staging = if writer {
-            &paths.scratch
-        } else {
-            &paths.temporary
-        };
+        let staging = &paths.temporary;
         // Setup repairs partial files in place (#1461), so a non-empty directory
         // fails the Claude primary on its settings path; a Codex fallback must
         // also not collide with a partial candidate-0 auth entry.
@@ -1766,6 +1762,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             Some(&token),
         )
         .map_err(|e| format!("prepare {adapter} writer={writer}: {e}"))?;
+        assert_eq!(launch.route.provider.as_deref(), Some(adapter));
         fs::write(rig.state.join("config.toml"), config(1))?;
         assert!(
             launch

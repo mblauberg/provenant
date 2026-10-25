@@ -18,11 +18,12 @@ Defer universal retention classes and typed deletion until a concrete deletion
 requirement establishes the necessary protections, evidence and refusal
 behaviour. Durable run artefacts remain retained until then.
 
-Attempt-private `tmp/` is disposable. Terminal commit attempts its removal;
-`reconcile` retries removal for terminal attempts once no reservation is
-retained. It uses the existing no-follow, identity-checked deletion primitives
-and reports leftover paths and reasons without failing reconciliation for a
-removal error. Live and non-terminal attempts keep their temporary data.
+Attempt-private `tmp/` is disposable. Writer `TMPDIR` lives in `tmp/candidate-N`.
+Terminal commit attempts to remove `tmp/`; `reconcile` retries removal for
+terminal attempts once no reservation is retained. It uses the existing
+no-follow, identity-checked deletion primitives and reports leftover paths and
+reasons without failing reconciliation for a removal error. Live and non-terminal
+attempts keep their temporary data.
 Unreadable worktree reservations block removal. Reconcile checks worktree
 reservations first, then holds the attempt's writer lock during deletion to
 exclude read-only guardians. It does not hold the worktree writer lock during
