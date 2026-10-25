@@ -41,6 +41,11 @@ dispatch cannot pass `--write-root`, so declare the directory in
 see [configuration](configuration.md#writer-extra-write-paths). Its entries are
 used as written and must be real paths (`/private/tmp`, not `/tmp`).
 
+Inspect `provenant lanes --id RUN/TASK/ATTEMPT --json` and its `write_grants`
+array for the write allowances applied to that attempt. Each entry records its
+source, byte-encoded absolute path and scope. Writer Git grants are represented
+by `git_grants_digest`; profile deny rules still restrict the listed allowances.
+
 Writers hold no Git credentials, and remote-tracking refs and shared config are
 read-only, so `git fetch` of a configured remote fails. Fetch on the host
 before dispatch, or dispatch with `--deliver-remote` and `--deliver-branch`:

@@ -20,7 +20,9 @@ pub mod worktrees;
 pub use disclosure::scan_disclosure;
 pub use git_evidence::Git;
 pub use output_custody::OutputCustody;
-pub use permissions::ConfinementBackend;
+pub use permissions::{
+    ConfinementBackend, MAX_WRITE_GRANTS, WriteGrant, WriteSource, write_grants,
+};
 pub use plan::{
     CodexPolicy, ConfinedPlan, ExtensionPolicy, MAX_READ_ONLY_WRITABLE, PlanError, PlanRequest,
     valid_read_only_writable,

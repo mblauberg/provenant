@@ -1494,6 +1494,9 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
                 "delivery_id": lane.delivery_id,
+                "write_grants": lane.write_grants,
+                "read_only_writable": lane.read_only_writable,
+                "git_grants_digest": lane.git_grants_digest,
                 "head": lane.head,
                 "delivery": lane.delivery,
                 "result_path": result,
@@ -2460,6 +2463,9 @@ mod tests {
             "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
             "applied_route": {"model":"fixture/\x1b[32mmodel","account_label":account},
             "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "write_grants": [{"source":"write_root","path":{"relative_to_root":{"encoding":"utf8","path":"work/shared"}},"scope":"subtree"}],
+            "read_only_writable": ["locks"],
+            "git_grants_digest": provenant_core::Digest::from_bytes([6; 32]),
             "queued_at": now,
             "state": {"state":"terminal","outcome":"failed","exit_code":1,"finished_at":now,"reason":reason},
             "usage": {},
@@ -2486,6 +2492,17 @@ mod tests {
         assert!(!human.chars().any(|c| c.is_control() && c != '\n'));
         assert!(!human.contains('\u{202e}'));
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
+        assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
+        assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");
+        assert_eq!(
+            data["lanes"][0]["write_grants"][0]["path"]["relative_to_root"]["path"],
+            "work/shared"
+        );
+        assert_eq!(data["lanes"][0]["read_only_writable"], json!(["locks"]));
+        assert_eq!(
+            data["lanes"][0]["git_grants_digest"],
+            json!(provenant_core::Digest::from_bytes([6; 32]))
+        );
         assert_eq!(data["lanes"][0]["account"], json!(account));
         assert_eq!(
             data["lanes"][0]["skipped_routes"][0]["detail"],

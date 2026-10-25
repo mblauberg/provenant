@@ -635,6 +635,38 @@ impl RunStore {
                 .and_then(|c| c.plan.permissions().read_only.as_ref())
                 .map(|g| g.writable_paths())
                 .unwrap_or_default();
+            let write_grants = plan
+                .confinement
+                .as_ref()
+                .map(|c| -> Result<_> {
+                    let permissions = c.plan.permissions();
+                    let grants = provenant_confinement::write_grants(permissions, &c.profile)
+                        .into_iter()
+                        .map(|grant| {
+                            Ok(WriteGrantRecord {
+                                source: grant.source,
+                                path: provenant_records::AbsolutePath::new(&grant.path).map_err(
+                                    |_| RunError::Validation("invalid write grant path"),
+                                )?,
+                                scope: grant.scope,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let git_grants_digest = match &permissions.mode {
+                        provenant_confinement::permissions::AccessMode::ReadOnly => None,
+                        provenant_confinement::permissions::AccessMode::WorktreeWrite(
+                            authority,
+                        ) => Some(provenant_core::Digest::from_bytes(
+                            authority.git_grants_digest,
+                        )),
+                    };
+                    Ok(admission::AppliedWriteGrants {
+                        grants,
+                        git_grants_digest,
+                    })
+                })
+                .transpose()?
+                .unwrap_or_default();
             if !plan.skipped_routes.is_empty() {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
@@ -642,6 +674,7 @@ impl RunStore {
                 &record,
                 &plan.route,
                 writable,
+                &write_grants,
                 plan.observed_head,
                 call,
             ) {

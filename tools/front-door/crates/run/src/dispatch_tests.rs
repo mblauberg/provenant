@@ -488,7 +488,14 @@ fn host_refuses_extra_child_attempt_without_touching_held_attempt() -> TestResul
     )?;
     let id = nested.attempts[0].attempt_id;
     let mut extra = store.record(id, &call)?;
-    let held = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    let held = store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     hold_child_fixture(
         &store,
         store.attempt_dir(nested.run_id, id, false)?,
@@ -1111,7 +1118,14 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
         let run = input();
         let id = run.attempts[0].attempt_id;
         store.create(&run, &call)?;
-        let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+        let started = store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
         let ticket: Vec<u8> = store.db.query_row(
             "SELECT record FROM admission WHERE attempt=?1",
             [id.to_string()],
@@ -1188,7 +1202,14 @@ fn held_stop_follows_the_handed_off_directory() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    let started = store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let scope = provenant_supervisor::custody::Scope {
         run: run.run_id,
         attempt: id,
@@ -1538,7 +1559,14 @@ fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResu
     let [queued, late] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
     // The parent's scan accepted only the queued child. A start launched
     // the other after that snapshot, so only hand-off holds it.
-    let started = store.mark_starting(&store.record(late, &call)?, &route(), &[], None, &call)?;
+    let started = store.mark_starting(
+        &store.record(late, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: late,
@@ -1576,7 +1604,14 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    let started = store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     // Before hand-off the host only stamped the owner; nothing is held yet.
     let mut record = store.record(id, &call)?;
     record.verified_owner = Some(forged);
@@ -1728,7 +1763,14 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
         detail: "account work: sign in again".into(),
     }];
     store.record_skipped_routes(id, &skipped, &call)?;
-    let started = store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    let started = store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     assert_eq!(started.skipped_routes, skipped);
     assert_eq!(store.record(id, &call)?.skipped_routes, skipped);
     Ok(())
@@ -1750,7 +1792,14 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     store.create(&serial, &call)?;
     let [first, second] = [serial.attempts[0].attempt_id, serial.attempts[1].attempt_id];
     for id in [first, second] {
-        store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
     }
     let running = store
         .claim(first, now, &call)?
@@ -1770,7 +1819,14 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     spaced.attempts[1].attempt_id = AttemptId::from_bytes([12; 16]);
     store.create(&spaced, &call)?;
     let id = spaced.attempts[0].attempt_id;
-    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     assert!(store.claim(id, now, &call)?.is_none(), "20 s host spacing");
 
     let attempt = store.attempt_dir(spaced.run_id, id, false)?;
@@ -1784,7 +1840,14 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
     store.create(&expired, &call)?;
     let id = expired.attempts[0].attempt_id;
-    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let starved = Host { available: 1 };
     assert!(matches!(
         store.admit(id, &attempt, &starved, &clock, &cancel),
@@ -1822,6 +1885,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
                 &store.record(attempt.attempt_id, &call)?,
                 &route(),
                 &[],
+                &Default::default(),
                 None,
                 &call,
             )?;
@@ -1838,6 +1902,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
         &stores[1].record(waiting, &call)?,
         &route(),
         &[],
+        &Default::default(),
         None,
         &call,
     )?;
@@ -1955,7 +2020,14 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
     };
     for (index, code) in [(0, 0), (1, 1)] {
         let id = batch.attempts[index].attempt_id;
-        store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
         store.claim(id, now, &call)?.ok_or("not admitted")?;
         let dir = store.attempt_dir(batch.run_id, id, false)?;
         artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
@@ -2000,7 +2072,14 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let run = input();
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
-    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let mut observed = exit();
     observed.scope.generation = 1;
     observed.never_spawned = true;
@@ -2169,7 +2248,14 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         CancelReceipt::AlreadyTerminal
     );
 
-    store.mark_starting(&store.record(starting, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(starting, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     // Before the handoff publishes its launch summary there is nothing to
     // stop; cancel retries until its budget ends, then says so.
     let system = provenant_supervisor::clock::SystemClock::new();
@@ -2364,7 +2450,14 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
     let batch = two_tasks(1);
     store.create(&batch, &call)?;
     let orphan = batch.attempts[0].attempt_id;
-    store.mark_starting(&store.record(orphan, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(orphan, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: orphan,
@@ -2685,7 +2778,14 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         let temporary = store.temporary_path(id, &call)?;
         std::fs::write(temporary.join("keep.lock"), "keep")?;
         if reserved {
-            store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
             store.withdraw(
                 id,
                 AttemptState::Starting,
@@ -2735,7 +2835,14 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         let id = run.attempts[0].attempt_id;
         store.create(&run, &call)?;
         let temporary = store.temporary_path(id, &call)?;
-        store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
         let custody = context
             .state_root
             .as_path()
@@ -2802,7 +2909,14 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let candidate = temporary.join("candidate-0");
     std::fs::create_dir(&candidate)?;
     std::fs::write(candidate.join("x.lock"), "keep")?;
-    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let custody = context
         .state_root
         .as_path()
@@ -2920,7 +3034,14 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     let [exited, orphan] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
 
     // The guardian sealed an exit but died before its terminal commit.
-    store.mark_starting(&store.record(exited, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(exited, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     store
         .claim(exited, WallTime::from_micros(100)?, &call)?
         .ok_or("not admitted")?;
@@ -2939,7 +3060,14 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     seal_exit(&store, &observed)?;
 
     // A handoff whose reservation never reached a guardian.
-    store.mark_starting(&store.record(orphan, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(orphan, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let scope = provenant_supervisor::custody::Scope {
         run: batch.run_id,
         attempt: orphan,
@@ -2985,7 +3113,14 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     });
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
-    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     store
         .claim(id, WallTime::from_micros(100)?, &call)?
         .ok_or("not admitted")?;
@@ -3052,7 +3187,14 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     let run = input();
     let id = run.attempts[0].attempt_id;
     store.create(&run, &call)?;
-    store.mark_starting(&store.record(id, &call)?, &route(), &[], None, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
     assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
@@ -3061,6 +3203,7 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
 
 #[test]
 fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt() -> TestResult {
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
     let clock = clock();
@@ -3091,10 +3234,33 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
         0o700
     );
     let observed = provenant_core::GitOid::Sha1([7; 20]);
+    let write_grants = vec![
+        WriteGrantRecord {
+            source: WriteSource::WriteRoot,
+            path: provenant_records::AbsolutePath::new(
+                &context.state_root.as_path().join("shared"),
+            )?,
+            scope: PathScope::Subtree,
+        },
+        WriteGrantRecord {
+            source: WriteSource::StateWrite,
+            path: provenant_records::AbsolutePath::new(
+                &context
+                    .state_root
+                    .as_path()
+                    .join(std::ffi::OsString::from_vec(b"session-\xff".to_vec())),
+            )?,
+            scope: PathScope::Exact,
+        },
+    ];
     store.mark_starting(
         &store.record(first, &call)?,
         &route(),
         &[".agent-run/locks".into()],
+        &admission::AppliedWriteGrants {
+            grants: write_grants.clone(),
+            git_grants_digest: None,
+        },
         Some(observed),
         &call,
     )?;
@@ -3105,19 +3271,76 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
         [".agent-run/locks"]
     );
     assert!(store.record(second, &call)?.read_only_writable.is_empty());
+    assert_eq!(store.record(first, &call)?.write_grants, write_grants);
+    assert!(store.record(second, &call)?.write_grants.is_empty());
+    assert_eq!(store.record(first, &call)?.git_grants_digest, None);
     // The host-observed head of a read-only lane persists; unobserved stays absent.
     assert_eq!(store.record(first, &call)?.head, Some(observed));
     assert_eq!(store.record(second, &call)?.head, None);
-    // Old v1 records omit the added field and retain an empty default.
+    // Old v1 records omit the added fields and retain empty defaults.
     let mut record = serde_json::to_value(store.record(first, &call)?)?;
-    record
-        .as_object_mut()
-        .ok_or("record object")?
-        .remove("read_only_writable");
-    assert!(
-        serde_json::from_value::<AttemptRecord>(record)?
-            .read_only_writable
-            .is_empty()
+    let fields = record.as_object_mut().ok_or("record object")?;
+    fields.remove("read_only_writable");
+    fields.remove("write_grants");
+    fields.remove("git_grants_digest");
+    let old = serde_json::from_value::<AttemptRecord>(record)?;
+    assert!(old.read_only_writable.is_empty());
+    assert!(old.write_grants.is_empty());
+    assert_eq!(old.git_grants_digest, None);
+    Ok(())
+}
+
+#[test]
+fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let prepared = input();
+    store.create(&prepared, &call)?;
+    let id = prepared.attempts[0].attempt_id;
+    let grant = WriteGrantRecord {
+        source: WriteSource::LaneCache,
+        path: provenant_records::AbsolutePath::new(&context.state_root.as_path().join("cache"))?,
+        scope: PathScope::Subtree,
+    };
+    let mut applied = admission::AppliedWriteGrants {
+        grants: vec![grant.clone(); provenant_confinement::MAX_WRITE_GRANTS + 1],
+        git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
+    };
+    let mut record = store.record(id, &call)?;
+    assert!(matches!(
+        store.mark_starting(&record, &route(), &[], &applied, None, &call),
+        Err(RunError::Validation("invalid write grants"))
+    ));
+    record.write_grants = applied.grants.clone();
+    assert!(matches!(
+        reader::validate_attempt(&record),
+        Err(RunError::Validation("invalid write grants"))
+    ));
+    applied.grants.pop();
+    assert!(reader::valid_write_grants(&applied.grants));
+    applied.grants = vec![grant];
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &applied,
+        None,
+        &call,
+    )?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    assert_eq!(
+        store.record(id, &call)?.git_grants_digest,
+        applied.git_grants_digest
     );
+    // AbsolutePath retains PathWire's contained byte encoding. It cannot
+    // deserialise a relative escape into an absolute grant.
+    let mut invalid = serde_json::to_value(store.record(id, &call)?)?;
+    invalid["write_grants"][0]["path"]["relative_to_root"]["path"] = serde_json::json!("../escape");
+    assert!(serde_json::from_value::<AttemptRecord>(invalid).is_err());
     Ok(())
 }

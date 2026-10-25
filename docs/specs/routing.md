@@ -378,8 +378,10 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
 - Writer-only grants, such as configured `[domains.run] writer_writes`
   directories, a per-worktree Cargo cache with a private `CARGO_HOME`, linked
   worktree commit files and Git helper execution, come from confinement's
-  writer profile ([supervisor](supervisor.md)). Remote-tracking refs and shared
-  Git config stay host-owned and read-only.
+  writer profile ([supervisor](supervisor.md)). Each attempt records its applied
+  write allowances and, for writers, the Git grants digest. Concrete Git paths
+  stay out of the record. Remote-tracking refs and shared Git config stay
+  host-owned and read-only.
 - Host-side delivery for a task with `deliver` is run's: fetch before launch,
   push the final commit only on verified writer success, compare the remote ref,
   set upstream, and keep a typed receipt. The host credential environment never
