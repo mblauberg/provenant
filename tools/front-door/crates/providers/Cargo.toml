@@ -19,8 +19,7 @@ provenant-quota = { workspace = true }
 provenant-supervisor = { workspace = true }
 
 [features]
-# Lets the activation recorder prepare unrecorded modes. Never enabled by a
-# production crate; the recorder verifies every claimed observation by probe.
+# Enables the recorder example for collecting redacted replay fixtures.
 recording = []
 
 [dev-dependencies]

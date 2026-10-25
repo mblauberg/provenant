@@ -60,12 +60,15 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
     Ok(value)
 }
 #[test]
-fn help_list_and_resolve_are_pure_and_resolve_reports_disabled_exact_candidates() -> Result {
+fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Result {
     let rig = rig()?;
     call(&rig, &["route", "--help"], 0)?;
     let listed = call(&rig, &["route", "list", "--adapter", "opencode"], 0)?;
     assert_eq!(listed["command"], "route list");
-    assert_eq!(listed["data"]["availability"][0]["reason"], "disabled");
+    assert_eq!(
+        listed["data"]["availability"][0]["reason"],
+        "unknown_availability"
+    );
     assert!(
         listed["data"]["models"]
             .as_array()

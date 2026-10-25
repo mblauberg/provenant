@@ -9,9 +9,7 @@ use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
     WallTime,
 };
-use provenant_providers::{
-    Access, OutcomeStatus, ProviderEvent, REGISTRY, Session as ProviderSession, mode_enabled,
-};
+use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice};
 use provenant_run as run;
@@ -133,16 +131,9 @@ pub struct Registry<'a> {
     pub host: Option<&'a run::HostLaunchContext>,
 }
 impl Registry<'_> {
-    /// Whether any adapter has a recorded resume recipe. Each attempt must
-    /// still carry a session handle; `continue_attempt` checks that first.
+    /// Each adapter supports resume; the attempt must carry a session handle.
     pub fn continues_sessions(&self) -> bool {
-        REGISTRY.iter().any(|registration| {
-            [Access::ReadOnly, Access::WorktreeWrite]
-                .into_iter()
-                .any(|access| {
-                    mode_enabled(registration.adapter.id(), access, ProviderSession::Resume)
-                })
-        })
+        !REGISTRY.is_empty()
     }
     /// Refuse before the attempt's one continuation is spent.
     fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
@@ -152,13 +143,8 @@ impl Registry<'_> {
             .as_ref()
             .and_then(|route| route.provider.as_deref())
             .ok_or_else(|| unsupported("the attempt launched no provider to resume".into()))?;
-        if ![Access::ReadOnly, Access::WorktreeWrite]
-            .into_iter()
-            .any(|access| mode_enabled(adapter, access, ProviderSession::Resume))
-        {
-            return Err(unsupported(format!(
-                "{adapter} has no enabled resume recipe; dispatch a new lane with the prior result as context"
-            )));
+        if !REGISTRY.iter().any(|entry| entry.adapter.id() == adapter) {
+            return Err(unsupported(format!("unknown provider {adapter}")));
         }
         if prior.session.is_none() {
             return Err(unsupported(
@@ -1150,8 +1136,9 @@ fn launch_on_host(
         None => run::HostLaunchContext {
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
-            executables: ["codex", "claude", "opencode"]
-                .into_iter()
+            executables: REGISTRY
+                .iter()
+                .map(|entry| entry.adapter.id())
                 .filter_map(|name| {
                     provider::resolve_executable(name)
                         .ok()

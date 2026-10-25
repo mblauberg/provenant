@@ -564,27 +564,8 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
 
 #[test]
 fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn std::error::Error>> {
-    #[derive(Deserialize)]
-    struct Matrix {
-        execution_modes: Vec<Entry>,
-        quota_sources: Vec<Entry>,
-    }
-    #[derive(Deserialize)]
-    struct Entry {
-        adapter: String,
-    }
-    let matrix: Matrix = serde_json::from_str(fixture!("activation.json"))?;
     let ids: std::collections::BTreeSet<_> = REGISTRY.iter().map(|r| r.adapter.id()).collect();
     assert_eq!(ids.len(), REGISTRY.len(), "duplicate adapter id");
-    for entries in [matrix.execution_modes, matrix.quota_sources] {
-        assert_eq!(
-            entries
-                .iter()
-                .map(|r| r.adapter.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            ids
-        );
-    }
     for entry in REGISTRY {
         if let Some(source) = entry.quota_source {
             assert_eq!(source.adapter_id(), entry.adapter.id());
@@ -709,7 +690,7 @@ pub(super) fn fixture_input<'a>(
 }
 
 #[test]
-fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<(), ProviderError> {
+fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = std::path::Path::new("/fixture/repo");
     let token = fixture_token();
@@ -719,7 +700,7 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         route.account_key = None;
         // Codex and Agy read a credential inside the sandbox.
         let authentication = match id {
-            "codex" => Some("login"),
+            "codex" | "cursor" => Some("login"),
             "agy" => Some("keychain"),
             _ => None,
         };
@@ -728,18 +709,9 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
         let result = entry
             .adapter
             .prepare(fixture_input(&route, &confined, &prompt, repo, token));
-        // Recording builds may prepare disabled modes to gather their evidence.
-        if !mode_enabled(id, Access::ReadOnly, Session::Fresh) {
-            assert!(
-                matches!(result, Err(ProviderError::Disabled { .. }))
-                    || (cfg!(feature = "recording") && result.is_ok()),
-                "{id}"
-            );
-            continue;
-        }
         let spec = result?;
         // Agy keeps its prompt on argv and has no lane runtime; its own test pins its launch.
-        if id == "agy" {
+        if matches!(id, "agy" | "cursor" | "opencode") {
             continue;
         }
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
@@ -929,25 +901,140 @@ fn prepare_follows_the_activation_matrix_and_pins_launch_controls() -> Result<()
     Ok(())
 }
 
+#[test]
+fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("--literal prompt".into());
+    let route = route("cursor", "fixture-model");
+    let continuation = Continuation::retained("cursor", "fixture-session", &route, "fixture")?;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for resume in [false, true] {
+            let plan = fixture_access_plan(access, Some("login"), resume);
+            let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            input.continuation = resume.then_some(&continuation);
+            let spec = cursor::Cursor.prepare(input)?;
+            let mut expected = vec![
+                "/opt/homebrew/Cellar/provider/1.0/bin/provider",
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--workspace",
+                "/fixture/repo",
+                "--trust",
+                "--sandbox",
+                "disabled",
+            ];
+            match access {
+                Access::ReadOnly => expected.extend(["--mode", "ask"]),
+                Access::WorktreeWrite => expected.push("--force"),
+            }
+            if resume {
+                expected.extend(["--resume", "fixture-session"]);
+            }
+            expected.extend(["--model", "fixture-model", "--", "--literal prompt"]);
+            assert_eq!(
+                spec.argv,
+                expected
+                    .iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(spec.stdin, Stdin::Null);
+            assert_eq!(spec.cwd, Path::new("/fixture/repo"));
+            assert_eq!(
+                spec.profile.spec.tool_exec_roots.is_empty(),
+                access == Access::ReadOnly
+            );
+        }
+    }
+    let plan = read_only_plan("/fixture", Some("login"));
+    let prompt = Prompt::new("x".repeat(65_537));
+    assert!(matches!(
+        cursor::Cursor.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None
+        )),
+        Err(ProviderError::PromptTooLarge)
+    ));
+    Ok(())
+}
+
+#[test]
+fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result<(), ProviderError>
+{
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("opencode", "configured/model");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, None, false);
+        let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        let spec = opencode::OpenCode.prepare(input)?;
+        let env = |key: &str| {
+            spec.env
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value)
+        };
+        assert_eq!(
+            env("HOME"),
+            Some(&std::ffi::OsString::from("/fixture/home"))
+        );
+        let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
+        let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
+        assert!(!config_home.starts_with("/fixture/state"));
+        assert!(!data_home.starts_with("/fixture/state"));
+        if config_home.join("opencode").is_dir() {
+            assert!(
+                spec.profile
+                    .spec
+                    .runtime_reads
+                    .contains(&crate::launch::subtree(config_home.join("opencode")))
+            );
+        }
+        assert!(
+            spec.profile
+                .spec
+                .runtime_reads
+                .contains(&crate::launch::subtree(data_home.join("opencode")))
+        );
+        let auth = data_home.join("opencode/auth.json");
+        assert!(spec.profile.spec.state_writes.iter().all(|grant| {
+            match grant.scope {
+                provenant_confinement::permissions::PathScope::Exact => grant.path != auth,
+                provenant_confinement::permissions::PathScope::Subtree => {
+                    !auth.starts_with(&grant.path)
+                }
+            }
+        }));
+        let config: serde_json::Value = serde_json::from_str(
+            &env("OPENCODE_CONFIG_CONTENT")
+                .expect("inline config")
+                .to_string_lossy(),
+        )
+        .expect("JSON config");
+        let permission = if access == Access::ReadOnly {
+            "deny"
+        } else {
+            "allow"
+        };
+        assert_eq!(config["permission"]["edit"], permission);
+        assert_eq!(config["permission"]["bash"], permission);
+        assert_eq!(
+            spec.profile.spec.tool_exec_roots.is_empty(),
+            access == Access::ReadOnly
+        );
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct LiveCapture {
     id: String,
-    fixture: String,
-    session_mode: Session,
-    access_mode: Access,
     process_exit: Option<i64>,
     outcome: String,
     answering_model: Option<String>,
-    activation_eligible: bool,
     argv: Vec<String>,
-    #[serde(default)]
-    writer_shell_proof: bool,
-    #[serde(default)]
-    subprocess_env_scrub: bool,
-    #[serde(default)]
-    cli_version: String,
-    #[serde(default)]
-    keychain_ipc_proof: bool,
 }
 
 fn recordings(adapter: &str) -> Vec<LiveCapture> {
@@ -1063,72 +1150,6 @@ live_replay!(
     "claude-live-auth-required",
     "claude/live-auth-required.jsonl"
 );
-
-#[test]
-fn enabled_modes_cite_live_evidence_for_their_own_access_and_session() {
-    #[derive(Deserialize)]
-    struct Matrix {
-        execution_modes: Vec<Mode>,
-    }
-    #[derive(Deserialize)]
-    struct Mode {
-        adapter: String,
-        access_mode: Access,
-        session_mode: Session,
-        enabled: bool,
-        capture_refs: Vec<String>,
-        #[serde(default)]
-        shell_enabled: bool,
-    }
-    let matrix: Matrix = serde_json::from_str(fixture!("activation.json")).expect("matrix");
-    for mode in matrix.execution_modes.iter().filter(|mode| mode.enabled) {
-        let captures = recordings(&mode.adapter);
-        assert!(!mode.capture_refs.is_empty(), "{}", mode.adapter);
-        for reference in &mode.capture_refs {
-            let capture = captures
-                .iter()
-                .find(|capture| &capture.id == reference)
-                .expect("cited capture");
-            // Read-only evidence never enables a writer, nor fresh a resume.
-            assert_eq!(capture.access_mode, mode.access_mode, "{reference}");
-            assert_eq!(capture.session_mode, mode.session_mode, "{reference}");
-            assert!(capture.activation_eligible, "{reference}");
-            if mode.adapter == "claude" && mode.shell_enabled {
-                assert!(
-                    capture.writer_shell_proof,
-                    "{reference}: Bash must have run"
-                );
-                assert!(
-                    capture.subprocess_env_scrub,
-                    "{reference}: scrub must be enabled"
-                );
-                assert!(
-                    !capture.cli_version.is_empty(),
-                    "{reference}: CLI version required"
-                );
-            }
-            if capture.keychain_ipc_proof {
-                assert!(capture.writer_shell_proof, "{reference}");
-            }
-            if capture.writer_shell_proof {
-                assert_eq!(mode.access_mode, Access::WorktreeWrite);
-                assert!(
-                    capture
-                        .argv
-                        .iter()
-                        .any(|arg| arg.split(',').any(|tool| tool == "Bash")),
-                    "{reference}"
-                );
-            }
-            assert_eq!(capture.outcome, "Success", "{reference}");
-            assert!(
-                capture
-                    .fixture
-                    .starts_with(&format!("{}/live-", mode.adapter))
-            );
-        }
-    }
-}
 
 #[test]
 fn finish_decodes_the_last_unterminated_line() -> Result<(), ProviderError> {
@@ -1512,15 +1533,14 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             .transpose()?;
         let account_token =
             (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
-        // Synthetic continuation for path-policy coverage, including disabled
-        // adapters without answering-model evidence. This enables no mode.
+        // Synthetic continuation covers every adapter and mode.
         let continuation = Continuation::from_outcome(id, &outcome, &route, "fixture", false)?;
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
             for session in [Session::Fresh, Session::Resume] {
                 let plan = fixture_access_plan(
                     access,
                     match id {
-                        "codex" => Some("login"),
+                        "codex" | "cursor" => Some("login"),
                         "agy" => Some("keychain"),
                         _ => None,
                     },
@@ -1535,14 +1555,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                 );
                 input.account = account.as_ref();
                 input.continuation = (session == Session::Resume).then_some(&continuation);
-                let launch = match adapter.prepare(input) {
-                    Ok(launch) => launch,
-                    Err(ProviderError::Disabled { .. }) => {
-                        assert!(!mode_enabled(id, access, session));
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
+                let launch = adapter.prepare(input)?;
                 for relative in forbidden
                     .iter()
                     .copied()

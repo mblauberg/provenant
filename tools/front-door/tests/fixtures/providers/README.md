@@ -1,19 +1,7 @@
 # Provider wire recordings
 
-Decoder and activation evidence for the five retained providers in
-[execution-route.md](../../../../../docs/specs/rust-port/design/execution-route.md).
-[activation.json](activation.json) is the runtime gate: `providers::prepare`
-refuses any execution mode it does not enable, and a missing mode is disabled.
-
-## Coverage and activation
-
-| Adapter | Recorded evidence | Read-only fresh/resume | Writer fresh/resume | Quota |
-| --- | --- | --- | --- | --- |
-| Claude | Live confined runs (2.1.310); success, model mismatch, matching model, continuation pair, authentication failure | Enabled | Enabled | Lane D |
-| Codex | Live confined runs (0.159.0); success/usage, structured failure, interrupted prefix | Enabled | Enabled | Lane D |
-| Cursor | Success, thinking deltas, continuation pair | Disabled | Disabled | Lane D |
-| Agy | Live confined runs (1.4.7, `gemini-3.8-flash`); fresh and resume, read-only and writer | Enabled | Enabled | Lane D |
-| OpenCode | Projected (version unknown): text/stop, error, tool-step finish then error and nonzero exit. Launch form prepared; live v2.0.32 stream lacked `step_finish` | Disabled | Disabled | Lane D |
+All five adapters are enabled by default in every access and session mode with a launch form.
+Recordings are replay and confinement probe evidence only; they do not gate execution.
 
 ## Live recordings
 
@@ -26,13 +14,9 @@ platform, redacted argv, access and session mode, exit, decoded outcome and
 answering model. `<adapter>/confinement.json` holds the probed observations per
 access mode, which `prepare` attaches to the provider profile.
 
-An enabled mode must cite a live capture with the same access and session mode,
-marked `activation_eligible`, that decoded as success; a test enforces this, so
-read-only evidence never enables a writer. Each live capture replays through
-the real decoder, resumes bound to their fresh capture's continuation.
-`claude/live-auth-required.jsonl` is not activation evidence: it records how a
-rejected sign-in decodes (`Refused`). Claude's recordings use the host-read
-access token in `CLAUDE_CODE_OAUTH_TOKEN`; the keychain is unreadable inside.
+Each live capture replays through the real decoder, with resume captures bound
+to their fresh capture's continuation. `claude/live-auth-required.jsonl`
+records how a rejected sign-in decodes (`Refused`).
 
 Redaction substitutes session ids, paths under `HOME` or the recording root,
 emails, `prefix_<id>` and UUID identifiers and token-shaped strings. Model
@@ -45,8 +29,7 @@ passes in the environment; probes read zero bytes from them.
 The other files are sanitised projections of earlier tracked streams and
 local receipts, listed in [manifest.json](manifest.json) with source, SHA-256,
 substitutions and limitations. `null` there means unrecorded. They prove decoder
-shapes only: no exact argv, platform or confinement form, so they enable
-nothing. Their strings are replaced by stable `FIXTURE_<CLASS>_<NUMBER>`
+shapes only: no exact argv, platform or confinement form. Their strings are replaced by stable `FIXTURE_<CLASS>_<NUMBER>`
 placeholders and their numbers by zero. OpenCode's major version is unverified,
 so its streams cannot establish v2 acceptance. OpenCode `step_finish` with
 `reason: tool-calls` is an intermediate step, not terminal success.

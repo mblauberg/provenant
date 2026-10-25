@@ -1,6 +1,4 @@
-use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations,
-};
+use crate::launch::{Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact};
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{
     AuthenticationProfile, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
@@ -10,11 +8,6 @@ use std::ffi::OsString;
 pub struct Agy;
 crate::adapter!(Agy, "agy", prepare);
 const MODEL_ON_WIRE: bool = true;
-
-const OBSERVATIONS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/providers/agy/confinement.json"
-));
 
 /// The CLI's own turn limit; the supervisor's deadline is the real bound.
 const PRINT_TIMEOUT: &str = "900s";
@@ -107,7 +100,7 @@ fn prepare(
                 loopback_server: true,
                 ..ProviderProfileSpec::default()
             },
-            observations: observations(OBSERVATIONS, access)?,
+            observations: Default::default(),
         },
         stream,
     })

@@ -123,20 +123,21 @@ fn prepare_with(
             });
         }
     }
-    // This profile exposes no stored OpenCode login: every free request uses
-    // the same keyless allowance on this host, rather than an inferred user.
-    if locate("opencode").is_ok() {
-        entries.push(provenant_providers::accounts::Registration {
-            adapter: "opencode".into(),
-            label: "keyless".into(),
-            key: "keyless".into(),
-            org_fingerprint: None,
-            directory: paths.provider_state.clone(),
-            plan: None,
-            priority: None,
-            billing_anchor: None,
-            limits: None,
-        });
+    // These adapters use the CLI's existing local login and configuration.
+    for adapter in ["opencode", "cursor", "agy"] {
+        if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
+            entries.push(provenant_providers::accounts::Registration {
+                adapter: adapter.into(),
+                label: "default".into(),
+                key: "local".into(),
+                org_fingerprint: None,
+                directory: home.clone(),
+                plan: None,
+                priority: None,
+                billing_anchor: None,
+                limits: None,
+            });
+        }
     }
     let timestamp = jiff::Timestamp::now().as_second();
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
@@ -150,9 +151,6 @@ fn prepare_with(
         scratch: &paths.scratch,
     };
     for entry in &entries {
-        if !matches!(entry.adapter.as_str(), "claude" | "codex") {
-            continue;
-        }
         match locate(&entry.adapter).and_then(|executable| {
             observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
         }) {
@@ -166,7 +164,7 @@ fn prepare_with(
     }
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
-    for adapter in ["codex", "claude", "opencode"] {
+    for adapter in REGISTRY.iter().map(|entry| entry.adapter.id()) {
         // Repository-bound read-only grants are checked per candidate below.
         if confinement_request(
             project_id,
@@ -243,28 +241,12 @@ fn prepare_with(
             continue;
         };
         let adapter = registration.adapter;
-        if !adapter.execution_enabled() {
-            reasons.push(skip(
-                &label,
-                SkipKind::Unavailable,
-                "provider execution is disabled",
-            ));
-            continue;
-        }
         if let provenant_records::RouteReadiness::Unavailable { reason } = &route.readiness {
             reasons.push(skip(&label, SkipKind::Unavailable, format!("{reason:?}")));
             continue;
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route) {
             reasons.push(skip(&label, SkipKind::Unavailable, error));
-            continue;
-        }
-        if !matches!(adapter.id(), "codex" | "claude" | "opencode") {
-            reasons.push(skip(
-                &label,
-                SkipKind::Unavailable,
-                "provider launch is not supported here",
-            ));
             continue;
         }
         let entry = entries
@@ -437,7 +419,25 @@ fn prepare_with(
             .as_ref()
             .filter(|_| adapter.id() == "claude")
             .map(|account| account.directory());
-        let setup_roots = [scratch, private_state, roots.state.as_path()];
+        let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
+        // Only directory creation uses these additional provider state roots;
+        // generated files and links remain confined to attempt-owned roots.
+        let opencode_data = spec
+            .env
+            .iter()
+            .find(|(key, _)| key == "XDG_DATA_HOME")
+            .map(|(_, value)| Path::new(value));
+        if adapter.id() == "opencode" {
+            if let Some(data) = opencode_data {
+                let existing = data
+                    .ancestors()
+                    .find(|path| path.is_dir())
+                    .ok_or("OpenCode data directory has no existing ancestor")?;
+                setup_roots.push(existing);
+            }
+        } else if adapter.id() == "cursor" {
+            setup_roots.push(&home);
+        }
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
             reasons.push(skip(
                 &label,
@@ -528,8 +528,8 @@ fn continuation_for(
         .join("provider-state");
     match find_session_state(&prior_state, session) {
         Some(retained) => copy_state(&retained, private_state)?,
-        // Claude keeps non-writer transcripts in the account directory, not here.
-        None if route.adapter == "claude" => {}
+        // These adapters retain sessions in their existing user data stores.
+        None if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
         None => return Err("the prior attempt's retained provider state is missing".into()),
     }
     Ok(continuation)
@@ -651,7 +651,7 @@ fn observe_account(
             entry.adapter, entry.label
         ));
     }
-    let (detected, org) = if entry.adapter == "opencode" {
+    let (detected, org) = if !matches!(entry.adapter.as_str(), "claude" | "codex") {
         (entry.key.clone(), None)
     } else {
         provenant_providers::accounts::detect_with_org(
@@ -723,7 +723,7 @@ fn observe_account(
         adapter: entry.adapter.clone(),
         executable: executable.to_string_lossy().into_owned(),
         version,
-        fixture_ref: format!("activated/{}/fresh", entry.adapter),
+        fixture_ref: format!("installed/{}/version", entry.adapter),
         catalogue_revision: catalogue_revision.into(),
         account_key: Some(entry.key.clone()),
         observed_models: Vec::new(),
@@ -840,7 +840,11 @@ fn confinement_request(
                 scope: PathScope::Exact,
             }],
             secret_roots: Vec::new(),
-            selected_authentication: (adapter == "codex").then(|| "login".into()),
+            selected_authentication: match adapter {
+                "codex" | "cursor" => Some("login".into()),
+                "agy" => Some("keychain".into()),
+                _ => None,
+            },
             include_continuation: false,
             network: Vec::new(),
             capabilities: Vec::new(),
@@ -933,6 +937,11 @@ fn read_only_plan(
 }
 
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
+    let name = if name == "cursor" {
+        "cursor-agent"
+    } else {
+        name
+    };
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
     for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
         let candidate = directory.join(name);
@@ -1132,6 +1141,57 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_session_stores_resume_without_private_session_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{AttemptId, Digest, RunId, TaskId};
+        use provenant_records::{
+            FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
+        };
+        for adapter in ["cursor", "opencode", "codex"] {
+            let route = ResolvedRoute {
+                adapter: adapter.into(),
+                model: "fixture-model".into(),
+                effort: None,
+                catalogue_revision: "fixture".into(),
+                account_key: Some("local".into()),
+                host: "fixture".into(),
+                alternatives: RouteAlternatives::default(),
+                exclusions: Vec::new(),
+                eligibility: RouteEligibility::Eligible,
+                readiness: RouteReadiness::Ready {
+                    availability_ref: "fixture".into(),
+                    expires_unix_seconds: 100,
+                },
+                confidentiality: RouteConfidentiality {
+                    evidence_ref: "fixture".into(),
+                },
+                pool_selection: None,
+            };
+            let mut prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]), "run_id": RunId::from_bytes([2; 16]),
+                "project_id": ProjectId::from_bytes([3; 16]), "task_id": TaskId::from_bytes([4; 16]),
+                "operation_id": "fixture", "attempt_number": 1, "revision": 1, "generation": 0,
+                "requested_route": {"kind": "model", "provider": adapter, "model": "fixture-model"},
+                "applied_route": {"provider": adapter, "model": format!("{adapter}/fixture-model"), "account_key": "local"},
+                "authority_digest": Digest::from_bytes([0; 32]), "session": "fixture-session",
+                "queued_at": "2026-10-25T00:00:00.000000Z", "state": {"state": "queued"}, "usage": {},
+                "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+            }))?;
+            let state = Path::new("/fixture/missing-state");
+            let result = continuation_for(&prior, &route, "fixture", state, state);
+            if adapter == "codex" {
+                assert!(result.is_err(), "Codex still requires its retained state");
+            } else {
+                assert_eq!(result?.session(), "fixture-session");
+                prior.session = None;
+                assert!(continuation_for(&prior, &route, "fixture", state, state).is_err());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std::error::Error>>

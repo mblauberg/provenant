@@ -1,7 +1,7 @@
 //! Typed permission plans and the fail-closed macOS SBPL backend.
 //!
-//! Provider-owned profile data and observations are checked against every
-//! requested permission. Linux deliberately exposes an unavailable backend.
+//! Provider-owned profile data bounds every requested permission.
+//! Linux deliberately exposes an unavailable backend.
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -171,9 +171,7 @@ pub enum PermissionError {
     NonUtf8Path,
     #[error("profile or fixture record is malformed")]
     InvalidFixture,
-    #[error("provider profile lacks required permission observations")]
-    FixtureInsufficient,
-    #[error("requested permission is not present in the fixture-backed profile")]
+    #[error("requested permission is not present in the provider profile")]
     PermissionNotRecorded,
     #[error("provider process execution policy is missing")]
     ProcessPolicyMissing,
@@ -277,9 +275,9 @@ pub struct AuthenticationProfile {
 /// the compiler; only the selected authentication mechanism is included.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderProfileSpec {
-    /// Exact provider/runtime executables observed in this profile's recording.
+    /// Exact provider/runtime executables required by this adapter.
     pub process_executables: Vec<PathGrant>,
-    /// Forking is broad process authority and is enabled only by recorded data.
+    /// Forking is broad process authority and requires an explicit profile grant.
     pub allow_process_fork: bool,
     /// Deny keychain IPC and its CLI even when a tool can execute system programs.
     pub deny_keychain_access: bool,
@@ -827,7 +825,7 @@ pub enum FixtureOperation {
 }
 
 /// Typed provider policy consumed by the permission compiler. Providers own
-/// fixture loading and construct this value after their own checks.
+/// the launch policy; observations are retained for recorder tooling only.
 pub struct ProviderProfile {
     pub spec: ProviderProfileSpec,
     pub observations: BTreeMap<FixtureOperation, FixtureOutcome>,
@@ -1320,7 +1318,6 @@ fn compile_sbpl(
         return Err(PermissionError::ProfileTooLarge);
     }
     validate_profile_spec(&profile.spec)?;
-    verify_requested_evidence(plan, profile)?;
     for grant in &plan.read_roots {
         validate_read_exec_grant(grant)?;
     }
@@ -2033,96 +2030,6 @@ fn verify_selected_head(worktree: &VerifiedWorktree, branch: &str) -> Result<(),
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn verify_requested_evidence(
-    plan: &PlanPermissions,
-    profile: &ProviderProfile,
-) -> Result<(), PermissionError> {
-    let denied = FixtureOutcome::Denied;
-    let allowed = FixtureOutcome::Allowed;
-    let mut required = vec![
-        (FixtureOperation::DeclaredRead, allowed),
-        (FixtureOperation::UndeclaredRead, denied),
-        (FixtureOperation::UndeclaredWrite, denied),
-        (FixtureOperation::SecretRead, denied),
-        (FixtureOperation::ProtectedWrite, denied),
-        (FixtureOperation::OtherNetwork, denied),
-        (FixtureOperation::DeclaredProcessExec, allowed),
-        (FixtureOperation::UndeclaredProcessExec, denied),
-        (
-            FixtureOperation::ProcessFork,
-            if profile.spec.allow_process_fork {
-                allowed
-            } else {
-                denied
-            },
-        ),
-    ];
-    if profile.spec.deny_keychain_access {
-        required.extend([
-            (FixtureOperation::ShellExec, allowed),
-            (FixtureOperation::KeychainTool, denied),
-            (FixtureOperation::KeychainRead, denied),
-        ]);
-    }
-    if !profile.spec.runtime_reads.is_empty() {
-        required.push((FixtureOperation::RuntimeRead, allowed));
-    }
-    if !profile.spec.state_writes.is_empty() {
-        required.push((FixtureOperation::StateWrite, allowed));
-    }
-    if plan.selected_authentication.is_some() {
-        required.push((FixtureOperation::AuthenticationRead, allowed));
-    }
-    if plan.include_continuation {
-        required.push((FixtureOperation::ContinuationRead, allowed));
-    }
-    if !plan.protected_roots.is_empty() {
-        required.push((FixtureOperation::ProtectedInstructionRead, allowed));
-    }
-    if !plan.network.is_empty() || !profile.spec.provider_api.is_empty() {
-        required.push((FixtureOperation::ProviderEndpoint, allowed));
-    }
-    if profile.spec.loopback_server {
-        required.push((FixtureOperation::LoopbackServer, allowed));
-    }
-    required.extend(plan.capabilities.iter().map(|capability| {
-        let operation = match capability {
-            Capability::BrowserIpc => FixtureOperation::BrowserIpc,
-            Capability::PostgresIpc => FixtureOperation::PostgresIpc,
-        };
-        (operation, allowed)
-    }));
-    if let AccessMode::WorktreeWrite(_) = &plan.mode {
-        required.extend([
-            (FixtureOperation::WorktreeWrite, allowed),
-            (FixtureOperation::GitIndexWrite, allowed),
-            (FixtureOperation::GitHeadWrite, allowed),
-            (FixtureOperation::GitObjectsWrite, allowed),
-            (FixtureOperation::SelectedRefWrite, allowed),
-            (FixtureOperation::GitConfigWrite, denied),
-            (FixtureOperation::OtherRefWrite, denied),
-            (FixtureOperation::ProtectedWrite, denied),
-        ]);
-    }
-    for (operation, outcome) in required {
-        require_observation(&profile.observations, operation, outcome)?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn require_observation(
-    observations: &BTreeMap<FixtureOperation, FixtureOutcome>,
-    operation: FixtureOperation,
-    expected: FixtureOutcome,
-) -> Result<(), PermissionError> {
-    match observations.get(&operation) {
-        Some(actual) if *actual == expected => Ok(()),
-        _ => Err(PermissionError::FixtureInsufficient),
-    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -3698,21 +3605,9 @@ mod tests {
 
         spec.allow_process_fork = false;
         spec.loopback_server = true;
-        use FixtureOperation as O;
-        use FixtureOutcome::{Allowed, Denied};
-        let mut profile = ProviderProfile {
+        let profile = ProviderProfile {
             spec,
-            observations: BTreeMap::from([
-                (O::DeclaredRead, Allowed),
-                (O::UndeclaredRead, Denied),
-                (O::UndeclaredWrite, Denied),
-                (O::SecretRead, Denied),
-                (O::ProtectedWrite, Denied),
-                (O::OtherNetwork, Denied),
-                (O::DeclaredProcessExec, Allowed),
-                (O::UndeclaredProcessExec, Denied),
-                (O::ProcessFork, Denied),
-            ]),
+            observations: BTreeMap::new(),
         };
         let rendered =
             String::from_utf8(render_profile(&plan, &profile, &[], &[], None).expect("SBPL"))
@@ -3722,12 +3617,6 @@ mod tests {
         assert!(rendered.contains("(allow network-bind (local ip \"localhost:*\"))"));
         assert!(rendered.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
         assert!(!rendered.contains("\"*:*\""));
-        assert!(matches!(
-            verify_requested_evidence(&plan, &profile),
-            Err(PermissionError::FixtureInsufficient)
-        ));
-        profile.observations.insert(O::LoopbackServer, Allowed);
-        assert!(verify_requested_evidence(&plan, &profile).is_ok());
     }
 
     #[cfg(target_os = "macos")]

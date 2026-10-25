@@ -5,7 +5,7 @@ authority
 
 Current owners: [ADR 0020](../adr/0020-retire-the-daemon-fabric.md),
 [Fabric Rust design](../specs/rust-port/design/fabric.md),
-[`activation.json`](../../tools/front-door/tests/fixtures/providers/activation.json),
+[provider recordings](../../tools/front-door/tests/fixtures/providers/README.md),
 and [`HARNESS.md`](../../HARNESS.md). Daemon and Console claims below are
 retained as dated evidence only.
 
@@ -36,9 +36,8 @@ daemon and wire hardening
   hooks or global default changes need explicit human authority.
 - Operational spans are content-free and never substitute for authority,
   review, disclosure or artifact receipts.
-- OpenCode is an optional adapter, not a model family. Current execution
-  activation is recorded in `activation.json`; only Claude and Codex are
-  enabled. This dated research does not establish later activation authority.
+- OpenCode is an adapter, not a model family. All current adapters are enabled
+  by default; this dated research does not establish current route availability.
 
 ## Evidence
 

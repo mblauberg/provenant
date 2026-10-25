@@ -17,7 +17,7 @@ pub mod opencode;
 pub mod quota;
 mod stream;
 pub use contract::*;
-pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin, mode_enabled};
+pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin};
 pub use stream::*;
 
 use provenant_quota::QuotaSource;
@@ -58,9 +58,6 @@ macro_rules! adapter {
             fn id(&self) -> &'static str {
                 $id
             }
-            fn execution_enabled(&self) -> bool {
-                crate::launch::any_mode_enabled($id)
-            }
             fn account(
                 &self,
                 state: &crate::StreamState,
@@ -76,7 +73,7 @@ macro_rules! adapter {
                 &self,
                 _: &crate::PreflightInput,
             ) -> Result<crate::PreflightPlan, crate::ProviderError> {
-                Err(crate::ProviderError::Disabled { adapter: $id })
+                Err(crate::ProviderError::UnsupportedPolicy)
             }
             fn decode_preflight(
                 &self,
