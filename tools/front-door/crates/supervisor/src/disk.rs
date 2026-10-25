@@ -52,6 +52,9 @@ pub struct DiskParts {
 pub struct DiskEntry {
     pub class: String,
     pub path: PathBuf,
+    /// Number of inventory rows represented by a class aggregate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,8 +174,20 @@ impl DiskReport {
         name: &OsStr,
         path: &Path,
     ) {
+        let Some(comparison) = self.comparison_path(path) else {
+            return;
+        };
         let mut budget = WalkBudget::default();
-        self.walk(parent, name, path, entry, false, 0, &mut budget);
+        self.walk(
+            parent,
+            name,
+            path,
+            &comparison,
+            entry,
+            false,
+            0,
+            &mut budget,
+        );
     }
 
     /// Publish an aggregate, combining shared host-root observations.
@@ -220,6 +235,7 @@ impl DiskReport {
         path: &Path,
         lane: bool,
     ) -> Option<usize> {
+        let comparison = self.comparison_path(path)?;
         let mut entry = DiskEntry {
             class: class.into(),
             path: path.into(),
@@ -229,7 +245,16 @@ impl DiskReport {
         let mut budget = WalkBudget::default();
         let errors_before = self.errors.len();
         let entries_before = self.entries.len();
-        if !self.walk(parent, name, path, &mut entry, lane, 0, &mut budget) {
+        if !self.walk(
+            parent,
+            name,
+            path,
+            &comparison,
+            &mut entry,
+            lane,
+            0,
+            &mut budget,
+        ) {
             return None;
         }
         if class == "worktree" {
@@ -240,11 +265,28 @@ impl DiskReport {
                 .map(|entry| entry.newest_write_ns)
                 .fold(entry.newest_write_ns, i128::max);
             self.measured_worktrees
-                .insert(path.into(), (newest, self.errors.len() == errors_before));
+                .insert(comparison, (newest, self.errors.len() == errors_before));
         }
         let index = self.entries.len();
         self.entries.push(entry);
         Some(index)
+    }
+
+    fn comparison_path(&mut self, path: &Path) -> Option<PathBuf> {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            self.error(path, "measurement requires a named entry");
+            return None;
+        };
+        // Resolve aliases only in the trusted parent anchor. The measured
+        // entry and all descendants retain descriptor-relative no-follow I/O.
+        match parent.canonicalize() {
+            Ok(parent) => Some(parent.join(name)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                self.error(path, error);
+                None
+            }
+        }
     }
 
     fn observe(&mut self, entry: &mut DiskEntry, metadata: Metadata, private: Option<u64>) {
@@ -272,12 +314,13 @@ impl DiskReport {
         parent: &Directory,
         name: &OsStr,
         path: &Path,
+        comparison: &Path,
         entry: &mut DiskEntry,
         lane: bool,
         depth: usize,
         budget: &mut WalkBudget,
     ) -> bool {
-        if let Some((newest, complete)) = path
+        if let Some((newest, complete)) = comparison
             .ancestors()
             .find_map(|root| self.measured_worktrees.get(root))
             .copied()
@@ -329,6 +372,7 @@ impl DiskReport {
                 parent,
                 name,
                 path,
+                comparison,
                 metadata,
                 child.as_ref(),
                 &mut cache,
@@ -342,6 +386,7 @@ impl DiskReport {
                 parent,
                 name,
                 path,
+                comparison,
                 metadata,
                 child.as_ref(),
                 entry,
@@ -359,6 +404,7 @@ impl DiskReport {
         parent: &Directory,
         name: &OsStr,
         path: &Path,
+        comparison: &Path,
         metadata: Metadata,
         child: Option<&Directory>,
         entry: &mut DiskEntry,
@@ -409,6 +455,7 @@ impl DiskReport {
                 child,
                 &name,
                 &path.join(&name),
+                &comparison.join(&name),
                 entry,
                 lane,
                 depth + 1,
@@ -437,10 +484,41 @@ impl DiskReport {
     }
 
     pub fn finish(&mut self) {
+        // Fold only after all owners have contributed, so shared host-root
+        // rollups still represent one row. Actionable paths remain separate.
+        let mut entries: Vec<DiskEntry> = Vec::new();
+        let mut aggregates = BTreeMap::<String, usize>::new();
+        for mut entry in self.entries.drain(..) {
+            if matches!(
+                entry.class.as_str(),
+                "other_state" | "attempt_retained" | "child_store"
+            ) {
+                if let Some(&index) = aggregates.get(&entry.class) {
+                    let aggregate = &mut entries[index];
+                    aggregate.count = Some(
+                        aggregate
+                            .count
+                            .unwrap_or(1)
+                            .saturating_add(entry.count.unwrap_or(1)),
+                    );
+                    while !entry.path.starts_with(&aggregate.path) {
+                        if !aggregate.path.pop() {
+                            break;
+                        }
+                    }
+                    aggregate.absorb(entry);
+                    continue;
+                }
+                entry.count = Some(entry.count.unwrap_or(1));
+                aggregates.insert(entry.class.clone(), entries.len());
+            }
+            entries.push(entry);
+        }
+        self.entries = entries;
         self.totals.clear();
         for entry in &self.entries {
             let total = self.totals.entry(entry.class.clone()).or_default();
-            total.count += 1;
+            total.count = total.count.saturating_add(entry.count.unwrap_or(1));
             total.allocated_bytes = total.allocated_bytes.saturating_add(entry.allocated_bytes);
             total.unshared_bytes = total.unshared_bytes.saturating_add(entry.unshared_bytes);
         }
@@ -495,6 +573,7 @@ mod tests {
             &parent,
             name,
             temp.path(),
+            temp.path(),
             &mut entry,
             false,
             0,
@@ -510,6 +589,7 @@ mod tests {
         assert!(!report.walk(
             &parent,
             name,
+            temp.path(),
             temp.path(),
             &mut entry,
             false,
@@ -555,6 +635,7 @@ mod tests {
             &directory,
             name,
             &path,
+            &path,
             metadata,
             None,
             &mut entry,
@@ -583,6 +664,47 @@ mod tests {
         assert_eq!(report.entries[parent].allocated_bytes, expected);
         assert!(child_bytes >= 16384);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn overlapping_worktrees_and_state_resolve_symlinked_ancestors() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let real = temp.path().join("real");
+        let root = real.join("container/repo");
+        let nested = root.join(".worktrees/feature");
+        let state = root.join("state/tmp");
+        fs::create_dir_all(&nested)?;
+        fs::create_dir_all(&state)?;
+        fs::write(nested.join("payload"), vec![1; 16384])?;
+        fs::write(state.join("payload"), vec![2; 8192])?;
+        let alias = temp.path().join("alias");
+        symlink(&real, &alias)?;
+        let aliased_root = alias.join("container/repo");
+
+        for (first, second) in [(&root, &aliased_root), (&aliased_root, &root)] {
+            let mut report = DiskReport::new(root.clone(), 0);
+            let child = report
+                .measure("worktree", &first.join(".worktrees/feature"))
+                .ok_or("nested")?;
+            let child_bytes = report.entries[child].allocated_bytes;
+            let parent = report.measure("worktree", second).ok_or("parent")?;
+            let expected = fs::symlink_metadata(&root)?.blocks() * 512
+                + fs::symlink_metadata(root.join(".worktrees"))?.blocks() * 512
+                + fs::symlink_metadata(root.join("state"))?.blocks() * 512
+                + fs::symlink_metadata(&state)?.blocks() * 512
+                + fs::symlink_metadata(state.join("payload"))?.blocks() * 512;
+            assert_eq!(report.entries[parent].allocated_bytes, expected);
+            assert!(child_bytes >= 16384);
+            let newest = report.entries[parent].newest_write_ns;
+            let inventory = report
+                .measure("attempt_tmp", &first.join("state/tmp"))
+                .ok_or("state")?;
+            assert_eq!(report.entries[inventory].allocated_bytes, 0);
+            assert_eq!(report.entries[inventory].unshared_bytes, 0);
+            assert_eq!(report.entries[inventory].newest_write_ns, newest);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        }
         Ok(())
     }
 

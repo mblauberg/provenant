@@ -40,7 +40,9 @@ One `(device, inode)` set spans the report for multiply linked non-directories,
 counting hard-linked files once. Duplicate names still contribute their
 modification time. Directory names are streamed rather than collected and
 sorted. Nested worktrees are measured first; their roots are skipped when
-measuring the containing worktree. Later inventories inside a measured worktree
+measuring the containing worktree. Overlap comparisons canonicalise trusted
+parent paths, so symlinked ancestors identify the same worktree without
+following links beneath an anchor. Later inventories inside a measured worktree
 also skip those bytes: allocation belongs to the first observation. They inherit
 its newest-write timestamp conservatively, and an incomplete earlier walk
 remains an error. A tagged Cargo cache in worktree or other
@@ -57,9 +59,9 @@ and `other`; these parts use unshared bytes and sum to the lane's unshared total
 | `worktree` | Branch when attached, writer `live`, `free` or `unknown`, merge containment when known |
 | `host_target` | Directory containing a regular `CACHEDIR.TAG` in worktree or other state |
 | `attempt_tmp` | Attempt `tmp`; `leak: true` when its indexed attempt is terminal, `false` while nonterminal |
-| `attempt_retained` | One aggregate per run for scratch, provider-state, quarantine, logs, stdout and stderr |
-| `child_store` | One entry per `children/<attempt>`, including its nested store |
-| `other_state` | One aggregate at the host state root and one per run for remaining run and attempt state |
+| `attempt_retained` | One class aggregate for scratch, provider-state, quarantine, logs, stdout and stderr |
+| `child_store` | One class aggregate for `children/<attempt>`, including nested stores |
+| `other_state` | One class aggregate for remaining host, run and attempt state |
 
 Lane states are `live`, `idle`, `orphaned`, `foreign`, `legacy`, `tombstone`,
 `refused` and `unmarked`. Classification reuses cache-owner parsing and GC
@@ -69,7 +71,8 @@ unverifiable markers are retained as unmarked, legacy or refused. Worktree
 writer observations use existing registration and lock files opened read-only,
 plus the native process census. Missing or ambiguous evidence stays unknown and
 protects its cache. Merge containment is against the main worktree's observed
-HEAD, including when invoked from a linked worktree.
+HEAD, including when invoked from a linked worktree. The main worktree omits
+`merged` and does not run a merge-containment check against itself.
 
 Target contents contribute to the newest-write observation, so a fully measured
 cache containing a target can be idle. `reclaim: "gc"` is an ownership hint;
@@ -111,9 +114,14 @@ contains the following additive schema (example with one lane):
 `volume.path` is the existing state directory or its nearest existing ancestor;
 `available_bytes` is unprivileged available space on that filesystem. Other
 inventoried roots may reside on different volumes. Totals aggregate entries by
-class. Retained and other run state is aggregated at each run's path, keeping
-ordinary metadata files from generating a row per file or attempt. Temporary
-directories and caches retain their individual paths for investigation.
+class. Retained, other state and child-store rows are folded into one aggregate
+per class after inventory. Its `path` is the common ancestor of the folded
+paths; `count` is the number of inventory rows represented, rather than files.
+Retained output contributes one row per run, child stores one per child, and
+other state one per run plus one for the shared host-root metadata. Class total
+counts sum these represented rows, and byte totals are unchanged by folding.
+Temporary directories, caches and worktrees retain their individual paths for
+investigation.
 Optional class-specific fields are omitted when unknown or inapplicable.
 Per-path errors accompany successful partial reports; root-resolution failures
 use an error envelope. JSON output over 1 MiB returns `RESULT_TOO_LARGE` without

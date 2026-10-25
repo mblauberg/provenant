@@ -320,6 +320,13 @@ mod tests {
         assert!(!rig.state.exists());
         assert!(snapshot(&rig.root)? == before, "report changed files");
         assert_eq!(report.totals["worktree"].count, 1);
+        let main = report
+            .entries
+            .iter()
+            .find(|entry| entry.class == "worktree")
+            .ok_or("main worktree")?;
+        assert_eq!(main.merged, None);
+        assert!(serde_json::to_value(main)?.get("merged").is_none());
 
         fs::create_dir_all(rig.project.join(".worktrees"))?;
         crate::worktree_tests::git(
@@ -365,6 +372,12 @@ mod tests {
             .ok_or("linked worktree")?;
         assert!(linked.allocated_bytes >= 8192);
         assert_eq!(linked.merged, Some(true));
+        let main = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == rig.project)
+            .ok_or("main worktree")?;
+        assert_eq!(main.merged, None);
         assert!(
             report
                 .entries
@@ -381,6 +394,108 @@ mod tests {
         assert!(json["data"]["volume"]["available_bytes"].is_u64());
         for key in ["method", "volume", "entries", "totals", "errors"] {
             assert!(!json["data"][key].is_null(), "missing {key}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn disk_report_for_three_thousand_runs_stays_small_in_both_render_modes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt};
+        const RUNS: u64 = 3000;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let state = root.join("state");
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("project"));
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&LocalFs)?;
+        fs::create_dir_all(state.join("children"))?;
+        // Mostly empty files and directories exercise physical classification
+        // without SQLite inserts or provider setup. Only the first and last
+        // runs need payload blocks to check that folding preserves bytes.
+        fs::write(state.join("run.sqlite3"), [])?;
+        fs::write(state.join("config.toml"), [])?;
+        let mut expected = BTreeMap::<&str, u64>::new();
+        for index in 0..RUNS {
+            let contents: &[u8] = if index == 0 || index == RUNS - 1 {
+                &[7; 4096]
+            } else {
+                &[]
+            };
+            let attempt = state.join(format!("runs/{index}/attempts/a"));
+            fs::create_dir_all(&attempt)?;
+            for (name, class) in [
+                ("result.md", "other_state"),
+                ("stdout.log", "attempt_retained"),
+            ] {
+                let part = attempt.join(name);
+                fs::write(&part, contents)?;
+                *expected.entry(class).or_default() += fs::symlink_metadata(part)?.blocks() * 512;
+            }
+            let child = state.join(format!("children/{index}"));
+            fs::create_dir(&child)?;
+            if !contents.is_empty() {
+                let payload = child.join("payload");
+                fs::write(&payload, contents)?;
+                *expected.entry("child_store").or_default() +=
+                    fs::symlink_metadata(payload)?.blocks() * 512;
+            }
+            *expected.entry("child_store").or_default() +=
+                fs::symlink_metadata(child)?.blocks() * 512;
+        }
+        for name in ["run.sqlite3", "config.toml"] {
+            *expected.entry("other_state").or_default() +=
+                fs::symlink_metadata(state.join(name))?.blocks() * 512;
+        }
+        let mut report = DiskReport::new(state.clone(), 0);
+        RunStore::disk_usage_unindexed(&roots.state, &mut report)?;
+        other_state(&state, &mut report);
+        // Capture all original byte observations before publication compacts
+        // rows, including APFS private sizes and newest-write timestamps.
+        let mut before = BTreeMap::<String, (u64, u64, u64, i128)>::new();
+        for entry in &report.entries {
+            let total = before.entry(entry.class.clone()).or_default();
+            total.0 += 1;
+            total.1 += entry.allocated_bytes;
+            total.2 += entry.unshared_bytes;
+            total.3 = total.3.max(entry.newest_write_ns);
+        }
+        report.finish();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.entries.len(), 3);
+        for entry in &report.entries {
+            let count = RUNS + u64::from(entry.class == "other_state");
+            assert_eq!(entry.count, Some(count));
+            let total = &report.totals[&entry.class];
+            assert!(total.allocated_bytes > 0);
+            assert_eq!(total.count, count);
+            assert_eq!(total.allocated_bytes, expected[entry.class.as_str()]);
+            assert_eq!(
+                (
+                    total.count,
+                    total.allocated_bytes,
+                    total.unshared_bytes,
+                    entry.newest_write_ns
+                ),
+                before[&entry.class]
+            );
+        }
+        let value = serde_json::to_value(&report)?;
+        report.finish();
+        assert_eq!(serde_json::to_value(&report)?, value);
+        let result = CommandResult::new("disk report", Outcome::Ok, Some(report));
+        let human = provenant_cli::terse(&value);
+        for json in [true, false] {
+            let mut output = Vec::new();
+            let mut errors = Vec::new();
+            assert_eq!(render(&result, json, &human, &mut output, &mut errors), 0);
+            assert!(errors.is_empty());
+            assert!(!output.is_empty());
+            assert!(
+                output.len() < provenant_cli::MAX_RESULT_BYTES / 16,
+                "{} bytes",
+                output.len()
+            );
         }
         Ok(())
     }

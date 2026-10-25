@@ -193,7 +193,7 @@ pub fn worktrees(
     let integration = listed
         .iter()
         .find(|entry| !entry.bare)
-        .map(|entry| entry.head);
+        .map(|entry| (entry.path.clone(), entry.head));
     // Attribute nested linked worktrees before their containing primary tree.
     listed.sort_by_key(|entry| std::cmp::Reverse(entry.path.components().count()));
     let roots: Vec<_> = listed
@@ -227,30 +227,33 @@ pub fn worktrees(
             writer,
         };
         if let Some(index) = report.measure("worktree", &info.path) {
-            let merged = integration.and_then(|tip| {
-                match run_utility(
-                    executor,
-                    GitRead::MergeBaseIsAncestor {
-                        ancestor: info.head,
-                        tip,
-                    },
-                    repo,
-                    utility,
-                    budget,
-                    cancel,
-                ) {
-                    Ok(outcome) if outcome.termination == Termination::Exit(0) => Some(true),
-                    Ok(outcome) if outcome.termination == Termination::Exit(1) => Some(false),
-                    Ok(_) => {
-                        report.error(&info.path, "cannot determine merge containment");
-                        None
+            let merged = integration
+                .as_ref()
+                .filter(|(main, _)| main != &info.path)
+                .and_then(|(_, tip)| {
+                    match run_utility(
+                        executor,
+                        GitRead::MergeBaseIsAncestor {
+                            ancestor: info.head,
+                            tip: *tip,
+                        },
+                        repo,
+                        utility,
+                        budget,
+                        cancel,
+                    ) {
+                        Ok(outcome) if outcome.termination == Termination::Exit(0) => Some(true),
+                        Ok(outcome) if outcome.termination == Termination::Exit(1) => Some(false),
+                        Ok(_) => {
+                            report.error(&info.path, "cannot determine merge containment");
+                            None
+                        }
+                        Err(error) => {
+                            report.error(&info.path, error.to_string());
+                            None
+                        }
                     }
-                    Err(error) => {
-                        report.error(&info.path, error.to_string());
-                        None
-                    }
-                }
-            });
+                });
             let entry = &mut report.entries[index];
             entry.branch = info.branch.clone();
             entry.writer = Some(

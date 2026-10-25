@@ -31,16 +31,18 @@ companions of an existing store while reading its live index.
    investigation. An `attempt_tmp` entry with `leak: true` belongs to an indexed
    terminal attempt. Scratch, provider state, quarantine and logs are retained
    output, so their presence alone is not a leak. Retained output and other run
-   metadata are rolled up per run; remaining host state is rolled up at the
-   state root. Temporary directories and caches keep their individual paths.
+   metadata and child stores are rolled up into one row per class. Each
+   aggregate's `count` records the number of inventory rows it represents.
+   Temporary directories, caches and worktrees keep their individual paths.
 
 Every `target` directory is sized, including nested attempt targets and
 `parts.target` in lane caches. Build artefacts are never parsed. Each measured
-path stops at 1,000,000 entries, ten seconds between filesystem operations or
-256 directory levels, reporting an error and the bytes observed so far. Files
-that disappear during the walk are skipped without an error. A worktree's
+path has a budget of 1,000,000 entries and ten seconds, checked between filesystem
+operations; depth is capped at 256. Reaching a limit reports an error and the
+bytes observed so far. Files that disappear during the walk are skipped without
+an error. A worktree's
 `merged` fact describes containment in the main checkout's observed HEAD and
-grants no removal authority.
+grants no removal authority. The main worktree omits this field.
 
 Live WAL data is included in terminal-state inspection. If a rollback journal
 or an index error prevents inspection, expect an error and omitted
