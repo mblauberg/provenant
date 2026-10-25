@@ -299,7 +299,8 @@ impl Store {
     }
 }
 fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
-    if directory.metadata()?.mode & 0o077 != 0 {
+    let metadata = directory.metadata()?;
+    if metadata.mode & 0o077 != 0 || metadata.uid != provenant_supervisor::fs::effective_uid() {
         return Err(Error::UnsafePath(path.into()));
     }
     Ok(())
@@ -412,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn companions_refuse_a_stray_journal() -> TestResult {
+    fn companions_allow_a_safe_journal_and_refuse_a_symlink() -> TestResult {
         let temp = tempfile::tempdir()?;
         let directory = Directory::open_anchor(temp.path())?;
         let path = temp.path().join("fabric.sqlite3-journal");
