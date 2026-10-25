@@ -31,8 +31,9 @@ is kept and reported as `not_merged`; `--discard` deletes it too and returns
 its head, which recovers it with `git branch NAME HEAD` while Git still holds
 the objects.
 
-Rust confinement validates repository identity and refuses primary, dirty,
-live or unknown writers. It reports `git_operation_in_progress` and refuses
+Rust confinement validates repository identity and refuses primary, dirty
+and live writers. An unknown writer is accepted when its lease is free and the
+tree is clean. It reports `git_operation_in_progress` and refuses
 removal when the worktree's private Git directory contains an unfinished
 cherry-pick, revert, rebase, merge or sequencer operation, even if the index
 and working tree are clean. Run calls `worktrees::check_writer_terminal` before

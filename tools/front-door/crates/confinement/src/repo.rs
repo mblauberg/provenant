@@ -125,6 +125,15 @@ impl GitRefName {
         Ok(Self(value.to_owned()))
     }
 
+    /// A remote-tracking ref named `remote/branch`, such as `origin/main`.
+    pub fn remote_tracking(value: impl AsRef<str>) -> Result<Self, GitRefError> {
+        let value = value.as_ref();
+        if !valid_branch(value) || !value.contains('/') {
+            return Err(GitRefError);
+        }
+        Ok(Self(format!("refs/remotes/{value}")))
+    }
+
     pub fn branch(value: impl AsRef<str>) -> Result<Self, GitRefError> {
         let branch = value.as_ref();
         if !valid_branch(branch) {

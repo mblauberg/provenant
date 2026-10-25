@@ -204,6 +204,7 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                 WorktreeRemove::Name {
                     name,
                     discard: args.discard,
+                    integration: args.integration,
                 }
             } else {
                 WorktreeRemove::Merged {

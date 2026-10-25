@@ -539,7 +539,7 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
         ("provenant check release", "base") => &["head"],
         ("provenant check release", "head") => &["base"],
         ("provenant worktree remove", "merged") => &["integration", "remove_scope"],
-        ("provenant worktree remove", "integration" | "branch" | "since") => &["merged"],
+        ("provenant worktree remove", "branch" | "since") => &["merged"],
         _ => &[],
     };
     names.iter().map(|v| (*v).into()).collect()

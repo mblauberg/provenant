@@ -48,6 +48,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
             "remove_by_name_deletes_a_branch_fully_contained_in_integration",
+            "remove_resolves_directory_names_and_remote_integration_refs",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_an_unregistered_worktree_names_the_create_command",
             "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
@@ -91,6 +92,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "remove_by_name_deletes_a_branch_fully_contained_in_integration" => {
                     remove_by_name_deletes_a_branch_fully_contained_in_integration()
+                }
+                "remove_resolves_directory_names_and_remote_integration_refs" => {
+                    remove_resolves_directory_names_and_remote_integration_refs()
                 }
                 "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_names_the_create_command()
@@ -1198,6 +1202,97 @@ fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -> Result {
         serde_json::json!(["behind"])
     );
     assert!(!has_branch(&rig, "behind")?);
+    rig.assert_legacy_unchanged()
+}
+
+fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
+    let rig = repository()?;
+    // The worktree directory is the branch with `/` replaced by `-`.
+    ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "fix/shipped",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
+    let shipped = rig.project.join(".worktrees/fix-shipped");
+    let shipped_text = shipped.to_str().ok_or("non-text fixture path")?;
+    fs::write(shipped.join("shipped.txt"), "work")?;
+    git(&rig, &["-C", shipped_text, "add", "shipped.txt"])?;
+    git(&rig, &["-C", shipped_text, "commit", "-qm", "shipped"])?;
+    // Local main stays behind; the work is only on the remote-tracking ref.
+    let tip = git(&rig, &["rev-parse", "fix/shipped"])?;
+    git(&rig, &["update-ref", "refs/remotes/origin/main", &tip])?;
+
+    let removed = ok(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "fix-shipped",
+            "--integration",
+            "origin/main",
+            "--json",
+        ],
+    )?;
+    assert_eq!(
+        removed["data"]["pruned_refs"],
+        serde_json::json!(["fix/shipped"])
+    );
+    assert!(!shipped.exists());
+    assert!(!has_branch(&rig, "fix/shipped")?);
+
+    // The merged sweep accepts the same remote-tracking integration ref.
+    let swept = branch_commit(&rig, "swept")?;
+    let swept_tip = git(&rig, &["rev-parse", "swept"])?;
+    // A merge of the branch into the remote's main: contained, and not on the
+    // first-parent history, so the sweep may delete it.
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    let merge_tree = git(&rig, &["rev-parse", &format!("{head}^{{tree}}")])?;
+    let next = git(
+        &rig,
+        &[
+            "commit-tree",
+            &merge_tree,
+            "-p",
+            &head,
+            "-p",
+            &swept_tip,
+            "-m",
+            "merge swept",
+        ],
+    )?;
+    git(&rig, &["update-ref", "refs/remotes/origin/main", &next])?;
+    let stale = git(&rig, &["rev-parse", "HEAD"])?;
+    git(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            swept.to_str().ok_or("path")?,
+        ],
+    )?;
+    let result = ok(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "origin/main",
+            "--branch",
+            "swept",
+            "--json",
+        ],
+    )?;
+    assert_eq!(result["data"]["pruned_refs"], serde_json::json!(["swept"]));
+    assert!(!has_branch(&rig, "swept")?);
+    assert_eq!(git(&rig, &["rev-parse", "HEAD"])?, stale);
     rig.assert_legacy_unchanged()
 }
 
