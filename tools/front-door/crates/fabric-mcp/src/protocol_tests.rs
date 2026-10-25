@@ -122,7 +122,7 @@ fn invalid_first_request_does_not_commit_an_era() {
 }
 
 #[test]
-fn modern_tools_list_publishes_output_schemas_for_every_tool() {
+fn modern_tools_list_publishes_only_supported_output_schemas() {
     let mut protocol = Protocol::default();
     let discover = json!({"jsonrpc":"2.0","id":"discover","method":"server/discover",
         "params":{"_meta":{VERSION:MODERN,CAPABILITIES:{}}}});
@@ -137,11 +137,16 @@ fn modern_tools_list_publishes_output_schemas_for_every_tool() {
     };
     let tools = reply["result"]["tools"].as_array().expect("tools array");
     assert_eq!(tools.len(), 11);
-    assert!(
-        tools
-            .iter()
-            .all(|tool| tool["outputSchema"].is_object() || tool["outputSchema"].is_array())
-    );
+    for tool in tools {
+        let supported = matches!(
+            tool["name"].as_str(),
+            Some("fabric_identity" | "fabric_submit")
+        );
+        assert_eq!(tool.get("outputSchema").is_some(), supported);
+        if supported {
+            assert_eq!(tool["outputSchema"]["type"], "object");
+        }
+    }
 }
 
 #[test]
