@@ -19,6 +19,7 @@ fn invalid_json_is_an_envelope() -> Result {
 #[test]
 fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
     let state = rig.state.to_string_lossy().into_owned();
     let empty = rig.command(&["lanes", "--json"])?;
@@ -262,7 +263,9 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     );
     let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
     assert_eq!(value["data"]["totals"]["attempts"], 4);
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]

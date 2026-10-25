@@ -627,12 +627,8 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
 pub(super) fn writer_process_cleanup(
     context: &provenant_run::ExecutionContext,
 ) -> provenant_supervisor::fixture::ProcessCleanupGuard {
-    let root = context
-        .state_root
-        .as_path()
-        .join("worktrees")
-        .join(context.project_id.to_string());
-    provenant_supervisor::fixture::ProcessCleanupGuard::new(&root)
+    // Guardian records live under runs, alongside worktree metadata and child stores.
+    provenant_supervisor::fixture::ProcessCleanupGuard::new(context.state_root.as_path())
 }
 
 fn start_writer(

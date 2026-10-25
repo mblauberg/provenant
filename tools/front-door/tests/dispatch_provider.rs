@@ -91,6 +91,7 @@ fn fixture() -> Result {
 fn codex_dispatch_observes_rollout() -> Result {
     for (index, prompt) in ["reply OK", "missing", "mismatch"].iter().enumerate() {
         let mut rig = TestRig::new()?;
+        let cleanup = rig.process_cleanup();
         // The production read-only profile anchors the host Rust runtime roots.
         for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
             fs::create_dir_all(rig.home.join(path))?;
@@ -151,7 +152,9 @@ fn codex_dispatch_observes_rollout() -> Result {
                     .is_some_and(|r| r.contains("UnsupportedPlatform")),
                 "{lane}"
             );
-            return rig.assert_legacy_unchanged();
+            rig.assert_legacy_unchanged()?;
+            cleanup.disarm();
+            return Ok(());
         }
         if index == 0 {
             assert_eq!(lane["state"], "succeeded", "{lane}");
@@ -168,11 +171,13 @@ fn codex_dispatch_observes_rollout() -> Result {
             );
         }
         rig.assert_legacy_unchanged()?;
+        cleanup.disarm();
     }
     Ok(())
 }
 fn claude_dispatch_refreshes_registered_account() -> Result {
     let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
     fs::copy(std::env::current_exe()?, bin.join("claude"))?;
@@ -248,7 +253,9 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
             "{lane}"
         );
         assert!(account.join("refreshed").exists());
-        return rig.assert_legacy_unchanged();
+        rig.assert_legacy_unchanged()?;
+        cleanup.disarm();
+        return Ok(());
     }
     assert_eq!(lane["state"], "succeeded", "{lane}");
     assert_eq!(lane["account"], "pro");
@@ -279,7 +286,9 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
             assert!(!String::from_utf8_lossy(&bytes).contains("fixture-refreshed-token"));
         }
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 fn opencode_free_pool_cools_second_model() -> Result {
