@@ -191,12 +191,19 @@ satisfied as the run grammar states. Two shorthands recur:
   Omitted fallback is `Fallback::None`; the list holds at most two distinct
   models and conflicts with a writer.
 - `ACCESS` = `[--mode read-only|worktree-write] [--worktree PATH]
-  [--read-root PATH…] [--network on|off] [--capability NAME…]`, mapping to
-  the task's `Authority`. Mode defaults to read-only and network to off.
-  `--network` governs the task's own network access; the selected provider
-  profile always permits that provider's API endpoints.
-  `--worktree`, or a peer writer's `--branch`, is required with, and only
-  valid for, `worktree-write`. At most 32 read roots and 16 capabilities.
+  [--read-root PATH…] [--write-root PATH…] [--network on|off]
+  [--capability postgres]`, mapping to the task's sealed `LaneAccess`. Mode
+  defaults to read-only. Network defaults to on (open outbound plus localhost)
+  for writers and off for read-only lanes; off still permits the selected
+  provider's API endpoints. `--capability postgres` adds localhost TCP and the
+  `/private/tmp/.s.PGSQL.*` socket without opening outbound network. Read and
+  write roots must be existing directories clear of the state root;
+  confinement refuses credential, broad and Git-internal roots. Rust and Node
+  toolchains need no flag (supervisor.md, Permission policy). `--worktree`, or
+  a peer writer's `--branch`, is required with, and only valid for,
+  `worktree-write`. At most 32 read roots, 32 write roots and 16 capabilities.
+  Fabric submissions, nested dispatch and `--host` take the defaults and refuse
+  overrides.
 
 | Leaf | Grammar | Owner request type | Bounds, conflicts and reason |
 | --- | --- | --- | --- |

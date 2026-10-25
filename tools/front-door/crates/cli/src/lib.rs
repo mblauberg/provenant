@@ -270,6 +270,7 @@ fn build_model(passive: bool) -> clap::Command {
                         "mode",
                         "worktree",
                         "read_root",
+                        "write_root",
                         "network",
                         "capability",
                         "provider_timeout",
@@ -364,8 +365,13 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             if access.mode == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
                 return invalid("writers cannot use fallback models");
             }
-            if access.read_root.len() > 32 || access.capability.len() > 16 {
-                return invalid("at most 32 read roots and 16 capabilities are allowed");
+            if access.read_root.len() > 32
+                || access.write_root.len() > 32
+                || access.capability.len() > 16
+            {
+                return invalid(
+                    "at most 32 read roots, 32 write roots and 16 capabilities are allowed",
+                );
             }
         }
         Command::Lanes(lanes) if lanes.id.len() > 100 => {
@@ -520,7 +526,7 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
         "concurrency" => Some((1, 8)),
         "tail" => Some((1, 500)),
         "max_bytes" => Some((1, 65536)),
-        "read_root" => Some((0, 32)),
+        "read_root" | "write_root" => Some((0, 32)),
         "capability" => Some((0, 16)),
         "fallback" => Some((0, 2)),
         "id" | "branch"

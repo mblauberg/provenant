@@ -130,8 +130,10 @@ flags. Drop `--context-ceiling`. No raw argv, unrestricted knobs, secret bypass
 or hidden downgrade. Read-only fallback is explicit
 (`ADAPTER/ID[,ADAPTER/ID]`, at most two models; omitted means none).
 Access requests carry mode (default read-only), cwd, a required writer worktree,
-read roots, network (default off) and capabilities; writes stay in the worktree. Confinement checks caller authority;
-flags cannot grant it, and provider access excludes custody/control files.
+and an optional sealed `LaneAccess` (network level, read roots, write roots).
+Writes stay in the worktree, shared toolchain stores and declared write roots.
+Confinement checks caller authority; flags cannot grant it, and provider access
+excludes custody/control files.
 
 A manifest is strict JSON `{schema_version:1,tasks:[...]}` with unique task IDs
 (1–64 ASCII letters/digits/`._-`, starting alphanumeric), exactly one inline
@@ -811,8 +813,7 @@ scheduler daemon. Within that, the lane decided:
   worktree's supervisor reservation and exclusive lease before compiling the
   confinement plan, and transfers custody to the guardian. A second writer is
   refused. The guardian releases the reservation after terminal publication
-  and settlement. Network, capability, read-root and remote-host requests
-  remain unsupported.
+  and settlement. Remote-host and nested dispatch refuse access overrides.
 - **Writer terminal checks** reverify the recorded worktree and call
   confinement's instruction snapshot before launch. The sealed baseline lives
   in the provider-inaccessible quarantine archive and can be reopened only for

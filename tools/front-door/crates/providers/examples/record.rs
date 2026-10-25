@@ -17,7 +17,7 @@
 )]
 use provenant_confinement::permissions::{
     AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
-    PathGrant, PathScope, PlanPermissions, ProviderProfile, WorktreeWriteAuthority,
+    NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile, WorktreeWriteAuthority,
     required_anchors, system_backend,
 };
 use provenant_confinement::repo::GitRefName;
@@ -1034,8 +1034,8 @@ fn main() -> Result<()> {
                     _ => None,
                 },
                 include_continuation: false,
-                network: vec![],
-                capabilities: vec![],
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
                 nested_confinement: false,
             },
             codex: CodexPolicy::Clean,

@@ -1345,6 +1345,8 @@ impl BinaryRunOwner<'_> {
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
+                // Fabric lanes take the mode defaults; overrides are CLI-only.
+                access: provenant_records::run::LaneAccess::default(),
             });
         }
         let session = self.session(budget, cancel)?;
