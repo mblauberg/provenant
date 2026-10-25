@@ -84,6 +84,12 @@ fn prepare_with(
         .name;
 
     let executor = provenant_supervisor::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
+    // Nested attempts live in a lane-writable child store. Unconfined provider
+    // commands, including status, version and token refresh, get a fresh cwd
+    // under the host configuration root retained in the launch context.
+    let executor =
+        provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
+            .map_err(|e| e.to_string())?;
     let config = provenant_config::read_with_domains(
         roots,
         &provenant_supervisor::fs::LocalFs,
@@ -366,7 +372,7 @@ fn prepare_with(
                 config_dir: account.directory(),
                 scratch,
             };
-            let authority = match credential_authority(paths, &login) {
+            let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
                 Err(error) => {
                     reasons.push(skip(&label, SkipKind::AuthRequired, error));
@@ -711,7 +717,7 @@ fn copy_tree(from: &Directory, to: &Directory) -> Result<(), CopyRefusal> {
 /// Host context for fresh account identity and version probes.
 struct Probe<'a> {
     roots: Option<&'a provenant_core::Roots>,
-    executor: &'a provenant_supervisor::exec::SystemExecutor,
+    executor: &'a provenant_providers::host::HostProbeExecutor<'a>,
     home: &'a Path,
     user: &'a std::ffi::OsStr,
     scratch: &'a Path,
@@ -891,6 +897,7 @@ fn adapter_route(route: &ResolvedRoute) -> ResolvedRoute {
 /// Record this dispatch's credential authority durably beside the attempt
 /// before any refresh may act on it.
 fn credential_authority(
+    host_root: &Path,
     paths: &run::LaunchPaths,
     login: &provenant_providers::claude::Login<'_>,
 ) -> Result<provenant_providers::claude::CredentialAuthority, String> {
@@ -905,7 +912,18 @@ fn credential_authority(
         .provider_state
         .parent()
         .ok_or("attempt directory missing")?;
-    let parent = Directory::open_anchor(attempt).map_err(|e| e.to_string())?;
+    let relative = attempt
+        .strip_prefix(host_root)
+        .map_err(|_| "attempt directory is outside host state")?;
+    let mut parent = Directory::open_anchor(host_root).map_err(|e| e.to_string())?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("attempt directory is not normalised".into());
+        };
+        parent = parent
+            .open_verified_directory(name)
+            .map_err(|e| e.to_string())?;
+    }
     let publication = parent
         .atomic_write(
             std::ffi::OsStr::new("credential-authority.json"),
@@ -1289,6 +1307,63 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_authority_never_follows_links_below_the_host_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{AttemptId, OperationId, RunId};
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let host_root = base.join("host-state");
+        let relative = Path::new("children/parent/runs/run/attempts/attempt");
+        let attempt = host_root.join(relative);
+        let config = base.join("home/.claude-pro");
+        std::fs::create_dir_all(attempt.join("provider-state"))?;
+        std::fs::create_dir_all(&config)?;
+        std::fs::write(config.join(".credentials.json"), b"{}")?;
+        let mut paths = run::LaunchPaths {
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            operation_id: OperationId::parse("fixture")?,
+            task_index: 0,
+            lane_depth: 2,
+            run_id: RunId::from_bytes([2; 16]),
+            deadline_unix_ms: u64::MAX,
+            scratch: attempt.join("scratch"),
+            provider_state: attempt.join("provider-state"),
+            temporary: attempt.join("tmp"),
+        };
+        let login = provenant_providers::claude::Login {
+            executable: Path::new("/fixture/claude"),
+            home: &base.join("home"),
+            user: std::ffi::OsStr::new("fixture"),
+            config_dir: &config,
+            scratch: &paths.scratch,
+        };
+        credential_authority(&host_root, &paths, &login)?;
+        let record = attempt.join("credential-authority.json");
+        let original = std::fs::read(&record)?;
+        // Test intermediate child-store ancestors as well as the final attempt.
+        for ancestor in [
+            Path::new("children"),
+            Path::new("children/parent"),
+            relative,
+        ] {
+            let source = host_root.join(ancestor);
+            let redirected = base.join("redirected");
+            std::fs::rename(&source, &redirected)?;
+            std::os::unix::fs::symlink(&redirected, &source)?;
+            assert!(credential_authority(&host_root, &paths, &login).is_err());
+            assert_eq!(std::fs::read(&record)?, original);
+            std::fs::remove_file(&source)?;
+            std::fs::rename(&redirected, &source)?;
+        }
+        paths.provider_state = base.join("outside/provider-state");
+        assert!(credential_authority(&host_root, &paths, &login).is_err());
+        paths.provider_state = host_root.join("children/../outside/provider-state");
+        assert!(credential_authority(&host_root, &paths, &login).is_err());
+        Ok(())
+    }
 
     #[test]
     fn user_session_stores_resume_without_private_session_files()
