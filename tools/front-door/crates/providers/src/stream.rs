@@ -235,6 +235,14 @@ impl StreamState {
     }
 }
 pub(crate) fn wire<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ProviderError> {
-    provenant_records::decode(bytes, provenant_records::Limits::CONFIG)
-        .map_err(|_| ProviderError::Malformed)
+    // Providers may repeat a member inside an event they otherwise ignore (Codex
+    // `web_search` items carry two `id`s). Only that case falls back to plain
+    // serde_json, which keeps the last value; the line is already length-bounded.
+    match provenant_records::decode(bytes, provenant_records::Limits::CONFIG) {
+        Ok(value) => Ok(value),
+        Err(provenant_records::DecodeError::DuplicateMember { .. }) => {
+            serde_json::from_slice(bytes).map_err(|_| ProviderError::Malformed)
+        }
+        Err(_) => Err(ProviderError::Malformed),
+    }
 }
