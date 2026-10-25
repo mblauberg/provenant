@@ -113,15 +113,25 @@ MCP registration, before changing a live installation. Build the optional menu b
 ## Quick start
 
 With Rust 1.99.1 installed, build from `tools/front-door`, where the pinned
-toolchain file lives, and inspect the available commands and routes:
+toolchain file lives, package a release and inspect the available commands and
+routes:
 
 ```sh
 cd tools/front-door
-BIN="${CARGO_TARGET_DIR:-$PWD/target}/release/provenant"
+RELEASE="$(mktemp -d)/release"
 cargo build --release --locked --bin provenant
+cargo run --release --locked --example package-release -- --out "$RELEASE"
+BIN="$RELEASE/bin/provenant"
 "$BIN" help
 "$BIN" route list
 "$BIN" route resolve --route junior
+```
+
+Before dispatch, install and sign in to a supported provider CLI. Claude and
+Codex lanes require `provenant accounts register` first; follow the
+[account registration steps](docs/runbooks/install.md#install).
+
+```sh
 "$BIN" quota show
 printf '%s\n' 'Summarise this repository structure in three bullets.' | \
   "$BIN" dispatch \
@@ -130,8 +140,8 @@ printf '%s\n' 'Summarise this repository structure in three bullets.' | \
 "$BIN" lanes --all
 ```
 
-The dispatch command starts a real read-only provider lane. Install and sign in
-to a supported provider CLI first; the run uses that provider's quota. Use
+The dispatch command starts a real read-only provider lane and uses that
+provider's quota. Use
 `provenant help dispatch` for all dispatch controls and
 `provenant help route` for route commands.
 

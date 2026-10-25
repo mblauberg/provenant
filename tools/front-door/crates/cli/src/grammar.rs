@@ -1,4 +1,4 @@
-//! Frozen CLI-owned grammar. Owner subtrees mount only when their owners land.
+//! CLI-owned grammar with mounted owner subtrees.
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
 pub use provenant_records::Harness;
@@ -454,7 +454,7 @@ pub struct Reconcile {
     #[arg(long)]
     pub id: Vec<RunId>,
     /// Abandon uncertain custody (not available in this build)
-    #[arg(long, requires = "id")]
+    #[arg(long, requires = "id", hide = true)]
     pub abandon_uncertain: bool,
 }
 #[derive(Debug, Subcommand)]

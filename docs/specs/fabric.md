@@ -400,8 +400,7 @@ Fabric does not own these wire forms.
   intent was recorded. After that boundary, recovery observes or reports
   unknown and never replays. A held lock, live provider or uncertain identity
   means starting or unknown, never a second launch. An uncertain attempt stays
-  unknown: `reconcile --abandon-uncertain` is in the grammar but refused in
-  this build. Any retry is a new authorised operation.
+  unknown. Any retry is a new authorised operation.
 - **No kill on silence.** Silence, an MCP disconnect, a bookkeeping failure or
   ENOSPC never stops a healthy provider. Only explicit cancellation, an
   authorised timeout or the run owner's custody rules can. Missing or malformed

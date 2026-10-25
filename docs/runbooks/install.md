@@ -49,12 +49,19 @@ preview, and keep them closed through the install and `check install`. The
 example selects Claude; repeat `--harness` for each client (`claude`, `codex`,
 `cursor`, `agy` or `opencode`).
 
+Claude accounts must use exactly `~/.claude-$LABEL`, where `LABEL` is the
+registration label. Choose a label and sign in to that directory before
+registering it. `~/.claude` is the sign-in source only, not a registered account.
+
 ```sh
 PROVENANT="$RELEASE/bin/provenant"
 STATE="$HOME/.local/share/provenant/v1"
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --dry-run
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin"
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
+LABEL=work
+ACCOUNT_DIR="$HOME/.claude-$LABEL"
+CLAUDE_CONFIG_DIR=~/.claude-$LABEL claude
 "$PROVENANT" --state-dir "$STATE" accounts register "$LABEL" --adapter claude --directory "$ACCOUNT_DIR"
 "$PROVENANT" --state-dir "$STATE" quota tick
 ```
@@ -112,8 +119,9 @@ exit 1. Apply the same command without `--dry-run` once the preview is right.
 
 ## Fabric MCP registration
 
-`provenant fabric mcp --client NAME` is the explicit stdio transport. Supported
-client values are `claude`, `codex`, `cursor`, `agy` and `opencode`. `--json`
+`provenant fabric mcp [--client NAME]` is the explicit stdio transport. The
+`--client` flag is optional; supported values are `claude`, `codex`, `cursor`,
+`agy` and `opencode`. `--json`
 is refused before stdin. A bare `provenant` prints usage and exits 2, so a
 client registration must name `fabric mcp`.
 

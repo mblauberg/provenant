@@ -8,6 +8,10 @@ components on the default branch. This project orchestrates tools that may
 execute commands or access local files; an instruction-level authority bypass
 is in scope even when it is not conventional application code.
 
+## Supported versions
+
+Security fixes go to the latest 1.x release only.
+
 ## Reporting
 
 Report privately through GitHub private vulnerability reporting at
