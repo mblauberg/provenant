@@ -40,6 +40,10 @@ const REFUSING: usize = 32;
 /// the caller recognises it and builds the busy reply itself; the agent never
 /// parses a request.
 const BUSY: &[u8] = b"{\"agent\":\"busy\"}\n";
+/// Already-buffered request bytes discarded before an at-cap refusal closes.
+/// Closing with unread data resets the connection, and on Linux the reset
+/// discards the busy frame before the caller can read it.
+const BUFFERED_DRAIN: usize = 64 * 1024;
 /// Pause after a failed `accept`, and the run of consecutive failures after
 /// which the agent exits so launchd restarts it.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
@@ -249,7 +253,9 @@ fn refuse(mut stream: UnixStream, refusing: &Arc<AtomicUsize>) {
     {
         // At the refusal cap, a best-effort busy frame must not stall accept.
         if stream.set_nonblocking(true).is_ok() {
+            drain_buffered(&mut stream);
             let _ = stream.write(BUSY);
+            let _ = stream.shutdown(Shutdown::Write);
         }
         return;
     }
@@ -265,6 +271,19 @@ fn refuse(mut stream: UnixStream, refusing: &Arc<AtomicUsize>) {
         }
         refusing.fetch_sub(1, Ordering::SeqCst);
     });
+}
+
+/// Read without blocking whatever the caller has already sent, up to
+/// `BUFFERED_DRAIN`, so closing the refused stream does not reset it.
+fn drain_buffered(stream: &mut UnixStream) {
+    let mut buffer = [0; 4096];
+    let mut drained = 0;
+    while drained < BUFFERED_DRAIN {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => drained += read,
+        }
+    }
 }
 
 /// Count consecutive `accept` failures: pause and carry on, then give up once
