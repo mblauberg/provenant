@@ -1078,6 +1078,10 @@ fn main() -> Result<()> {
                 priority: None,
                 billing_anchor: None,
                 limits: None,
+                display_name: None,
+                hidden: false,
+                order: None,
+                headline: None,
             }
             .registered()
         })

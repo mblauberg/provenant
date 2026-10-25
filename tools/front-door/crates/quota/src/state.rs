@@ -239,6 +239,21 @@ pub struct AccountRow {
     pub next_due_unix_seconds: Option<i64>,
     pub refreshing: bool,
     pub error: Option<ProbeFailure>,
+    /// Menu bar choices from the matching registered account, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<RowDisplay>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowDisplay {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline: Option<crate::Headline>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -265,6 +280,8 @@ pub struct QuotaReport {
     pub refreshing_ids: Vec<String>,
     pub next_due_unix_seconds: Option<i64>,
     pub report_path: String,
+    #[serde(default)]
+    pub display: crate::Display,
 }
 
 #[cfg(test)]

@@ -6,18 +6,58 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub max_parallel: u64,
     pub wall_budget_seconds: u64,
+    #[serde(default)]
+    pub display: Display,
+}
+/// Which window the menu bar leads with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Headline {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "5h")]
+    FiveHour,
+    #[serde(rename = "weekly")]
+    Weekly,
+}
+/// Menu bar display choices. Hidden accounts and ordering live on each account entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Display {
+    pub headline: Headline,
+    /// `most_constrained` or an account entry id.
+    pub icon: String,
+}
+pub const MOST_CONSTRAINED: &str = "most_constrained";
+impl Default for Display {
+    fn default() -> Self {
+        Self {
+            headline: Headline::Auto,
+            icon: MOST_CONSTRAINED.into(),
+        }
+    }
+}
+/// Syntax of an account entry id, which the quota domain cannot resolve.
+pub fn valid_icon(icon: &str) -> bool {
+    icon == MOST_CONSTRAINED
+        || (!icon.is_empty()
+            && icon.len() <= 128
+            && icon
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             max_parallel: 3,
             wall_budget_seconds: 55,
+            display: Display::default(),
         }
     }
 }
 impl DomainConfig for Settings {
     fn validate(&self) -> Vec<SectionError> {
-        [
+        let mut errors: Vec<SectionError> = [
             ("max_parallel", (1..=3).contains(&self.max_parallel)),
             (
                 "wall_budget_seconds",
@@ -30,8 +70,50 @@ impl DomainConfig for Settings {
             field: field.into(),
             code: "ceiling",
         })
-        .collect()
+        .collect();
+        if !valid_icon(&self.display.icon) {
+            errors.push(SectionError {
+                field: "display.icon".into(),
+                code: "icon",
+            });
+        }
+        errors
     }
 }
 pub const SECTION: DomainSection =
-    DomainSection::new::<Settings>("quota", |_| "max_parallel = 3\nwall_budget_seconds = 55\n");
+    DomainSection::new::<Settings>("quota", |_| {
+    "max_parallel = 3\nwall_budget_seconds = 55\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n"
+});
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn parse(text: &str) -> Result<Settings, toml_edit::de::Error> {
+        toml_edit::de::from_str(text)
+    }
+    const BASE: &str = "max_parallel = 3\nwall_budget_seconds = 55\n";
+    #[test]
+    fn display_defaults_and_valid_values() {
+        let s = parse(BASE).unwrap();
+        assert_eq!(s.display, Display::default());
+        assert!(s.validate().is_empty());
+        let d = parse(&format!("{BASE}[display]\nheadline = \"5h\"\nicon = \"claude-michael\"\n")).unwrap();
+        assert_eq!(d.display.headline, Headline::FiveHour);
+        assert!(d.validate().is_empty());
+        let w = parse(&format!("{BASE}[display]\nheadline = \"weekly\"\n")).unwrap();
+        assert_eq!(w.display.icon, MOST_CONSTRAINED);
+        assert_eq!(serde_json::to_string(&Headline::FiveHour).unwrap(), "\"5h\"");
+    }
+    #[test]
+    fn display_rejects_bad_headline_icon_and_unknown_keys() {
+        assert!(parse(&format!("{BASE}[display]\nheadline = \"daily\"\n")).is_err());
+        assert!(parse(&format!("{BASE}[display]\nextra = 1\n")).is_err());
+        for icon in ["", "a b", "x/y", "caf\u{e9}"] {
+            let s = parse(&format!("{BASE}[display]\nicon = \"{icon}\"\n")).unwrap();
+            assert_eq!(s.validate()[0].code, "icon", "{icon:?}");
+        }
+        let long = "a".repeat(129);
+        let s = parse(&format!("{BASE}[display]\nicon = \"{long}\"\n")).unwrap();
+        assert!(!s.validate().is_empty());
+    }
+}

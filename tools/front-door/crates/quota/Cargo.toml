@@ -14,6 +14,8 @@ provenant-config = { workspace = true }
 provenant-records = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+toml_edit = { workspace = true }
 
 [lints]
 workspace = true
