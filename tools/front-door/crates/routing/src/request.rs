@@ -54,6 +54,32 @@ pub(crate) fn effort_valid(text: &str) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RouteName(String);
+impl RouteName {
+    pub fn parse(text: &str) -> Result<Self, RoutingError> {
+        if !identifier(text) {
+            return Err(RoutingError::InvalidValue);
+        }
+        Ok(Self(text.into()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for RouteName {
+    type Error = RoutingError;
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+impl From<RouteName> for String {
+    fn from(name: RouteName) -> String {
+        name.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     content = "value",
@@ -62,7 +88,7 @@ pub(crate) fn effort_valid(text: &str) -> bool {
 )]
 pub enum RouteChoice {
     Model(ModelId),
-    NamedRoute(String),
+    NamedRoute(RouteName),
 }
 
 /// Closed bound is checked on construction and deserialization.

@@ -6,7 +6,7 @@ use provenant_providers::{AvailabilityRecord, REGISTRY};
 use provenant_records::{CommandError, CommandResult, Limits, Outcome, RouteReadiness};
 use provenant_routing::{
     AccessContext, BoundedModels, Catalogue, Fallback, ModelId, PacingPolicy, QuotaObservation,
-    RouteChoice, RoutePoolMember, RoutingContext, RoutingError,
+    RouteChoice, RouteName, RoutePoolMember, RoutingContext, RoutingError,
 };
 use provenant_supervisor::fs::{Directory, FsError, LocalFs};
 use serde::Serialize;
@@ -121,7 +121,7 @@ impl RouteRequest {
     pub fn to_domain(&self) -> Result<provenant_routing::RouteRequest, RoutingError> {
         let choice = match (&self.model, &self.route) {
             (Some(model), None) => RouteChoice::Model(ModelId::parse(&model.0)?),
-            (None, Some(name)) => RouteChoice::NamedRoute(name.clone()),
+            (None, Some(name)) => RouteChoice::NamedRoute(RouteName::parse(name)?),
             _ => return Err(RoutingError::InvalidValue),
         };
         let fallback = if self.fallback.is_empty() {

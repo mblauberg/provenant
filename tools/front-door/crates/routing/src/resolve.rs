@@ -57,6 +57,35 @@ impl RoutingContext<'_> {
         Ok(())
     }
 }
+
+struct ValidatedContext<'a>(RoutingContext<'a>);
+impl<'a> ValidatedContext<'a> {
+    fn new(context: &RoutingContext<'a>) -> Result<Self, RoutingError> {
+        context.validate()?;
+        Ok(Self(RoutingContext { ..*context }))
+    }
+}
+impl<'a> std::ops::Deref for ValidatedContext<'a> {
+    type Target = RoutingContext<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+enum AccountSelection<'a> {
+    Any,
+    Known(&'a str),
+}
+impl<'a> AccountSelection<'a> {
+    fn parse(account: Option<&'a str>) -> Result<Self, RoutingError> {
+        match account {
+            None => Ok(Self::Any),
+            Some("unknown") => Err(RoutingError::InvalidValue),
+            Some(account) if crate::request::identifier(account) => Ok(Self::Known(account)),
+            Some(_) => Err(RoutingError::InvalidValue),
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct RouteList {
     pub catalogue_revision: String,
@@ -81,7 +110,7 @@ pub fn list(
     query: &RouteListQuery,
     context: &RoutingContext<'_>,
 ) -> Result<RouteList, RoutingError> {
-    context.validate()?;
+    let context = &ValidatedContext::new(context)?;
     if query
         .adapter
         .as_ref()
@@ -393,7 +422,7 @@ fn exhaustion_lapsed(snapshot: &provenant_quota::QuotaSnapshot, now_seconds: i64
 fn candidate(
     model: &ModelId,
     effort: Option<&str>,
-    context: &RoutingContext<'_>,
+    context: &ValidatedContext<'_>,
 ) -> Result<RouteAlternative, RoutingError> {
     context
         .registry
@@ -475,7 +504,12 @@ pub fn resolve_with_seed(
     operation_id: &str,
     task_index: u64,
 ) -> Result<ResolvedRoute, RoutingError> {
-    resolve_inner(request, context, Some((operation_id, task_index)), &[])
+    resolve_inner(
+        request,
+        &ValidatedContext::new(context)?,
+        Some((operation_id, task_index)),
+        &[],
+    )
 }
 
 /// Dispatch-only account filter; its routing decision also uses the stable
@@ -515,15 +549,13 @@ pub fn resolve_for_account_with_seed_excluding(
     task_index: u64,
     excluded_members: &[ModelId],
 ) -> Result<ResolvedRoute, RoutingError> {
-    let mut filtered = None;
-    if let Some(account) = account {
-        if !crate::request::identifier(account) || account == "unknown" {
-            return Err(RoutingError::InvalidValue);
-        }
-        context.validate()?;
+    let account = AccountSelection::parse(account)?;
+    let context = &ValidatedContext::new(context)?;
+    if let AccountSelection::Known(account) = account {
         let adapters: BTreeSet<&str> = match &request.choice {
             RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
             RouteChoice::NamedRoute(name) => {
+                let name = name.as_str();
                 if let Some(pool) = effective_pool(context, name) {
                     pool.iter().map(|member| member.model.adapter()).collect()
                 } else {
@@ -548,24 +580,24 @@ pub fn resolve_for_account_with_seed_excluding(
             })
             .cloned()
             .collect();
-        filtered = Some(availability);
-    }
-    match filtered.as_ref() {
-        Some(availability) => resolve_inner(
+        // Filtering a validated snapshot preserves its bounds and uniqueness.
+        let filtered = ValidatedContext(RoutingContext {
+            availability: &availability,
+            ..context.0
+        });
+        resolve_inner(
             request,
-            &RoutingContext {
-                availability,
-                ..*context
-            },
+            &filtered,
             Some((operation_id, task_index)),
             excluded_members,
-        ),
-        None => resolve_inner(
+        )
+    } else {
+        resolve_inner(
             request,
             context,
             Some((operation_id, task_index)),
             excluded_members,
-        ),
+        )
     }
 }
 
@@ -573,7 +605,7 @@ pub fn resolve(
     request: &RouteRequest,
     context: &RoutingContext<'_>,
 ) -> Result<ResolvedRoute, RoutingError> {
-    resolve_inner(request, context, None, &[])
+    resolve_inner(request, &ValidatedContext::new(context)?, None, &[])
 }
 
 struct PoolPick {
@@ -583,11 +615,10 @@ struct PoolPick {
 
 fn resolve_inner(
     request: &RouteRequest,
-    context: &RoutingContext<'_>,
+    context: &ValidatedContext<'_>,
     seed: Option<(&str, u64)>,
     excluded_members: &[ModelId],
 ) -> Result<ResolvedRoute, RoutingError> {
-    context.validate()?;
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
             if !privacy_allowed(model, request.confidential, context.catalogue) {
@@ -596,9 +627,7 @@ fn resolve_inner(
             (candidate(model, request.effort.as_deref(), context)?, None)
         }
         RouteChoice::NamedRoute(name) => {
-            if !crate::request::identifier(name) {
-                return Err(RoutingError::InvalidValue);
-            }
+            let name = name.as_str();
             if let Some(pool) = effective_pool(context, name) {
                 let selected = select_pool(name, pool, request, context, seed, excluded_members)?;
                 (selected.route, Some(selected.receipt))
@@ -684,7 +713,7 @@ struct PoolDraw {
 fn classify_pool(
     members: &[RoutePoolMember],
     request: &RouteRequest,
-    context: &RoutingContext<'_>,
+    context: &ValidatedContext<'_>,
     excluded_members: &[ModelId],
 ) -> Result<ClassifiedPool, RoutingError> {
     let mut classified = ClassifiedPool {
@@ -855,7 +884,7 @@ fn select_pool(
     name: &str,
     members: &[RoutePoolMember],
     request: &RouteRequest,
-    context: &RoutingContext<'_>,
+    context: &ValidatedContext<'_>,
     seed: Option<(&str, u64)>,
     excluded_members: &[ModelId],
 ) -> Result<PoolPick, RoutingError> {
