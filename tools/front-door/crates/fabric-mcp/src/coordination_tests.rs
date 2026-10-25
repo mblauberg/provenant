@@ -81,7 +81,7 @@ fn call(
 #[test]
 fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
 -> Result<(), Box<dyn Error>> {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
     let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
     inputs.state_dir = Some(base.join("state"));

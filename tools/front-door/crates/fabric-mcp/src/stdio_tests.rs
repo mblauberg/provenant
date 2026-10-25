@@ -827,7 +827,7 @@ struct FactoryState {
 struct FakeFactory(Arc<FactoryState>);
 impl FakeFactory {
     fn new(gate: Arc<Gate>) -> Self {
-        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));

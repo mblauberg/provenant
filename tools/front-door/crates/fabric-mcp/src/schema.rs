@@ -4,7 +4,7 @@ use provenant_fabric_runtime::coordination::input::{
     MAX_ARTIFACT_PATH_BYTES, MAX_FETCH_BYTES, MAX_REFERENCE_BYTES, MAX_ROUTE_BYTES, MAX_TEXT_BYTES,
 };
 use serde_json::{Value, json};
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolKind {
@@ -98,22 +98,10 @@ fn tagged(tag: &str, variants: Value) -> Value {
 fn output_object(fields: Value) -> Value {
     object(fields)
 }
-fn output_page(item: Value) -> Value {
-    output_object(json!({
-        "items":array(item,0,100),
-        "truncated":{"type":"boolean"}
-    }))
-}
 fn output_attempt_target() -> Value {
     output_object(json!({
         "attempt":pattern("^[0-9a-f]{32}$"),
         "host":nullable(pattern("^[0-9a-f]{32}$"))
-    }))
-}
-fn output_artifact() -> Value {
-    output_object(json!({
-        "path":{"type":"object"},
-        "digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))
     }))
 }
 fn output_absolute_path() -> Value {
@@ -124,91 +112,20 @@ fn output_absolute_path() -> Value {
         }))
     }))
 }
-fn output_schema(kind: ToolKind) -> Value {
+fn output_schema(kind: ToolKind) -> Option<Value> {
     let any_object = json!({"type":"object"});
     let text_value = json!({"type":"string"});
-    let integer_value = json!({"type":"integer","minimum":0});
-    let bool_value = json!({"type":"boolean"});
-    let proof = any_object.clone();
     match kind {
-        ToolKind::Identity => output_object(json!({
+        ToolKind::Identity => Some(output_object(json!({
             "project":pattern("^[0-9a-f]{32}$"),"host":pattern("^[0-9a-f]{32}$"),
             "inbox":output_object(json!({"host":pattern("^[0-9a-f]{32}$"),"agent":text_value,"actor":pattern("^[0-9a-f]{32}$")})),
             "client":text_value,"cwd":output_absolute_path(),"common_dir":output_absolute_path(),
             "federation":{"anyOf":[any_object,{"type":"null"}]}
-        })),
-        ToolKind::Mail => tagged(
-            "result",
-            json!({
-                "sent":{"id":text_value},
-                "read":{"page":output_page(any_object),"cursor":{"type":"integer"}},
-                "marked_read":{"cursor":{"type":"integer"}}
-            }),
-        ),
-        ToolKind::Task => tagged(
-            "result",
-            json!({
-                "created":{"task":any_object},"listed":{"page":output_page(any_object.clone())},
-                "claimed":{"proof":proof},"updated":{"task":any_object},
-                "finished":{"task":any_object},"released":{"task":any_object}
-            }),
-        ),
-        ToolKind::Events => tagged(
-            "result",
-            json!({
-                "read":{"page":output_page(any_object),"cursor":{"type":"integer"},"timed_out":bool_value,
-                    "unknown_hosts":array(text_value,0,100),"run_events_pending":bool_value},
-                "noted":{"seq":{"type":"integer"}}
-            }),
-        ),
-        ToolKind::Claim => tagged(
-            "result",
-            json!({
-                "acquired":{"proof":proof,"claim":any_object},"renewed":{"claim":any_object},
-                "verified":{"claim":any_object},"released":{"id":text_value},
-                "listed":{"page":output_page(any_object)}
-            }),
-        ),
-        ToolKind::Landing => tagged(
-            "result",
-            json!({
-                "acquired":{"proof":proof,"landing":any_object},"renewed":{"landing":any_object},
-                "verified":{"landing":any_object},"released":{"id":text_value,"reference":text_value},
-                "waited":{"landing":{"anyOf":[any_object,{"type":"null"}]},"timed_out":bool_value}
-            }),
-        ),
-        ToolKind::Submit => output_object(json!({
+        }))),
+        ToolKind::Submit => Some(output_object(json!({
             "operation_id":text_value,"targets":array(output_attempt_target(),0,100)
-        })),
-        ToolKind::Run => tagged(
-            "result",
-            json!({
-                "list":{"page":output_object(json!({"items":array(any_object.clone(),0,100),"next_after":{"anyOf":[output_attempt_target(),{"type":"null"}]},"truncated":bool_value}))},
-                "status":{"attempt":any_object},"wait":{"condition":choices(&["any","all"]),"attempts":array(any_object.clone(),0,100),"satisfied":bool_value,"timed_out":bool_value},
-                "cancel":{"attempt":any_object},"resume":{"attempt":any_object}
-            }),
-        ),
-        ToolKind::Output => tagged(
-            "kind",
-            json!({
-                "chunk":{"target":output_attempt_target(),"part":choices(&["stdout","stderr"]),"offset":integer_value,
-                    "next_offset":integer_value,"eof":bool_value,"digest":text_value,
-                    "bytes":tagged("encoding",json!({"utf8":{"data":text_value},"bytes":{"data":array(integer(0,255),0,provenant_records::run::OUTPUT_LIMIT)}}))},
-                "artifact":{"target":output_attempt_target(),"artifact":output_artifact(),"digest":text_value,
-                    "bytes":tagged("encoding",json!({"utf8":{"data":text_value},"bytes":{"data":array(integer(0,255),0,MAX_FETCH_BYTES)}}))}
-            }),
-        ),
-        ToolKind::Hosts => array(
-            output_object(json!({
-                "host":text_value,"available":bool_value,
-                "execution":{"anyOf":[bool_value,{"type":"null"}]}
-            })),
-            0,
-            100,
-        ),
-        ToolKind::Graph => output_object(json!({
-            "status":choices(&["pending","complete","cancelled"]),"checkpoint":any_object
-        })),
+        }))),
+        _ => None,
     }
 }
 fn proof(key: &str, landing: bool) -> Value {
@@ -239,7 +156,7 @@ fn definitions() -> Value {
         "Scope":tagged("kind",json!({"issue":{"key":text(MAX_REFERENCE_BYTES)},"paths":{"paths":array(text(MAX_ARTIFACT_PATH_BYTES),1,100)},"worktree":{"path":text(MAX_ARTIFACT_PATH_BYTES)}}))
     })
 }
-fn build_catalogue() -> Vec<Value> {
+fn build_strict() -> Vec<Value> {
     let page = integer(1, 100);
     let lease = integer(1000, 3_600_000);
     let wait = integer(1000, crate::MAX_WAIT_MS);
@@ -333,21 +250,32 @@ fn build_catalogue() -> Vec<Value> {
             let mut input = tagged("op", operations);
             if matches!(
                 kind,
-                ToolKind::Mail | ToolKind::Task | ToolKind::Events | ToolKind::Claim | ToolKind::Landing
+                ToolKind::Mail
+                    | ToolKind::Task
+                    | ToolKind::Events
+                    | ToolKind::Claim
+                    | ToolKind::Landing
             ) && let Some(variants) = input["oneOf"].as_array_mut()
             {
-                    for variant in variants {
-                        let operation = variant.pointer("/properties/op/const").and_then(Value::as_str);
-                        let is_mutation = matches!((*kind, operation),
-                            (ToolKind::Mail, Some("send" | "mark_read"))
-                            | (ToolKind::Task, Some("create" | "claim" | "update" | "finish" | "release"))
+                for variant in variants {
+                    let operation = variant
+                        .pointer("/properties/op/const")
+                        .and_then(Value::as_str);
+                    let is_mutation = matches!(
+                        (*kind, operation),
+                        (ToolKind::Mail, Some("send" | "mark_read"))
+                            | (
+                                ToolKind::Task,
+                                Some("create" | "claim" | "update" | "finish" | "release")
+                            )
                             | (ToolKind::Events, Some("note"))
                             | (ToolKind::Claim, Some("acquire" | "renew" | "release"))
-                            | (ToolKind::Landing, Some("acquire" | "renew" | "release")));
-                        if is_mutation {
-                            variant["properties"]["operation_id"] = reference("OperationId");
-                        }
+                            | (ToolKind::Landing, Some("acquire" | "renew" | "release"))
+                    );
+                    if is_mutation {
+                        variant["properties"]["operation_id"] = reference("OperationId");
                     }
+                }
             }
             // A single-operation tool is a plain object: a one-variant `oneOf`
             // is rendered by clients as "exactly one of" over the union of its
@@ -362,9 +290,134 @@ fn build_catalogue() -> Vec<Value> {
             }
             input["type"] = json!("object");
             input["$defs"] = definitions();
-            json!({"name":name,"description":description,"inputSchema":input,"outputSchema":output_schema(*kind)})
+            let mut tool = json!({"name":name,"description":description,"inputSchema":input});
+            if let Some(output) = output_schema(*kind) {
+                tool["outputSchema"] = output;
+            }
+            tool
         })
         .collect()
+}
+
+fn strip_string_constraints(node: &mut Value) {
+    match node {
+        Value::Object(fields) => {
+            if fields.get("type").and_then(Value::as_str) == Some("string") {
+                fields.remove("minLength");
+                fields.remove("x-provenant-maxUtf8Bytes");
+                if fields.get("pattern").and_then(Value::as_str) == Some(r"^[^\u0000]*$") {
+                    fields.remove("pattern");
+                }
+            }
+            for child in fields.values_mut() {
+                strip_string_constraints(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                strip_string_constraints(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Count physical references in the reachable schema, visiting each def once.
+fn count_refs<'a>(
+    node: &Value,
+    defs: &'a serde_json::Map<String, Value>,
+    counts: &mut BTreeMap<&'a str, usize>,
+) {
+    match node {
+        Value::Object(fields) => {
+            if let Some((name, definition)) = fields
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|pointer| pointer.strip_prefix("#/$defs/"))
+                .and_then(|name| defs.get_key_value(name))
+            {
+                let count = counts.entry(name.as_str()).or_default();
+                *count += 1;
+                if *count == 1 {
+                    count_refs(definition, defs, counts);
+                }
+            }
+            for (key, child) in fields {
+                if key != "$defs" {
+                    count_refs(child, defs, counts);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                count_refs(child, defs, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn inline_single_use_defs(
+    node: &mut Value,
+    defs: &serde_json::Map<String, Value>,
+    counts: &BTreeMap<&str, usize>,
+) {
+    while let Some(name) = node["$ref"]
+        .as_str()
+        .and_then(|pointer| pointer.strip_prefix("#/$defs/"))
+        && counts.get(name) == Some(&1)
+    {
+        *node = defs[name].clone();
+    }
+    match node {
+        Value::Object(fields) => {
+            for child in fields.values_mut() {
+                inline_single_use_defs(child, defs, counts);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                inline_single_use_defs(child, defs, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Publish relaxed text bounds and only definitions that save repeated bytes.
+fn compact(tool: &Value) -> Value {
+    let mut tool = tool.clone();
+    strip_string_constraints(&mut tool);
+    let input = &mut tool["inputSchema"];
+    let Some(Value::Object(defs)) = input
+        .as_object_mut()
+        .and_then(|fields| fields.remove("$defs"))
+    else {
+        return tool;
+    };
+    let mut counts = BTreeMap::new();
+    count_refs(input, &defs, &mut counts);
+    inline_single_use_defs(input, &defs, &counts);
+    let retained: serde_json::Map<String, Value> = defs
+        .iter()
+        .filter(|(name, _)| counts.get(name.as_str()).is_some_and(|count| *count >= 2))
+        .map(|(name, definition)| {
+            let mut definition = definition.clone();
+            inline_single_use_defs(&mut definition, &defs, &counts);
+            (name.clone(), definition)
+        })
+        .collect();
+    let mut counts = BTreeMap::new();
+    count_refs(input, &retained, &mut counts);
+    let retained: serde_json::Map<String, Value> = retained
+        .iter()
+        .filter(|(name, _)| counts.get(name.as_str()).is_some_and(|count| *count >= 2))
+        .map(|(name, definition)| (name.clone(), definition.clone()))
+        .collect();
+    if !retained.is_empty() {
+        input["$defs"] = Value::Object(retained);
+    }
+    tool
 }
 
 /// The only operation of a single-operation tool, which callers may omit.
@@ -376,9 +429,14 @@ pub fn sole_operation(name: &str) -> Option<&'static str> {
     input["properties"]["op"]["const"].as_str()
 }
 
+pub(crate) fn strict_catalogue() -> &'static [Value] {
+    static CATALOGUE: OnceLock<Vec<Value>> = OnceLock::new();
+    CATALOGUE.get_or_init(build_strict)
+}
+
 pub fn catalogue() -> &'static [Value] {
     static CATALOGUE: OnceLock<Vec<Value>> = OnceLock::new();
-    CATALOGUE.get_or_init(build_catalogue)
+    CATALOGUE.get_or_init(|| strict_catalogue().iter().map(compact).collect())
 }
 
 pub fn legacy_catalogue() -> &'static [Value] {
@@ -400,7 +458,9 @@ pub fn legacy_catalogue() -> &'static [Value] {
 /// Diagnose only a rejected serde value. Runtime is the validation owner;
 /// this structural walk recovers paths that serde's errors omit.
 pub fn invalid_path(name: &str, value: &Value) -> Option<String> {
-    let root = &catalogue().iter().find(|tool| tool["name"] == name)?["inputSchema"];
+    let root = &strict_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == name)?["inputSchema"];
     structural_path(root, root, value, "arguments")
 }
 fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> Option<String> {

@@ -170,7 +170,9 @@ usage and exits 2, so a registration must name `fabric mcp`.
 
 The MCP server exposes 11 tools. Each takes a tagged `op` enum that rejects
 unknown fields, with no numeric-string coercion or synonym repair. The schema
-catalogue is explicit and checked against serde acceptance.
+catalogue has two cached forms: strict schemas for serde acceptance probes and
+error paths, and compact schemas for `tools/list`. Every valid strict-schema
+probe must also pass its compact schema.
 
 | Tool | Operations |
 |---|---|
@@ -185,6 +187,42 @@ catalogue is explicit and checked against serde acceptance.
 | `fabric_graph` | run, status, cancel, resume |
 | `fabric_output` | read, fetch |
 | `fabric_hosts` | list |
+
+The compact input schemas keep `maxLength` and identifier patterns for IDs,
+operation IDs, Git OIDs, SHA-256 digests and graph IDs. They omit text
+`minLength`, UTF-8 byte annotations and the NUL-exclusion pattern. Runtime
+validation still rejects empty text, NUL characters and excess UTF-8 bytes
+before side effects, with `invalid_input` and the exact field path. Since a
+string's code point count cannot exceed its UTF-8 byte count, these schemas
+only relax acceptance. Single-use definitions are inlined recursively;
+unreachable definitions are removed. Definitions used at least twice stay in
+`$defs` at the input-schema root, and an empty `$defs` is omitted.
+
+Only identity and submit publish `outputSchema`, each with `type: "object"`.
+Other tools still send `structuredContent`. Legacy catalogues omit all output
+schemas. Both protocol eras use the same compact input schemas; protocol
+versions and catalogue cache behaviour are unchanged.
+
+Issue #1571 wave 1 measured the following bytes with
+`serde_json::to_vec(tool).len()`, including each complete tool object and
+excluding catalogue array framing. The total fell by 75.8%. Tests allow 10%
+growth per tool, rounded up, with hard caps of 3,072 bytes per tool and 18 KiB
+for the sum.
+
+| Tool | Before (bytes) | After (bytes) |
+|---|---:|---:|
+| `fabric_identity` | 5,973 | 1,387 |
+| `fabric_mail` | 6,586 | 2,441 |
+| `fabric_task` | 7,710 | 2,209 |
+| `fabric_events` | 6,220 | 781 |
+| `fabric_claim` | 6,776 | 2,185 |
+| `fabric_landing` | 7,105 | 2,020 |
+| `fabric_submit` | 6,780 | 2,338 |
+| `fabric_run` | 7,545 | 1,776 |
+| `fabric_graph` | 5,780 | 838 |
+| `fabric_output` | 7,395 | 1,375 |
+| `fabric_hosts` | 5,188 | 336 |
+| **Total** | **73,058** | **17,686** |
 
 Mutating operations in the mail, task, events, claim and landing tools accept
 an optional `operation_id` so a caller can retry after a lost reply; observation
