@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(crate) fn tempdir() -> io::Result<tempfile::TempDir> {
+    // Canonical roots avoid macOS temp aliases while honouring the lane's writable TMPDIR.
+    tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir())?)
+}
+
 pub(crate) struct Fixture {
     pub(crate) _temp: tempfile::TempDir,
     pub(crate) root: PathBuf,
@@ -35,7 +40,7 @@ impl Fixture {
         .find(|path| path.is_file())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Git fixture is unavailable"))?;
         let git = fs::canonicalize(git)?;
-        let temp = tempfile::tempdir_in("/tmp")?;
+        let temp = tempdir()?;
         let root = temp.path().join("repo");
         let home = temp.path().join("home");
         fs::create_dir(&root)?;

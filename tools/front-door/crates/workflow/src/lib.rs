@@ -10,4 +10,6 @@ pub mod review;
 pub mod risk;
 pub mod session;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 pub mod writing;

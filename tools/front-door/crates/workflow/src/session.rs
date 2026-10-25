@@ -179,7 +179,7 @@ mod tests {
     }
     fn setup() -> (tempfile::TempDir, StateRoot, ProjectId) {
         // Explicit roots; no environment or real HOME/harness settings are read.
-        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let home = base.join("home");
         std::fs::create_dir(&home).unwrap();

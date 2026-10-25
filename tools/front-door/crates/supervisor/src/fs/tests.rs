@@ -915,7 +915,7 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
         ("rename", &b"old complete receipt"[..]),
         ("directory-sync", &b"new complete receipt"[..]),
     ] {
-        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let temp = crate::test_support::short_tempdir(".tmp", "boundary.sock").unwrap();
         let dir = Directory::open_anchor(temp.path()).unwrap();
         dir.atomic_write(
             OsStr::new("receipt.json"),

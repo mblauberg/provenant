@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
 use provenant_supervisor::{
     ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,
@@ -1966,9 +1969,7 @@ fn settle_writers(root: &Path) -> Result<()> {
 }
 
 fn run_case(name: &str) -> Result<()> {
-    // Darwin's per-user TMPDIR can exceed sockaddr_un's path bound once the
-    // fixture's socket names are appended; keep this private root short.
-    let root = tempfile::Builder::new().prefix("s2-").tempdir_in("/tmp")?;
+    let root = test_support::short_tempdir("s2-", "terminal-checkpoint.sock")?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let case = CASES
         .iter()

@@ -183,7 +183,7 @@ fn commit(rig: &TestRig, message: &str, content: &str) -> Result<String> {
 #[test]
 fn pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers() -> Result {
     for format in ["sha1", "sha256"] {
-        check_push_policy(&TestRig::with_object_format(Path::new("/tmp"), format)?)?;
+        check_push_policy(&TestRig::with_object_format(&std::env::temp_dir(), format)?)?;
     }
     Ok(())
 }

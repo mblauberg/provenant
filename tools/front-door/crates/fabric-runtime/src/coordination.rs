@@ -1103,8 +1103,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").expect("tmp path"))
-                .expect("temp root");
+            let temp = crate::test_support::tempdir().expect("temp root");
             let base = temp.path().canonicalize().expect("canonical temp root");
             let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
             inputs.state_dir = Some(base.join("state"));
@@ -1181,8 +1180,7 @@ mod tests {
 
     #[test]
     fn task_create_uses_one_timestamp() {
-        let temporary = tempfile::tempdir_in(std::fs::canonicalize("/tmp").expect("tmp path"))
-            .expect("temp root");
+        let temporary = crate::test_support::tempdir().expect("temp root");
         let base = temporary
             .path()
             .canonicalize()

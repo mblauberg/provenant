@@ -17,7 +17,7 @@ fn roots(path: &Path) -> Result<Roots> {
 }
 #[test]
 fn recording_on_a_missing_root_creates_nothing() -> Result {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = crate::worktree_tests::support::tempdir()?;
     let roots = roots(temp.path())?;
     record_cli(&roots, "root", 0, 4);
     record_tool(&roots, "fabric_identity", "ok", 1);
@@ -26,7 +26,7 @@ fn recording_on_a_missing_root_creates_nothing() -> Result {
 }
 #[test]
 fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
-    let temp = tempfile::tempdir_in("/tmp")?;
+    let temp = crate::worktree_tests::support::tempdir()?;
     let roots = roots(temp.path())?;
     std::fs::create_dir(roots.state.as_path())?;
     std::fs::set_permissions(

@@ -3142,12 +3142,15 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn anchored_directory_rejects_noncanonical_tmp_aliases() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary anchor");
-        let canonical = provenant_supervisor::fs::canonicalize(temp.path())
-            .expect("canonical temporary anchor");
-        assert_ne!(temp.path(), canonical);
+        let temp = crate::test_support::tempdir().expect("temporary anchor");
+        // An explicit alias exercises macOS symlink rejection inside a writable fixture.
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(temp.path(), &alias).expect("temporary anchor alias");
+        let canonical =
+            provenant_supervisor::fs::canonicalize(&alias).expect("canonical temporary anchor");
+        assert_ne!(alias, canonical);
         assert!(matches!(
-            AnchoredDirectory::open_canonical(&LocalFs, temp.path()),
+            AnchoredDirectory::open_canonical(&LocalFs, &alias),
             Err(PermissionError::InvalidPath)
         ));
         assert!(AnchoredDirectory::open_canonical(&LocalFs, canonical).is_ok());
@@ -3156,7 +3159,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn anchored_directory_detects_replacement_at_its_sbpl_path() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary anchor root");
+        let temp = crate::test_support::tempdir().expect("temporary anchor root");
         let original = temp.path().join("root");
         std::fs::create_dir(&original).expect("anchor directory");
         let path =
@@ -4460,7 +4463,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_sandbox_probe_runs_through_executor_with_isolated_environment() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary isolated root");
+        let temp = crate::test_support::tempdir().expect("temporary isolated root");
         let root =
             provenant_supervisor::fs::canonicalize(temp.path()).expect("canonical isolated root");
         let home = root.join("home");

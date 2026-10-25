@@ -389,8 +389,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").expect("tmp root"))
-                .expect("temp directory");
+            let temp = crate::test_support::tempdir().expect("temp directory");
             let base = temp.path().canonicalize().expect("canonical temp root");
             let mut roots = RootInputs::new(base.join("home"), base.join("checkout"));
             roots.state_dir = Some(base.join("state"));
