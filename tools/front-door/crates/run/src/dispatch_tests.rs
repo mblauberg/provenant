@@ -644,10 +644,24 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
         cancel: &cancel,
     };
+    // A held custody lock is a live handoff: cancel leaves it untouched.
+    let scope = provenant_supervisor::custody::Scope {
+        run: batch.run_id,
+        attempt: starting,
+        generation: 1,
+    };
+    let held = provenant_supervisor::fixture::acquire_writer(
+        store.attempt_dir(batch.run_id, starting, false)?,
+        scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?;
     assert!(matches!(
         store.cancel(starting, "stop", &spent)?,
         CancelReceipt::Unobservable { .. }
     ));
+    drop(held);
     // Supervisor's stop writes cancel.json; the waiting guardian sees it.
     let dir = store.attempt_dir(batch.run_id, starting, false)?;
     artifacts::seal(&dir, "cancel.json", b"{}", RECORD_LIMIT)?;
@@ -737,6 +751,46 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     );
     store.start(continued.run_id, &fake, &|_| unreachable!(), &call)?;
     assert_eq!(fake.resumed.get(), Some(prior));
+    Ok(())
+}
+
+#[test]
+fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let batch = two_tasks(1);
+    store.create(&batch, &call)?;
+    let orphan = batch.attempts[0].attempt_id;
+    store.mark_starting(orphan, &route(), &[], None, &call)?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: batch.run_id,
+        attempt: orphan,
+        generation: 1,
+    };
+    drop(provenant_supervisor::fixture::acquire_writer(
+        store.attempt_dir(batch.run_id, orphan, false)?,
+        scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let system = provenant_supervisor::clock::SystemClock::new();
+    let spent = Request {
+        clock: &system,
+        budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
+        cancel: &cancel,
+    };
+    assert_eq!(
+        store.cancel(orphan, "stop", &spent)?,
+        CancelReceipt::Cancelled
+    );
+    assert_eq!(terminal(&store, orphan, &call)?, Outcome::Rejected);
+    assert_eq!(
+        store.cancel(orphan, "stop", &spent)?,
+        CancelReceipt::AlreadyTerminal
+    );
     Ok(())
 }
 

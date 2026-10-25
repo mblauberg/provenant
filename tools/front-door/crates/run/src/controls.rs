@@ -171,6 +171,26 @@ impl RunStore {
                 {
                     std::thread::park_timeout(std::time::Duration::from_millis(100));
                 }
+                // The handoff window is spent and there is still no launch
+                // summary: settle a launch nobody holds, as reconcile does.
+                Err(CustodyError::Filesystem(error))
+                    if error.is_not_found() && record.state == AttemptState::Starting =>
+                {
+                    // A busy or unreadable custody lock leaves it untouched.
+                    let settled =
+                        self.settle_unlaunched(id, &record, call)
+                            .unwrap_or_else(|error| Reconciled::Uncertain {
+                                reason: error.to_string(),
+                            });
+                    return Ok(match settled {
+                        Reconciled::Withdrawn => CancelReceipt::Cancelled,
+                        Reconciled::Finished => CancelReceipt::AlreadyTerminal,
+                        Reconciled::Uncertain { reason } => CancelReceipt::Unobservable { reason },
+                        other => CancelReceipt::Unobservable {
+                            reason: format!("{other:?}"),
+                        },
+                    });
+                }
                 Err(error) => {
                     return Ok(CancelReceipt::Unobservable {
                         reason: error.to_string(),
@@ -318,6 +338,87 @@ impl RunStore {
             _ => false,
         })
     }
+    /// Settle an attempt that has no launch summary. Only a reservation or
+    /// handoff that provably never spawned is withdrawn; a held custody lock
+    /// or a live provider leaves it untouched and uncertain.
+    fn settle_unlaunched(
+        &self,
+        id: AttemptId,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<Reconciled> {
+        let scope = Self::scope(record);
+        let uncertain = |error: &dyn std::fmt::Display| Reconciled::Uncertain {
+            reason: error.to_string(),
+        };
+        let dir = || self.attempt_dir(record.run_id, id, false);
+        if record.state != AttemptState::Starting {
+            return Ok(uncertain(&"running attempt has no launch summary"));
+        }
+        if let Some(fence) = self
+            .writer_fences()?
+            .into_iter()
+            .find(|fence| fence.scope == scope)
+        {
+            if self.withdraw_prepared_writer(&fence, call)? {
+                let now = call
+                    .clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?;
+                self.withdraw(
+                    id,
+                    AttemptState::Starting,
+                    Outcome::Rejected,
+                    "launch interrupted: writer preparation never reached a guardian",
+                    now,
+                    call,
+                )?;
+                return Ok(Reconciled::Withdrawn);
+            }
+            return Ok(uncertain(&format!(
+                "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
+                fence.reservation.display()
+            )));
+        }
+        // The submitter died before reserving: the held lease proves no
+        // handoff began and keeps a late reservation out.
+        let attempt = dir()?;
+        let unreserved = custody::prove_unreserved(&attempt, call.budget, call.cancel, call.clock)
+            .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        let _recovery = match unreserved {
+            Some(lease) => Held::Unreserved(lease),
+            None => {
+                let recovery =
+                    match custody::acquire_recovery(dir()?, call.budget, call.cancel, call.clock) {
+                        Ok(recovery) => recovery,
+                        Err(error) => return Ok(uncertain(&error)),
+                    };
+                if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent {
+                    return Ok(uncertain(&"launch custody is not provably absent"));
+                }
+                if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
+                    return Ok(uncertain(&"exit exists without a launch summary"));
+                }
+                Held::Reserved(Box::new(recovery))
+            }
+        };
+        let now = call
+            .clock
+            .wall_now()
+            .map_err(|_| RunError::Validation("wall clock"))?;
+        let done = self.withdraw(
+            id,
+            AttemptState::Starting,
+            Outcome::Rejected,
+            "launch interrupted: never reached a guardian",
+            now,
+            call,
+        )?;
+        Ok(match done {
+            Some(_) => Reconciled::Withdrawn,
+            None => Reconciled::Finished,
+        })
+    }
     fn reconcile_attempt(
         &self,
         id: AttemptId,
@@ -408,78 +509,7 @@ impl RunStore {
             // No launch summary: the handoff never confirmed. Only a
             // reservation that provably never spawned may be withdrawn.
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
-                if record.state != AttemptState::Starting {
-                    return Ok(uncertain(&"running attempt has no launch summary"));
-                }
-                if let Some(fence) = self
-                    .writer_fences()?
-                    .into_iter()
-                    .find(|fence| fence.scope == scope)
-                {
-                    if self.withdraw_prepared_writer(&fence, call)? {
-                        let now = call
-                            .clock
-                            .wall_now()
-                            .map_err(|_| RunError::Validation("wall clock"))?;
-                        self.withdraw(
-                            id,
-                            AttemptState::Starting,
-                            Outcome::Rejected,
-                            "writer preparation never reached a guardian",
-                            now,
-                            call,
-                        )?;
-                        return Ok(Reconciled::Withdrawn);
-                    }
-                    return Ok(uncertain(&format!(
-                        "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
-                        fence.reservation.display()
-                    )));
-                }
-                // The submitter died before reserving: the held lease proves no
-                // handoff began and keeps a late reservation out.
-                let attempt = dir()?;
-                let unreserved =
-                    custody::prove_unreserved(&attempt, call.budget, call.cancel, call.clock)
-                        .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
-                let _recovery = match unreserved {
-                    Some(lease) => Held::Unreserved(lease),
-                    None => {
-                        let recovery = match custody::acquire_recovery(
-                            dir()?,
-                            call.budget,
-                            call.cancel,
-                            call.clock,
-                        ) {
-                            Ok(recovery) => recovery,
-                            Err(error) => return Ok(uncertain(&error)),
-                        };
-                        if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent
-                        {
-                            return Ok(uncertain(&"launch custody is not provably absent"));
-                        }
-                        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
-                            return Ok(uncertain(&"exit exists without a launch summary"));
-                        }
-                        Held::Reserved(Box::new(recovery))
-                    }
-                };
-                let now = call
-                    .clock
-                    .wall_now()
-                    .map_err(|_| RunError::Validation("wall clock"))?;
-                let done = self.withdraw(
-                    id,
-                    AttemptState::Starting,
-                    Outcome::Rejected,
-                    "launch never reached a guardian",
-                    now,
-                    call,
-                )?;
-                Ok(match done {
-                    Some(_) => Reconciled::Withdrawn,
-                    None => Reconciled::Finished,
-                })
+                self.settle_unlaunched(id, &record, call)
             }
             Err(error) => Ok(uncertain(&error)),
         }
