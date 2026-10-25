@@ -158,6 +158,59 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     Ok(())
 }
 #[test]
+fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
+    use provenant_supervisor::fs::LockMode;
+    use std::ffi::OsStr;
+
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let store = RunStore::open(&context, &call(&clock, &cancel))?;
+    let _held = store
+        .root
+        .try_lock(OsStr::new("run.sqlite3.lock"), LockMode::Exclusive)?;
+    let request = Request {
+        clock: &clock,
+        budget: WaitBudget::nonblocking(MonoTime::from_micros(0)),
+        cancel: &cancel,
+    };
+    let contended = matches!(
+        db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
+        Err(RunError::Contention)
+    );
+    cancel.cancel();
+    let cancelled = matches!(
+        db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
+        Err(RunError::Cancelled)
+    );
+    assert_eq!((contended, cancelled), (true, true));
+    Ok(())
+}
+
+#[test]
+fn reopening_a_current_store_does_not_wait_for_a_writer() -> TestResult {
+    use provenant_core::Clock;
+    use provenant_supervisor::clock::SystemClock;
+
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 1)?,
+        cancel: &cancel,
+    };
+    let writer = RunStore::open(&context, &request)?;
+    writer.db.execute_batch("BEGIN IMMEDIATE")?;
+    let reader = RunStore::open(&context, &request)?;
+    assert!(!reader.has_runs(&request)?);
+    writer.db.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
 fn concurrent_first_opens_create_a_ready_store() -> TestResult {
     // Repeated fresh directories exercise both file creation and WAL setup.
     for _ in 0..16 {

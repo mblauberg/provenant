@@ -662,31 +662,39 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 } else {
                     let coverage =
                         if matches!(input, CoordinationInput::Events(EventsInput::Read { .. })) {
-                            peer_factory.pull_events_from(false, budget, &cancel)?
+                            peer_factory.pull_events_from(false, budget, &cancel)
                         } else {
-                            EventCoverage::default()
+                            Ok(EventCoverage::default())
                         };
-                    let service = CoordinationService::open(
-                        &context.roots.state,
-                        context.identity.project,
-                        request.actor()?,
-                        &clock,
-                        &backoff,
-                        budget,
-                        &cancel,
-                    )?;
-                    match input.execute(&service, operation_id.clone(), budget, &cancel) {
-                        Ok(mut value) => {
-                            if let CoordinationResult::Events(EventsResult::Read {
-                                unknown_hosts,
-                                run_events_pending,
-                                ..
-                            }) = &mut value
-                            {
-                                unknown_hosts.extend(coverage.unknown_hosts);
-                                *run_events_pending |= coverage.more_events;
+                    match coverage {
+                        Ok(coverage) => {
+                            let service = CoordinationService::open(
+                                &context.roots.state,
+                                context.identity.project,
+                                request.actor()?,
+                                &clock,
+                                &backoff,
+                                budget,
+                                &cancel,
+                            )?;
+                            match input.execute(&service, operation_id.clone(), budget, &cancel) {
+                                Ok(mut value) => {
+                                    if let CoordinationResult::Events(EventsResult::Read {
+                                        unknown_hosts,
+                                        run_events_pending,
+                                        ..
+                                    }) = &mut value
+                                    {
+                                        unknown_hosts.extend(coverage.unknown_hosts);
+                                        *run_events_pending |= coverage.more_events;
+                                    }
+                                    PeerResult::Coordination(value)
+                                }
+                                Err(error) => PeerResult::Error {
+                                    code: error.code().into(),
+                                    operation_id: operation_id.clone(),
+                                },
                             }
-                            PeerResult::Coordination(value)
                         }
                         Err(error) => PeerResult::Error {
                             code: error.code().into(),

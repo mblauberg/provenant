@@ -1,7 +1,7 @@
 use crate::*;
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
 use provenant_supervisor::fs::{
-    Directory, FileKind, LockGuard, LockMode, verify_directory_identity,
+    Directory, FileKind, FsError, LockGuard, LockMode, verify_directory_identity,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::{
@@ -126,7 +126,7 @@ impl RunStore {
         request.retry(|| Ok(()))?;
         let (root, db, _initialisation) =
             open_database(context.state_root.as_path(), "run.sqlite3", request)?;
-        request.retry(|| version(&db))?;
+        let schema_version = request.retry(|| version(&db))?;
         let store = Self {
             db,
             root,
@@ -135,15 +135,17 @@ impl RunStore {
             policy: Default::default(),
             _owner: PhantomData,
         };
-        store.write(request, |tx| {
-            if version(tx)? == 0 {
-                tx.execute_batch(include_str!("schema.sql"))?;
-            }
-            if version(tx)? == 1 {
-                tx.execute_batch(include_str!("schema_v2.sql"))?;
-            }
-            Ok(())
-        })?;
+        if schema_version < 2 {
+            store.write(request, |tx| {
+                if version(tx)? == 0 {
+                    tx.execute_batch(include_str!("schema.sql"))?;
+                }
+                if version(tx)? == 1 {
+                    tx.execute_batch(include_str!("schema_v2.sql"))?;
+                }
+                Ok(())
+            })?;
+        }
         companions(&store.root, "run.sqlite3")?;
         Ok(store)
     }
@@ -211,13 +213,19 @@ pub(crate) fn open_database(
         Err(error) if error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
-    let initialisation = root.lock(
-        OsStr::new(&lock_name),
-        LockMode::Exclusive,
-        request.budget,
-        request.cancel,
-        request.clock,
-    )?;
+    let initialisation = root
+        .lock(
+            OsStr::new(&lock_name),
+            LockMode::Exclusive,
+            request.budget,
+            request.cancel,
+            request.clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => RunError::Contention,
+            FsError::Cancelled { .. } => RunError::Cancelled,
+            error => error.into(),
+        })?;
     match root.create_new(OsStr::new(name)) {
         Ok(file) => {
             file.sync()?;
