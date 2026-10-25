@@ -447,7 +447,10 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
     // Validation failures exit before a PeerResponse is framed.
     assert_eq!(code(&output), 3);
     assert!(output.stdout.bytes.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("peer project is outside"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("peer source host must be a configured peer other than this host")
+    );
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
     rig.assert_legacy_unchanged()
 }
