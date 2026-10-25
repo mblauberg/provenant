@@ -1139,26 +1139,27 @@ pub fn plan_install(
                 .as_deref()
                 .map(AbsolutePath::new)
                 .transpose()?,
+            relinquished_hooks: Vec::new(),
         }),
         None => snapshots.receipt.as_ref().and_then(|r| r.legacy.clone()),
     };
     if let Some(legacy) = &mut legacy
-        && snapshots.receipt.as_ref().is_some_and(|previous| {
-            previous.legacy.as_ref().is_some_and(|old| {
-                old.git_hooks_dir == legacy.git_hooks_dir
-                    && previous
-                        .entries
-                        .iter()
-                        .any(|entry| entry.selector == "git-hook:pre-push")
-            })
-        })
-        && !entries
-            .iter()
-            .any(|entry| entry.selector == "git-hook:pre-push")
+        && let Some(previous) = &snapshots.receipt
+        && previous
+            .legacy
+            .as_ref()
+            .is_some_and(|old| old.git_hooks_dir == legacy.git_hooks_dir)
     {
-        // Once ownership ends, the edited launcher is user state. Keep the
-        // other legacy audits, but stop auditing its former hooks directory.
-        legacy.git_hooks_dir = None;
+        // Once ownership ends, the edited hook is user state. Stop auditing
+        // that hook only; its neighbours keep their legacy audits.
+        for entry in &previous.entries {
+            if let Some(name) = entry.selector.strip_prefix("git-hook:")
+                && !entries.iter().any(|kept| kept.selector == entry.selector)
+                && !legacy.relinquished_hooks.iter().any(|hook| hook == name)
+            {
+                legacy.relinquished_hooks.push(name.to_owned());
+            }
+        }
     }
     let receipt = InstallReceipt {
         schema_version: 1,

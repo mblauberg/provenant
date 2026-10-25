@@ -364,6 +364,9 @@ fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migrat
         fs::create_dir_all(&hooks).unwrap();
         let launcher = hooks.join("pre-push");
         symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
+        // A never-owned neighbour stays audited after pre-push is relinquished.
+        let foreign = hooks.join("post-merge");
+        fs::write(&foreign, b"foreign hook\n").unwrap();
         f.targets.legacy_checkout = Some(checkout);
         f.targets.git_hooks_dir = Some(hooks);
         let clock = SystemClock::new();
@@ -416,7 +419,16 @@ fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migrat
         )
         .unwrap();
         assert!(inspection.error.is_none());
-        assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+        assert_eq!(
+            inspection
+                .findings
+                .iter()
+                .map(|finding| (finding.rule.as_str(), finding.path.to_path_buf().unwrap()))
+                .collect::<Vec<_>>(),
+            [("legacy_hook_conflict", foreign.clone())],
+            "{:?}",
+            inspection.findings
+        );
         let other = f.home.join("other-checkout");
         let hooks = other.join(".git/hooks");
         fs::create_dir_all(&hooks).unwrap();

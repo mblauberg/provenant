@@ -236,7 +236,10 @@ No cross-file or cross-host atomicity is claimed.
 Omitting `--hooks` on re-install retains and refreshes the selected target's
 unchanged owned hook registrations and the shared legacy Git pre-push launcher.
 Edited hooks and launchers are preserved, relinquished from the receipt and
-reported. Missing launchers also leave the receipt. The legacy checkout flag
+reported. The receipt's legacy record names each relinquished Git hook in
+`relinquished_hooks`, so `check install` stops auditing that hook while other
+legacy hooks in the same directory stay audited. Missing launchers also leave
+the receipt. The legacy checkout flag
 need not be repeated. Explicit `--hooks on` refuses edited Claude hooks and
 names `--hooks off` as recovery. Explicit `--hooks off` removes exact owned
 matches, relinquishes modified entries and reports them.

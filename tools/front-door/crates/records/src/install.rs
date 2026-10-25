@@ -113,4 +113,8 @@ pub struct LegacyInstall {
     pub home: AbsolutePath,
     pub manifest_digest: FileDigest,
     pub git_hooks_dir: Option<AbsolutePath>,
+    /// Hooks in `git_hooks_dir` whose ownership ended after a user edit. They
+    /// are user state, so audits skip them; other legacy hooks stay audited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relinquished_hooks: Vec<String>,
 }

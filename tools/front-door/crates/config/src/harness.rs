@@ -1389,10 +1389,11 @@ pub(crate) fn check_legacy(
                     add_finding(findings, "legacy_entry", &path)?;
                 }
                 Some(current)
-                    if !receipt.entries.iter().any(|entry| {
-                        entry.path.to_path_buf().is_ok_and(|p| p == path)
-                            && managed::matches_owned(&current.value, &entry.expected)
-                    }) =>
+                    if !legacy.relinquished_hooks.contains(&link.name)
+                        && !receipt.entries.iter().any(|entry| {
+                            entry.path.to_path_buf().is_ok_and(|p| p == path)
+                                && managed::matches_owned(&current.value, &entry.expected)
+                        }) =>
                 {
                     add_finding(findings, "legacy_hook_conflict", &path)?;
                 }
