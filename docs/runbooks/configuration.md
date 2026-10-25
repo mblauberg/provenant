@@ -76,6 +76,9 @@ or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
 `/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
 
+Sharing a target across worktrees is the host owner's choice and can run another
+checkout's stale test binaries; see [writer lanes](providers.md#writer-lanes).
+
 ## Routing pools
 
 Routing changes are stored per state root and apply on the next route command.

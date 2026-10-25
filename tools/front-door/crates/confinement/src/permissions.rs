@@ -4188,10 +4188,16 @@ mod tests {
         // A build script built into a declared write root (a shared
         // CARGO_TARGET_DIR) runs; the sandbox checks the exec of the file.
         let build_script = project_locks.join("build-script-main");
+        let scratch_script = scratch.join("build-script-main");
+        let undeclared_target = root.join("undeclared-target");
+        std::fs::create_dir_all(&undeclared_target)?;
+        let undeclared_script = undeclared_target.join("build-script-main");
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&build_script, "#!/bin/sh\nexit 0\n")?;
-            std::fs::set_permissions(&build_script, std::fs::Permissions::from_mode(0o755))?;
+            for script in [&build_script, &scratch_script, &undeclared_script] {
+                std::fs::write(script, "#!/bin/sh\nexit 0\n")?;
+                std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))?;
+            }
         }
         for (name, outcome) in [
             (
@@ -4218,6 +4224,8 @@ mod tests {
             );
         }
         let mut probes = vec![
+            ("scratch exec", run(&scratch_script, &[])),
+            ("undeclared target exec", run(&undeclared_script, &[])),
             (
                 "git config write",
                 run(&executables[0], &[&common.join("config")]),
