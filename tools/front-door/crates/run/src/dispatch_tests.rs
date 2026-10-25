@@ -75,9 +75,9 @@ fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
 #[test]
 fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
-    let writer = || WriterRequest {
+    let writer = |worktree: &str| WriterRequest {
         project: "/project".into(),
-        worktree: "/project/.worktrees/sibling".into(),
+        worktree: worktree.into(),
     };
     let deliver = |branch: &str, open_pr| WriterDeliveryRequest {
         remote: "origin".into(),
@@ -86,83 +86,42 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     };
     let read_only = input().request.tasks[0].clone();
     let mut writing = read_only.clone();
-    writing.writer = Some(writer());
+    writing.writer = Some(writer("/project/.worktrees/parent"));
     let mut delivering = writing.clone();
-    delivering.deliver = Some(deliver("feature", false));
-    let mut sibling = writing.clone();
-    sibling.writer = Some(WriterRequest {
-        project: "/project".into(),
-        worktree: "/project/.worktrees/other".into(),
-    });
-    let mut elsewhere = writing.clone();
-    elsewhere.writer = Some(WriterRequest {
-        project: "/other".into(),
-        worktree: "/other/.worktrees/sibling".into(),
-    });
-    for (parent_task, writer_child, child_delivery, valid, case) in [
+    delivering.deliver = Some(deliver("feature", true));
+    // The host holds no sealed list of worktrees a lane may delegate, so no
+    // lane can propose a writer or delivering child, even its own worktree.
+    for (parent_task, child_writer, child_delivery, case) in [
         (
             &read_only,
-            false,
             None,
-            true,
+            None,
             "read-only child of read-only parent",
         ),
+        (&writing, None, None, "read-only child of writer parent"),
         (
             &read_only,
-            true,
+            Some("/project/.worktrees/child"),
             None,
-            false,
             "writer child of read-only parent",
         ),
         (
-            &read_only,
-            true,
-            Some(deliver("feature", false)),
-            false,
-            "delivery child of read-only parent",
-        ),
-        (&writing, true, None, true, "writer child of writer parent"),
-        (
-            &sibling,
-            true,
+            &writing,
+            Some("/project/.worktrees/parent"),
             None,
-            true,
-            "writer child in a sibling worktree",
-        ),
-        (
-            &elsewhere,
-            true,
-            None,
-            false,
-            "writer child in another repository",
+            "writer child in its parent's worktree",
         ),
         (
             &writing,
-            true,
+            Some("/project/.worktrees/other"),
+            None,
+            "writer child in a sibling worktree",
+        ),
+        (
+            &delivering,
+            Some("/project/.worktrees/parent"),
             Some(deliver("feature", false)),
-            false,
-            "delivery child of non-delivering parent",
-        ),
-        (
-            &delivering,
-            true,
-            Some(deliver("feature", false)),
-            true,
-            "delivery within parent grant",
-        ),
-        (
-            &delivering,
-            true,
-            Some(deliver("other", false)),
-            false,
-            "delivery to another branch",
-        ),
-        (
-            &delivering,
-            true,
-            Some(deliver("feature", true)),
-            false,
-            "pull request beyond parent grant",
+            "delivery child within parent grant",
         ),
     ] {
         let temp = tempfile::tempdir()?;
@@ -172,11 +131,23 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         let mut nested = input();
         nested.request.lane_depth = Some(2);
         nested.request.parent_attempt = Some(parent);
-        nested.request.tasks[0].writer = writer_child.then(writer);
+        nested.request.tasks[0].writer = child_writer.map(writer);
         nested.request.tasks[0].deliver = child_delivery;
+        let proposes_writer =
+            nested.request.tasks[0].writer.is_some() || nested.request.tasks[0].deliver.is_some();
         let record = store.create(&nested, &call)?;
         let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
-        assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
+        if proposes_writer {
+            assert!(
+                matches!(
+                    result,
+                    Err(RunError::Validation("a lane cannot propose a writer child"))
+                ),
+                "{case}: {result:?}"
+            );
+        } else {
+            assert!(result.is_ok(), "{case}: {result:?}");
+        }
     }
     Ok(())
 }
@@ -268,9 +239,15 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         ),
         (
             &quiet_writer,
-            task(true, LaneAccess::default()),
+            task(false, LaneAccess::default()),
+            true,
+            "read-only default child of a quiet writer",
+        ),
+        (
+            &quiet_writer,
+            task(false, access(Some(NetworkAccess::Local), &[], &[])),
             false,
-            "writer default network beyond parent network",
+            "network beyond a writer parent's network",
         ),
     ] {
         let temp = tempfile::tempdir()?;

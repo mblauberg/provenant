@@ -2275,7 +2275,6 @@ fn verify_lane_profile(
             Err(error) => Err(error.into()),
         }
     };
-    let before = run_count()?;
     // Startup spacing is host-wide: the child would otherwise wait out the
     // default 20 s after the parent's own start, past this test's deadline.
     // Clear only the last-start time; the lease counts stay real.
@@ -2286,61 +2285,6 @@ fn verify_lane_profile(
         db.execute("DELETE FROM spacing", [])?;
     }
     fs::write(state.join("config.toml"), config(2))?;
-    let nested_frames =
-        String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
-    let cancel_child =
-        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
-    let nested_frames = if confinement.writer.is_some() {
-        nested_frames.replace(
-            "\"timeout_ms\":1000",
-            "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\".worktrees/nested-child\"",
-        )
-    } else {
-        nested_frames
-    };
-    let nested_frames = if cancel_child {
-        nested_frames
-            .replace("read only", "wait for host cancellation")
-            .replace("\"timeout_ms\":1000", "\"timeout_ms\":10000")
-    } else {
-        nested_frames
-    };
-    let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
-    options.env = Some(&launch.environment);
-    options.stdin = Some(nested_frames.as_bytes());
-    let nested = executor.execute(options)?;
-    assert_eq!(
-        code(&nested),
-        0,
-        "{}",
-        String::from_utf8_lossy(&nested.stderr.bytes)
-    );
-    assert!(
-        run_count()? > before,
-        "confined child admission created no run"
-    );
-    // The child must be admitted as a target, not merely leave a record.
-    let accepted = nested
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let targets = &accepted
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("confined child reply")?["result"]["structuredContent"]["targets"];
-    assert_eq!(
-        targets.as_array().map(Vec::len),
-        Some(1),
-        "confined child was not admitted: {targets}"
-    );
-    // Admission is not launch: the host must reach the confined fake child,
-    // including when a Claude parent cannot read Codex credentials.
-    let attempt_id = provenant_core::AttemptId::parse(
-        targets[0]["attempt"].as_str().ok_or("child attempt id")?,
-    )?;
     let mut inputs =
         provenant_core::RootInputs::new(confinement.home.clone(), parent.roots.checkout.clone());
     inputs.state_dir = Some(child.clone());
@@ -2352,6 +2296,79 @@ fn verify_lane_profile(
     };
     let clock = provenant_supervisor::clock::SystemClock::new();
     let call = writer_call(&clock, &cancel)?;
+    // Admission is not launch: the host decides from its sealed parent task.
+    let admit = |frames: &str| -> Result<provenant_core::AttemptId> {
+        let before = run_count()?;
+        let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
+        options.env = Some(&launch.environment);
+        options.stdin = Some(frames.as_bytes());
+        let nested = executor.execute(options)?;
+        assert_eq!(
+            code(&nested),
+            0,
+            "{}",
+            String::from_utf8_lossy(&nested.stderr.bytes)
+        );
+        assert!(
+            run_count()? > before,
+            "confined child admission created no run"
+        );
+        // The child must be admitted as a target, not merely leave a record.
+        let accepted = nested
+            .stdout
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice::<Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let targets = &accepted
+            .iter()
+            .find(|reply| reply["id"] == 1)
+            .ok_or("confined child reply")?["result"]["structuredContent"]["targets"];
+        assert_eq!(
+            targets.as_array().map(Vec::len),
+            Some(1),
+            "confined child was not admitted: {targets}"
+        );
+        Ok(provenant_core::AttemptId::parse(
+            targets[0]["attempt"].as_str().ok_or("child attempt id")?,
+        )?)
+    };
+    let nested_frames =
+        String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
+    if confinement.writer.is_some() {
+        // A writer lane cannot hand a writer child any registered worktree:
+        // the host refuses the proposal before any provider launches.
+        let proposal = admit(&nested_frames.replace("confined-child", "confined-writer").replace(
+            "\"timeout_ms\":1000",
+            "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\".worktrees/nested-child\"",
+        ))?;
+        let store = provenant_run::RunStore::open(&child_context, &call)?;
+        let refused = await_terminal(&store, proposal, &call)?;
+        assert_terminal_outcome(&refused, provenant_run::Outcome::Rejected)?;
+        assert_ne!(refused.provider_launched, Some(true));
+        let provenant_run::AttemptState::Terminal { reason, .. } = &refused.state else {
+            return Err("writer proposal was not terminal".into());
+        };
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("a lane cannot propose a writer child")),
+            "{reason:?}"
+        );
+    }
+    let cancel_child =
+        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
+    let nested_frames = if cancel_child {
+        nested_frames
+            .replace("read only", "wait for host cancellation")
+            .replace("\"timeout_ms\":1000", "\"timeout_ms\":10000")
+    } else {
+        nested_frames
+    };
+    // The host must reach the confined fake child, including when a Claude
+    // parent cannot read Codex credentials.
+    let attempt_id = admit(&nested_frames)?;
     let store = provenant_run::RunStore::open(&child_context, &call)?;
     if cancel_child {
         let run = store.record(attempt_id, &call)?.run_id;

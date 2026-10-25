@@ -458,10 +458,16 @@ The MCP `fabric_submit` path seals queued child records without preparing or
 launching providers. The host worker rechecks the request's parent AttemptId and
 depth against its own parent run's sealed request and the current
 `lanes.max_depth`, and bounds each child task by the parent attempt's sealed
-task: a read-only parent cannot propose a writer, and child delivery needs the
-parent's own delivery grant for the same remote and branch, with a pull request
-only when the parent may open one. Invalid proposals terminate as rejected
-before provider preparation. Environment and path checks provide early feedback but do not
+task. In v1 no lane may propose a writer or delivering child: the host holds
+no sealed list of worktrees a lane may delegate, and a writer child in any
+registered worktree could leave build scripts or tests that later run outside
+a sandbox. A child's network reach and read and write roots must sit within
+the parent's, after canonicalisation, and a child cannot continue an attempt.
+The host launches only the request it validated, refuses one whose digest
+changed after validation, and refuses a live terminal whose re-read request no
+longer matches the digest sealed in the host custody handoff. Delivery pushes
+only to the remote and branch bound when the host prepared it. Invalid
+proposals terminate as rejected before provider preparation. Environment and path checks provide early feedback but do not
 supply host launch authority.
 
 The guardian stops and joins its worker on observed provider exit, before
@@ -478,9 +484,8 @@ ID or child journal confers no cancellation authority.
 The macOS fixture runs the configured MCP inside the parent's compiled profile
 and requires a launched fake Codex child and a marker written by that child,
 for read-only and writer parents from both Codex and Claude. Writer parents
-submit a writer child on another registered worktree. Registration validation
-and writer custody use the original host state root; the lane only resolves
-its requested project/worktree paths and queues the proposal. A held reader
+first propose a writer child on another registered worktree, which the host
+rejects before any provider launches, then submit a read-only child. A held reader
 child also checks explicit parent cancellation after provider launch. Synthetic
 state-write evidence is confined to fixture builds. Live provider execution
 uses the launch controls below; the fixture does not establish

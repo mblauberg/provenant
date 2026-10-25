@@ -604,6 +604,16 @@ fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
         if kind.is_dir() {
             copy_state(&entry.path(), &target)?;
         } else if kind.is_file() {
+            // A hard link can name a host file the lane could not otherwise
+            // read; the host copy would then publish its contents.
+            use std::os::unix::fs::MetadataExt;
+            if std::fs::symlink_metadata(entry.path())
+                .map_err(error)?
+                .nlink()
+                > 1
+            {
+                return Err("retained provider state holds a hard-linked file".into());
+            }
             std::fs::copy(entry.path(), &target).map_err(error)?;
         }
     }
@@ -1263,6 +1273,20 @@ mod tests {
             None
         );
         assert!(copy_state(&state.join("candidate-0"), &base.join("copy")).is_err());
+        std::fs::write(state.join("candidate-1/fixture-session/own"), "lane")?;
+        copy_state(&state.join("candidate-1"), &base.join("copy"))?;
+        assert!(base.join("copy/fixture-session/own").is_file());
+        std::fs::write(base.join("outside/host-secret"), "host")?;
+        std::fs::hard_link(
+            base.join("outside/host-secret"),
+            state.join("candidate-1/fixture-session/linked"),
+        )?;
+        let copied = base.join("linked-copy");
+        assert_eq!(
+            copy_state(&state.join("candidate-1"), &copied),
+            Err("retained provider state holds a hard-linked file".into())
+        );
+        assert!(!copied.join("fixture-session/linked").exists());
         Ok(())
     }
 

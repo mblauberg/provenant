@@ -174,13 +174,13 @@ fn child_access_within(
 
 impl RunStore {
     /// Validate lane-writable ingress against the host's recorded parent and
-    /// its sealed task. A child never gains authority its parent lacks: a
-    /// writer child stays in its writer parent's repository (a sibling
-    /// worktree there is the designed delegation), delivery must already be
-    /// granted to the parent for the same remote, branch and pull request,
-    /// and access must sit within the parent's. A child cannot continue an
-    /// attempt, whose retained state the host would copy. The lane can rewrite
-    /// its store at any time, so launch only the request returned here.
+    /// its sealed task. A child never gains authority its parent lacks, and a
+    /// lane cannot propose a writer or delivering child: the host has no
+    /// sealed list of worktrees a lane may delegate, and a writer child in any
+    /// registered worktree could plant code that later runs unconfined. Access
+    /// must sit within the parent's. A child cannot continue an attempt, whose
+    /// retained state the host would copy. The lane can rewrite its store at
+    /// any time, so launch only the request returned here.
     pub fn validate_child(
         &self,
         run: RunId,
@@ -203,27 +203,8 @@ impl RunStore {
             ));
         }
         for task in &request.tasks {
-            if let Some(writer) = &task.writer
-                && parent_task
-                    .writer
-                    .as_ref()
-                    .is_none_or(|parent| parent.project != writer.project)
-            {
-                return Err(RunError::Validation(
-                    "a writer child must stay in its writer parent's repository",
-                ));
-            }
-            if let Some(deliver) = &task.deliver {
-                let granted = parent_task.deliver.as_ref().is_some_and(|parent| {
-                    parent.remote == deliver.remote
-                        && parent.branch == deliver.branch
-                        && (parent.open_pr || !deliver.open_pr)
-                });
-                if !granted {
-                    return Err(RunError::Validation(
-                        "child delivery exceeds parent delivery authority",
-                    ));
-                }
+            if task.writer.is_some() || task.deliver.is_some() {
+                return Err(RunError::Validation("a lane cannot propose a writer child"));
             }
             child_access_within(parent_task, task, self.context.state_root.as_path())?;
         }

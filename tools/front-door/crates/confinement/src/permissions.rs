@@ -2602,6 +2602,73 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn compiler_refuses_grants_of_or_around_an_unconventional_host_home() {
+        // Static grant checks know only /Users and /home; the compiler must
+        // still refuse the host's actual home and any root that encloses it.
+        let home = Path::new("/srv/team/alice");
+        let grant = |path: &Path| PathGrant {
+            path: path.to_owned(),
+            scope: PathScope::Subtree,
+        };
+        let profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                process_executables: vec![PathGrant {
+                    path: "/opt/provider/bin/cli".into(),
+                    scope: PathScope::Exact,
+                }],
+                ..ProviderProfileSpec::default()
+            },
+            observations: BTreeMap::new(),
+        };
+        let plan = |read_roots: Vec<PathGrant>, write_roots: Vec<PathGrant>| PlanPermissions {
+            read_only: None,
+            mode: AccessMode::ReadOnly,
+            scratch: grant(Path::new("/srv/scratch")),
+            private_state: None,
+            read_roots,
+            protected_roots: Vec::new(),
+            secret_roots: Vec::new(),
+            selected_authentication: None,
+            include_continuation: false,
+            write_roots,
+            network: NetworkAccess::Provider,
+            nested_confinement: false,
+        };
+        let anchors = Anchors {
+            home,
+            directories: &[],
+            safe_fs: &LocalFs,
+            worktree: None,
+        };
+        for root in [home, Path::new("/srv/team"), Path::new("/srv")] {
+            for plan in [
+                plan(vec![grant(root)], Vec::new()),
+                plan(Vec::new(), vec![grant(root)]),
+            ] {
+                assert!(validate_read_exec_grant(&grant(root)).is_ok(), "{root:?}");
+                assert!(
+                    matches!(
+                        compile_sbpl(&plan, &profile, &anchors),
+                        Err(PermissionError::CredentialRoot)
+                    ),
+                    "{root:?}"
+                );
+            }
+        }
+        // A project beneath the home passes this check and fails later only
+        // because the fixture holds no anchors.
+        assert!(matches!(
+            compile_sbpl(
+                &plan(vec![grant(&home.join("project"))], Vec::new()),
+                &profile,
+                &anchors
+            ),
+            Err(PermissionError::AnchorMismatch)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn anchored_directory_rejects_noncanonical_tmp_aliases() {
         let temp = tempfile::tempdir_in("/tmp").expect("temporary anchor");
         let canonical = provenant_supervisor::fs::canonicalize(temp.path())

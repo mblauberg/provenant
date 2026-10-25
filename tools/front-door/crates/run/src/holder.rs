@@ -69,6 +69,8 @@ enum Completion<'a> {
     Live {
         custody: &'a custody::Recovery,
         delivery: Option<&'a crate::HostDeliveryContext>,
+        /// Request digest the host sealed at launch.
+        sealed: Option<&'a provenant_core::Digest>,
     },
     Recovered(Option<&'a custody::Recovery>),
 }
@@ -175,6 +177,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 Completion::Live {
                     custody: recovery,
                     delivery: context.host_delivery.as_ref(),
+                    sealed: context.sealed.as_ref().map(|sealed| &sealed.request_digest),
                 },
                 self.providers,
                 &call(&SystemClock, &cancel).map_err(custody_error)?,
@@ -344,6 +347,17 @@ impl RunStore {
             });
         }
         let request = self.request(record.run_id, call)?;
+        // The run store is writable by a parent lane, so a live terminal must
+        // see the request the host launched before it acts on its writer or
+        // delivery fields.
+        if let Completion::Live {
+            sealed: Some(sealed),
+            ..
+        } = &completion
+            && request.digest()? != **sealed
+        {
+            return Err(RunError::Validation("request changed after launch"));
+        }
         let task = request
             .tasks
             .iter()
