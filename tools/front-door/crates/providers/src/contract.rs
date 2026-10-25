@@ -31,16 +31,6 @@ pub enum ProviderError {
     CredentialUnavailable,
 }
 
-/// No preflight probe form is implemented yet. An uninhabited plan cannot be
-/// forged or accidentally executed.
-#[derive(Debug)]
-pub enum PreflightPlan {}
-
-pub struct PreflightInput {
-    pub route: ResolvedRoute,
-    pub observed_unix_seconds: i64,
-}
-
 /// Redacted cache projection; raw provider diagnostics are never persisted here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -247,12 +237,6 @@ pub(crate) fn verify_lineage(
 pub trait Adapter: Sync {
     fn id(&self) -> &'static str;
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
-    fn preflight(&self, input: &PreflightInput) -> Result<PreflightPlan, ProviderError>;
-    fn decode_preflight(
-        &self,
-        plan: &PreflightPlan,
-        capture: &[u8],
-    ) -> Result<AvailabilityRecord, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
     /// If a later line fails, events from earlier lines in that call are
