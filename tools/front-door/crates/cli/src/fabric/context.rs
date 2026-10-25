@@ -9,7 +9,7 @@ use provenant_fabric_runtime::{
     },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
-use provenant_records::{AbsolutePath, CommandResult};
+use provenant_records::{AbsolutePath, CommandResult, Outcome};
 use provenant_supervisor::{
     exec::{Executor, SystemExecutor},
     fs::{Directory, LocalFs, PublishMode},
@@ -259,6 +259,29 @@ impl From<FacadeError> for PeerFailure {
             error,
             detail: None,
         }
+    }
+}
+/// The stable outcome and code for a peer refusal, shared by remote runs and
+/// session hand-off. `LaunchUnknown` is handled by each caller, which names
+/// its own recovery step.
+pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
+    match error {
+        FacadeError::LaunchUnknown { .. } => (Outcome::Error, "LAUNCH_UNKNOWN"),
+        FacadeError::HomeUnavailable => (Outcome::Error, "PEER_UNAVAILABLE"),
+        FacadeError::PeerVersion => (Outcome::Refused, "PEER_VERSION"),
+        FacadeError::InvalidInput => (Outcome::Invalid, "INVALID"),
+        FacadeError::NotFound => (Outcome::Invalid, "NOT_FOUND"),
+        FacadeError::Conflict => (Outcome::Refused, "CONFLICT"),
+        FacadeError::Busy => (Outcome::Refused, "QUEUE_FULL"),
+        FacadeError::ConfinementRefused => (Outcome::Refused, "REFUSED"),
+        FacadeError::WorktreeMissing => (Outcome::Invalid, "WORKTREE_MISSING"),
+        FacadeError::BaseUnreachable => (Outcome::Refused, "BASE_UNREACHABLE"),
+        FacadeError::BranchExists => (Outcome::Refused, "BRANCH_EXISTS"),
+        FacadeError::LaneDepth => (Outcome::Refused, "LANE_DEPTH"),
+        FacadeError::OwnerUnavailable => (Outcome::Refused, "UNSUPPORTED"),
+        FacadeError::Cancelled => (Outcome::Error, "CANCELLED"),
+        FacadeError::StateCorrupt => (Outcome::Error, "STATE_CORRUPT"),
+        _ => (Outcome::Error, "PEER"),
     }
 }
 /// Map a transport error, naming the peer and, when known, the cause.

@@ -484,7 +484,12 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
         }
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let seconds = if matches!(request.action, PeerAction::SessionHandoff { .. }) {
+            crate::handoff::peer_seconds(context.config.limits.peer_seconds)
+        } else {
+            30
+        };
+        let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
         let backoff = ThreadWait;
         context.identity.inbox =
             provenant_fabric_runtime::identity::Address::new(request.source_host, &request.agent)?;

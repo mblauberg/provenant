@@ -344,13 +344,21 @@ pub struct PeerResponse {
 pub fn decode_request(bytes: &[u8]) -> Result<PeerRequest, PeerError> {
     provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
 }
+/// `text` with control characters removed, cut to `limit` characters. Peer
+/// text passes through this before it is printed.
+pub fn plain_text(text: &str, limit: usize) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(limit)
+        .collect()
+}
 /// First non-empty stderr line, control characters removed, bounded.
 fn stderr_line(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| line.chars().filter(|c| !c.is_control()).take(200).collect())
+        .map(|line| plain_text(line, 200))
         .unwrap_or_default()
 }
 pub trait PeerTransport {
