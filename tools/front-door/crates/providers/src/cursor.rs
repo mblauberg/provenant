@@ -29,9 +29,14 @@ fn prepare(
         "stream-json".into(),
         "--workspace".into(),
         input.cwd.into(),
+        "--trust".into(),
+        // Cursor's own sandbox does not nest inside the confinement profile.
+        "--sandbox".into(),
+        "disabled".into(),
     ];
-    if access == Access::WorktreeWrite {
-        argv.push("--force".into());
+    match access {
+        Access::ReadOnly => argv.extend(["--mode".into(), "ask".into()]),
+        Access::WorktreeWrite => argv.push("--force".into()),
     }
     if session == Session::Resume {
         let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
