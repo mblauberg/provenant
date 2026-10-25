@@ -2424,7 +2424,7 @@ fn verify_lane_profile(
     // host's: its preparation keeps its git home under the host root.
     assert!(child.join("tmp/git-home").is_dir());
     // Host probes leave no directory or lease behind once the child launched.
-    let probes: Vec<_> = fs::read_dir(&state)?
+    let probes: Vec<_> = fs::read_dir(state)?
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
         .filter(|name| name.starts_with("probe-"))
         .collect();
