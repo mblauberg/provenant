@@ -158,19 +158,21 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
     let (_, parent) =
         run::HolderContext::open(&context.encode().map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
+    // Children are bounded by this attempt's own sealed task authority. The
+    // store may be a parent lane's, so trust its request only while it still
+    // matches the digest the host launched this attempt from.
+    let sealed = context.sealed.as_ref().ok_or("host sealed task missing")?;
     let parent_request = parent
         .request(context.run_id, &call)
         .map_err(|error| error.to_string())?;
+    if parent_request.digest().map_err(|error| error.to_string())? != sealed.request_digest {
+        return Err("parent request changed after launch".into());
+    }
     let parent_depth = parent_request.lane_depth.unwrap_or(1);
-    // Children are bounded by this attempt's own sealed task authority.
-    let parent_task_id = parent
-        .record(context.attempt_id, &call)
-        .map_err(|error| error.to_string())?
-        .task_id;
     let parent_task = parent_request
         .tasks
         .iter()
-        .find(|task| task.task_id == parent_task_id)
+        .find(|task| task.task_id == sealed.task_id)
         .ok_or("parent task missing from its request")?;
     let mut inputs =
         provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
@@ -256,7 +258,7 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                     .map_err(|error| error.to_string())?;
                 continue;
             }
-            if let Err(error) = session.store.validate_child(
+            let validated = match session.store.validate_child(
                 id,
                 context.attempt_id,
                 parent_task,
@@ -264,12 +266,15 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 maximum,
                 &call,
             ) {
-                session
-                    .store
-                    .refuse_queued(id, &error.to_string(), &call)
-                    .map_err(|error| error.to_string())?;
-                continue;
-            }
+                Ok(validated) => validated,
+                Err(error) => {
+                    session
+                        .store
+                        .refuse_queued(id, &error.to_string(), &call)
+                        .map_err(|error| error.to_string())?;
+                    continue;
+                }
+            };
             // Accept refs before handoff: start can launch an earlier task
             // and then fail on a later one. Keep all scopes for cancellation.
             for record in session
@@ -287,7 +292,9 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 };
                 accepted.insert((record.attempt_id, generation));
             }
-            if let Err(error) = launch_on_host(&session, id, &edge, &call, Some(launch)) {
+            if let Err(error) =
+                launch_on_host(&session, id, &edge, &call, Some((launch, &validated)))
+            {
                 launch_error = Some(error.message);
             }
         }

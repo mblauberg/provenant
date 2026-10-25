@@ -1368,6 +1368,111 @@ impl provenant_supervisor::exec::Executor for KeychainScript {
 }
 
 #[test]
+fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directories() {
+    use crate::host::HostProbeExecutor;
+    use provenant_supervisor::exec::{ExecOptions, Executor};
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    // Check while the command is running, before the private cwd is removed.
+    struct CheckCwd<'a> {
+        host_root: &'a Path,
+        script: &'a KeychainScript,
+    }
+    impl Executor for CheckCwd<'_> {
+        fn execute(
+            &self,
+            options: ExecOptions<'_>,
+        ) -> Result<provenant_supervisor::exec::ExecOutcome, provenant_supervisor::exec::ExecError>
+        {
+            assert_eq!(options.cwd.parent(), Some(self.host_root));
+            let metadata = std::fs::metadata(options.cwd).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::read_dir(options.cwd).unwrap().count(), 0);
+            // A command may write settings. The next command must not see them.
+            std::fs::create_dir(options.cwd.join(".claude")).unwrap();
+            std::fs::write(options.cwd.join(".claude/settings.json"), b"{}").unwrap();
+            self.script.execute(options)
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let host_root = temp.path().canonicalize().unwrap();
+    let child_store = host_root.join("children/parent-attempt");
+    let attempt = child_store.join("runs/run/attempts/attempt");
+    let scratch = attempt.join("scratch");
+    let candidate = attempt.join("tmp/candidate-0");
+    for directory in [&scratch, &candidate] {
+        std::fs::create_dir_all(directory.join(".claude")).unwrap();
+        std::fs::write(
+            directory.join(".claude/settings.json"),
+            br#"{"hooks":{"SessionStart":[{"command":"child-controlled"}]}}"#,
+        )
+        .unwrap();
+    }
+    let now = 1_000_000_000_u64;
+    let item = |expires| {
+        format!(r#"{{"claudeAiOauth":{{"accessToken":"fixture-access","expiresAt":{expires}}}}}"#)
+            .into_bytes()
+    };
+    let mut seen = std::collections::HashSet::new();
+    for supplied_cwd in [&scratch, &candidate] {
+        let script = KeychainScript {
+            items: std::sync::Mutex::new(vec![item(now + 1000), item(now + 3_600_000)].into()),
+            statuses: std::sync::Mutex::new(
+                vec![br#"{"loggedIn":true,"email":"fixture@example.test"}"#.to_vec(); 3].into(),
+            ),
+            calls: Default::default(),
+        };
+        let checked = CheckCwd {
+            host_root: &host_root,
+            script: &script,
+        };
+        let executor = HostProbeExecutor::new(&checked, &host_root).unwrap();
+        let login = claude::Login {
+            executable: Path::new("/opt/homebrew/bin/claude"),
+            home: Path::new("/home/u"),
+            user: OsStr::new("u"),
+            config_dir: Path::new("/home/u/.claude-pro"),
+            scratch: supplied_cwd,
+        };
+        let key = crate::accounts::detect(
+            &executor,
+            "claude",
+            login.executable,
+            login.home,
+            login.user,
+            login.config_dir,
+            supplied_cwd,
+        )
+        .unwrap();
+        let account =
+            crate::identity::RegisteredAccount::new("claude", &key, login.config_dir.to_owned())
+                .unwrap();
+        claude::refresh_for_account(&executor, &login, &account, &|| now, now + 60_000).unwrap();
+        let argv = [login.executable.into(), "--version".into()];
+        executor
+            .execute(ExecOptions::new(
+                &argv,
+                supplied_cwd,
+                Duration::from_secs(4),
+            ))
+            .unwrap();
+        let calls = script.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            7,
+            "status, refresh, keychain and version commands"
+        );
+        for (_, _, cwd) in calls.iter() {
+            assert!(!cwd.starts_with(&child_store));
+            assert!(!cwd.exists(), "host cwd must be removed after each command");
+            assert!(seen.insert(cwd.clone()), "host cwds must never be reused");
+        }
+        assert!(supplied_cwd.join(".claude/settings.json").is_file());
+    }
+}
+
+#[test]
 fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token() {
     use crate::claude::{Login, refresh_if_expiring};
     let now = 1_000_000_000_u64;

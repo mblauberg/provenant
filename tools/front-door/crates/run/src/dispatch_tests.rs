@@ -75,9 +75,9 @@ fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
 #[test]
 fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
-    let writer = || WriterRequest {
+    let writer = |worktree: &str| WriterRequest {
         project: "/project".into(),
-        worktree: "/project/.worktrees/sibling".into(),
+        worktree: worktree.into(),
     };
     let deliver = |branch: &str, open_pr| WriterDeliveryRequest {
         remote: "origin".into(),
@@ -86,59 +86,42 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     };
     let read_only = input().request.tasks[0].clone();
     let mut writing = read_only.clone();
-    writing.writer = Some(writer());
+    writing.writer = Some(writer("/project/.worktrees/parent"));
     let mut delivering = writing.clone();
-    delivering.deliver = Some(deliver("feature", false));
-    for (parent_task, writer_child, child_delivery, valid, case) in [
+    delivering.deliver = Some(deliver("feature", true));
+    // The host holds no sealed list of worktrees a lane may delegate, so no
+    // lane can propose a writer or delivering child, even its own worktree.
+    for (parent_task, child_writer, child_delivery, case) in [
         (
             &read_only,
-            false,
             None,
-            true,
+            None,
             "read-only child of read-only parent",
         ),
+        (&writing, None, None, "read-only child of writer parent"),
         (
             &read_only,
-            true,
+            Some("/project/.worktrees/child"),
             None,
-            false,
             "writer child of read-only parent",
         ),
         (
-            &read_only,
-            true,
-            Some(deliver("feature", false)),
-            false,
-            "delivery child of read-only parent",
+            &writing,
+            Some("/project/.worktrees/parent"),
+            None,
+            "writer child in its parent's worktree",
         ),
-        (&writing, true, None, true, "writer child of writer parent"),
         (
             &writing,
-            true,
+            Some("/project/.worktrees/other"),
+            None,
+            "writer child in a sibling worktree",
+        ),
+        (
+            &delivering,
+            Some("/project/.worktrees/parent"),
             Some(deliver("feature", false)),
-            false,
-            "delivery child of non-delivering parent",
-        ),
-        (
-            &delivering,
-            true,
-            Some(deliver("feature", false)),
-            true,
-            "delivery within parent grant",
-        ),
-        (
-            &delivering,
-            true,
-            Some(deliver("other", false)),
-            false,
-            "delivery to another branch",
-        ),
-        (
-            &delivering,
-            true,
-            Some(deliver("feature", true)),
-            false,
-            "pull request beyond parent grant",
+            "delivery child within parent grant",
         ),
     ] {
         let temp = tempfile::tempdir()?;
@@ -148,12 +131,204 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         let mut nested = input();
         nested.request.lane_depth = Some(2);
         nested.request.parent_attempt = Some(parent);
-        nested.request.tasks[0].writer = writer_child.then(writer);
+        nested.request.tasks[0].writer = child_writer.map(writer);
         nested.request.tasks[0].deliver = child_delivery;
+        let proposes_writer =
+            nested.request.tasks[0].writer.is_some() || nested.request.tasks[0].deliver.is_some();
+        let record = store.create(&nested, &call)?;
+        let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
+        if proposes_writer {
+            assert!(
+                matches!(
+                    result,
+                    Err(RunError::Validation("a lane cannot propose a writer child"))
+                ),
+                "{case}: {result:?}"
+            );
+        } else {
+            assert!(result.is_ok(), "{case}: {result:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    for name in ["reads/sub", "writes/sub", "outside", "home/.config"] {
+        std::fs::create_dir_all(base.join(name))?;
+    }
+    std::os::unix::fs::symlink(base.join("outside"), base.join("reads/alias"))?;
+    let access = |network, reads: &[&str], writes: &[&str]| LaneAccess {
+        network,
+        read_roots: reads.iter().map(|path| base.join(path)).collect(),
+        write_roots: writes.iter().map(|path| base.join(path)).collect(),
+    };
+    let task = |writer: bool, access: LaneAccess| {
+        let mut task = input().request.tasks[0].clone();
+        task.writer = writer.then(|| WriterRequest {
+            project: "/project".into(),
+            worktree: "/project/.worktrees/sibling".into(),
+        });
+        task.access = access;
+        task
+    };
+    let read_only = task(false, LaneAccess::default());
+    let granted = task(
+        false,
+        access(Some(NetworkAccess::Local), &["reads"], &["writes"]),
+    );
+    let quiet_writer = task(true, access(Some(NetworkAccess::Provider), &[], &[]));
+    for (parent_task, child, valid, case) in [
+        (
+            &read_only,
+            task(false, LaneAccess::default()),
+            true,
+            "default child",
+        ),
+        (
+            &read_only,
+            task(false, access(None, &[], &["writes"])),
+            false,
+            "write root under a read-only parent",
+        ),
+        (
+            &read_only,
+            task(false, access(None, &["home/.config"], &[])),
+            false,
+            "extra read root under a read-only parent",
+        ),
+        (
+            &read_only,
+            task(false, access(Some(NetworkAccess::Open), &[], &[])),
+            false,
+            "network under a read-only parent",
+        ),
+        (
+            &granted,
+            task(
+                false,
+                access(
+                    Some(NetworkAccess::Local),
+                    &["reads/sub", "writes"],
+                    &["writes/sub"],
+                ),
+            ),
+            true,
+            "child within parent roots",
+        ),
+        (
+            &granted,
+            task(false, access(Some(NetworkAccess::Open), &[], &[])),
+            false,
+            "network beyond parent network",
+        ),
+        (
+            &granted,
+            task(false, access(None, &[], &["reads/sub"])),
+            false,
+            "write root inside a parent read root",
+        ),
+        (
+            &granted,
+            task(false, access(None, &["reads/alias"], &[])),
+            false,
+            "symlinked read root escaping the parent root",
+        ),
+        (
+            &quiet_writer,
+            task(false, LaneAccess::default()),
+            true,
+            "read-only default child of a quiet writer",
+        ),
+        (
+            &quiet_writer,
+            task(false, access(Some(NetworkAccess::Local), &[], &[])),
+            false,
+            "network beyond a writer parent's network",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut nested = input();
+        nested.request.lane_depth = Some(2);
+        nested.request.parent_attempt = Some(parent);
+        nested.request.tasks[0] = child;
         let record = store.create(&nested, &call)?;
         let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
         assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
     }
+    Ok(())
+}
+
+#[test]
+fn host_launches_only_the_validated_child_request() -> TestResult {
+    let parent = AttemptId::from_bytes([9; 16]);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let parent_task = input().request.tasks[0].clone();
+    let mut nested = input();
+    nested.request.lane_depth = Some(2);
+    nested.request.parent_attempt = Some(parent);
+    let record = store.create(&nested, &call)?;
+    let validated = store.validate_child(record.run_id, parent, &parent_task, 1, 2, &call)?;
+
+    // The lane swaps its sealed request and the recorded digest together.
+    let mut swapped = validated.clone();
+    swapped.tasks[0].access.network = Some(NetworkAccess::Open);
+    store.run_dir(record.run_id, false)?.atomic_write(
+        std::ffi::OsStr::new("request.json"),
+        ".swap-",
+        &crate::db::bytes(&swapped)?,
+        provenant_supervisor::fs::PublishMode::Replace,
+    )?;
+    let mut run = store.run(record.run_id, &call)?;
+    run.request_digest = swapped.digest()?;
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&run)?, run.run_id.to_string()],
+    )?;
+    assert_eq!(store.request(record.run_id, &call)?, swapped);
+    let fake = Fake::default();
+    assert!(matches!(
+        store.start_child(record.run_id, &validated, &fake, &|_| unreachable!(), &call),
+        Err(RunError::Validation(
+            "child request changed after validation"
+        ))
+    ));
+    assert_eq!(fake.prompt.borrow().as_str(), "");
+
+    // A child cannot continue an attempt, whose retained state the host copies.
+    let refuse = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start_child(record.run_id, &swapped, &refuse, &|_| unreachable!(), &call)?;
+    let continued = store.resume(
+        &Resume {
+            prior: nested.attempts[0].attempt_id,
+            expected_generation: 0,
+            operation_id: provenant_core::OperationId::parse("continue")
+                .map_err(|_| RunError::Validation("operation"))?,
+            run_id: provenant_core::RunId::from_bytes([20; 16]),
+            attempt_id: AttemptId::from_bytes([21; 16]),
+            prompt: "answer".into(),
+            created_at: WallTime::from_micros(100).map_err(|_| RunError::Validation("time"))?,
+        },
+        &call,
+    )?;
+    assert!(matches!(
+        store.validate_child(continued.run_id, parent, &parent_task, 1, 2, &call),
+        Err(RunError::Validation(
+            "a child run cannot continue an attempt"
+        ))
+    ));
     Ok(())
 }
 

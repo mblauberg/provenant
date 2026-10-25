@@ -36,6 +36,8 @@ struct BoundDelivery {
     pull_request_repo: Option<String>,
     git_dir: PathBuf,
     host_cwd: PathBuf,
+    /// Destination sealed at launch; a later request edit cannot redirect it.
+    destination: WriterDeliveryRequest,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,6 +195,7 @@ impl HostDeliveryContext {
                 .transpose()?,
             git_dir: std::fs::canonicalize(git_dir).map_err(|_| RunError::Delivery(stage))?,
             host_cwd: writer.project.clone(),
+            destination: request.clone(),
         });
         // Free-form shell helpers can select writer code. Support normal
         // executable helpers and gh's standard helper, otherwise refuse early.
@@ -617,6 +620,15 @@ pub(crate) fn deliver_once(
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
         return crate::db::decode(&raw);
+    }
+    if host
+        .bound
+        .as_ref()
+        .is_none_or(|bound| bound.destination != *request)
+    {
+        return Err(RunError::Validation(
+            "delivery destination changed after launch",
+        ));
     }
     let started =
         crate::artifacts::read_sealed(attempt, "delivery-started.json", crate::RECORD_LIMIT)?;
