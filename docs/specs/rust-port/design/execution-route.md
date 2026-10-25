@@ -7,9 +7,9 @@ The [cross-area decisions](README.md#cross-area-decisions) bind this design.
 Provider step 1 status: Agy `--print-timeout` handling remains a gap. The current
 Rust `finish(ExitObservation)` has no artifacts/stderr input, so it cannot
 recognise the timeout diagnostic and preserve answer text as partial as the
-current product does. A qualifying activation recording must establish that
-stderr/exit/answer combination and the finalisation input before Agy activation;
-no timeout inference is implemented from exit status alone.
+current product does. A replay fixture must establish that stderr/exit/answer
+combination before changing finalisation; no timeout inference is implemented
+from exit status alone.
 
 `routing` resolves exact model choices, named routes and ordered catalogue
 pools; `providers` prepares
@@ -64,11 +64,11 @@ candidate's weight, factor, readiness, the roll and the pick. `config.toml`
 `[routing]` replaces bundled pools; `provenant route set|remove|reset|pacing`
 edit it. When none is ready it reports the first eligible candidate with its
 readiness blocker. No inferred adapter, model upgrade or hidden downgrade. An
-explicit unknown ID remains unverified and can run only if activation,
+explicit unknown ID remains unverified and can run only if executable availability,
 disclosure and confinement are independently established.
 
 Resolve once against immutable catalogue, provider availability and quota
-snapshots. Validate activation/executable and access, filter confidentiality and
+snapshots. Validate executable availability and access, filter confidentiality and
 eligibility, apply recorded effort support, then return one `ResolvedRoute` with
 at most two ordered explicit alternatives and exclusion reasons. Run never
 reconstructs candidates. Read-only fallback needs explicit opt-in and a typed
@@ -116,14 +116,14 @@ and status call the same APIs, with bounded waits from the cross-area table.
 Config owns one user `S/config.toml`; bundled catalogue and adapter data are
 TOML assets. `[routing.routes]` maps names to `{ model = "ADAPTER/ID", effort =
 "VALUE" }` (effort optional). `[quota]` holds refresh scheduling settings;
-adapter activation uses typed config keys over the bundled adapter table.
+adapters with launch forms are enabled by default.
 No profile layering, project overlays, per-knob environment variables,
 preferences or extra config files. Unknown owned fields/versions fail closed.
 `S` is the fresh host state root from the cross-area table, never an old root.
 
 | Path relative to S | Version 1 contents |
 | --- | --- |
-| `routing/availability/<adapter>.json` | `AvailabilityRecord`: executable/version, activation and fixture evidence, exact observed IDs, catalogue revision, account label, observation/expiry and last preflight error. |
+| `routing/availability/<adapter>.json` | `AvailabilityRecord`: executable/version and observation evidence, exact observed IDs, catalogue revision, account label, observation/expiry and last preflight error. |
 | `quota/<account-key>/<adapter>.json` | Last good windows, source/observation time, reset/refusal scope, refresh revision, claim/deadline and backoff. Account keys are opaque and host-local. |
 | `quota/report.json` | Current account rows, coverage, generated time, refreshing IDs and next due. No ledger/history. |
 
@@ -259,9 +259,9 @@ pool across models only for the same account identity and a supplied pool
 binding. Production terminal decoding persists these events under the applied account
 key, and dispatch admission supplies catalogue-backed free-pool bindings. A
 shared refusal blocks another free model on that same key until reset or the
-one-hour backoff; the repair hint names free-tier exhaustion. The private OpenCode profile has no stored login: its explicit `keyless`
-allowance is scoped to this host, rather than attributed to a guessed user.
-OpenCode remains disabled until its separate activation requirements are met. The quota tick's macOS Claude refresh calls the shared provider helper
+one-hour backoff; the repair hint names free-tier exhaustion. OpenCode uses the
+CLI's local account store, scoped by the host's local account key.
+The quota tick's macOS Claude refresh calls the shared provider helper
 from the binary composition edge; quota itself cannot import providers because
 providers already depends on quota. The dispatch loader selects the registered directory
 credential file when present, otherwise its exact macOS Keychain item.
@@ -284,7 +284,7 @@ below abbreviate `Result<T, ProviderError>`; failures are always typed.
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; primary plus at most two explicit alternatives, effort, eligibility, readiness and confidentiality. |
 | quota / run | `Admission::check(&ResolvedRoute) -> Result<(), QuotaError>`; provider/account readiness and persisted refusals only. Run keeps its own resource reservation; no second admission ledger and no quota permit. |
 | providers / run | `prepare(PrepareInput) -> LaunchSpec`; incremental `observe(bytes) -> ProviderEvent` and `finish(ExitObservation, artifacts) -> ProviderOutcome`; exact continuation/session support, no context-ceiling input. |
-| providers / workflow composition edge | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; exact observed ID and catalogue revision key every fact. Adapter preflight validates activation, executable, fixture and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. |
+| providers / workflow composition edge | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; exact observed ID and catalogue revision key every fact. Adapter preflight validates executable and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. |
 | routing / workflow composition edge | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`; cached tier/family coverage, expiry and quota/config/capability/family-slot blockers. No probes under a receipt lock. |
 
 `VerifiedLineage` contains the exact observed model ID, catalogue revision,
@@ -311,7 +311,7 @@ module per provider and exports one static registry of `{ adapter, quota_source?
 the binary injects providers' registry as `&[&dyn QuotaSource]` into quota. No per-crate
 adapter switches or quota-to-providers dependency. Adding an adapter changes
 one provider module, one registry entry and one bundled TOML row with its
-fixture/activation requirements. Config validates policy; registration cannot
+executable and confinement requirements. Config validates policy; registration cannot
 bypass it. Quota owns scheduling/admission, not adapter wire decoding.
 
 `LaunchSpec` holds OsString argv (canonical executable first), cwd, the complete
@@ -395,7 +395,7 @@ Safe mode is removed because it disables MCP and hooks; slash commands remain
 disabled. Direct MCP calls do not need slash-command or skill discovery; lanes
 can read applicable skill instructions supplied in their workspace or brief. Codex keeps its clean private home and injects the same MCP entry with
 `-c`; no Codex hooks are currently registered by the installer. OpenCode
-remains disabled in `activation.json`. Agy is enabled without Fabric MCP, hooks or lane
+is enabled by default. Agy is enabled without Fabric MCP, hooks or lane
 environment; wiring them is a later change.
 
 The profile grants execution/read access to the exact Provenant binary. Shared
@@ -483,7 +483,7 @@ and writer custody use the original host state root; the lane only resolves
 its requested project/worktree paths and queues the proposal. A held reader
 child also checks explicit parent cancellation after provider launch. Synthetic
 state-write evidence is confined to fixture builds. Live provider execution
-remains subject to the activation gates below; the fixture does not establish
+uses the launch controls below; the fixture does not establish
 live-provider acceptance. Host recovery selects the child store explicitly.
 
 `STAGING` is `ATTEMPT/scratch/candidate-N/` for writers and
@@ -557,17 +557,18 @@ writable.
 
 OpenCode's discovery recipe grants literal directory reads of `.agents`,
 `.claude` and `.codex` along cwd ancestry. These reads never grant their child
-files or enable OpenCode without activation evidence.
+files or bypass OpenCode confinement.
 
-### Live activation
+### Provider launches and replay recordings
 
 `providers::prepare` returns a `LaunchSpec`: exact argv (`argv[0]` the canonical
 executable), the complete child environment, stdin, cwd, setup steps (a 0700
 directory or one symbolic link) and the provider confinement profile. The
 launcher performs setup, holds `required_anchors(plan, profile, worktree)`,
 compiles the plan with the profile and runs `ConfinedLaunch::command(argv)`.
-A mode runs only when `tests/fixtures/providers/activation.json` enables it;
-each adapter's `confinement.json` holds the probed observations per access mode.
+Every adapter with a launch form is enabled by default in every access and
+session mode. Recordings and confinement observations provide replay and probe
+evidence only; they do not gate execution.
 
 `cargo run -p provenant-providers --features recording --example record --
 ADAPTER read_only|worktree_write --model M --root EMPTY_DIR [--write]` builds a
@@ -582,9 +583,7 @@ writes. Writers must also create a file through the model's own edit tool.
 their manifest entries in `<adapter>/recordings.json` and the observations in
 `confinement.json`. Session ids, paths under `HOME` or the root, emails,
 identifiers and token-shaped strings are substituted. Credentials are opened
-only by the CLIs, except Claude's access token (below); probes read zero bytes. A test fails if an enabled mode cites
-evidence from another access or session mode, so read-only evidence never
-enables a writer.
+only by the CLIs, except Claude's access token (below); probes read zero bytes.
 
 Decisions recorded with the first activation (Codex 0.159.0, Claude 2.1.310,
 macOS 27.0.1 arm64, 2026-10-24):
@@ -637,23 +636,12 @@ macOS 27.0.1 arm64, 2026-10-24):
   none; the resume argv pins the same `-m`. Adapters that report a model must
   have reported the requested one.
 - Provider endpoints are `*:443`: Seatbelt cannot filter by host name.
-- OpenCode: the standalone server is a child process on a loopback port, so
-  its profile adds `loopback_server` (bind, accept and connect on `localhost`
-  only) and must carry a `LoopbackServer` observation. That grant also reaches
-  other local services; accepted because bash, webfetch, MCP and plugins are
-  off. The confined launch answered on 2026-10-24 (v2.0.32,
-  `opencode/glm-5.3-flash-free`), but its stream ended after the text event
-  without `step_finish`, which decodes as `Partial`; the same happened
-  unconfined whenever Git was off the search path. The free quota then ran
-  out, so no mode is enabled and no capture was stored. Next step: confirm
-  whether `step_finish` needs Git (snapshots); if it does, grant one Git
-  executable and its libraries rather than decode a stream without a terminal
-  event as success.
-- Cursor keeps refusing (`launch::unrecorded`) until it has a launch
-  form and recordings. Agy resume needs a route account key, which has no
-  production source (#1062); recordings use an opaque key. Preflight and availability records are still
-  unimplemented, so routing reports enabled adapters as `UnknownAvailability`
-  until the run lane supplies them.
+- OpenCode uses the user's HOME and XDG config/data for configured providers
+  and stored accounts, with private caches and inline permissions denying shell
+  commands and edits in read-only runs; writers may use both.
+- Cursor launches `cursor-agent --print --output-format stream-json` with the
+  prompt on argv, an explicit workspace and optional model; only writers add
+  `--force`. Its existing decoder handles the stream and resume uses `--resume`.
 
 ### Writer confinement follow-up (#927, #1255, #1414)
 
@@ -661,9 +649,8 @@ User configuration remains outside writable provider state. The provider test
 table names Claude settings/hooks/skills/CLAUDE.md and ide/jobs/state/teams,
 Codex config/rules/hooks/skills/extensions, OpenCode config/plugins/skills,
 Agy Gemini MCP/plugins and sidecars/plugin_data/knowledge, Cursor
-hooks/extensions/skills/plans/ai-tracking, and shared npm state. Disabled
-adapters refuse before returning grants; the recording feature exercises the
-prepared OpenCode recipe without enabling it. Agy's private-home test also
+hooks/extensions/skills/plans/ai-tracking, and shared npm state. Every adapter
+prepares its launch without requiring a recording. Agy's private-home test also
 proves controls are neither seeded nor copied back. Agy's recorder
 probes deny symlink creation in its writable private home and new entries in the
 Gemini, Claude, Codex and Cursor config, hook, plugin and extension
@@ -674,7 +661,7 @@ symlink denial through that path; this is a fake-provider confinement test,
 not a new live provider smoke row. The live rows for the enabled adapters are
 recorded: on 2026-10-25 a Claude writer lane ran Git (including a two-parent
 merge), node and npm under the narrowed grants, and Codex writer lanes run
-daily under them. Agy is enabled from the 2026-10-25 live confined recordings; Cursor stays refused.
+daily under them. Agy has live confined recordings from 2026-10-25; Cursor also has a launch form.
 Apple's `/usr/bin/git` shim loads `libxcrun.dylib` from the developer
 installation, so granting that shim alone does not make shell Git work.
 Host selection now prefers package-manager Git, then the real CLT executable
@@ -697,15 +684,8 @@ The required macOS `lane_prepare_isolates_nested_state` case runs `git
 These are native runtime probes with a synthetic provider, not live #927 rows.
 Kiro is retired.
 
-Claude writer Bash is enabled per mode through the activation matrix's
-`shell_enabled` knob, on by live pro-account captures (CLI 2.1.310, #1455) that
-prove Bash, scrub and the CLI version. The recorder binds the token to the
-`~/.claude-pro` registration by its fingerprint. The earlier default-on decision is
-superseded by REVIEW-FIX-2: each enabled shell mode must cite its own live
-capture proving successful Bash execution, `subprocess_env_scrub: true` and
-an identified CLI version. Historical file-tool captures prove none of these.
-Recording builds can prepare the shell candidate without activating it.
-R7 takes precedence over #1414's credential-file suggestion.
+Claude writer Bash is enabled for worktree writers and denied for read-only
+runs. Recordings retain Bash, scrub and CLI-version evidence as replay coverage.
 
 The host delivers the selected OAuth token through a dedicated pipe and sets
 only `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` to its read descriptor number.
@@ -750,8 +730,7 @@ grant. `git status`, `git diff` and `git commit` are built-ins and need no
 helpers there; commands needing external Git helpers remain outside this grant.
 
 After the chair approves the pro account, quota and throwaway-worktree run,
-record both shell sessions from the repository root (the recorder does not
-flip `shell_enabled`):
+record both shell sessions from the repository root for replay coverage:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH" TMPDIR=/private/tmp CARGO_BUILD_JOBS=4
@@ -765,8 +744,8 @@ cargo run --manifest-path tools/front-door/Cargo.toml -p provenant-providers \
   --provenant "$CARGO_TARGET_DIR/debug/provenant" --assets "$PWD" --write
 ```
 
-Review the redacted captures and the recorder's separate keychain-IPC gate
-before enabling either mode. No live recording was made by REVIEW-FIX-2.
+Review the redacted captures and the recorder's separate keychain-IPC checks
+as probe evidence. They do not enable or disable execution.
 
 The native regression checks actual security-tool execution and synthetic
 keychain-file read denials alongside Cargo/Git. Live Claude Bash, fresh/resume
@@ -979,7 +958,7 @@ confinement or custody acceptance.
 ## Build order
 
 0. **Recording PR before implementation.** Promote qualifying existing on-disk
-   recordings with provenance/redaction manifests and an activation matrix.
+   recordings with provenance/redaction manifests.
    Missing recordings keep the corresponding adapter/mode disabled; no live
    provider run. This is a concrete prerequisite for step 1.
 1. **Provider interfaces and registry.** After core/records/config/confinement
@@ -1052,12 +1031,12 @@ the current subscription after an account upgrade.
 The installed Claude CLI's `auth --help` advertises login, logout and status;
 `auth status --help` advertises JSON/text status only. Status success is not
 proof that usage was refreshed. The one renewal Provenant runs is the
-zero-cost refresh before a Claude launch (see Live activation); it never copies
+zero-cost refresh before a Claude launch (see Provider launches and replay recordings); it never copies
 credentials between `.claude-<label>` identities, writes credentials itself,
 or widens a sandbox's keychain access. Expired identities need renewal through that selected
 Claude identity outside the utility sandbox before a supported quota probe can
 replace the last-known reading. Current Rust quota sources remain disabled
-without their activation recording and credential authority.
+without credential authority.
 
 Claude's structured result field `api_error_status = 401` is authentication
 failure, including an expired OAuth token inside confinement. It now becomes
@@ -1086,5 +1065,5 @@ junior fallback. Each candidate
 needs its own disclosure, availability and confinement checks; confidential
 input must never reach a free model without an explicit non-training guarantee.
 A sandboxed 401 takes this route-around path rather than receiving wider auth
-write/keychain access. Exact selectors and controls still require activation
+write/keychain access. Exact selectors and controls still require provider support
 evidence; a requested model name cannot fabricate that evidence.

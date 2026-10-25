@@ -1,16 +1,12 @@
 //! Prepared launches: exact argv, environment allow-list, stdin, cwd and the
-//! fixture-backed confinement profile. Nothing here executes a process.
+//! confinement profile. Nothing here executes a process.
 use crate::{Continuation, Prompt, ProviderError, StreamState};
 use provenant_confinement::ConfinedPlan;
-use provenant_confinement::permissions::{
-    AccessMode, FixtureOperation, FixtureOutcome, PathGrant, PathScope, ProviderProfile,
-};
+use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, ProviderProfile};
 use provenant_records::ResolvedRoute;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 /// What the launcher feeds the child on stdin.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,92 +93,7 @@ pub enum Session {
     Resume,
 }
 
-#[derive(Deserialize)]
-struct Matrix {
-    execution_modes: Vec<Mode>,
-}
-#[derive(Deserialize)]
-struct Mode {
-    adapter: String,
-    access_mode: Access,
-    session_mode: Session,
-    enabled: bool,
-    #[serde(default)]
-    shell_enabled: bool,
-}
-
-const ACTIVATION: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/providers/activation.json"
-));
-
-fn modes() -> &'static [Mode] {
-    static MODES: OnceLock<Vec<Mode>> = OnceLock::new();
-    // A malformed matrix enables nothing; the registry test pins its shape.
-    MODES.get_or_init(|| {
-        serde_json::from_str::<Matrix>(ACTIVATION)
-            .map(|matrix| matrix.execution_modes)
-            .unwrap_or_default()
-    })
-}
-
-/// Activation is the recorded matrix, not configuration or cache state.
-pub fn mode_enabled(adapter: &str, access: Access, session: Session) -> bool {
-    modes().iter().any(|mode| {
-        mode.adapter == adapter
-            && mode.access_mode == access
-            && mode.session_mode == session
-            && mode.enabled
-    })
-}
-
-/// The explicit writer-shell policy knob is separate from live provider
-/// activation. Recording builds can prepare a disabled candidate for probes.
-pub(crate) fn shell_enabled(adapter: &str, access: Access, session: Session) -> bool {
-    access == Access::WorktreeWrite
-        && (cfg!(feature = "recording")
-            || modes().iter().any(|mode| {
-                mode.adapter == adapter
-                    && mode.access_mode == access
-                    && mode.session_mode == session
-                    && mode.enabled
-                    && mode.shell_enabled
-            }))
-}
-
-pub(crate) fn any_mode_enabled(adapter: &str) -> bool {
-    modes()
-        .iter()
-        .any(|mode| mode.adapter == adapter && mode.enabled)
-}
-
-#[derive(Deserialize)]
-struct Observations {
-    read_only: Option<BTreeMap<FixtureOperation, FixtureOutcome>>,
-    worktree_write: Option<BTreeMap<FixtureOperation, FixtureOutcome>>,
-}
-
-/// Recorded confinement observations for one access mode. The recorder
-/// (feature `recording`) supplies its own claims and verifies them by probe.
-pub(crate) fn observations(
-    text: &str,
-    access: Access,
-) -> Result<BTreeMap<FixtureOperation, FixtureOutcome>, ProviderError> {
-    let parsed =
-        serde_json::from_str::<Observations>(text)
-            .ok()
-            .and_then(|recorded| match access {
-                Access::ReadOnly => recorded.read_only,
-                Access::WorktreeWrite => recorded.worktree_write,
-            });
-    match parsed {
-        Some(map) => Ok(map),
-        None if cfg!(feature = "recording") => Ok(BTreeMap::new()),
-        None => Err(ProviderError::Malformed),
-    }
-}
-
-/// Checks shared by every adapter, returning the gated mode.
+/// Checks shared by every adapter, returning its access and session mode.
 pub(crate) fn admit(
     adapter: &'static str,
     input: &PrepareInput<'_>,
@@ -222,9 +133,6 @@ pub(crate) fn admit(
     } else {
         Session::Fresh
     };
-    if !cfg!(feature = "recording") && !mode_enabled(adapter, access, session) {
-        return Err(ProviderError::Disabled { adapter });
-    }
     Ok((access, session))
 }
 
@@ -413,16 +321,4 @@ pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
         &hex[16..20],
         &hex[20..32]
     )
-}
-
-/// Adapters without a recorded launch form refuse even if the matrix drifts.
-pub(crate) fn unrecorded(
-    _: &PrepareInput<'_>,
-    _: Access,
-    _: Session,
-    stream: StreamState,
-) -> Result<LaunchSpec, ProviderError> {
-    Err(ProviderError::Disabled {
-        adapter: stream.adapter(),
-    })
 }

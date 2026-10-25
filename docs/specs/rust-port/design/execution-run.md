@@ -888,9 +888,9 @@ scheduler daemon. Within that, the lane decided:
   the recorded handle, and copies the prior attempt's retained private
   provider state into the new attempt's own, so settled history is never
   written. Codex launches `codex exec resume ID` and Claude `claude --resume
-  ID` where the activation matrix enables resume. `resume` refuses as
-  `UNSUPPORTED` before it spends the continuation when the adapter has no
-  enabled recipe or the attempt recorded no handle. A replay compares the
+  ID`. All adapters support resume; `resume` refuses as `UNSUPPORTED`
+  before it spends the continuation when the provider is unknown or the attempt
+  recorded no handle. A replay compares the
   rebuilt request digest, so a changed prompt under the same operation ID is
   an operation conflict.
 - **Reconcile** observes each nonterminal attempt through supervisor custody.
@@ -998,7 +998,7 @@ then re-read and commit only a matching live claim. A refusal-cache write
 failure remains a typed, recoverable terminal-publication error; it cannot
 silently discard cooldown evidence. Only the structured free-pool
 event adds the free-tier repair hint. Unknown or stale quota cannot create a
-fresh refusal. OpenCode activation is a separate gate and remains disabled.
+fresh refusal. All adapters are enabled by default; recordings do not gate execution.
 
 Writer dispatch now carries a verified `WriterLaunch` through confinement and
 supervisor custody (#1429); terminal publication checks the selected worktree

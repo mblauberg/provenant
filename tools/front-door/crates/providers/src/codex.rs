@@ -1,6 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, package_root,
-    subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::CodexPolicy;
@@ -14,11 +13,6 @@ pub struct Codex;
 crate::adapter!(Codex, "codex", prepare);
 /// The exec JSON stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
-
-const OBSERVATIONS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/providers/codex/confinement.json"
-));
 
 /// Codex runs with a private `CODEX_HOME` (the attempt's private state) that
 /// links only `auth.json` from the selected registered identity (the default
@@ -137,7 +131,7 @@ fn prepare(
                 }],
                 ..ProviderProfileSpec::default()
             },
-            observations: observations(OBSERVATIONS, access)?,
+            observations: Default::default(),
         },
         stream,
     };

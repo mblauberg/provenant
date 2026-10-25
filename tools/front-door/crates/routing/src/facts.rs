@@ -5,7 +5,7 @@ use provenant_records::{ResolvedRoute, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Cached bytes never establish activation. The provider registry owns that gate.
+/// Cached provider availability, independent of launch permissions.
 #[derive(Debug, Clone, Serialize)]
 pub struct AvailabilityView {
     pub adapter: String,

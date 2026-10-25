@@ -1,6 +1,6 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, observations, package_root,
-    shell_enabled, subtree, uuid_v4,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
@@ -14,11 +14,6 @@ use std::time::Duration;
 pub struct Claude;
 crate::adapter!(Claude, "claude", prepare);
 const MODEL_ON_WIRE: bool = true;
-
-const OBSERVATIONS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/providers/claude/confinement.json"
-));
 
 /// The default config directory's keychain service. A non-default
 /// `CLAUDE_CONFIG_DIR` appends [`keychain_suffix`].
@@ -410,7 +405,7 @@ fn refresh_account(
 /// and passes it through an inherited pipe, so the keychain stays
 /// unreadable. Writers additionally deny keychain services and the security
 /// executable, use private configuration and ask Claude to scrub subprocess
-/// credentials. The shell_enabled knob retains the file-tools-only fallback.
+/// credentials. Writer lanes may use Bash.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -458,11 +453,10 @@ fn prepare(
         Session::Resume => "--resume".into(),
     });
     argv.push(session_id.clone().into());
-    let shell = shell_enabled("claude", access, session);
+    let shell = access == Access::WorktreeWrite;
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob"),
-        Access::WorktreeWrite if shell => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
-        Access::WorktreeWrite => ("acceptEdits", "Read,Grep,Glob,Edit,Write"),
+        Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
     };
     argv.extend(
         [
@@ -580,7 +574,7 @@ fn prepare(
                 }],
                 ..ProviderProfileSpec::default()
             },
-            observations: observations(OBSERVATIONS, access)?,
+            observations: Default::default(),
         },
         stream,
     };

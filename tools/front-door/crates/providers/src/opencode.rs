@@ -1,26 +1,18 @@
 use crate::launch::{
-    Access, PrepareInput, Session, Stdin, base_env, exact, observations, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use serde::Deserialize;
 use std::ffi::OsString;
+use std::path::PathBuf;
 pub struct OpenCode;
 crate::adapter!(OpenCode, "opencode", prepare);
 /// The JSON run stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
-const OBSERVATIONS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/providers/opencode/confinement.json"
-));
-
-/// OpenCode v2 runs a private standalone server (a child over loopback) with
-/// every XDG directory in the attempt's private state, so it sees none of the
-/// user's OpenCode configuration, sessions or stored provider keys: only
-/// keyless providers (such as OpenCode's free models) can answer. Repository
-/// configuration is ignored; inline configuration denies the shell and web
-/// fetch, and file edits for read-only runs.
+/// OpenCode uses the user's configuration and stored provider accounts.
+/// Inline permissions deny edits and shell commands for read-only runs.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -61,20 +53,49 @@ fn prepare(
         Access::WorktreeWrite => "allow",
     };
     let config = format!(
-        r#"{{"autoupdate":false,"share":"disabled","mcp":{{}},"plugin":[],"permission":{{"edit":"{edit}","bash":"deny","webfetch":"deny"}}}}"#
+        r#"{{"autoupdate":false,"share":"disabled","mcp":{{}},"plugin":[],"permission":{{"edit":"{edit}","bash":"{edit}","webfetch":"deny"}}}}"#
     );
     let package = package_root(input.executable)?;
-    // No Git on the search path: project discovery finds none and OpenCode
-    // treats the working directory as a plain folder, so no Git is executed.
-    let mut env = base_env(input, &plan.scratch.path, "/bin");
-    // The private state is OpenCode's home: its data, configuration, caches
-    // and every home-relative lookup (other agents' files included) stay
-    // inside it. The free models need no credentials from the user's home.
-    for (key, value) in &mut env {
-        if key == "HOME" {
-            *value = private.into();
-        }
+    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    let xdg = |key, fallback| {
+        std::env::var_os(key)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| input.home.join(fallback))
+    };
+    let config_home = xdg("XDG_CONFIG_HOME", ".config");
+    let data_home = xdg("XDG_DATA_HOME", ".local/share");
+    let data = data_home.join("opencode");
+    let mut runtime_reads = vec![subtree(package), subtree(&data)];
+    let config_dir = config_home.join("opencode");
+    if config_dir.is_dir() {
+        runtime_reads.push(subtree(config_dir));
     }
+    // Keep the account store readable but outside all writable state grants.
+    let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]
+        .map(|name| exact(data.join(name)))
+        .to_vec();
+    let mut setup = vec![SetupStep::CreateDir(data.clone())];
+    for name in ["log", "storage", "snapshot"] {
+        let directory = data.join(name);
+        state_writes.push(subtree(&directory));
+        setup.push(SetupStep::CreateDir(directory));
+    }
+    env.extend([
+        (
+            "XDG_CONFIG_HOME".into(),
+            config_home.clone().into_os_string(),
+        ),
+        ("XDG_DATA_HOME".into(), data_home.clone().into_os_string()),
+        (
+            "XDG_CACHE_HOME".into(),
+            private.join("cache").into_os_string(),
+        ),
+        (
+            "XDG_STATE_HOME".into(),
+            private.join("state").into_os_string(),
+        ),
+    ]);
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
     // No repository configuration or plugins, and no Claude Code files.
     for key in [
@@ -91,13 +112,19 @@ fn prepare(
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
         secret_input: None,
         cwd: input.cwd.to_owned(),
-        setup: Vec::new(),
+        setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
-                runtime_reads: vec![subtree(package)],
+                runtime_reads,
+                state_writes,
+                tool_exec_roots: if access == Access::WorktreeWrite {
+                    vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
+                } else {
+                    Vec::new()
+                },
                 discovery_reads: input
                     .cwd
                     .ancestors()
@@ -112,7 +139,7 @@ fn prepare(
                 loopback_server: true,
                 ..ProviderProfileSpec::default()
             },
-            observations: observations(OBSERVATIONS, access)?,
+            observations: Default::default(),
         },
         stream,
     })
@@ -223,7 +250,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
 
 crate::quota_source!(OpenCode, "opencode");
 
-#[cfg(all(test, feature = "recording"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::Adapter;
@@ -240,7 +267,6 @@ mod tests {
             std::path::Path::new("/fixture/repo"),
             None,
         );
-        // Recipe test does not enable an adapter with missing activation evidence.
         let spec = prepare(
             &input,
             Access::ReadOnly,

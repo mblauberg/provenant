@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error("{adapter} invocation has no qualifying activation recording")]
-    Disabled { adapter: &'static str },
     #[error("argv prompt exceeds 64 KiB")]
     PromptTooLarge,
     #[error("provider protocol is malformed")]
@@ -31,8 +29,8 @@ pub enum ProviderError {
     CredentialUnavailable,
 }
 
-/// No preflight probe form is recorded yet. An uninhabited plan cannot be
-/// forged or accidentally executed; qualifying recordings must precede effects.
+/// No preflight probe form is implemented yet. An uninhabited plan cannot be
+/// forged or accidentally executed.
 #[derive(Debug)]
 pub enum PreflightPlan {}
 
@@ -246,11 +244,6 @@ pub(crate) fn verify_lineage(
 
 pub trait Adapter: Sync {
     fn id(&self) -> &'static str;
-    /// Activation is a provider-owned recording gate, independent of cache/config:
-    /// true when any mode of this adapter is enabled in the recorded matrix.
-    fn execution_enabled(&self) -> bool {
-        false
-    }
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn preflight(&self, input: &PreflightInput) -> Result<PreflightPlan, ProviderError>;
     fn decode_preflight(

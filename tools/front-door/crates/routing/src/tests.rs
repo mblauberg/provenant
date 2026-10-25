@@ -282,15 +282,15 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
     ];
     let registry = [
         provenant_providers::Registration {
-            adapter: &RECORDED_CODEX,
+            adapter: &provenant_providers::codex::Codex,
             quota_source: None,
         },
         provenant_providers::Registration {
-            adapter: &RECORDED_CLAUDE,
+            adapter: &provenant_providers::claude::Claude,
             quota_source: None,
         },
         provenant_providers::Registration {
-            adapter: &RECORDED_AGY,
+            adapter: &provenant_providers::agy::Agy,
             quota_source: None,
         },
     ];
@@ -634,24 +634,14 @@ fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
         }
         error => panic!("unexpected pool error: {error}"),
     }
-    // OpenCode is not activated in the bundled registry, so opting in moves the
-    // free member past the free gate to the activation gate, never to fallback.
+    // Opting in passes the free gate; availability is still required.
     query.allow_free = true;
-    match resolve(&query, &ctx).unwrap_err() {
-        RoutingError::NoEligiblePoolMember { exclusions } => {
-            assert!(
-                !exclusions
-                    .iter()
-                    .any(|reason| reason == "free model disabled")
-            );
-            assert!(
-                exclusions
-                    .iter()
-                    .any(|reason| reason == "opencode/opencode/deepseek-v4.1-flash-free: disabled")
-            );
-        }
-        error => panic!("unexpected pool error: {error}"),
-    }
+    let resolved = resolve(&query, &ctx)?;
+    assert_eq!(resolved.adapter, "opencode");
+    assert_eq!(
+        reason(&resolved),
+        Some(&RouteExclusionReason::UnknownAvailability)
+    );
     Ok(())
 }
 
@@ -742,7 +732,7 @@ fn availability() -> AvailabilityRecord {
     }
 }
 #[test]
-fn cached_claims_cannot_activate_and_age_is_exact() -> Result<(), Box<dyn std::error::Error>> {
+fn cached_availability_age_and_disclosure_are_checked() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let records = [availability()];
@@ -767,7 +757,7 @@ fn cached_claims_cannot_activate_and_age_is_exact() -> Result<(), Box<dyn std::e
             reason: RouteExclusionReason::DisclosureDenied
         }
     ));
-    // A fresh record cannot activate an adapter the matrix leaves disabled.
+    // Cursor also reaches the disclosure gate with a fresh availability record.
     let mut cursor = availability();
     cursor.adapter = "cursor".into();
     let records = [cursor];
@@ -775,7 +765,7 @@ fn cached_claims_cannot_activate_and_age_is_exact() -> Result<(), Box<dyn std::e
     assert!(matches!(
         resolve(&request("cursor/test")?, &context)?.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::Disabled
+            reason: RouteExclusionReason::DisclosureDenied
         }
     ));
     let duplicate = [availability(), availability()];
@@ -957,7 +947,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
             .satisfied()
     );
     let registry = [provenant_providers::Registration {
-        adapter: &RecordedFixture(&Claude),
+        adapter: &Claude,
         quota_source: None,
     }];
     let mut record = availability();
@@ -988,79 +978,6 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
     Ok(())
 }
 
-/// A test-only activation gate, with the provider's real mechanics otherwise
-/// unchanged. No fixture activation is exported from the library or registry.
-struct RecordedFixture(&'static dyn provenant_providers::Adapter);
-static RECORDED_CODEX: RecordedFixture = RecordedFixture(&provenant_providers::codex::Codex);
-static RECORDED_CLAUDE: RecordedFixture = RecordedFixture(&provenant_providers::claude::Claude);
-static RECORDED_AGY: RecordedFixture = RecordedFixture(&provenant_providers::agy::Agy);
-impl provenant_providers::Adapter for RecordedFixture {
-    fn id(&self) -> &'static str {
-        self.0.id()
-    }
-    fn execution_enabled(&self) -> bool {
-        true
-    }
-    fn account(
-        &self,
-        s: &provenant_providers::StreamState,
-    ) -> Result<provenant_providers::AccountDetection, provenant_providers::ProviderError> {
-        self.0.account(s)
-    }
-    fn preflight(
-        &self,
-        i: &provenant_providers::PreflightInput,
-    ) -> Result<provenant_providers::PreflightPlan, provenant_providers::ProviderError> {
-        self.0.preflight(i)
-    }
-    fn decode_preflight(
-        &self,
-        p: &provenant_providers::PreflightPlan,
-        b: &[u8],
-    ) -> Result<AvailabilityRecord, provenant_providers::ProviderError> {
-        self.0.decode_preflight(p, b)
-    }
-    fn prepare(
-        &self,
-        i: provenant_providers::PrepareInput<'_>,
-    ) -> Result<provenant_providers::LaunchSpec, provenant_providers::ProviderError> {
-        self.0.prepare(i)
-    }
-    fn stream(
-        &self,
-        c: Option<&provenant_providers::Continuation>,
-    ) -> Result<provenant_providers::StreamState, provenant_providers::ProviderError> {
-        self.0.stream(c)
-    }
-    fn observe(
-        &self,
-        s: &mut provenant_providers::StreamState,
-        b: &[u8],
-    ) -> Result<Vec<provenant_providers::ProviderEvent>, provenant_providers::ProviderError> {
-        self.0.observe(s, b)
-    }
-    fn finish(
-        &self,
-        s: provenant_providers::StreamState,
-        e: provenant_providers::ExitObservation,
-    ) -> Result<provenant_providers::ProviderOutcome, provenant_providers::ProviderError> {
-        self.0.finish(s, e)
-    }
-    fn continuation(
-        &self,
-        o: &provenant_providers::ProviderOutcome,
-        r: &ResolvedRoute,
-        d: &str,
-    ) -> Result<provenant_providers::Continuation, provenant_providers::ProviderError> {
-        self.0.continuation(o, r, d)
-    }
-    fn validate_provenance(
-        &self,
-        p: &provenant_providers::RouteProvenance<'_>,
-    ) -> Result<provenant_providers::VerifiedLineage, provenant_providers::ProviderError> {
-        self.0.validate_provenance(p)
-    }
-}
 fn reason(route: &ResolvedRoute) -> Option<&RouteExclusionReason> {
     match &route.readiness {
         RouteReadiness::Unavailable { reason } => Some(reason),
@@ -1096,14 +1013,14 @@ fn quota(
     })
 }
 #[test]
-fn activation_availability_access_and_scoped_quota_are_independent_gates()
+fn availability_access_and_scoped_quota_are_independent_gates()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::QuotaStatus;
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let mut context = context(&catalogue, &config, now()?);
     let registry = [provenant_providers::Registration {
-        adapter: &RecordedFixture(&provenant_providers::codex::Codex),
+        adapter: &provenant_providers::codex::Codex,
         quota_source: None,
     }];
     context.registry = &registry;

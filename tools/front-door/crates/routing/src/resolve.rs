@@ -150,7 +150,7 @@ pub fn list(
                 .availability
                 .iter()
                 .find(|a| a.adapter == r.adapter.id());
-            let reason = availability_reason(r, record, context);
+            let reason = availability_reason(record, context);
             AvailabilityView {
                 adapter: r.adapter.id().into(),
                 record: record.map(AvailabilitySummary::from),
@@ -299,13 +299,9 @@ fn pace_snapshot_factor(
 }
 
 fn availability_reason(
-    reg: &Registration,
     record: Option<&AvailabilityRecord>,
     ctx: &RoutingContext<'_>,
 ) -> Option<RouteExclusionReason> {
-    if !reg.adapter.execution_enabled() {
-        return Some(RouteExclusionReason::Disabled);
-    }
     let Some(record) = record else {
         return Some(RouteExclusionReason::UnknownAvailability);
     };
@@ -331,14 +327,13 @@ fn availability_reason(
     None
 }
 fn account_reason<'q>(
-    reg: &Registration,
     model: &ModelId,
     listed: bool,
     availability: &AvailabilityRecord,
     access: Option<&AccessContext<'_>>,
     context: &'q RoutingContext<'_>,
 ) -> (Option<RouteExclusionReason>, Option<&'q QuotaObservation>) {
-    let mut reason = availability_reason(reg, Some(availability), context);
+    let mut reason = availability_reason(Some(availability), context);
     if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
         reason = Some(RouteExclusionReason::DisclosureDenied);
     }
@@ -400,7 +395,7 @@ fn candidate(
     effort: Option<&str>,
     context: &RoutingContext<'_>,
 ) -> Result<RouteAlternative, RoutingError> {
-    let reg = context
+    context
         .registry
         .iter()
         .find(|r| r.adapter.id() == model.adapter())
@@ -421,7 +416,7 @@ fn candidate(
         .iter()
         .filter(|a| a.adapter == model.adapter())
         .map(|a| {
-            let (reason, quota) = account_reason(reg, model, entry.is_some(), a, access, context);
+            let (reason, quota) = account_reason(model, entry.is_some(), a, access, context);
             let headroom = quota
                 .and_then(|q| pace_snapshot_factor(&q.snapshot, context.now_seconds()))
                 .unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS);
@@ -436,7 +431,7 @@ fn candidate(
     let availability = best.map(|(a, _, _)| *a);
     let reason = match best {
         Some((_, reason, _)) => reason.clone(),
-        None => availability_reason(reg, None, context),
+        None => availability_reason(None, context),
     };
     let account = availability.and_then(|a| a.account_key.clone());
     let readiness = match (reason, availability) {

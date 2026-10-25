@@ -49,7 +49,7 @@ linked worktrees of the canonical Git common directory.
 mode, Codex clean/inherited config policy and hooks/MCP/plugin policy. Read-only
 plans require clean config and deny extensions; inherited config is refused.
 This is validated policy, not backend readiness: compile against held anchors
-immediately before handoff. Provider activation still gates every launch.
+immediately before handoff. Adapters are enabled by default; recordings do not gate launch.
 
 An optional Agy recipe selects one state directory and an attempt-private,
 retained `private_state` root, separate from disposable scratch. Supervisor

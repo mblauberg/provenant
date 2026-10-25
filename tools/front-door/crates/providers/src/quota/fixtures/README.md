@@ -14,6 +14,5 @@ the account-attribution regression check.
 | `opencode.json` | Live local ledger aggregate. It is a partial, this-machine-only estimate and does not include usage from other hosts. |
 | `codex-app-server.json` | Synthetic supplemental schema example for app-server response decoding; not a live recording. |
 
-`activation.json` enables quota sources with live redacted recordings. The
-synthetic Codex app-server example supplements coverage but is not activation
-evidence.
+Quota sources are available by default. These recordings and the synthetic
+Codex app-server example provide decoder replay coverage.

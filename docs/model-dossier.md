@@ -14,9 +14,8 @@ entries and say which ones you reasoned from.
 Read it before choosing a model. Prefer what it says. Depart from it when the
 work calls for something else, and say why in the receipt.
 
-Execution is currently enabled only for `claude` and `codex`, as recorded in
-[`activation.json`](../tools/front-door/tests/fixtures/providers/activation.json).
-Use `provenant route list` to check which exact models are currently available.
+All five adapters are enabled by default; recordings provide replay coverage.
+Use `provenant route list` to check current model availability.
 
 ## Advisory only
 
@@ -26,7 +25,7 @@ written in a sentence, changed in a sentence, and read by whoever is about to
 dispatch a leg.
 
 - Task-class knob presets affect configuration values; the Rust routing
-  catalogue and activation fixture determine route availability.
+  catalogue and current provider observations determine route availability.
 - The dossier only ranks options that are *already* admissible. It never widens
   authority, never reaches a disabled adapter, and never blocks a dispatch.
 - If a preference here disagrees with a resolved route, the resolved route wins
@@ -36,7 +35,7 @@ dispatch a leg.
 flowchart LR
   A[task-class preset] -->|knob values| R[route]
   D[model dossier] -->|ADVISORY: which mind fits| R
-  G[activation, route eligibility] -->|VETO| R
+  G[route eligibility] -->|VETO| R
 ```
 
 ## What this file does not own
@@ -56,7 +55,7 @@ those. This file only helps you pick among what they already allow.
 The bundled Rust catalogue owns route availability and resolution. Use
 `provenant route list` to inspect named routes and `provenant route resolve`
 to check a route or exact model. This dossier records advisory preferences;
-it does not set aliases, weights, activation gates or admissibility.
+it does not set aliases, weights or admissibility.
 
 For numbers rather than judgement, see the
 [model benchmark registry](research/model-benchmarks/README.md): published
@@ -147,12 +146,6 @@ not read an absent `Watch out for` as an endorsement.
 - **Cost:** cheapest Claude tier ($0.10/$0.50 per Mtok at launch).
 - **Reach:** Claude adapter; first entry in the `utility` pool at low effort,
   before Codex Luna.
-
-### Disabled adapter entries
-
-OpenCode, Agy and Cursor entries in the catalogue are not available for
-dispatch while their activation modes are disabled. Their catalogue metadata
-does not establish current pricing, data terms or route availability.
 
 ## Categories
 
