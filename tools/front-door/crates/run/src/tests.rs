@@ -158,6 +158,37 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     Ok(())
 }
 #[test]
+fn concurrent_first_opens_create_a_ready_store() -> TestResult {
+    // Repeated fresh directories exercise both file creation and WAL setup.
+    for _ in 0..16 {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    scope.spawn(|| -> std::result::Result<(), String> {
+                        let clock = clock();
+                        let cancel = CancelToken::new();
+                        let call = call(&clock, &cancel);
+                        barrier.wait();
+                        let store = RunStore::open(&context, &call)
+                            .map_err(|error| format!("open: {error:?}"))?;
+                        assert!(!store.has_runs(&call).map_err(|error| error.to_string())?);
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                worker.join().map_err(|_| "open worker panicked")??;
+            }
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
 fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

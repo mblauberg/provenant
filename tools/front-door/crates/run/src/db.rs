@@ -1,6 +1,8 @@
 use crate::*;
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
-use provenant_supervisor::fs::{Directory, FileKind, verify_directory_identity};
+use provenant_supervisor::fs::{
+    Directory, FileKind, LockGuard, LockMode, verify_directory_identity,
+};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::{
     ffi::OsStr,
@@ -122,7 +124,8 @@ impl RunStore {
 
     pub fn open(context: &ExecutionContext, request: &Request<'_>) -> Result<Self> {
         request.retry(|| Ok(()))?;
-        let (root, db) = open_database(context.state_root.as_path(), "run.sqlite3", request)?;
+        let (root, db, _initialization) =
+            open_database(context.state_root.as_path(), "run.sqlite3", request)?;
         request.retry(|| version(&db))?;
         let store = Self {
             db,
@@ -167,11 +170,12 @@ pub(crate) fn immediate<T>(
 }
 /// Create the private directory chain and database file, then open it in WAL
 /// mode with full synchronisation. Every component is identity-checked.
+/// The caller must hold the returned lock through schema initialisation.
 pub(crate) fn open_database(
     path: &Path,
     name: &str,
     request: &Request<'_>,
-) -> Result<(Directory, Connection)> {
+) -> Result<(Directory, Connection, LockGuard)> {
     let mut root = Directory::root(true)?;
     for component in path.components() {
         if let Component::Normal(part) = component {
@@ -198,6 +202,22 @@ pub(crate) fn open_database(
     }
     private(&root)?;
     let root = root.into_anchor()?;
+    // SQLite serialises transactions, but first-file and WAL setup precede them.
+    let lock_name = format!("{name}.lock");
+    // Concurrent non-exclusive O_CREAT opens can fail with ENOENT on macOS.
+    // Establish the stable inode with exclusive creation before opening the lock.
+    match root.create_new(OsStr::new(&lock_name)) {
+        Ok(_) => {}
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
+    let initialization = root.lock(
+        OsStr::new(&lock_name),
+        LockMode::Exclusive,
+        request.budget,
+        request.cancel,
+        request.clock,
+    )?;
     match root.create_new(OsStr::new(name)) {
         Ok(file) => {
             file.sync()?;
@@ -223,7 +243,7 @@ pub(crate) fn open_database(
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
         Ok(())
     })?;
-    Ok((root, db))
+    Ok((root, db, initialization))
 }
 fn version(db: &Connection) -> Result<i64> {
     let (version, has_schema): (i64, bool) = db.query_row("SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
