@@ -499,6 +499,10 @@ fn prepare(
     if let Some(effort) = &input.route.effort {
         argv.extend(["--effort".into(), effort.into()]);
     }
+    if !shell && let Some(read_only) = &plan.read_only {
+        // The following MCP flags terminate --add-dir's variadic paths.
+        add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
+    }
 
     let config_dir = input.account.map_or_else(
         || input.home.join(".claude"),
@@ -618,6 +622,18 @@ fn prepare(
         .provenant
         .grant(&mut spec.profile.spec, &mut spec.setup, true);
     Ok(spec)
+}
+
+pub(super) fn add_git_dirs<'a>(
+    argv: &mut Vec<OsString>,
+    paths: impl IntoIterator<Item = &'a Path>,
+    cwd: &Path,
+) {
+    for path in paths {
+        if !path.starts_with(cwd) {
+            argv.extend(["--add-dir".into(), path.as_os_str().to_owned()]);
+        }
+    }
 }
 
 /// Claude's per-project transcript directory name: every byte outside ASCII

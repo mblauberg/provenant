@@ -208,7 +208,9 @@ home or tmp grants.
   config, remote-tracking refs and their reflogs, provider configuration and
   protected instructions stay immutable. The push guard trusts
   `refs/remotes/<remote>/HEAD` to identify the default branch. Common
-  `info/exclude` is read-only.
+  `info/exclude` is read-only. Read-only lanes read the bound common Git
+  directory, including each linked worktree's private directory, and never
+  write it.
 - **Network.** A level: `provider` (the profile's API endpoints only, the
   read-only default), `local` (adds localhost and the Postgres socket) or
   `open` (adds any outbound, the writer default).

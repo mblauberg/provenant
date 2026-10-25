@@ -95,6 +95,9 @@ impl ReadOnlyGrants {
     pub fn writable_paths(&self) -> &[String] {
         &self.relative
     }
+    pub fn git_read_paths(&self) -> impl Iterator<Item = &std::path::Path> {
+        self.git_reads.iter().map(|grant| grant.path.as_path())
+    }
     #[cfg(any(target_os = "macos", test))]
     pub(crate) fn revalidate(
         &self,
@@ -205,6 +208,10 @@ mod tests {
         );
         let grants = policy(&[".agent-run/locks"]).resolve(&repo, &binding)?;
         assert_eq!(grants.writes[0].path, root.join(".agent-run/locks"));
+        assert_eq!(
+            grants.git_read_paths().collect::<Vec<_>>(),
+            [binding.common_dir()]
+        );
         grants.revalidate(&LocalFs)?;
         for path in [
             "/tmp/x",

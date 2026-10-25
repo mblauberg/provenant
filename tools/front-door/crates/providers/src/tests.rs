@@ -803,6 +803,28 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
 }
 
 #[test]
+fn claude_read_only_adds_external_git_dir_only() {
+    let common_dir = Path::new("/fixture/repo/.git");
+    let mut argv = Vec::new();
+    claude::add_git_dirs(
+        &mut argv,
+        [common_dir],
+        Path::new("/fixture/repo/.worktrees/x"),
+    );
+    assert_eq!(
+        argv,
+        [
+            OsString::from("--add-dir"),
+            common_dir.as_os_str().to_owned()
+        ]
+    );
+
+    argv.clear();
+    claude::add_git_dirs(&mut argv, [common_dir], Path::new("/fixture/repo"));
+    assert!(argv.is_empty());
+}
+
+#[test]
 fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = std::path::Path::new("/fixture/repo");
@@ -922,6 +944,12 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 assert!(argv.iter().any(|arg| arg == "--mcp-config"));
                 assert!(argv.iter().any(|arg| arg == "--settings"));
                 assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
+                assert!(!argv.iter().any(|arg| arg == "--add-dir"));
+                assert!(
+                    spec.env
+                        .iter()
+                        .all(|(key, _)| { key != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD" })
+                );
                 let sources = argv
                     .iter()
                     .position(|arg| arg == "--setting-sources")
