@@ -322,8 +322,10 @@ legacy import. Opening it fails with `upgrade_refused`; the message names the
 table and its row count, and the store stays at a version the previous release
 still opens. An import that brought nothing over does not block the upgrade.
 When the refusing store is a project's home, peers do not see this code: their
-calls report the home as unavailable, and the reason and remedy are in the
-home's `~/.local/share/provenant/v1/peer-agent/agent.log`.
+read-only calls report the home as unavailable; changes report `launch_unknown`,
+and no receipt will exist for them. The reason and remedy are in the home's
+`~/.local/share/provenant/v1/peer-agent/agent.log` while the peer agent runs.
+Otherwise, in-process handling writes them to the SSH caller's stderr.
 
 Keep the previous release while you need that data. To move to the newer
 release, archive the store and let Fabric create a fresh one:
@@ -331,8 +333,9 @@ release, archive the store and let Fabric create a fresh one:
 1. On the previous release, record what you still need from
    `provenant fabric task list` and `provenant fabric mail read`, settle every
    unresolved landing push with `provenant fabric landing reconcile`, and
-   resolve any peer operation that still reports `launch_unknown`. Active claims
-   and landing leases do not survive the archive.
+   resolve any peer operation that still reports `launch_unknown`, except calls
+   refused before the store opened as described above: those have no receipt
+   to reconcile. Active claims and landing leases do not survive the archive.
 2. Stop every process that holds the store: MCP servers in open sessions, the
    `fabric peer-agent` LaunchAgent and running lanes.
 3. Move the store files out of the state directory (here the default):

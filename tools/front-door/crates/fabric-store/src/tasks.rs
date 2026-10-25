@@ -37,7 +37,7 @@ pub struct Task {
     pub updated_at: WallTime,
     /// Retired member a binary from before migration 7 may still write as
     /// null. Read only when null, never written.
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip_serializing, deserialize_with = "crate::null_member")]
     pub legacy: (),
 }
 #[derive(Clone)]

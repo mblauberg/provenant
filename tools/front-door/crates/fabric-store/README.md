@@ -122,8 +122,8 @@ the previous release still opens. The supported remedy is to keep the previous
 release or archive the store, as the
 [Fabric hosts runbook](../../../../docs/runbooks/fabric-hosts.md#legacy-import-data)
 describes. A binary from before migration 7 may still write a null `legacy` or
-`legacy_output_path` after it; records read such a member, drop it and never
-write it.
+`legacy_output_path` after it; records read these members only when `null`,
+drop them and never write them. Any non-null value is refused.
 All mutations and their events share F1's immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.

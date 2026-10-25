@@ -2384,7 +2384,7 @@ impl Factory {
             backoff: &self.backoff,
         };
         let store = provenant_fabric_store::Store::open(&ctx.roots.state, &request)
-            .map_err(|_| FacadeError::Io)?;
+            .map_err(|error| FacadeError::from_code(store_error_code(&error), None))?;
         let mut owner = BinaryRunOwner {
             factory: self,
             allow_remote: true,
@@ -2545,13 +2545,20 @@ pub fn events(
                 true,
             )
         }
-        Err(error) => crate::fail(
-            "fabric events read",
-            provenant_records::Outcome::Error,
-            "events_read",
-            &error.to_string(),
-            globals,
-        ),
+        Err(error) => {
+            let code = error
+                .downcast_ref::<CoordinationError>()
+                .map(CoordinationError::code)
+                .or_else(|| error.downcast_ref::<FacadeError>().map(FacadeError::code));
+            crate::fail(
+                "fabric events read",
+                code.map(provenant_cli::fabric::coordination_outcome)
+                    .unwrap_or(provenant_records::Outcome::Error),
+                code.unwrap_or("events_read"),
+                &error.to_string(),
+                globals,
+            )
+        }
     }
 }
 #[cfg(test)]

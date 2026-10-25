@@ -3,6 +3,33 @@ use provenant_core::OperationId;
 use serde_json::json;
 
 #[test]
+fn legacy_import_refusals_report_upgrade_refused_in_tool_errors() {
+    for error in [
+        ServiceError::Coordination(CoordinationError::from(
+            provenant_fabric_store::Error::LegacyImportData {
+                table: "tasks",
+                rows: 1,
+            },
+        )),
+        ServiceError::Facade(FacadeError::UpgradeRefused),
+    ] {
+        assert_eq!(error.code(), "upgrade_refused");
+        let result = tool_error(
+            Some("fabric_events"),
+            error.code(),
+            error.structured_error(),
+        );
+        assert_eq!(result["isError"], true);
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("upgrade_refused:")
+        );
+    }
+}
+
+#[test]
 fn output_bytes_are_utf8_or_an_explicit_lossless_byte_encoding() {
     assert_eq!(
         OutputBytes::from_bytes(b"hello".to_vec()),

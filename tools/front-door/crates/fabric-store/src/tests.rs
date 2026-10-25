@@ -1115,14 +1115,36 @@ fn null_members_an_old_binary_writes_after_migration_read_and_are_never_written(
     ] {
         assert!(!value.contains("legacy"), "{value}");
     }
-    // A non-null member is still refused.
+    // Empty objects must be refused even through a tagged receipt's buffer.
+    store
+        .db
+        .execute_batch(
+            "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),\
+             '$.task.legacy',json('{}')) AS BLOB); \
+             UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',json('{}')) AS BLOB); \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',json('{}')) AS BLOB);",
+        )
+        .unwrap();
+    assert!(matches!(
+        store.coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request),
+        Err(Error::Decode(_))
+    ));
+    assert!(matches!(
+        store.task(project(), t.id, &request),
+        Err(Error::Decode(_))
+    ));
+    assert!(matches!(
+        store.read_mail(project(), actor(3), Some(0), 100, &request),
+        Err(Error::Decode(_))
+    ));
+    // Other non-null members are still refused.
     store
         .db
         .execute_batch(
             "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',\
              json('{\"id\":\"i\",\"project\":\"p\",\"source\":\"s\"}')) AS BLOB); \
              UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),\
-             '$.legacy_output_path','out.md') AS BLOB);",
+             '$.legacy',NULL,'$.legacy_output_path','out.md') AS BLOB);",
         )
         .unwrap();
     assert!(matches!(
@@ -1192,6 +1214,19 @@ fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
         (
             "imports",
             "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,0,X'7B7D');".to_owned(),
+        ),
+        (
+            "imports",
+            "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,0,1,X'7B7D');".to_owned(),
+        ),
+        (
+            "events",
+            format!(
+                "INSERT INTO imports VALUES('/old/fabric.db','{}','lp',0,0,0,X'7B7D'); \
+                 UPDATE events SET record=CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
+                 WHERE seq=1;",
+                ProjectId::from_bytes([9; 16])
+            ),
         ),
         (
             "events",
