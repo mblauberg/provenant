@@ -76,7 +76,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             switch entry {
             case .separator: item.isSeparatorItem
             case .header: item.isSectionHeader
-            case .item: !item.isSeparatorItem && !item.isSectionHeader
+            case .item: !item.isSeparatorItem && !item.isSectionHeader && item.view == nil
+            case .title, .window, .fact, .note: MenuInfoView.matches(entry, item.view)
             }
         }
         if !same {
@@ -85,31 +86,49 @@ final class StatusMenu: NSObject, NSMenuDelegate {
                 switch entry {
                 case .separator: menu.addItem(.separator())
                 case .header(let title): menu.addItem(.sectionHeader(title: title))
-                case .item: menu.addItem(NSMenuItem())
+                default: menu.addItem(NSMenuItem())
                 }
             }
         }
+        let column = MenuStyle.column(for: entries.compactMap { if case .item(let spec) = $0 { spec } else { nil } })
         for (item, entry) in zip(menu.items, entries) {
             switch entry {
             case .separator: break
             case .header(let title): if item.title != title { item.title = title }
-            case .item(let spec): configure(item, spec)
+            case .item(let spec): configure(item, spec, column: column)
+            case .title, .window, .fact, .note:
+                let view = MenuInfoView.make(for: entry, reusing: item.view)
+                if item.view !== view { item.view = view }
+                item.isEnabled = false
             }
         }
     }
 
-    private func configure(_ item: NSMenuItem, _ spec: MenuItemSpec) {
+    private func configure(_ item: NSMenuItem, _ spec: MenuItemSpec, column: CGFloat) {
         if #available(macOS 14.4, *) {
-            item.title = spec.title
             item.subtitle = spec.subtitle
-        } else {
-            item.title = [spec.title, spec.subtitle].compactMap { $0 }.joined(separator: " · ")
+        } else if let subtitle = spec.subtitle {
+            item.attributedTitle = nil
+            item.title = "\(spec.title) · \(subtitle)"
+            return configureRest(item, spec)
         }
-        item.badge = spec.badge.map { NSMenuItemBadge(string: $0) }
-        item.image = spec.symbol.flatMap { Self.image($0, spec.tint) }
+        if let title = MenuStyle.attributedTitle(spec, column: column) {
+            item.attributedTitle = title
+        } else {
+            item.attributedTitle = nil
+            item.title = spec.title
+        }
+        configureRest(item, spec)
+    }
+
+    private func configureRest(_ item: NSMenuItem, _ spec: MenuItemSpec) {
+        item.image = spec.icon.flatMap(MenuStyle.image)
         item.keyEquivalent = spec.shortcut ?? ""
         item.keyEquivalentModifierMask = .command
-        item.toolTip = spec.help
+        item.isHidden = spec.hidden
+        item.allowsKeyEquivalentWhenHidden = spec.hidden
+        item.toolTip = spec.submenu == nil ? spec.help : nil
+        item.setAccessibilityLabel(MenuStyle.spoken(spec))
         item.representedObject = spec.action.map(ActionBox.init)
         item.target = spec.action == nil ? nil : self
         item.action = spec.action == nil ? nil : #selector(choose(_:))
@@ -135,28 +154,9 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case .open(let url): NSWorkspace.shared.open(url)
         }
     }
-
-    /// An SF Symbol in a semantic system colour; untinted symbols stay templates and follow the menu's text colour.
-    static func image(_ name: String, _ tint: MenuTint?) -> NSImage? {
-        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        guard let tint else { return image }
-        return image.withSymbolConfiguration(.init(hierarchicalColor: tint.color))
-    }
 }
 
 private final class ActionBox: NSObject {
     let action: MenuAction
     init(_ action: MenuAction) { self.action = action }
-}
-
-extension MenuTint {
-    var color: NSColor {
-        switch self {
-        case .green: .systemGreen
-        case .orange: .systemOrange
-        case .red: .systemRed
-        case .blue: .systemBlue
-        case .secondary: .secondaryLabelColor
-        }
-    }
 }
