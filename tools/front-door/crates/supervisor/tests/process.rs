@@ -122,6 +122,58 @@ fn timeout_escalates_to_kill(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn cleanup_guard_kills_a_guardian_recorded_in_a_nested_store(root: &Path) -> Result<()> {
+    let store = root.join("store");
+    let nested = store.join("children/a/runs/r/attempts/x");
+    std::fs::create_dir_all(&nested)?;
+    let socket = root.join("guard.sock");
+    let listener = UnixListener::bind(&socket).map_err(|error| {
+        io::Error::new(error.kind(), format!("bind cleanup guard socket: {error}"))
+    })?;
+    let args = fixture::argv_with_args("crash-guardian-provider", &[fixture_arg(&socket)])?;
+    let env = fixture_environment(root);
+    let cwd = nested.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        let result = (|| {
+            let mut options = ExecOptions::new(&args, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            SystemExecutor::new(1)?.execute(options)
+        })();
+        let _ = sender.send(result);
+    });
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    read_byte(&mut held, b'R')?;
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(nested.join("fixture-process.json"))?)?;
+    let guardian: provenant_supervisor::census::ProcessIdentity =
+        serde_json::from_value(record["provider"].clone())?;
+    for byte in format!("{}\n", guardian.pid).bytes() {
+        read_byte(&mut held, byte)?;
+    }
+    std::fs::write(
+        nested.join("process.json"),
+        serde_json::to_vec(&serde_json::json!({"guardian": guardian}))?,
+    )?;
+    // Leave only the guardian identity so provider cleanup cannot mask a failure.
+    std::fs::remove_file(nested.join("fixture-process.json"))?;
+
+    fixture::ProcessCleanupGuard::new(&store).disarm();
+    assert!(matches!(
+        fixture::fixture_read_byte(&mut held, Duration::from_millis(100)),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut
+    ));
+
+    drop(fixture::ProcessCleanupGuard::new(&store));
+    let outcome = receiver.recv_timeout(Duration::from_secs(3))??;
+    worker
+        .join()
+        .map_err(|_| io::Error::other("cleanup guard worker panicked"))?;
+    assert_eq!(outcome.termination, Termination::Signal(9));
+    assert!(!outcome.timed_out && !outcome.cancelled);
+    Ok(())
+}
+
 fn tee_loss_does_not_stall_capture_test(root: &Path) -> Result<()> {
     let env = fixture_environment(root);
     let executor = SystemExecutor::new(4)?;
@@ -372,6 +424,7 @@ const TESTS: &[&str] = &[
     "large_stdin_round_trip",
     "bounded_capture_retains_only_the_configured_limit",
     "timeout_escalates_to_kill",
+    "cleanup_guard_kills_a_guardian_recorded_in_a_nested_store",
     "tee_loss_does_not_stall_capture",
     "cancellation_is_scoped_to_the_owned_child",
     "cancellation_reap_exhaustion_transfers_child",
@@ -392,6 +445,9 @@ fn run_case(name: &str) -> Result<()> {
             bounded_capture_retains_only_the_configured_limit(root.path())
         }
         "timeout_escalates_to_kill" => timeout_escalates_to_kill(root.path()),
+        "cleanup_guard_kills_a_guardian_recorded_in_a_nested_store" => {
+            cleanup_guard_kills_a_guardian_recorded_in_a_nested_store(root.path())
+        }
         "tee_loss_does_not_stall_capture" => tee_loss_does_not_stall_capture_test(root.path()),
         "cancellation_is_scoped_to_the_owned_child" => {
             cancellation_is_scoped_to_the_owned_child_test(root.path())

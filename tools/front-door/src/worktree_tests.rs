@@ -1551,6 +1551,7 @@ fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
 fn lane_prepare_isolates_nested_state() -> Result {
     use provenant_confinement::permissions::PathScope;
     let rig = repository()?;
+    let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
     ok(
         &rig,
         &["worktree", "create", "writer", "--base", "HEAD", "--json"],
@@ -2014,6 +2015,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         )
         .map_err(|e| format!("confined {adapter} writer={writer}: {e}"))?;
     }
+    cleanup.disarm();
     Ok(())
 }
 
