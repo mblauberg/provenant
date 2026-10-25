@@ -16,6 +16,8 @@ fn fixture() -> Result<TestRig> {
     for name in [
         ".cargo/bin",
         ".cargo/registry",
+        ".cargo/git",
+        "Library/pnpm",
         ".rustup/toolchains",
         ".codex",
         ".claude/hooks",
@@ -215,15 +217,23 @@ pub(crate) fn provider() -> Result {
             PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").ok_or("CARGO_TARGET_DIR missing")?);
         let cargo = PathBuf::from(std::env::var_os("CARGO_HOME").ok_or("CARGO_HOME missing")?);
         let cache = target.parent().ok_or("cache")?;
-        // Cargo home is the user's: its shared registry is writable, its
-        // root and installed binaries are not.
-        assert_eq!(cargo, home.join(".cargo"));
+        // Cargo home is lane-private, inside the writer cache. The user's
+        // own stores and installed binaries are read-only.
+        assert_eq!(cargo, cache.join("cargo-home"));
         fs::create_dir_all(&target)?;
         fs::write(target.join("compose-target"), b"target")?;
+        fs::create_dir_all(cargo.join("registry"))?;
         fs::write(cargo.join("registry/compose-home"), b"cargo")?;
-        fs::write(home.join(".npm/compose"), b"npm")?;
-        denied(&cargo.join("compose-home"))?;
-        denied(&cargo.join("bin/compose"))?;
+        for shared in [
+            ".cargo/registry/compose",
+            ".cargo/git/compose",
+            ".cargo/bin/compose",
+            ".cargo/compose-home",
+            ".npm/compose",
+            "Library/pnpm/compose",
+        ] {
+            denied(&home.join(shared))?;
+        }
         fs::write(
             state.join("compose-cache"),
             cache.as_os_str().as_encoded_bytes(),

@@ -95,7 +95,7 @@ fn prepare(
         subtree(package),
     ];
     let mut runtime_reads = vec![subtree(package)];
-    let mut tool_writes = Vec::new();
+    let tool_writes = Vec::new();
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
@@ -110,15 +110,13 @@ fn prepare(
         access,
         &mut runtime_reads,
         &mut tool_exec_roots,
-        &mut tool_writes,
         &mut env,
         &mut setup,
     );
     crate::launch::node_tools(
-        input.home,
+        crate::launch::lane_cache(input),
         &mut runtime_reads,
         &mut tool_exec_roots,
-        &mut tool_writes,
         &mut env,
     );
     // Git may inspect global config even for status. Keep host hooks,

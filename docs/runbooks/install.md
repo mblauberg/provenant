@@ -27,8 +27,10 @@ cargo run --locked --example package-release -- --out "$RELEASE"
 
 Host builds use a fresh target directory. Confined writers use the separate
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>` namespace, derived from
-verified worktree and repository identities. Never use a lane cache for a host
-build.
+verified worktree and repository identities. It also holds the lane's private
+Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry`,
+`~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
+a lane cache for a host build.
 
 The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
 workspace's `target/release/provenant` without that variable. Pass
