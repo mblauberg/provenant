@@ -72,6 +72,12 @@ derived from its verified identity before Git removes it. Cache cleanup holds
 the writer lock and uses verified detachment before deletion. A cleanup failure
 emits a warning; the worktree stays removed. Other orphaned caches and
 interrupted cleanup tombstones remain for `provenant gc`.
+Cleanup recognises v1 owner markers for missing owners; existing v1 owners
+are kept and never collected as idle.
+
+Never use raw `git worktree remove` on Provenant worktrees; use
+`provenant worktree remove`, which holds writer exclusion and cleans the
+lane cache.
 
 ## Writer dispatch
 

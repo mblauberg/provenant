@@ -34,8 +34,10 @@ a lane cache for a host build. `provenant worktree remove` deletes only the
 removed worktree's own cache while holding its writer lock. Other orphaned
 caches remain until `provenant gc [--dry-run] [--idle-days N]`, which also
 removes caches idle for N days (default 7) for the selected project's
-worktrees, sparing live or unobservable writers. Existing owners outside that
-project are reported as kept (foreign). Before deletion, GC atomically renames
+worktrees, sparing live or unobservable writers. V1 owner markers support
+orphan cleanup and foreign-owner reporting, but never idle cleanup because
+they lack device and inode identity. Existing owners outside that project are
+reported as kept (foreign). Before deletion, GC atomically renames
 each cache to a tombstone so a launching lane can create a fresh cache. Later
 sweeps retry interrupted tombstones. Entries that fail identity verification
 are quarantined under `.gc-refused-*` and kept for inspection. The owner marker

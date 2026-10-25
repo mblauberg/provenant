@@ -161,6 +161,7 @@ fn classify_lane_cache(
         Some(CacheGcReason::Idle) => "idle",
         Some(CacheGcReason::Tombstone) => "tombstone",
         Some(CacheGcReason::Foreign) => "foreign",
+        None if owner.identity.is_none() => "legacy",
         None => "live",
     };
     Ok((state, Some(owner.path)))
@@ -408,6 +409,33 @@ mod tests {
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
             "legacy"
+        );
+        let owner = fixture.path().join("owner");
+        std::fs::write(
+            cache.join(CARGO_CACHE_OWNER),
+            [
+                LEGACY_CARGO_CACHE_OWNER_PREFIX,
+                owner.as_os_str().as_encoded_bytes(),
+            ]
+            .concat(),
+        )?;
+        assert_eq!(
+            classify_lane_cache(&directory, relative, &policy, 0)?,
+            ("orphaned", Some(owner.clone()))
+        );
+        std::fs::create_dir(&owner)?;
+        assert_eq!(
+            classify_lane_cache(&directory, relative, &policy, 0)?,
+            ("foreign", Some(owner.clone()))
+        );
+        let policy = CacheGcPolicy {
+            project_owners: [owner.clone()].into(),
+            idle_before_ns: Some(100),
+            ..policy
+        };
+        assert_eq!(
+            classify_lane_cache(&directory, relative, &policy, 0)?,
+            ("legacy", Some(owner))
         );
         std::fs::write(cache.join(CARGO_CACHE_OWNER), b"invalid marker")?;
         assert_eq!(

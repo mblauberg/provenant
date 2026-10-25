@@ -66,12 +66,15 @@ and `other`; these parts use unshared bytes and sum to the lane's unshared total
 Lane states are `live`, `idle`, `orphaned`, `foreign`, `legacy`, `tombstone`,
 `refused` and `unmarked`. Classification reuses cache-owner parsing and GC
 reason policy, with the same seven-day default idle threshold. Foreign owners
-are outside the selected project's worktree inventory. Missing, malformed or
-unverifiable markers are retained as unmarked, legacy or refused. Worktree
-writer observations use existing registration and lock files opened read-only,
-plus the native process census. Missing or ambiguous evidence stays unknown and
-protects its cache. Merge containment is against the main worktree's observed
-HEAD, including when invoked from a linked worktree. The main worktree omits
+are outside the selected project's worktree inventory. A valid v1 marker is
+orphaned when its owner path is missing, foreign when an existing owner is
+outside the project, and legacy otherwise. V1 markers never become idle.
+Missing, malformed or unverifiable markers are retained as unmarked, legacy
+or refused. Worktree writer observations use existing registration and lock
+files opened read-only, plus the native process census. Missing or ambiguous
+evidence stays unknown and protects its cache. Merge containment is against
+the main worktree's observed HEAD, including when invoked from a linked
+worktree. The main worktree omits
 `merged` and does not run a merge-containment check against itself.
 
 Target contents contribute to the newest-write observation, so a fully measured
