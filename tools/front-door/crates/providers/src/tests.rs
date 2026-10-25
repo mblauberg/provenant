@@ -2284,3 +2284,38 @@ fn codex_ignores_web_search_items_with_repeated_members() -> Result<(), Provider
     );
     Ok(())
 }
+
+#[test]
+fn account_display_fields_validate() {
+    use provenant_config::DomainConfig;
+    let base = "[entries.claude-work]\nadapter = \"claude\"\nlabel = \"work\"\nkey = \"k\"\ndirectory = \"/home/u/.claude-work\"\n";
+    let parse = |extra: &str| -> accounts::Settings {
+        toml_edit::de::from_str(&format!("{base}{extra}")).unwrap()
+    };
+    assert!(
+        parse("display_name = \"Work\"\nhidden = true\norder = 999\nheadline = \"5h\"\n")
+            .validate()
+            .is_empty()
+    );
+    for extra in [
+        "display_name = \"\"\n",
+        "display_name = \" pad\"\n",
+        "display_name = \"a\\u0007b\"\n",
+        "order = 0\n",
+        "order = 1000\n",
+    ] {
+        let errors = parse(extra).validate();
+        assert_eq!(errors.len(), 1, "{extra}");
+        assert_eq!(errors[0].code, "display", "{extra}");
+    }
+    assert!(
+        parse(&format!("display_name = \"{}\"\n", "x".repeat(65)))
+            .validate()
+            .len()
+            == 1
+    );
+    assert!(
+        toml_edit::de::from_str::<accounts::Settings>(&format!("{base}headline = \"daily\"\n"))
+            .is_err()
+    );
+}

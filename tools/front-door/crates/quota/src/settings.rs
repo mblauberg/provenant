@@ -80,10 +80,10 @@ impl DomainConfig for Settings {
         errors
     }
 }
-pub const SECTION: DomainSection =
-    DomainSection::new::<Settings>("quota", |_| {
-    "max_parallel = 3\nwall_budget_seconds = 55\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n"
-});
+pub const SECTION: DomainSection = DomainSection::new::<Settings>(
+    "quota",
+    |_| "max_parallel = 3\nwall_budget_seconds = 55\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
+);
 
 #[cfg(test)]
 mod tests {
@@ -97,12 +97,18 @@ mod tests {
         let s = parse(BASE).unwrap();
         assert_eq!(s.display, Display::default());
         assert!(s.validate().is_empty());
-        let d = parse(&format!("{BASE}[display]\nheadline = \"5h\"\nicon = \"claude-michael\"\n")).unwrap();
+        let d = parse(&format!(
+            "{BASE}[display]\nheadline = \"5h\"\nicon = \"claude-michael\"\n"
+        ))
+        .unwrap();
         assert_eq!(d.display.headline, Headline::FiveHour);
         assert!(d.validate().is_empty());
         let w = parse(&format!("{BASE}[display]\nheadline = \"weekly\"\n")).unwrap();
         assert_eq!(w.display.icon, MOST_CONSTRAINED);
-        assert_eq!(serde_json::to_string(&Headline::FiveHour).unwrap(), "\"5h\"");
+        assert_eq!(
+            serde_json::to_string(&Headline::FiveHour).unwrap(),
+            "\"5h\""
+        );
     }
     #[test]
     fn display_rejects_bad_headline_icon_and_unknown_keys() {
