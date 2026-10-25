@@ -25,6 +25,8 @@ pub use provenant_fabric_store::{
 
 #[derive(Debug, Error)]
 pub enum CoordinationError {
+    #[error("coordination mutations are not allowed inside a lane")]
+    LaneMutation,
     #[error(transparent)]
     Peer(#[from] crate::hosts::PeerError),
     #[error("invalid coordination input: {0}")]
@@ -52,6 +54,7 @@ pub enum CoordinationError {
 impl CoordinationError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::LaneMutation => "lane_coordination_refused",
             Self::Peer(error) => error.code(),
             Self::InvalidInput(_) | Self::Input(_) => "invalid_input",
             Self::Time(_) => "state_corrupt",

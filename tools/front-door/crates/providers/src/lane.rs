@@ -39,6 +39,7 @@ impl LaneRuntime<'_> {
         let mut entry = provenant_config::mcp_entry(harness, self.executable, self.state)
             .map_err(|_| ProviderError::UnsupportedPolicy)?;
         entry["env"] = serde_json::json!({
+            "PROVENANT_AGENT_LABEL": format!("lane-{}", self.attempt),
             "PROVENANT_LANE_DEPTH": self.depth.to_string(),
             "PROVENANT_PARENT_ATTEMPT_ID": self.attempt.to_string(),
             RUN_STATE_DIRECTORY_ENV: self.child_state,
@@ -188,8 +189,12 @@ impl LaneRuntime<'_> {
             subtree(self.state.join("projects")),
             subtree(self.state.join("routing")),
         ]);
-        // The parent pre-creates anchors. Only shared SQLite and landing locks
-        // are mutable; Run databases and custody are private to child_state.
+        // The parent pre-creates anchors. Run databases and custody are private
+        // to child_state. Shared SQLite still needs writes even for reads:
+        // Store::open enables WAL and checks migrations. The lane MCP guard is
+        // only a tool-surface guard, not a full boundary against direct writes.
+        // TODO(lane-store-isolation): remove shared SQLite and lock write grants
+        // after the read-only store follow-up in docs/specs/fabric.md lands.
         setup.push(SetupStep::CreateDir(self.child_state.to_owned()));
         profile.state_writes.push(subtree(self.child_state));
         let locks = self.state.join("fabric/locks");
@@ -215,5 +220,33 @@ impl LaneRuntime<'_> {
             setup.push(SetupStep::CreateDir(path.clone()));
             profile.state_writes.push(subtree(path));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lane_mcp_entries_have_attempt_unique_agent_labels() -> Result<(), ProviderError> {
+        for harness in [Harness::Claude, Harness::Codex] {
+            for byte in [1, 2] {
+                let lane = LaneRuntime {
+                    executable: Path::new("/fixture/provenant"),
+                    git: Path::new("/fixture/git"),
+                    state: Path::new("/fixture/state"),
+                    child_state: Path::new("/fixture/state/children/attempt"),
+                    home: Path::new("/fixture/home"),
+                    depth: 1,
+                    attempt: AttemptId::from_bytes([byte; 16]),
+                    assets: Path::new("/fixture/assets"),
+                };
+                assert_eq!(
+                    lane.mcp(harness)?["env"]["PROVENANT_AGENT_LABEL"],
+                    format!("lane-{}", lane.attempt)
+                );
+            }
+        }
+        Ok(())
     }
 }

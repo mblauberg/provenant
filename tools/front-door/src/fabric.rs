@@ -98,7 +98,8 @@ impl stdio::Factory for Factory {
             BoundFacade { factory: self },
             &self.clock,
         )
-        .with_limits(self.context.config.limits.clone()))
+        .with_limits(self.context.config.limits.clone())
+        .with_lane_restrictions(self.context.in_lane))
     }
 }
 struct BoundFacade<'a> {
@@ -848,6 +849,9 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
             let proof = fence.proof()?;
             let factory = factory(globals)?;
             let ctx = &factory.context;
+            if ctx.in_lane {
+                return Err(CoordinationError::LaneMutation.into());
+            }
             let cancel = CancelToken::new();
             let budget = WaitBudget::cli(factory.clock.mono_now(), 300)?;
             if let Some(project) = &ctx.identity.federation
@@ -955,7 +959,14 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
         Err(error) => crate::fail(
             command,
             provenant_records::Outcome::Refused,
-            "landing_refused",
+            if matches!(
+                error.downcast_ref::<CoordinationError>(),
+                Some(CoordinationError::LaneMutation)
+            ) {
+                "lane_coordination_refused"
+            } else {
+                "landing_refused"
+            },
             &error.to_string(),
             globals,
         ),
@@ -1237,6 +1248,7 @@ impl BinaryRunOwner<'_> {
                 return Err(FacadeError::ConfinementRefused);
             }
             let host = target.host.ok_or(FacadeError::InvalidInput)?;
+            let attempt_id = target.attempt;
             return match self.peer(
                 host,
                 PeerAction::Run {
@@ -1246,7 +1258,9 @@ impl BinaryRunOwner<'_> {
                 cancel,
             )? {
                 PeerResult::Run(value) => match *value {
-                    RunResult::Status { attempt } => Ok(attempt),
+                    RunResult::Status { attempt } if attempt.attempt_id == attempt_id => {
+                        Ok(attempt)
+                    }
                     _ => Err(FacadeError::StateCorrupt),
                 },
                 _ => Err(FacadeError::StateCorrupt),

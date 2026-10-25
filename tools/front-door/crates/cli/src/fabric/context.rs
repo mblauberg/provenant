@@ -27,6 +27,8 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    /// Captured once from the host-set MCP entry, never from tool arguments.
+    pub in_lane: bool,
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
@@ -95,7 +97,7 @@ impl Context {
         let utility_home = utility_root.join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;
         let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
-            || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some();
+            || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0");
         let git = provenant_supervisor::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::new(
             Arc::new(LocalFs),
@@ -133,6 +135,7 @@ impl Context {
             roots,
             identity,
             config,
+            in_lane: lane,
             executor,
             home: home.to_path_buf(),
             cwd: cwd.to_path_buf(),
@@ -225,7 +228,19 @@ impl Context {
             .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
-            PeerResult::Error { code, operation_id } => {
+            PeerResult::Error {
+                code,
+                operation_id: returned_operation,
+            } => {
+                let operation_id = request.operation();
+                // Busy and other generic refusals may omit the ID. Any ID the
+                // peer supplies must agree with this locally frozen request.
+                if returned_operation
+                    .as_ref()
+                    .is_some_and(|id| Some(id) != operation_id.as_ref())
+                {
+                    return Err(peer_failure(&peer.destination, &PeerError::Frame));
+                }
                 Err(FacadeError::from_code(&code, operation_id).into())
             }
             value => Ok(value),
