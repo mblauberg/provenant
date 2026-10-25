@@ -953,6 +953,13 @@ fn wait_for_path(path: &Path, timeout: Duration) -> Result {
     Ok(())
 }
 
+fn pause(duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        thread::park_timeout(left);
+    }
+}
+
 struct ReleaseOnDrop(PathBuf);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -2385,6 +2392,7 @@ fn verify_lane_profile(
         // stop the child, from the scope and requester it held at hand-off.
         let attempt = child.join(format!("runs/{run}/attempts/{attempt_id}"));
         let mut finished = store.record(attempt_id, &call)?;
+        let mut sibling = finished.clone();
         finished.state = provenant_run::AttemptState::Terminal {
             outcome: provenant_run::Outcome::Rejected,
             exit_code: None,
@@ -2417,15 +2425,89 @@ fn verify_lane_profile(
             "reason": "explicit_cancellation",
         });
         fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
-        host.provider_exited(
+        // Scan reads of lane-written rows once ended the host's launcher
+        // before its stop. First an undecodable attempt row, then a queued
+        // sibling whose run the lane renames, so the owner check refuses it.
+        let db = rusqlite::Connection::open(child.join("run.sqlite3"))?;
+        let owner: Vec<u8> = db.query_row(
+            "SELECT record FROM runs WHERE id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )?;
+        let (project, task): (String, String) = db.query_row(
+            "SELECT project, task FROM attempts WHERE id=?1",
+            [attempt_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let garbage = provenant_core::AttemptId::from_bytes([67; 16]);
+        db.execute(
+            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,x'00')",
+            rusqlite::params![garbage.to_string(), run.to_string(), project, task],
+        )?;
+        // Several of the launcher's 100 ms scans see it.
+        pause(Duration::from_millis(500));
+        db.execute("DELETE FROM attempts WHERE id=?1", [garbage.to_string()])?;
+        sibling.attempt_id = provenant_core::AttemptId::from_bytes([68; 16]);
+        sibling.state = provenant_run::AttemptState::Queued;
+        sibling.generation = 0;
+        sibling.attempt_number = 2;
+        sibling.revision = 1;
+        sibling.started_at = None;
+        let mut prompt = serde_json::to_value(&sibling.prompt)?;
+        prompt["path"]["path"] = prompt["path"]["path"]
+            .as_str()
+            .ok_or("prompt path")?
+            .replace(&attempt_id.to_string(), &sibling.attempt_id.to_string())
+            .into();
+        sibling.prompt = serde_json::from_value(prompt)?;
+        let mut renamed = store.run(run, &call)?;
+        renamed.actor_id = forged;
+        db.execute_batch("BEGIN")?;
+        db.execute(
+            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,?5)",
+            rusqlite::params![
+                sibling.attempt_id.to_string(),
+                run.to_string(),
+                project,
+                task,
+                provenant_records::CanonicalV1::bytes(&sibling)?.as_bytes()
+            ],
+        )?;
+        db.execute(
+            "UPDATE runs SET record=?1 WHERE id=?2",
+            rusqlite::params![
+                provenant_records::CanonicalV1::bytes(&renamed)?.as_bytes(),
+                run.to_string()
+            ],
+        )?;
+        db.execute_batch("COMMIT")?;
+        // Several of the launcher's 100 ms scans see it.
+        pause(Duration::from_millis(500));
+        // The launcher reports the refused read, after it stops the child.
+        let reported = host.provider_exited(
             &parent.encode()?,
             Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
-        )?;
+        );
         // The forged terminal record stands, so the guardian's own exit is
         // the evidence. Unstopped, the child would run to its wall deadline.
         wait_for_path(&attempt.join("process-exit.json"), Duration::from_secs(8))?;
         let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
         assert_eq!(exit["stop_reason"], "explicit_cancellation", "{exit}");
+        let Err(provenant_supervisor::custody::CustodyError::Io(reported)) = reported else {
+            return Err(format!("launcher hid the refused read: {reported:?}").into());
+        };
+        assert!(
+            reported.to_string().contains("names another owner"),
+            "{reported}"
+        );
+        db.execute(
+            "DELETE FROM attempts WHERE id=?1",
+            [sibling.attempt_id.to_string()],
+        )?;
+        db.execute(
+            "UPDATE runs SET record=?1 WHERE id=?2",
+            rusqlite::params![owner, run.to_string()],
+        )?;
     }
     let record = await_terminal(&store, attempt_id, &call)?;
     let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {

@@ -336,13 +336,16 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   independent evidence against that lane: the host's view refuses a run or
   attempt it launched once its record names another owner.
 - The guardian stops its worker on observed provider exit. Parent cancellation,
-  deadline or supervisor signal cancels only the child scopes this worker
-  accepted; normal parent completion leaves their custody intact. The host
-  stops each child it handed to a guardian from the scope and requester it
-  held in memory at hand-off, never from the child's record or launch summary.
-  The stop request itself still lands in the attempt directory, which the
-  lane can write, so a lane that deletes or replaces it after the host writes
-  it can still keep its child running.
+  deadline or supervisor signal cancels only this worker's children; normal
+  parent completion leaves their custody intact. The host first stops every
+  child it handed to a guardian, including one launched after its last scan,
+  from the scope and requester it held in memory at hand-off, never from the
+  child's record or launch summary. It then stops the accepted children that
+  never reached a guardian, from their records. A failed scan read does not
+  end the worker before that stop. The stop request itself still lands in the
+  attempt directory, which the lane can write, so the lane can pre-empt it
+  (for example with a directory named `cancel.json`) or undo it after the
+  host writes it, and keep its child running.
 - Git is resolved once on the host (`PROVENANT_GIT` override, otherwise the
   fixed list preferring package-manager Git), canonicalised, pinned in provider
   and MCP environments, and the only Git path lanes may execute.

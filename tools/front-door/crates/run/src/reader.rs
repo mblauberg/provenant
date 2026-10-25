@@ -282,9 +282,17 @@ impl RunStore {
         self.held_owner(&run, None)?;
         Ok(run)
     }
-    /// Whether this host view handed the attempt to a guardian.
-    pub fn holds(&self, id: AttemptId) -> bool {
-        self.held_scope(id).is_some()
+    /// Every attempt this host view handed to a guardian, once each.
+    pub fn held_attempts(&self) -> Vec<AttemptId> {
+        let mut held: Vec<_> = self
+            .launched
+            .borrow()
+            .iter()
+            .map(|scope| scope.attempt)
+            .collect();
+        held.sort();
+        held.dedup();
+        held
     }
     pub(crate) fn held_scope(&self, id: AttemptId) -> Option<provenant_supervisor::custody::Scope> {
         self.launched
