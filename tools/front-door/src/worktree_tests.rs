@@ -652,6 +652,7 @@ fn start_writer(
                 call.clock,
             )
         },
+        None,
         call,
     )?)
 }
@@ -895,6 +896,7 @@ fn holder_context<'a>(
             attempt_id: attempt.attempt_id,
             host_delivery: None,
             launch: None,
+            sealed: None,
         }
         .encode()
     }
@@ -1934,6 +1936,10 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 git: selected_git.clone(),
                 codex_home: None,
                 fixture_state_write: true,
+            }),
+            sealed: Some(provenant_run::SealedTask {
+                request_digest: prepared.request.digest()?,
+                task_id: task.task_id,
             }),
         };
         verify_lane_profile(

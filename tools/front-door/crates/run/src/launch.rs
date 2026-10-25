@@ -175,7 +175,8 @@ fn child_access_within(
 impl RunStore {
     /// Validate lane-writable ingress against the host's recorded parent and
     /// its sealed task. A child never gains authority its parent lacks: a
-    /// writer child keeps its parent's worktree, delivery must already be
+    /// writer child stays in its writer parent's repository (a sibling
+    /// worktree there is the designed delegation), delivery must already be
     /// granted to the parent for the same remote, branch and pull request,
     /// and access must sit within the parent's. A child cannot continue an
     /// attempt, whose retained state the host would copy. The lane can rewrite
@@ -202,9 +203,14 @@ impl RunStore {
             ));
         }
         for task in &request.tasks {
-            if task.writer.is_some() && task.writer != parent_task.writer {
+            if let Some(writer) = &task.writer
+                && parent_task
+                    .writer
+                    .as_ref()
+                    .is_none_or(|parent| parent.project != writer.project)
+            {
                 return Err(RunError::Validation(
-                    "a writer child must use its parent's writer worktree",
+                    "a writer child must stay in its writer parent's repository",
                 ));
             }
             if let Some(deliver) = &task.deliver {

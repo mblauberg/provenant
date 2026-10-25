@@ -89,10 +89,15 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     writing.writer = Some(writer());
     let mut delivering = writing.clone();
     delivering.deliver = Some(deliver("feature", false));
-    let mut elsewhere = writing.clone();
-    elsewhere.writer = Some(WriterRequest {
+    let mut sibling = writing.clone();
+    sibling.writer = Some(WriterRequest {
         project: "/project".into(),
         worktree: "/project/.worktrees/other".into(),
+    });
+    let mut elsewhere = writing.clone();
+    elsewhere.writer = Some(WriterRequest {
+        project: "/other".into(),
+        worktree: "/other/.worktrees/sibling".into(),
     });
     for (parent_task, writer_child, child_delivery, valid, case) in [
         (
@@ -118,11 +123,18 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         ),
         (&writing, true, None, true, "writer child of writer parent"),
         (
+            &sibling,
+            true,
+            None,
+            true,
+            "writer child in a sibling worktree",
+        ),
+        (
             &elsewhere,
             true,
             None,
             false,
-            "writer child in another worktree",
+            "writer child in another repository",
         ),
         (
             &writing,
