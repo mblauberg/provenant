@@ -2348,7 +2348,7 @@ mod tests {
         let account = "\x1b]0;account\x07";
         let detail = "skip\n\r\t\u{0008}\u{202e}detail";
         let remote = "or\x1bigin";
-        let branch = "fea\u{009b}ture";
+        let branch = "main\u{009b}line";
         let now = WallTime::from_micros(100)?;
         let lane: run::AttemptRecord = serde_json::from_value(json!({
             "schema_version": 1,
@@ -2380,7 +2380,7 @@ mod tests {
         assert_eq!(
             human,
             format!(
-                "{}/{}/{} failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:feature NotAttempted head=unknown\n",
+                "{}/{}/{} failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
                 RunId::from_bytes([2; 16]),
                 TaskId::from_bytes([4; 16]),
                 AttemptId::from_bytes([1; 16])
