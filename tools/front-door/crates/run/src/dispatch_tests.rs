@@ -325,6 +325,93 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
 }
 
 #[test]
+fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let now = WallTime::from_micros(100)?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let host = base.join("host");
+    let mut stores = Vec::new();
+    for name in ["first", "second"] {
+        std::fs::create_dir(base.join(name))?;
+        let mut store =
+            RunStore::open(&context(&base.join(name))?, &call)?.with_writer_registry(&host);
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 0,
+            ..AdmissionPolicy::default()
+        });
+        stores.push(store);
+    }
+    // Each store fills half the project's host-wide limit with its own run.
+    let half = PROJECT_ACTIVE / 2;
+    let batches = [batch(1, half), batch(2, half)];
+    for (store, run) in stores.iter().zip(&batches) {
+        store.create(run, &call)?;
+        for attempt in &run.attempts {
+            store.mark_starting(attempt.attempt_id, &route(), &[], None, &call)?;
+            store
+                .claim(attempt.attempt_id, now, &call)?
+                .ok_or("within the host limit")?;
+        }
+    }
+    // Counted per store, the second store would admit a ninth attempt.
+    let extra = batch(3, 1);
+    let waiting = extra.attempts[0].attempt_id;
+    stores[1].create(&extra, &call)?;
+    stores[1].mark_starting(waiting, &route(), &[], None, &call)?;
+    assert!(
+        stores[1].claim(waiting, now, &call)?.is_none(),
+        "both child stores count against one project limit"
+    );
+    // The first attempt's owner dies; recovery commits its terminal from the
+    // sealed exit, as reconcile does, and that frees its host lease.
+    let dead = batches[0].attempts[0].attempt_id;
+    let dir = stores[0].attempt_dir(batches[0].run_id, dead, false)?;
+    artifacts::seal(&dir, "stdout.log", b"partial", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope.run = batches[0].run_id;
+    observed.scope.attempt = dead;
+    observed.scope.generation = 1;
+    observed.termination = Some(Termination::Signal(9));
+    seal_exit(&stores[0], &observed)?;
+    let fake = Fake {
+        refuse: false,
+        observed: Some(route()),
+        ..Fake::default()
+    };
+    stores[0].finish(dead, &dir, &observed, &fake, &call)?;
+    let admitted = stores[1]
+        .claim(waiting, now, &call)?
+        .ok_or("recovered lease not freed")?;
+    assert_eq!(admitted.state, AttemptState::Running);
+    Ok(())
+}
+/// A run of `tasks` attempts at full concurrency, with IDs unique to `seed`.
+fn batch(seed: u8, tasks: u64) -> PreparedRun {
+    let mut run = input();
+    let template = run.request.tasks[0].clone();
+    run.run_id = provenant_core::RunId::from_bytes([seed; 16]);
+    run.operation_id = provenant_core::OperationId::parse(&format!("batch-{seed}")).unwrap();
+    run.request.concurrency = tasks.min(8);
+    run.request.tasks.clear();
+    run.attempts.clear();
+    for index in 0..tasks as u8 {
+        let mut task = template.clone();
+        task.task_id = TaskId::from_bytes([seed, index, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+        run.attempts.push(NewAttempt {
+            task_id: task.task_id,
+            attempt_id: AttemptId::from_bytes([
+                seed, index, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            ]),
+            prompt: "exact prompt".into(),
+        });
+        run.request.tasks.push(task);
+    }
+    run
+}
+
+#[test]
 fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

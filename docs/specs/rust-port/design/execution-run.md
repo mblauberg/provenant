@@ -419,9 +419,14 @@ original bytes in memory, but only redacted records reach telemetry or output.
 If safe capture fails, omit that capture with a typed warning and keep observing
 the provider; never persist an unredacted fallback or turn it into a stop request.
 
-Admission uses one store transaction for counts/tickets plus resource samples,
-not directory scans or a second ledger. Hard limits are 64 active attempts per
-host, 16 per project/host and 256 queued tasks per host across all entry points.
+Admission uses one store transaction for tickets and run concurrency plus
+resource samples, not directory scans. Host-wide counts and startup spacing
+live in one host ledger, `admission.sqlite3` under the host state root, which
+top-level and nested child stores all lease from inside that transaction. Hard
+limits are 64 active attempts per host and 16 per project/host, counted in the
+ledger, and 256 queued tasks per store. A lease lasts as long as its store's
+admission row, so terminal commit and owner recovery free it; a full ledger
+drops leases whose row is gone before refusing.
 Starting and custody-unknown attempts retain capacity until reconciled. Dead
 schedulers do not discard accepted queue work: `reconcile` claims their tickets
 with a new generation after supervisor verification. Defaults are five per cent
