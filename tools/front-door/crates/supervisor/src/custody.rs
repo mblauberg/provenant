@@ -617,6 +617,8 @@ pub struct CustodyHandle {
     pub(crate) directory: Directory,
     pub(crate) scope: Scope,
     pub(crate) requester: ActorId,
+    /// Built from the caller's own scope, not from the attempt directory.
+    pub(crate) held: bool,
 }
 impl CustodyHandle {
     pub fn scope(&self) -> Scope {
@@ -766,6 +768,7 @@ pub fn launch(
             directory: publication.directory,
             scope,
             requester,
+            held: false,
         }),
         Err(error) => Err(failure(error, publication)),
     }
@@ -810,19 +813,26 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
             match read_record::<CancelRequest>(&handle.directory, "cancel.json", RECORD_LIMIT) {
                 Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
-                // A stale handle never displaces a later generation's request.
+                // A stale reattached handle never displaces a later
+                // generation's request. A held scope is the guardian's own,
+                // so a later generation beside it can only be forged.
                 Ok(previous)
-                    if previous.scope.run == request.scope.run
+                    if !handle.held
+                        && previous.scope.run == request.scope.run
                         && previous.scope.attempt == request.scope.attempt
                         && previous.scope.generation > request.scope.generation =>
                 {
                     return Err(CustodyError::InvalidRecord);
                 }
                 Ok(_) | Err(CustodyError::InvalidRecord) => {}
+                // A symlink, FIFO or oversize entry is replaced too: rename
+                // swaps the entry without following or opening it. A
+                // directory still refuses the rename.
+                Err(_) if handle.held => {}
                 Err(error) => return Err(error),
             }
             // The guardian honours only its own scope and requester, so a
-            // stale, foreign or unreadable request would leave it running.
+            // stale, foreign or undecodable request would leave it running.
             // Replace it and confirm the replacement is the one now visible.
             require_durable(write_record(
                 &handle.directory,
@@ -1643,18 +1653,21 @@ pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
         directory,
         scope,
         requester: summary.requester,
+        held: false,
     })
 }
 /// A handle from the scope and requester the caller handed the guardian, read
 /// from nothing in the attempt directory. A host whose attempt directory a lane
 /// can write stops through this, so no summary the lane rewrites or deletes
 /// decides for whom it stops. The stop request itself still lands in that
-/// directory, where the lane can remove it after the host writes it.
+/// directory, where the lane can pre-empt it with a directory of that name or
+/// remove it after the host writes it.
 pub fn hold(directory: Directory, scope: Scope, requester: ActorId) -> CustodyHandle {
     CustodyHandle {
         directory,
         scope,
         requester,
+        held: true,
     }
 }
 
