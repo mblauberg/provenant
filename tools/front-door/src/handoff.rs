@@ -3,7 +3,11 @@
 //! sends one `session_handoff` peer action. The target checks the account
 //! against its own registrations, recreates each branch's worktree from
 //! origin, stores the prompt and opens Terminal through a launcher seam.
-use provenant_cli::{Globals, fabric::Context, workflow::Handoff};
+use provenant_cli::{
+    Globals,
+    fabric::{Context, PeerFailure},
+    workflow::Handoff,
+};
 use provenant_confinement::worktrees::{self, WorktreeCondition, WorktreeCreate, WriterState};
 use provenant_core::{CancelToken, Clock, HostId, OperationId, ProjectId, WaitBudget};
 use provenant_fabric_runtime::{
@@ -812,7 +816,10 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
                 "peer reply does not match the request",
             ));
         }
-        Err(FacadeError::LaunchUnknown { operation_id }) => {
+        Err(PeerFailure {
+            error: FacadeError::LaunchUnknown { operation_id },
+            ..
+        }) => {
             return Err(Refusal::new(
                 Outcome::Error,
                 "LAUNCH_UNKNOWN",
@@ -823,11 +830,15 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
                 ),
             ));
         }
-        Err(error) => {
+        Err(PeerFailure { error, detail }) => {
+            let detail = detail.map(|d| format!(" ({d})")).unwrap_or_default();
             return Err(Refusal::new(
                 Outcome::Error,
                 "PEER",
-                format!("peer {} refused or is unavailable: {error}", args.to),
+                format!(
+                    "peer {} refused or is unavailable: {error}{detail}",
+                    args.to
+                ),
             ));
         }
     };
