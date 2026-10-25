@@ -1,5 +1,8 @@
 mod support;
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+};
 use support::{Result, TestRig, code};
 
 #[test]
@@ -36,9 +39,13 @@ fn register_creates_a_missing_state_root_before_probing() -> Result {
     assert_eq!(
         code(&output),
         0,
-        "{}",
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout.bytes),
         String::from_utf8_lossy(&output.stderr.bytes)
     );
+    let metadata = fs::metadata(&rig.state)?;
+    assert_eq!(metadata.mode() & 0o777, 0o700);
+    assert_eq!(metadata.uid(), provenant_supervisor::fs::effective_uid());
     assert!(rig.state.join("config.toml").is_file());
     let probes = fs::read_dir(&rig.state)?
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())

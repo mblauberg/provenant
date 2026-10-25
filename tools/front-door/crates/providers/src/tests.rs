@@ -1449,6 +1449,66 @@ impl provenant_supervisor::exec::Executor for KeychainScript {
 }
 
 #[test]
+fn registration_names_probe_directory_failures() {
+    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Never;
+    impl Executor for Never {
+        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            panic!("the provider must not run without a private probe directory");
+        }
+    }
+    let state = tempfile::tempdir().unwrap();
+    let executor = crate::host::HostProbeExecutor::new(&Never, state.path()).unwrap();
+    std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    for adapter in ["claude", "cursor"] {
+        let error = crate::accounts::detect_with_org(
+            &executor,
+            adapter,
+            Path::new("/bin/provider"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            Path::new("/home/test/identity"),
+        )
+        .unwrap_err();
+        assert!(matches!(&error, ProviderError::ProbeDirectory(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("provider probe could not prepare its private directory"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn registration_keeps_other_executor_failures_as_unknown_identity() {
+    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+
+    struct Fail;
+    impl Executor for Fail {
+        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            Err(ExecError::Io {
+                operation: "spawn",
+                source: std::io::Error::other("provider unavailable"),
+            })
+        }
+    }
+    for adapter in ["claude", "cursor"] {
+        let result = crate::accounts::detect_with_org(
+            &Fail,
+            adapter,
+            Path::new("/bin/provider"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            Path::new("/home/test/identity"),
+        );
+        assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+    }
+}
+
+#[test]
 fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directories() {
     use crate::host::HostProbeExecutor;
     use provenant_supervisor::exec::{ExecOptions, Executor};

@@ -85,7 +85,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
             .min(3600),
         ProbeFailure::Auth => 3600,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
-        ProbeFailure::Malformed => 120,
+        ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
     };
     base.max(retry_after_seconds.unwrap_or(0).min(86400))
 }
@@ -496,6 +496,7 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 86400);
         assert_eq!(backoff(ProbeFailure::Auth, 1, None), 3600);
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
+        assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
     }
     #[test]
     fn reserve_adopts_a_renamed_label_for_the_same_account_key() {

@@ -11,6 +11,9 @@ const LOCK_SUFFIX: &str = ".lock";
 /// The random part of `temporary_name`, after its fixed staging prefix.
 const STAGING_PREFIX: &str = ".provenant-staging.";
 const ID_LEN: usize = 24;
+const TRIES: usize = 8;
+/// Identifies private probe-directory preparation failures at the exec boundary.
+pub const PROBE_DIR_OPERATION: &str = "create host probe directory";
 
 /// A fresh empty 0700 directory under a host-trusted root, removed on drop.
 ///
@@ -36,20 +39,23 @@ impl HostProbeDir {
     }
 
     fn create_in(root: &Directory, host_root: &Path) -> fs::Result<Self> {
-        Self::create_checked(root, host_root, &|_| {})
+        Self::create_checked(root, host_root, &|_| {}, &|_| {})
     }
 
-    /// `locked` runs after the lock is taken and before its entry is checked:
+    /// `before_lock` runs just before acquisition. `locked` runs after the lock
+    /// is taken and before its entry is checked:
     /// the window in which a sweeper may unlink the file just locked.
     fn create_checked(
         root: &Directory,
         host_root: &Path,
+        before_lock: &dyn Fn(&Path),
         locked: &dyn Fn(&Path),
     ) -> fs::Result<Self> {
         // A sweeper may hold, unlink or replace this id's lock file around our
         // open and flock (timeout, ENOENT, a refused race, or a lock on an
         // unlinked inode). None of those is a lease, so retry with a fresh id.
-        for _ in 0..8 {
+        let mut last = None;
+        for _ in 0..TRIES {
             let staging = temporary_name()?;
             let id = staging
                 .to_str()
@@ -62,16 +68,26 @@ impl HostProbeDir {
             let lock_name = OsString::from(format!("{PREFIX}{id}{LOCK_SUFFIX}"));
             let lock_path = host_root.join(&lock_name);
             // Lock first: any directory a sweeper can see is already leased.
+            before_lock(&lock_path);
             let lock = match root.try_lock(&lock_name, LockMode::Exclusive) {
                 Ok(lock) => lock,
                 // A sweeper holds, unlinked or replaced this fresh name: its
                 // lease is not ours, so try another id.
-                Err(fs::FsError::LockTimeout { .. } | fs::FsError::RaceRefused { .. }) => continue,
-                Err(error) if error.is_not_found() => continue,
+                Err(
+                    error @ (fs::FsError::LockTimeout { .. } | fs::FsError::RaceRefused { .. }),
+                ) => {
+                    last = Some(error);
+                    continue;
+                }
+                Err(error) if error.is_not_found() => {
+                    last = Some(error);
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             locked(&lock_path);
             if !holds_entry(root, &lock_name, &lock) {
+                last = Some(fs::FsError::RaceRefused { name: lock_name });
                 continue;
             }
             if let Err(error) = root.mkdir(&name, 0o700) {
@@ -85,8 +101,16 @@ impl HostProbeDir {
                 _lock: lock,
             });
         }
-        Err(fs::FsError::RaceRefused {
-            name: OsString::from(PREFIX),
+        Err(fs::FsError::Io {
+            operation: PROBE_DIR_OPERATION,
+            path: host_root.to_owned(),
+            source: std::io::Error::other(format!(
+                "{TRIES} tries; last: {}",
+                last.map_or_else(
+                    || "no attempt recorded".to_owned(),
+                    |error| error.to_string()
+                ),
+            )),
         })
     }
 
@@ -194,7 +218,7 @@ impl Executor for HostProbeExecutor<'_> {
         // mkdir is exclusive: an existing entry is an error, never a cwd.
         let scratch = HostProbeDir::create_in(&self.root, &self.path);
         let scratch = scratch.map_err(|error| ExecError::Io {
-            operation: "create host probe directory",
+            operation: PROBE_DIR_OPERATION,
             source: std::io::Error::other(error),
         })?;
         // Reborrow filters with the shorter cwd lifetime. Struct update syntax
@@ -308,7 +332,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         // The sweeper unlinks the file just locked, as in the race, and a
         // second owner could then lock a replacement. Both ids must be refused.
-        let probe = HostProbeDir::create_checked(&root, host_root.path(), &|lock_path| {
+        let probe = HostProbeDir::create_checked(&root, host_root.path(), &|_| {}, &|lock_path| {
             calls.set(calls.get() + 1);
             if calls.get() == 1 {
                 std::fs::remove_file(lock_path).unwrap();
@@ -333,7 +357,7 @@ mod tests {
 
         // A replaced (not just unlinked) lock file is refused the same way.
         let runs = std::cell::Cell::new(0);
-        let second = HostProbeDir::create_checked(&root, host_root.path(), &|lock_path| {
+        let second = HostProbeDir::create_checked(&root, host_root.path(), &|_| {}, &|lock_path| {
             runs.set(runs.get() + 1);
             if runs.get() == 1 {
                 std::fs::remove_file(lock_path).unwrap();
@@ -344,6 +368,60 @@ mod tests {
         assert_eq!(runs.get(), 2, "the replaced lease is retried with a new id");
         assert!(second.path().is_dir());
         assert_ne!(second.path(), probe.path());
+    }
+
+    #[test]
+    fn a_held_lock_is_retried_with_a_fresh_id() {
+        let host_root = tempfile::tempdir().unwrap();
+        let root = Directory::open_anchor(host_root.path()).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let held = std::cell::RefCell::new(None);
+        let first_path = std::cell::RefCell::new(None);
+        let probe = HostProbeDir::create_checked(
+            &root,
+            host_root.path(),
+            &|path| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    *held.borrow_mut() = Some(
+                        root.try_lock(path.file_name().unwrap(), LockMode::Exclusive)
+                            .unwrap(),
+                    );
+                    *first_path.borrow_mut() = Some(path.with_extension(""));
+                }
+            },
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(probe.path().is_dir());
+        assert_ne!(Some(probe.path()), first_path.borrow().as_deref());
+    }
+
+    #[test]
+    fn exhausted_retries_name_the_root_and_last_cause() {
+        let host_root = tempfile::tempdir().unwrap();
+        let root = Directory::open_anchor(host_root.path()).unwrap();
+        let held = std::cell::RefCell::new(Vec::new());
+        let result = HostProbeDir::create_checked(
+            &root,
+            host_root.path(),
+            &|path| {
+                held.borrow_mut().push(
+                    root.try_lock(path.file_name().unwrap(), LockMode::Exclusive)
+                        .unwrap(),
+                );
+            },
+            &|_| {},
+        );
+        let error = result.err().unwrap().to_string();
+        assert_eq!(held.borrow().len(), 8);
+        assert!(
+            error.contains(host_root.path().to_str().unwrap()),
+            "{error}"
+        );
+        assert!(error.contains("8 tries"), "{error}");
+        assert!(error.contains("lock acquisition timed out"), "{error}");
     }
 
     #[test]
