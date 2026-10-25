@@ -2,13 +2,11 @@
 
 The [constitution](../HARNESS.md) pre-authorises implementation branches and
 linked worktrees. Work in a registered linked worktree under the repository's
-`.worktrees/`; keep the primary checkout on the integration branch. The primary
-Provenant checkout is the frozen live install until authorised cut-over.
+`.worktrees/`; keep the primary checkout on the integration branch.
 
 ## Primary checkout stays on main
 
-Never switch, pull or reinstall the live primary checkout during the rewrite.
-The chair merges through the [repository workflow](runbooks/github-workflow.md).
+Do not switch branches in the primary checkout, and keep it clean. The chair merges through the [repository workflow](runbooks/github-workflow.md).
 
 ## Canonical location
 
@@ -31,7 +29,7 @@ is kept and reported as `not_merged`; `--discard` deletes it too and returns
 its head, which recovers it with `git branch NAME HEAD` while Git still holds
 the objects.
 
-Rust confinement validates repository identity and refuses primary, dirty
+Confinement validates repository identity and refuses primary, dirty
 and live writers. An unknown writer is accepted when its lease is free and the
 tree is clean. It reports `git_operation_in_progress` and refuses
 removal when the worktree's private Git directory contains an unfinished
@@ -53,11 +51,9 @@ provenant worktree remove --merged --integration OID --since PRE_MERGE_OID
 ```
 
 The integration OID and scope prevent a hook from sweeping unrelated branches.
-The old post-merge and pre-push shell adapters are retired. Rust install owns
-fixture-backed hook registration; merged pruning is an explicit Rust worktree
-operation. The clean/reap engines, retention plans and Node dependency cloning
-are retired. Guardian settlement owns classified scratch cleanup; retained
-history stays on disk.
+Install owns fixture-backed hook registration; merged pruning is an explicit
+worktree operation. Guardian settlement owns classified scratch cleanup;
+retained history stays on disk.
 
 Never share `CARGO_TARGET_DIR` across worktrees. Confined writers use
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical
@@ -65,7 +61,7 @@ worktree and common Git paths and held directory identities. Same-named and
 recreated worktrees get separate caches. Setup requires the cache and lane-only
 parent to belong to the effective user with mode 0700, and refuses mismatches.
 Host builds must use separate target directories outside this lane namespace;
-see the [release build example](runbooks/front-door.md#build-a-staged-release).
+see the [release build example](runbooks/install.md#build-a-staged-release).
 
 ## Writer dispatch
 

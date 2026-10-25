@@ -66,6 +66,6 @@ build time, and `config set` validates against it. A wired knob's `reader`
 names its consumer; advisory knobs carry a reason where a Rust owner is absent.
 Skill-read knobs (review, repair, council, writing and summary policy) take effect when the skill reads `provenant config show`.
 
-Use [the configuration runbook](../../runbooks/harness-profiles.md) for
+Use [the configuration runbook](../../runbooks/configuration.md) for
 operator commands and [the Rust designs](../rust-port/design/README.md) for
 the accepted boundaries.

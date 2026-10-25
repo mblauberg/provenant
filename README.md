@@ -28,10 +28,10 @@ reviewable path from a writer lane back to a remote branch.
 
 ## Features
 
-- **Confined provider lanes.** Claude Code and Codex lanes run with read-only
+- **Confined provider lanes.** Claude Code, Codex, Cursor, Agy, and OpenCode lanes run with read-only
   or worktree-write access plans, and provider output and terminal state are
-  recorded. Agy, Cursor, and OpenCode adapters are catalogued but stay
-  execution-disabled until a live confinement capture proves each mode.
+  recorded. Cursor, Agy, and OpenCode lanes use the same access plans; all five
+  adapters are enabled by default.
 - **Fabric messaging and dispatch.** The CLI and Fabric MCP surface provide
   messages, tasks, agent identity, host links, and local dispatch. Lanes can
   run on a configured peer host with `dispatch --host`; a peer writer names
@@ -56,14 +56,19 @@ reviewable path from a writer lane back to a remote branch.
   generic hooks.
 - **Git worktrees.** `provenant worktree create`, `list`, and `remove` manage
   isolated project worktrees for concurrent lanes.
+- **Usage telemetry.** `provenant telemetry stats` reports local usage and cost,
+  and `provenant telemetry trace` writes attempts as a Chrome Trace Event file
+  that opens in ui.perfetto.dev.
 - **Quota menu bar app.** The optional macOS app displays account quota
-  snapshots and lanes needing attention. It reads reports through the CLI and
-  does not read credentials itself.
+  snapshots and lanes needing attention. Its Customise menu sets row figures,
+  account names, order and visibility through `provenant accounts set` and
+  `provenant quota display`. It reads reports through the CLI and does not read
+  credentials itself.
 
 ## Install
 
 Build the Rust binary and package a staged release from a checkout. Rust
-1.99.1 is the minimum toolchain. The [front-door runbook](docs/runbooks/front-door.md)
+1.99.1 is the minimum toolchain. The [install runbook](docs/runbooks/install.md)
 documents release contents, installation targets, and recovery.
 
 From the repository root:
@@ -82,29 +87,27 @@ cd ../..
 
 In the same shell session, preview an install for one selected harness,
 inspect the proposed changes, and then apply it. This example installs Claude
-Code and uses the current checkout as the legacy-entry inventory:
+Code:
 
 ```sh
-LEGACY_CHECKOUT="$(git rev-parse --show-toplevel)"
 STATE="$HOME/.local/share/provenant/v1"
 "$RELEASE/bin/provenant" --state-dir "$STATE" install \
   --source "$RELEASE" --harness claude \
-  --bin-dir "$HOME/.local/bin" \
-  --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
+  --bin-dir "$HOME/.local/bin" --dry-run
 # After reviewing the preview, apply the install:
 "$RELEASE/bin/provenant" --state-dir "$STATE" install \
   --source "$RELEASE" --harness claude \
-  --bin-dir "$HOME/.local/bin" \
-  --legacy-checkout "$LEGACY_CHECKOUT"
+  --bin-dir "$HOME/.local/bin"
 "$RELEASE/bin/provenant" --state-dir "$STATE" check install --source "$RELEASE"
 ```
 
 Close each selected harness and configuration editor before applying an
 install. `--hooks` defaults to `off`; use only the hook handlers provided by
 the selected integration. Repeat `--harness` to select more than one client.
-See [Fabric MCP registration](docs/runbooks/fabric-mcp-registration.md) and
-the [install runbook](docs/runbooks/front-door.md) before changing a live
-installation. Build the optional menu bar app from its
+Upgrading from a pre-1.0 install needs `--legacy-checkout`; see
+[Migrating from a pre-1.0 install](docs/runbooks/install.md#migrating-from-a-pre-10-install).
+See the [install runbook](docs/runbooks/install.md), which also covers Fabric
+MCP registration, before changing a live installation. Build the optional menu bar app from its
 [macOS instructions](apps/quota-menubar/README.md).
 
 ## Quick start
@@ -139,36 +142,11 @@ dispatch and attempt state; routing, quota, providers, confinement, and the
 supervisor own their separate decisions. Fabric MCP reaches the same run
 service through the Fabric runtime. The quota app reads the CLI's reports.
 
-```mermaid
-flowchart TB
-    App["Quota menu bar app"] -->|"quota show and tick"| CLI["provenant CLI"]
-    CLI --> Run["run"]
-    CLI --> Workflow["workflow"]
-    CLI --> Telemetry["telemetry"]
-    CLI --> MCP["fabric-mcp"]
-    MCP --> Runtime["fabric-runtime"]
-    Runtime --> Run
-    Runtime --> FabricStore["fabric-store"]
-    Run --> Routing["routing"]
-    Run --> Quota["quota"]
-    Run --> Providers["providers"]
-    Run --> Confinement["confinement"]
-    Run --> Supervisor["supervisor"]
-    Run --> Records["records"]
-    Routing --> Quota
-    Routing --> Providers
-    Config["config"] -.-> Routing
-    Config -.-> Run
-    Config -.-> Workflow
-    Telemetry --> Records
-    Workflow --> Records
-    Records --> Core["core"]
-```
 
 The CLI writes run state under the selected state root. Fabric uses its own
 SQLite store for messages, tasks, and host records. By default the state root
 is `~/.local/share/provenant/v1`; `--state-dir` selects another root.
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) explains the wider system and
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the crate map and state root layout, and
 the [Rust design index](docs/specs/rust-port/design/README.md) lists crate
 responsibilities.
 
@@ -186,12 +164,15 @@ optional menu bar app.
 | [Rust design index](docs/specs/rust-port/design/README.md) | Crate owners, command boundaries, and current Rust decisions |
 | [Architecture](docs/ARCHITECTURE.md) | Product components and system flow |
 | [Rust rewrite rulebook](docs/specs/rust-port/PORTING.md) | Rust implementation constraints and checks |
-| [Release and install runbook](docs/runbooks/front-door.md) | Build, package, install, and recover a release |
+| [Install runbook](docs/runbooks/install.md) | Build, package, install, uninstall, and migrate a release; register Fabric MCP |
+| [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, writer write paths, quota display, and chair account switching |
+| [Providers](docs/runbooks/providers.md) | Per-adapter launch notes |
+| [Telemetry](docs/runbooks/telemetry.md) | Usage, cost, trace export, and quota commands |
+| [Worktrees](docs/worktrees.md) | Worktree policy, writer dispatch, and custody recovery |
 | [Model routing](docs/runbooks/model-routing.md) | Pools, weights, provider pacing, and quota eligibility |
-| [Fabric MCP registration](docs/runbooks/fabric-mcp-registration.md) | Register Fabric with supported clients |
 | [Fabric hosts](docs/runbooks/fabric-hosts.md) | Configure peer hosts and peer-host dispatch |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the optional macOS app |
-| [Benchmark runbook](docs/runbooks/bench.md) | Mine, verify, and replay benchmark tasks |
+| [Benchmark runbook](docs/runbooks/bench.md) | Mine, verify, and replay benchmark tasks, with the split and leakage rules |
 
 ## Contributing
 

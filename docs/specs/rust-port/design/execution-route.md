@@ -523,7 +523,7 @@ Host-configured `[domains.run] writer_writes` directories join the plan's
 `write_roots` for worktree-write lanes only (read-only lanes get none). They are
 absolute, charset-limited and credential-checked at config load, and
 plan compilation refuses overlap with protected, private and Git roots. See
-`docs/runbooks/harness-profiles.md`.
+`docs/runbooks/configuration.md`.
 
 Codex read-only and writer recipes grant read and exec of `~/.cargo/bin` and
 `~/.rustup/toolchains`, plus read of `~/.rustup/settings.toml` and
