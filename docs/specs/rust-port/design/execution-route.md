@@ -519,6 +519,12 @@ it, out of the credential-root refusal, for read and exec grants only
 link, `auth.json`, config, sessions, state and logs stay refused, as does any
 write, scratch or protected-root grant there.
 
+Host-configured `[domains.run] writer_writes` directories join the plan's
+`write_roots` for worktree-write lanes only (read-only lanes get none). They are
+absolute, charset-limited and credential-checked at config load, and
+plan compilation refuses overlap with protected, private and Git roots. See
+`docs/runbooks/harness-profiles.md`.
+
 Codex read-only and writer recipes grant read and exec of `~/.cargo/bin` and
 `~/.rustup/toolchains`, plus read of `~/.rustup/settings.toml` and
 `~/.cargo/registry`. Read-only setup creates a private `CARGO_HOME` inside the

@@ -24,6 +24,23 @@ to see each knob's status and source. Install registrations with
 `provenant install --dry-run`
 before applying an authorised install.
 
+## Writer extra write paths
+
+Some projects keep shared run state outside the worktree. Writer lanes can
+write it once the host owner lists the directories in the state `config.toml`:
+
+```toml
+[domains.run]
+writer_writes = ["/Users/me/proj/.agent-run/locks", "/Users/me/proj/.build/cargo-practice-wave"]
+```
+
+Each entry is an absolute directory (letters, digits and `/._-` only, no `..`,
+at most 16), granted read-write as a subtree to worktree-write lanes only.
+Read-only lanes are unchanged. The config is refused if an entry is too broad
+or names a credential directory such as `~/.ssh`; a launch is refused if an
+entry overlaps the state directory's protected parts or Git metadata.
+`/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
+
 ## Routing pools
 
 Routing changes are stored per state root and apply on the next route command.
