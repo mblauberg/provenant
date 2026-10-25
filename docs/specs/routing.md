@@ -280,6 +280,13 @@ Provider endpoints are `*:443` because Seatbelt cannot filter by host name.
 
 ### Claude token and refresh
 
+Every unconfined provider command during attempt preparation, including
+account status, provider version, keychain reads and token refresh, runs in its
+own fresh, empty private directory under the host configuration root. Creation
+is exclusive and the directory is removed after the command, including on
+error. Attempt scratch, temporary directories and nested child stores never
+supply the host command's working directory.
+
 The sandbox never refreshes or writes the keychain. Before launch the host
 refreshes a token with under 15 minutes left by running the CLI once outside
 the sandbox with a model name the API rejects, so no usage is spent, then
