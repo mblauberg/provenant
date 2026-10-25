@@ -36,10 +36,10 @@ impl PeerPhase {
     }
 }
 
-/// Frozen peer mutation data. `request` is never rewritten after preparation;
-/// a committed `response` is the bounded response received from the owner, as
-/// received except that migration 7 removed the always-null `legacy` member of
-/// a Task it carried.
+/// Frozen peer mutation data. `request` is never rewritten after preparation.
+/// A committed `response` is the caller's own re-encoding of the owner's
+/// decoded reply, never the bytes received, so a null `legacy` member an older
+/// home sends is already dropped; migration 7 removed it from earlier replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerOperation {

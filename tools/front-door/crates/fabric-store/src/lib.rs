@@ -88,7 +88,8 @@ pub enum Error {
     Time(#[from] provenant_core::TimeError),
     #[error(
         "Fabric store holds {rows} row(s) of legacy import data in table {table}, which this \
-         release would discard, so it left the store unchanged. Keep the previous release, or \
+         release would discard, so it stopped before migration 7; the store stays at a version \
+         the previous release still opens. Keep the previous release, or \
          archive the store as docs/runbooks/fabric-hosts.md (Legacy import data) describes"
     )]
     LegacyImportData { table: &'static str, rows: i64 },

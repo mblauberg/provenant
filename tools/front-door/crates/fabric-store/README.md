@@ -112,11 +112,13 @@ Migration 7 drops the removed legacy import's table and strips its always-null
 replies, and deletes the `imported` event of an import that brought nothing
 over. While any data that import wrote remains, opening refuses the upgrade with
 `LegacyImportData` (service code `upgrade_refused`), naming the table and its
-row count, and changes nothing. The supported remedy is to keep the previous
+row count. Earlier migrations commit separately, so the store stays at a version
+the previous release still opens. The supported remedy is to keep the previous
 release or archive the store, as the
 [Fabric hosts runbook](../../../../docs/runbooks/fabric-hosts.md#legacy-import-data)
-describes. Records still read a null `legacy` or `legacy_output_path`, which
-a binary from before migration 7 may write after it, drop it and never write it.
+describes. A binary from before migration 7 may still write a null `legacy` or
+`legacy_output_path` after it; records read such a member, drop it and never
+write it.
 All mutations and their events share F1's immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.
