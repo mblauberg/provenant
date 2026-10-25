@@ -42,8 +42,8 @@ member with `provenant route set POOL MODEL [--weight N] [--effort E]
 restore a bundled pool with `provenant route reset POOL`. Set provider pacing
 with `provenant route pacing PROVIDER pace|spend|max`. These edits are stored
 under `[routing]` in the selected state's `config.toml`. Catalogue presence
-does not establish adapter availability; inspect readiness and the resolved
-route recorded for the attempt.
+does not establish adapter availability; readiness is decided at dispatch, so
+inspect the resolved route recorded for the attempt.
 
 Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.
 

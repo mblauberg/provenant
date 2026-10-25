@@ -55,7 +55,7 @@ owns account eligibility, and run records the resolved account label.
 | Runs | `<state>/runs/<RunId>/` and run's top-level registry store |
 | Worktree custody | `<state>/worktrees/<ProjectId>/`; supervisor and confinement own locks, leases and reservations |
 | Fabric | `<state>/fabric/`; fabric-store owns its database |
-| Other owners | `<state>/workflow/projects/<ProjectId>/{deliveries,sessions}`, `<state>/quota/`, `<state>/routing/` |
+| Other owners | `<state>/workflow/projects/<ProjectId>/{deliveries,sessions}`, `<state>/quota/` |
 | Scratch | `<state>/tmp/`; operation-scoped, never a whole-root purge |
 
 There is no telemetry ledger subtree. `telemetry stats` reduces run's terminal

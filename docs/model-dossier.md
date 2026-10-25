@@ -14,7 +14,7 @@ entries and say which ones you reasoned from.
 Read it before choosing a model. Prefer what it says. Depart from it when the
 work calls for something else, and say why in the receipt.
 
-All five adapters are enabled by default. Use `provenant route list` to check current model availability.
+All five adapters are enabled by default. `provenant route list` does not probe; readiness is decided at dispatch.
 
 ## Advisory only
 
@@ -169,8 +169,8 @@ the reader, not the decider.
 Use `utility` for mechanical work: Claude Haiku has no explicit effort, Codex
 Luna uses its recorded `low` control, and the OpenCode free models come last.
 Use the named junior, senior or principal pools for increasing judgement, or
-the writing and design pools for those crafts. Check `route list` for cached
-availability. Task-class presets adjust knobs; they do not map task classes to
+the writing and design pools for those crafts. Check `route list` for pool
+membership and weights. Task-class presets adjust knobs; they do not map task classes to
 routes.
 
 ### Human-facing final polish
@@ -218,7 +218,7 @@ and record it.
 
 All five adapters are enabled for dispatch. A catalogue entry shows that a
 model is configured, not that it is reachable; readiness depends on the local
-sign-in and quota, which `provenant route list` reports.
+sign-in and quota, which dispatch decides; `provenant route list` does not probe.
 
 | Adapter | Models in the bundled pools |
 |---|---|
