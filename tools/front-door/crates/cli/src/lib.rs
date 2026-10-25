@@ -487,6 +487,10 @@ pub fn usage_verbs() -> Vec<String> {
         if children.is_empty() && !path.is_empty() {
             verbs.push(path);
         } else {
+            // A parent whose subcommand is optional is also a verb (`hosts`).
+            if !path.is_empty() && !command.is_subcommand_required_set() {
+                verbs.push(path.clone());
+            }
             for child in children {
                 let name = child.get_name();
                 walk(

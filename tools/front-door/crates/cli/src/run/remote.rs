@@ -385,7 +385,7 @@ pub(super) fn unknown_host(host: &str) -> Fail {
         Status::Invalid,
         "UNKNOWN_HOST",
         format!(
-            "no configured peer named {host}; use `local` for this host or see `provenant fabric host list`"
+            "no configured peer named {host}; use `local` for this host or see `provenant hosts`"
         ),
     )
 }

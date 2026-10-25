@@ -629,3 +629,14 @@ fn fabric_uses_the_binary_product_root_protection() -> Result {
     assert!(!rig.state.exists());
     Ok(())
 }
+#[test]
+fn hosts_lists_readiness_and_fabric_host_is_gone() -> Result {
+    let rig = TestRig::new()?;
+    let hosts = call(&rig, &["hosts"], 0)?;
+    assert_eq!(hosts["command"], "hosts");
+    let rows = hosts["data"].as_array().ok_or("hosts")?;
+    assert!(rows.iter().any(|row| row["available"] == true));
+    let removed = rig.command(&["fabric", "host", "list"])?;
+    assert_eq!(code(&removed), 2);
+    Ok(())
+}

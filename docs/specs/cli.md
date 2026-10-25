@@ -50,7 +50,7 @@ options fail. Only options marked repeatable may repeat.
 provenant
   help [COMMAND]
   root
-  hosts doctor [SSH_ALIAS]
+  hosts [doctor [SSH_ALIAS]]
   config show | set | unset
   install | uninstall
   accounts list | register | set
@@ -63,7 +63,7 @@ provenant
   cancel TARGET
   resume ATTEMPT
   reconcile
-  fabric mcp | identity | host | graph | mail | task | events | claim | landing
+  fabric mcp | identity | graph | mail | task | events | claim | landing
   telemetry stats | trace
   quota show | display | tick
   worktree create | list | remove
@@ -158,6 +158,7 @@ final head and open a pull request after verifying it.
 | Leaf | Grammar | Notes |
 | --- | --- | --- |
 | `root` | no flags | Reports the asset root, state directory, selected project and installation identity. Human output is the newline-terminated asset path that scripts read. Read-only; an explicit `--project` verifies the checkout with the supervisor's bounded Git runner. |
+| `hosts` | no flags | Lists the local host and configured peers with peer and adapter readiness observations. Read-only. |
 | `hosts doctor` | `[SSH_ALIAS]` | Probes sign-in on one host, or every configured host, with no inference and no credential access. |
 | `config show` | `[--task-class NAME]` | The resolved config with secrets redacted and each knob's source (default, profile or override). |
 | `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. `null` clears a nullable knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |

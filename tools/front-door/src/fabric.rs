@@ -426,7 +426,7 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
             let human = serde_json::to_string_pretty(&data).unwrap_or_default();
             crate::emit(
                 &provenant_records::CommandResult::new(
-                    "fabric host list",
+                    "hosts",
                     provenant_records::Outcome::Ok,
                     data,
                 ),
@@ -436,7 +436,7 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
             )
         }
         Err(error) => crate::fail(
-            "fabric host list",
+            "hosts",
             provenant_records::Outcome::Error,
             "io",
             &error.to_string(),
