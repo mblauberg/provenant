@@ -2261,6 +2261,10 @@ fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
         priority: None,
         billing_anchor: None,
         limits: None,
+        display_name: None,
+        hidden: false,
+        order: None,
+        headline: None,
     };
     assert_eq!(entry.check_org(Some("a")).unwrap().as_deref(), Some("a"));
     assert_eq!(entry.check_org(None).unwrap(), None);

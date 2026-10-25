@@ -32,6 +32,22 @@ pub enum Trigger {
     Power,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DisplayHeadline {
+    Auto,
+    #[value(name = "5h")]
+    FiveHour,
+    Weekly,
+}
+impl From<DisplayHeadline> for Headline {
+    fn from(value: DisplayHeadline) -> Self {
+        match value {
+            DisplayHeadline::Auto => Self::Auto,
+            DisplayHeadline::FiveHour => Self::FiveHour,
+            DisplayHeadline::Weekly => Self::Weekly,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Power {
     Ac,
     Battery,
@@ -41,6 +57,18 @@ pub enum Power {
 pub enum Quota {
     /// Show recorded provider quota
     Show(Filter),
+    /// Set menu bar display choices, then show quota
+    ///
+    /// With no options nothing changes. `--icon` takes `most_constrained` or an
+    /// account entry id or unique label, and stores the entry id.
+    Display {
+        /// Window the menu bar leads with
+        #[arg(long, value_enum)]
+        headline: Option<DisplayHeadline>,
+        /// Account the menu bar icon follows, or `most_constrained`
+        #[arg(long)]
+        icon: Option<String>,
+    },
     /// Refresh quota and record a pacing tick
     Tick {
         #[command(flatten)]
@@ -97,6 +125,8 @@ pub(crate) enum EdgeError {
     Adapter,
     #[error("quota report exceeds 1 MiB; filter with --adapter")]
     TooLarge,
+    #[error("{0}")]
+    Display(String),
     #[error("quota report path is not UTF-8")]
     Path,
 }
@@ -370,14 +400,47 @@ fn add_configured(records: &mut Vec<AccountRecord>, configured: &[AccountScope])
         }
     }
 }
+/// Attaches menu bar choices from config; hidden and order are applied by the app.
+fn decorate(
+    report: &mut QuotaReport,
+    accounts: &provenant_providers::accounts::Settings,
+    display: &Display,
+) {
+    report.display = display.clone();
+    for row in &mut report.accounts {
+        row.display = accounts
+            .entries
+            .iter()
+            .find(|(_, e)| {
+                e.adapter == row.account.adapter && e.key == row.account.account_key
+            })
+            .map(|(id, e)| RowDisplay {
+                id: id.clone(),
+                name: e.display_name.clone(),
+                hidden: e.hidden,
+                order: e.order,
+                headline: e.headline,
+            });
+    }
+}
 fn execute(
     command: &Quota,
     roots: &Roots,
     registry: &[provenant_providers::Registration],
     effects: &dyn QuotaEffects,
 ) -> Result<QuotaReport, EdgeError> {
+    let all = Filter { adapter: None };
     let (filter, tick) = match command {
         Quota::Show(filter) => (filter, None),
+        Quota::Display { headline, icon } => {
+            crate::accounts::set_quota_display(
+                roots,
+                headline.map(Into::into),
+                icon.as_deref(),
+            )
+            .map_err(EdgeError::Display)?;
+            (&all, None)
+        }
         Quota::Tick {
             adapter,
             trigger,
@@ -398,13 +461,13 @@ fn execute(
     {
         return Err(EdgeError::Adapter);
     }
-    let settings = provenant_config::read_with_domains(
+    let domains = provenant_config::read_with_domains(
         roots,
         &provenant_supervisor::fs::LocalFs,
         &crate::domains::SECTIONS,
     )?
-    .domains
-    .quota;
+    .domains;
+    let (settings, entries) = (domains.quota, domains.accounts);
     let clock = SystemClock::new();
     let now = clock
         .wall_now()
@@ -422,14 +485,16 @@ fn execute(
     let Some(tick) = tick else {
         let mut records = read_cache(roots)?;
         add_configured(&mut records, &configured);
-        return Ok(schedule::report(
+        let mut report = schedule::report(
             &policies,
             &records,
             &detected,
             &query,
             now,
             report_path,
-        )?);
+        )?;
+        decorate(&mut report, &entries, &settings.display);
+        return Ok(report);
     };
     let root = private(roots.state.as_path())?;
     let dir = child(&root, OsStr::new("quota"))?;
@@ -543,7 +608,7 @@ fn execute(
         .map_err(|_| EdgeError::Time)?
         .as_timestamp()
         .as_second();
-    let report = schedule::report(
+    let mut report = schedule::report(
         &policies,
         &records,
         &detected,
@@ -551,6 +616,7 @@ fn execute(
         now,
         report_path,
     )?;
+    decorate(&mut report, &entries, &settings.display);
     let bytes = serde_json::to_vec(&report)?;
     if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(EdgeError::TooLarge);
@@ -564,14 +630,16 @@ fn execute(
         PublishMode::Replace,
     )?)?;
     // Publish all accounts even when the caller requests a filtered projection.
-    Ok(schedule::report(
+    let mut shown = schedule::report(
         &policies,
         &records,
         &detected,
         &query,
         now,
         report.report_path,
-    )?)
+    )?;
+    decorate(&mut shown, &entries, &settings.display);
+    Ok(shown)
 }
 pub fn run(
     command: Quota,
@@ -585,6 +653,7 @@ pub fn run(
 ) -> u8 {
     let name = match command {
         Quota::Show(_) => "quota show",
+        Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
     let result = execute(&command, roots, registry, effects);
@@ -639,6 +708,7 @@ pub fn run(
             let status = match &error {
                 EdgeError::Config(provenant_config::ConfigError::Read { .. }) => Outcome::Error,
                 EdgeError::Adapter
+                | EdgeError::Display(_)
                 | EdgeError::Config(_)
                 | EdgeError::Quota(
                     QuotaError::Invalid(_) | QuotaError::Record(_) | QuotaError::NumberOutOfRange,
