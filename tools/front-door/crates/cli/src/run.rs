@@ -3,7 +3,7 @@
 //! same-binary guardian holder shares.
 use crate::{
     Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, Reconcile, Resume, Stats, Switch,
-    Target,
+    Target, Trace,
 };
 use provenant_core::{
     AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
@@ -2142,6 +2142,53 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
     Ok((data, human))
+}
+
+/// Offline lane timeline: terminal attempts as Chrome Trace Event JSON.
+pub fn trace(command: Trace, edge: &Edge<'_>) -> Reply {
+    reply("telemetry trace", trace_inner(command, edge))
+}
+fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    use run::AttemptReader;
+    let since = command
+        .since
+        .map(|t| WallTime::from_micros(t.as_microsecond()))
+        .transpose()
+        .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (_, store) = open_read_only(edge, &call)?;
+    let facts = store
+        .map(|store| {
+            store
+                .attempts(
+                    run::AttemptFilter {
+                        run_id: command.run,
+                        task_id: None,
+                    },
+                    &call,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let trace = provenant_telemetry::trace(&facts, since);
+    let events = trace["traceEvents"].as_array().map_or(0, Vec::len);
+    let bytes = serde_json::to_vec(&trace)
+        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+    std::fs::write(&command.out, bytes).map_err(|error| {
+        Fail::new(
+            Status::Error,
+            "IO",
+            format!("{}: {error}", command.out.display()),
+        )
+    })?;
+    let out = command.out.display().to_string();
+    Ok((
+        json!({ "out": out, "events": events }),
+        format!("{events} events written to {out}; open in ui.perfetto.dev\n"),
+    ))
 }
 
 /// A switch handoff is a snapshot of active lane IDs, never a parallel queue.
