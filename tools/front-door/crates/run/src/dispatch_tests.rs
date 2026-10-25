@@ -1303,6 +1303,73 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
 }
 
 #[test]
+fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let prior = run.attempts[0].attempt_id;
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
+        Ok(Resume {
+            prior,
+            expected_generation,
+            operation_id: provenant_core::OperationId::parse(operation)
+                .map_err(|_| RunError::Validation("operation"))?,
+            run_id: provenant_core::RunId::from_bytes([byte; 16]),
+            attempt_id: AttemptId::from_bytes([byte + 1; 16]),
+            prompt: "answer".into(),
+            created_at: WallTime::from_micros(100).map_err(|_| RunError::Validation("time"))?,
+        })
+    };
+    let original = resume("r1", 0, 20)?;
+    let continued = store.resume(&original, &call)?;
+    let mut operation = store
+        .operation(&original.operation_id, &call)?
+        .ok_or(RunError::NotFound)?;
+    operation.state = OperationState::Prepared;
+    store.db.execute(
+        "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+        rusqlite::params![
+            crate::db::bytes(&operation)?,
+            store.context.project_id.to_string(),
+            store.context.actor_id.to_string(),
+            original.operation_id.as_str(),
+        ],
+    )?;
+
+    let replayed = store.resume(&resume("r1", 0, 40)?, &call)?;
+    assert_eq!(replayed.run_id, provenant_core::RunId::from_bytes([20; 16]));
+    assert_eq!(replayed, continued);
+    assert_eq!(
+        store
+            .operation(&original.operation_id, &call)?
+            .ok_or(RunError::NotFound)?
+            .state,
+        OperationState::Accepted
+    );
+    let mut changed = resume("r1", 0, 40)?;
+    changed.prompt = "other".into();
+    assert!(matches!(
+        store.resume(&changed, &call),
+        Err(RunError::OperationConflict)
+    ));
+    for expected in [0, 1] {
+        assert!(matches!(
+            store.resume(&resume("r2", expected, 30)?, &call),
+            Err(RunError::Conflict)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

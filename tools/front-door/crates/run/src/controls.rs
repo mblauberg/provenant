@@ -320,10 +320,9 @@ impl RunStore {
             }],
             created_at: input.created_at,
         };
-        // A replay is answered by `create`, which compares the request digest.
-        let replay = self
-            .operation(&input.operation_id, call)?
-            .is_some_and(|op| op.state != OperationState::Prepared);
+        // A replay, prepared or accepted, is answered by `create`, which
+        // compares the request digest and adopts a prepared operation's IDs.
+        let replay = self.operation(&input.operation_id, call)?.is_some();
         if !replay {
             let generation: i64 = call.retry(|| {
                 Ok(self.db.query_row(

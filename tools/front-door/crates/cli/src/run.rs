@@ -138,6 +138,9 @@ impl Registry<'_> {
     }
     /// Refuse before the attempt's one continuation is spent.
     fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
+        if !matches!(prior.state, run::AttemptState::Terminal { .. }) {
+            return Err(run::RunError::Nonterminal.into());
+        }
         let unsupported = |message: String| Fail::new(Status::Refused, "UNSUPPORTED", message);
         let adapter = prior
             .applied_route
@@ -2350,6 +2353,42 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+
+    #[test]
+    fn check_continuable_refuses_nonterminal_before_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for state in ["running", "queued"] {
+            let prior: run::AttemptRecord = serde_json::from_value(json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]),
+                "run_id": RunId::from_bytes([2; 16]),
+                "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+                "task_id": TaskId::from_bytes([4; 16]),
+                "operation_id": "resume-nonterminal",
+                "attempt_number": 1,
+                "revision": 1,
+                "generation": 0,
+                "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+                "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+                "queued_at": WallTime::from_micros(100)?,
+                "state": {"state":state},
+                "usage": {},
+                "prompt": {
+                    "path": {"encoding":"utf8","path":"prompt.txt"},
+                    "digest": CanonicalV1::file_digest(b""),
+                    "bytes": 0,
+                    "complete": true,
+                    "redacted": false
+                }
+            }))?;
+            let result = Registry::default().check_continuable(&prior);
+            assert!(
+                matches!(result, Err(fail) if fail.code == "NONTERMINAL" && fail.status == Status::Refused),
+                "{state} attempt must be refused as nonterminal"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_controls() {
