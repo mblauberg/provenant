@@ -192,14 +192,15 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
-        Command::Hosts(command) => hosts::run(command, globals),
+        Command::Hosts { command: None } => fabric::hosts(globals),
+        Command::Hosts {
+            command: Some(command),
+        } => hosts::run(command, globals),
         Command::Accounts(command) => {
             run_edge(
                 &inv.leaf,
                 globals,
-                |edge| match provenant_cli::accounts::execute(
-                    &command, edge.roots, edge.home, edge.cwd,
-                ) {
+                |edge| match provenant_cli::accounts::execute(&command, edge.roots, edge.home) {
                     Ok(data) => provenant_cli::run::Reply {
                         human: data
                             .entries
@@ -333,7 +334,6 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             fabric::peer(globals, in_process)
         }
         Command::Fabric(provenant_cli::Fabric::PeerAgent) => peer_agent::serve(globals),
-        Command::Fabric(provenant_cli::Fabric::Host(_)) => fabric::hosts(globals),
         Command::Fabric(provenant_cli::Fabric::Events(provenant_cli::fabric::Events::Read {
             page,
             wait,

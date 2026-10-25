@@ -3,7 +3,7 @@ mod context;
 
 pub(crate) use context::private_dir;
 /// Shared identity/config setup for CLI leaves and the binary MCP transport.
-pub use context::{Context, PeerFailure, facade_outcome, publish};
+pub use context::{Context, PeerFailure, facade_outcome, in_lane, publish};
 
 /// Trusted project and actor identity for sibling leaves such as workflow.
 pub(crate) fn identity(
@@ -36,9 +36,6 @@ pub enum Fabric {
     },
     /// Show this agent's project and inbox identity
     Identity,
-    /// List known hosts
-    #[command(subcommand)]
-    Host(Host),
     #[command(hide = true)]
     Peer {
         /// Handle the request in this process; never forward to the peer agent
@@ -66,11 +63,6 @@ pub enum Fabric {
     /// Fence and land pushes to a shared reference
     #[command(subcommand)]
     Landing(Landing),
-}
-#[derive(Debug, Subcommand)]
-pub enum Host {
-    /// List hosts
-    List,
 }
 #[derive(Debug, Subcommand)]
 pub enum Graph {
@@ -537,7 +529,6 @@ impl Fabric {
         let (domain, verb) = match self {
             Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
-            Self::Host(_) => return "fabric host list".into(),
             Self::Peer { .. } => return "fabric peer".into(),
             Self::PeerAgent => return "fabric peer-agent".into(),
             Self::Graph(Graph::Run { .. }) => return "fabric graph run".into(),
@@ -622,6 +613,9 @@ fn execute(
 ) -> Result<(Value, bool), EdgeError> {
     let seconds = cmd.wait();
     let ctx = context::Context::open(roots, home, cwd)?;
+    if ctx.in_lane && !cmd.read_only() {
+        return Err(CoordinationError::LaneMutation.into());
+    }
     if matches!(cmd, Fabric::Identity) {
         return Ok((json(ctx.identity)?, false));
     }
@@ -647,7 +641,6 @@ fn execute(
     let value = match cmd {
         Fabric::Identity
         | Fabric::Mcp { .. }
-        | Fabric::Host(_)
         | Fabric::Graph(_)
         | Fabric::Peer { .. }
         | Fabric::PeerAgent
@@ -925,16 +918,9 @@ pub fn run(
         ),
         Err(error) => {
             let (status, code) = match &error {
-                EdgeError::Coordination(error) => (
-                    match error.code() {
-                        "invalid_input" | "not_found" => Outcome::Invalid,
-                        "stale_fence" | "conflict" => Outcome::Refused,
-                        "timeout" => Outcome::Timeout,
-                        "cancelled" => Outcome::Cancelled,
-                        _ => Outcome::Error,
-                    },
-                    error.code(),
-                ),
+                EdgeError::Coordination(error) => {
+                    (coordination_outcome(error.code()), error.code())
+                }
                 EdgeError::Identity(_) | EdgeError::Invalid | EdgeError::Root(_) => {
                     (Outcome::Invalid, "invalid_input")
                 }
@@ -952,9 +938,7 @@ pub fn run(
         }
     };
     let human = if result.error.is_none() {
-        serde_json::to_string_pretty(&result.data)
-            .map(|s| format!("{s}\n"))
-            .unwrap_or_default()
+        crate::terse(&result.data)
     } else {
         String::new()
     };
@@ -979,5 +963,39 @@ pub fn run(
             result.status = Outcome::Error;
             3
         }
+    }
+}
+
+/// The command outcome for a coordination error code. A refused store upgrade
+/// is a refusal here, as on the facade edge (`context::facade_outcome`).
+fn coordination_outcome(code: &str) -> Outcome {
+    match code {
+        "invalid_input" | "not_found" => Outcome::Invalid,
+        "stale_fence" | "conflict" | "lane_coordination_refused" | "upgrade_refused" => {
+            Outcome::Refused
+        }
+        "timeout" => Outcome::Timeout,
+        "cancelled" => Outcome::Cancelled,
+        _ => Outcome::Error,
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn refused_upgrade_is_a_refusal_on_both_edges() {
+        assert_eq!(coordination_outcome("upgrade_refused"), Outcome::Refused);
+        assert_eq!(
+            facade_outcome(
+                &provenant_fabric_runtime::coordination::facade::FacadeError::from_code(
+                    "upgrade_refused",
+                    None
+                )
+            )
+            .0,
+            Outcome::Refused
+        );
     }
 }

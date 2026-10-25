@@ -232,15 +232,19 @@ impl LiveQuota {
             if let (Some(executable), Some(user)) = (
                 claude_executable(),
                 std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME")),
-            ) && let (Ok(scratch), Ok(executor)) = (ProbeScratch::new(), SystemExecutor::new(1))
+            ) && let Ok(system) = SystemExecutor::new(1)
+                // Each command gets a fresh private cwd under the stable host
+                // state root, so a killed run's leftovers are swept next time.
+                && let Ok(executor) =
+                    provenant_providers::host::HostProbeExecutor::new(&system, &self.state)
             {
                 let login = provenant_providers::claude::Login {
                     executable: &executable,
                     home: &self.home,
                     user: user.as_os_str(),
                     config_dir: &account.identity_dir,
-                    scratch: scratch.path(),
                 };
+
                 let now_ms = || (now().max(0) as u64).saturating_mul(1000);
                 let deadline_ms = (deadline.max(0) as u64).saturating_mul(1000);
                 let _ = provenant_providers::claude::refresh_if_expiring(

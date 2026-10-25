@@ -3,6 +3,52 @@ use std::{fs, os::unix::fs::PermissionsExt};
 use support::{Result, TestRig, code};
 
 #[test]
+fn register_creates_a_missing_state_root_before_probing() -> Result {
+    let mut rig = TestRig::new()?;
+    let bin = rig.root.join("bin");
+    fs::create_dir(&bin)?;
+    let claude = bin.join("claude");
+    fs::write(
+        &claude,
+        "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"email\":\"fixture@example.test\"}'\n",
+    )?;
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let directory = rig.home.join(".claude-work");
+    fs::create_dir(&directory)?;
+    if rig.state.exists() {
+        fs::remove_dir_all(&rig.state)?;
+    }
+    let output = rig.command(&[
+        "accounts",
+        "register",
+        "work",
+        "--adapter",
+        "claude",
+        "--directory",
+        directory.to_str().ok_or("directory path")?,
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(rig.state.join("config.toml").is_file());
+    let probes = fs::read_dir(&rig.state)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("probe-"))
+        .count();
+    assert_eq!(probes, 0, "the probe leaves nothing behind");
+    Ok(())
+}
+
+#[test]
 fn register_writes_typed_quota_options_to_state_config() -> Result {
     let mut rig = TestRig::new()?;
     let bin = rig.root.join("bin");

@@ -33,7 +33,7 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
 2. Run `provenant reconcile` after an interruption or when task state may be
    stale. Inspect `provenant lanes` and the relevant Fabric tasks before
    selecting work.
-3. Dispatch bounded work through `provenant dispatch` and `orchestrate`.
+3. Dispatch bounded work through `fabric_submit` and `orchestrate`.
    Use Fabric tasks for assignment, coordination, and results. `orchestrate`
    owns routing, topology, and review requirements.
 4. Inspect returned work with `provenant output`; verify artifacts and checks
@@ -43,9 +43,11 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
    not bypass a user gate, widen the build ceiling, or infer authority from a
    worker's result.
 6. When work is interrupted, use `provenant reconcile --id RUN`, then resume
-   the exact attempt with `provenant resume RUN/TASK/ATTEMPT --operation-id ID
-   (--prompt-file PATH | --prompt-stdin)`. Preserve partial outputs and verify
-   the target before retrying.
+   the exact attempt with `fabric_run`'s `resume` operation
+   (`target: { attempt }`, `expected_generation: 0`, `operation_id`, `prompt`).
+   `expected_generation` counts earlier continuations, so pass 0; it is not the
+   attempt record's `generation`. Preserve partial outputs and verify the
+   target before retrying.
 7. Before compaction or a substantial handoff, save a bounded Markdown
    checkpoint for the actual host session with
    `provenant workflow session save <session-id> --file <checkpoint.md>`.

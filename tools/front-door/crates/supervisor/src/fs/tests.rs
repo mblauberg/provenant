@@ -12,6 +12,49 @@ fn names(dir: &Directory) -> Vec<OsString> {
 }
 
 #[test]
+fn entry_snapshot_refuses_over_budget_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    assert!(entry_names(&dir, 0).unwrap().is_empty());
+    for name in ["a", "b", "c"] {
+        dir.create_new(OsStr::new(name)).unwrap();
+    }
+    assert!(matches!(
+        entry_names(&dir, 2),
+        Err(FsError::EntryLimit { limit: 2 })
+    ));
+    assert_eq!(entry_names(&dir, 3).unwrap().len(), 3);
+}
+
+#[test]
+fn payload_disposal_allows_lock_names_without_following_links() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    dir.create_new(OsStr::new("Cargo.lock")).unwrap();
+    assert!(matches!(
+        dir.unlink(OsStr::new("Cargo.lock")),
+        Err(FsError::ReservedLockName { .. })
+    ));
+    dir.unlink_payload(OsStr::new("Cargo.lock")).unwrap();
+    dir.mkdir(OsStr::new("directory.lock"), 0o700).unwrap();
+    dir.rmdir_payload(OsStr::new("directory.lock")).unwrap();
+    dir.create_new(OsStr::new("keep")).unwrap();
+    symlink("keep", temp.path().join("link.lock")).unwrap();
+    dir.unlink_payload(OsStr::new("link.lock")).unwrap();
+    assert!(dir.metadata_at(OsStr::new("keep"), false).is_ok());
+    for name in ["..", "a/b", "/absolute"] {
+        assert!(matches!(
+            dir.unlink_payload(OsStr::new(name)),
+            Err(FsError::InvalidComponent { .. })
+        ));
+        assert!(matches!(
+            dir.rmdir_payload(OsStr::new(name)),
+            Err(FsError::InvalidComponent { .. })
+        ));
+    }
+}
+
+#[test]
 fn opens_a_directory_anchor() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().canonicalize().unwrap();

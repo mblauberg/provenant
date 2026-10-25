@@ -93,7 +93,6 @@ pub struct RouteList {
     pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
     pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMemberView>>,
     pub pacing: std::collections::BTreeMap<String, PacingPolicy>,
-    pub availability: Vec<AvailabilityView>,
 }
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
@@ -170,26 +169,6 @@ pub fn list(
         }
     }
     let pacing = effective_pacing(context.catalogue, context.config);
-    let availability = context
-        .registry
-        .iter()
-        .filter(|r| matches(r.adapter.id()))
-        .map(|r| {
-            let record = context
-                .availability
-                .iter()
-                .find(|a| a.adapter == r.adapter.id());
-            let reason = availability_reason(record, context);
-            AvailabilityView {
-                adapter: r.adapter.id().into(),
-                record: record.map(AvailabilitySummary::from),
-                reason,
-                age_seconds: record
-                    .and_then(|r| context.now_seconds().checked_sub(r.observed_unix_seconds))
-                    .and_then(|age| u64::try_from(age).ok()),
-            }
-        })
-        .collect();
     Ok(RouteList {
         catalogue_revision: context.catalogue.revision.clone(),
         models: context
@@ -208,7 +187,6 @@ pub fn list(
             .collect(),
         pools,
         pacing,
-        availability,
     })
 }
 
@@ -339,16 +317,6 @@ fn availability_reason(
         || record.expires_unix_seconds <= ctx.now_seconds()
     {
         return Some(RouteExclusionReason::StaleAvailability);
-    }
-    if let Some(error) = record.last_preflight_error {
-        use provenant_providers::PreflightFailure;
-        return Some(match error {
-            PreflightFailure::MissingExecutable => RouteExclusionReason::MissingExecutable,
-            PreflightFailure::AuthRequired => RouteExclusionReason::AuthRequired,
-            PreflightFailure::Disabled
-            | PreflightFailure::UnsupportedVersion
-            | PreflightFailure::MalformedProtocol => RouteExclusionReason::Disabled,
-        });
     }
     if record.account_key.is_none() {
         return Some(RouteExclusionReason::UnknownAccount);

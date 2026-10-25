@@ -5,7 +5,6 @@ mod claims;
 mod db;
 mod events;
 mod federation;
-mod import;
 mod landing;
 mod messages;
 mod operations;
@@ -15,7 +14,6 @@ pub use claims::*;
 pub use db::{Request, RetryWait, Store, ThreadWait};
 pub use events::*;
 pub use federation::*;
-pub use import::*;
 pub use landing::*;
 pub use messages::*;
 pub use tasks::*;
@@ -88,18 +86,13 @@ pub enum Error {
     Encode(#[from] provenant_records::CanonicalError),
     #[error("time is outside the supported range")]
     Time(#[from] provenant_core::TimeError),
-    #[error("import exceeds its row or byte bound")]
-    ImportLimit,
-    #[error("stop the old Fabric and retry with a cleanly closed source (journal sidecars remain)")]
-    ImportNotQuiescent,
-    #[error("cannot open import source read-only at {path}; stop the old Fabric and retry")]
-    ImportReadOnly {
-        path: std::path::PathBuf,
-        #[source]
-        source: rusqlite::Error,
-    },
-    #[error("import source must be a self-contained, quiescent snapshot")]
-    ImportSource,
+    #[error(
+        "Fabric store holds {rows} row(s) of legacy import data in table {table}, which this \
+         release would discard, so it stopped before migration 7; the store stays at a version \
+         the previous release still opens. Keep the previous release, or \
+         archive the store as docs/runbooks/fabric-hosts.md (Legacy import data) describes"
+    )]
+    LegacyImportData { table: &'static str, rows: i64 },
 }
 
 fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {

@@ -99,7 +99,7 @@ provenant-core = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 toml_edit = { workspace = true }
-provenant-supervisor = { workspace = true, features = ["test-fixtures"] }
+provenant-supervisor = { workspace = true, features = ["fixture"] }
 
 [profile.release]
 opt-level = "z"

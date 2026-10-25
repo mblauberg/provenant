@@ -1166,7 +1166,7 @@ fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_he
     let mut input = work(&f, 3);
     let work_fence = store.acquire_claim(&input, &f.request()).unwrap();
     let before = database_records(&store);
-    store.db.execute_batch("DROP TABLE peer_operations; DROP TABLE run_event_cursors; DROP TABLE coordination_operations; DROP TABLE claim_counters; DROP INDEX claim_path_lookup; DROP INDEX released_claims; PRAGMA user_version=3;").unwrap();
+    store.db.execute_batch(&format!("{IMPORTS_TABLE} DROP TABLE peer_operations; DROP TABLE run_event_cursors; DROP TABLE coordination_operations; DROP TABLE claim_counters; DROP INDEX claim_path_lookup; DROP INDEX released_claims; PRAGMA user_version=3;")).unwrap();
     drop(guard);
     drop(store);
     let store = f.open();

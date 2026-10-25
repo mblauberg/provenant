@@ -3,7 +3,7 @@
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
 };
-use crate::status::{parse_index_entries, parse_porcelain_v2_z};
+use crate::status::{StatusKind, parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{
     GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRuntime, execute_git_mutation,
     run_utility,
@@ -141,6 +141,9 @@ pub enum PruneScope {
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeCondition {
     Clean,
+    /// Only ignored files, such as build output, are present. Removal still
+    /// refuses it; a hand-off treats it as clean.
+    Ignored,
     Dirty,
     GitOperationInProgress,
     Unknown,
@@ -813,6 +816,11 @@ fn worktree_dirty_at(
         parse_porcelain_v2_z(&outcome.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
     Ok(if records.is_empty() {
         WorktreeCondition::Clean
+    } else if records
+        .iter()
+        .all(|record| record.kind == StatusKind::Ignored)
+    {
+        WorktreeCondition::Ignored
     } else {
         WorktreeCondition::Dirty
     })
@@ -1309,8 +1317,17 @@ fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(common_git_dir.join("worktrees")) else {
         return true;
     };
+    let Ok(entries) = entries
+        .take(MAX_WORKTREES + 1)
+        .collect::<std::io::Result<Vec<_>>>()
+    else {
+        return false;
+    };
+    if entries.len() > MAX_WORKTREES {
+        return false;
+    }
     let mut removed = true;
-    for entry in entries.flatten() {
+    for entry in entries {
         let Ok(text) = std::fs::read(entry.path().join("gitdir")) else {
             continue;
         };
@@ -1459,7 +1476,9 @@ fn remove_tree(
     }
     match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}
-        WorktreeCondition::Dirty => return Err(WorktreeError::Dirty),
+        WorktreeCondition::Ignored | WorktreeCondition::Dirty => {
+            return Err(WorktreeError::Dirty);
+        }
         WorktreeCondition::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }
@@ -1882,6 +1901,31 @@ pub fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_admin_entry_handles_large_directory_and_keeps_other_targets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let common = temporary.path();
+        let admin = common.join("worktrees");
+        std::fs::create_dir(&admin)?;
+        let target = common.join("target");
+        for index in 0..1024 {
+            let entry = admin.join(format!("entry-{index:04}"));
+            std::fs::create_dir(&entry)?;
+            std::fs::write(
+                entry.join("gitdir"),
+                target.join(".git").as_os_str().as_encoded_bytes(),
+            )?;
+        }
+        let keep = admin.join("keep");
+        std::fs::create_dir(&keep)?;
+        std::fs::write(keep.join("gitdir"), b"/another/worktree/.git")?;
+        assert!(remove_admin_entry(common, &target));
+        assert_eq!(std::fs::read_dir(&admin)?.count(), 1);
+        assert!(keep.is_dir());
+        Ok(())
+    }
 
     const WORKTREE_LIST: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2384,6 +2428,13 @@ mod lifecycle_tests {
             &cancellation,
         )?;
         fs::write(created.path.join("ignored.txt"), "keep me\n")?;
+        let condition = |cancellation: &CancelToken| -> Result<_, Box<dyn Error>> {
+            Ok(list(&context, cancellation)?
+                .into_iter()
+                .find(|entry| entry.path == created.path)
+                .map(|entry| entry.dirty))
+        };
+        assert_eq!(condition(&cancellation)?, Some(WorktreeCondition::Ignored));
 
         assert!(matches!(
             remove(
@@ -2401,6 +2452,8 @@ mod lifecycle_tests {
             fs::read_to_string(created.path.join("ignored.txt"))?,
             "keep me\n"
         );
+        fs::write(created.path.join("notes.txt"), "draft\n")?;
+        assert_eq!(condition(&cancellation)?, Some(WorktreeCondition::Dirty));
         Ok(())
     }
 

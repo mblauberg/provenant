@@ -15,7 +15,7 @@ does not define another queue or scheduler.
    outputs are complete, active, blocked, or awaiting a user decision.
 4. Select work that is within the approved goal and build ceiling. Keep
    independent tasks moving when one item is blocked by a gate.
-5. Dispatch bounded waves through `provenant dispatch` and `orchestrate`.
+5. Dispatch bounded waves through `fabric_submit` and `orchestrate`.
    `orchestrate` owns provider routing, topology, coordination, and review.
    Fabric tasks carry assignments and answer-bearing results.
 6. Read results with `provenant output`. Verify the named artifacts and
@@ -43,5 +43,5 @@ unavailable review legs with their reason. Decisions that need a durable
 record go to the existing project owner.
 
 A checkpoint is navigation context, not proof of completion or permission.
-After `provenant resume`, reconcile live tasks and reopen the cited evidence.
+After `fabric_run` `resume`, reconcile live tasks and reopen the cited evidence.
 Do not repeat completed work just because a new session lacks its transcript.
