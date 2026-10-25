@@ -5,8 +5,7 @@ use support::{Result, TestRig, code, mcp::McpClient};
 
 #[test]
 fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
-    let mut rig = TestRig::new()?;
-    rig.enable_usage();
+    let rig = TestRig::new()?;
     let out = rig.command(&["output", "--id", "sensitive-argument", "--json"])?;
     assert_ne!(code(&out), 0);
     assert_eq!(code(&rig.command(&["root", "--json"])?), 0);
@@ -64,8 +63,7 @@ fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
 
 #[test]
 fn usage_report_includes_zero_count_cli_verbs_and_mcp_tools() -> Result {
-    let mut rig = TestRig::new()?;
-    rig.enable_usage();
+    let rig = TestRig::new()?;
     let report = rig.command(&["telemetry", "stats", "--usage", "--since", "30d", "--json"])?;
     assert_eq!(
         code(&report),

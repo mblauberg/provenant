@@ -36,9 +36,8 @@ MCP rotation runs on existing workers, keeping it off the event loop. At
 cap. Reports read without locks, tolerate a missing `.1`, and skip malformed
 or incomplete lines. A concurrent rotation can make a report approximate.
 Only two logs are retained, so a 30-day query can cover less than 30 days on a
-busy host. Set `PROVENANT_USAGE_STATE_DIR` to isolate counters from the main
-state directory, as integration tests do. No config, provider or run-store
-state is created by these counters.
+busy host. No config, provider or run-store state is created by these
+counters.
 
 ## Quota
 

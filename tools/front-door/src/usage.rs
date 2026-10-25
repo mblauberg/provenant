@@ -59,13 +59,6 @@ fn directory(path: &Path) -> Result<Directory, FsError> {
     }
 }
 
-// Tests and operators can isolate demand counters from other owner state.
-fn state_path(roots: &Roots) -> std::path::PathBuf {
-    std::env::var_os("PROVENANT_USAGE_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| roots.state.as_path().to_owned())
-}
-
 fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
     let size = || {
         directory
@@ -92,7 +85,7 @@ fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
 
 /// Called by existing MCP workers, never by the transport event loop.
 pub fn maintain_tools(roots: &Roots) {
-    if let Ok(directory) = Directory::open_anchor(&state_path(roots)) {
+    if let Ok(directory) = Directory::open_anchor(roots.state.as_path()) {
         let _ = rotate(&directory, LINE_CAP as u64);
     }
 }
@@ -103,7 +96,7 @@ fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     if line.len() > LINE_CAP {
         return None;
     }
-    let directory = directory(&state_path(roots)).ok()?;
+    let directory = directory(roots.state.as_path()).ok()?;
     if rotate_log {
         let _ = rotate(&directory, line.len() as u64);
     }
@@ -180,7 +173,7 @@ fn inventory() -> BTreeMap<(String, String), u64> {
 }
 fn report(roots: &Roots, stats: &Stats) -> Result<Report, Box<dyn std::error::Error>> {
     let mut units = inventory();
-    let directory = match Directory::open_anchor(&state_path(roots)) {
+    let directory = match Directory::open_anchor(roots.state.as_path()) {
         Ok(directory) => Some(directory),
         Err(error) if error.is_not_found() => None,
         Err(error) => return Err(error.into()),
