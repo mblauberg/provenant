@@ -178,9 +178,10 @@ guessed. Routing owns eligibility and run records the resolved label.
   when stored and probed organisations are both present and differ; an absent
   probe organisation never refuses. Codex with no registration uses its
   effective `CODEX_HOME`, otherwise `~/.codex`.
-- A per-task `account` field in a dispatch manifest or Fabric submission filters
-  the requested adapter's accounts before quota and readiness. It is not a
-  command flag or a route pin and never switches accounts on quota.
+- A per-task `account` field in a dispatch manifest or Fabric submission, or
+  the single-lane `dispatch --account` flag, filters the requested adapter's
+  accounts before quota and readiness. It is not a route pin and never
+  switches accounts on quota.
 - Each account is signed in by the user through the provider's own flow.
   Credentials are never copied between identity directories. A switch moves
   work to an account with its own headroom and never suppresses a limit signal.

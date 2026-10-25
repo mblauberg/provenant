@@ -980,7 +980,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             },
             flag_route.3.clone(),
             command.delivery_id,
-            None,
+            command.account.clone(),
             flag_delivery,
         ));
     }
