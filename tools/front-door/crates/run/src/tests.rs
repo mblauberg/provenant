@@ -242,6 +242,55 @@ fn concurrent_first_opens_create_a_ready_store() -> TestResult {
 }
 
 #[test]
+fn opens_refuse_unsafe_database_companions() -> TestResult {
+    use provenant_supervisor::fs::Directory;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        for kind in ["symlink", "directory", "public"] {
+            let temp = tempfile::tempdir()?;
+            let context = context(temp.path())?;
+            let clock = clock();
+            let cancel = CancelToken::new();
+            let request = call(&clock, &cancel);
+            drop(RunStore::open(&context, &request)?);
+            let root = context.state_root.as_path();
+            let directory = Directory::open_anchor(root)?;
+            let target = root.join("target");
+            directory.create_new(std::ffi::OsStr::new("target"))?;
+            let path = root.join(format!("run.sqlite3{suffix}"));
+            if suffix.is_empty() {
+                std::fs::remove_file(&path)?;
+            }
+            let created = match kind {
+                "symlink" => symlink(&target, &path),
+                "directory" => std::fs::create_dir(&path),
+                _ => {
+                    std::fs::write(&path, [])?;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                }
+            };
+            created.map_err(|error| format!("{suffix}/{kind}: {error}"))?;
+            assert!(
+                matches!(
+                    RunStore::open(&context, &request),
+                    Err(RunError::UnsafePath)
+                ),
+                "{suffix}/{kind}"
+            );
+            assert!(
+                matches!(
+                    RunStore::open_read_only(&context, &request),
+                    Err(RunError::UnsafePath)
+                ),
+                "read-only {suffix}/{kind}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
