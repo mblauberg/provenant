@@ -83,7 +83,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             return match error.kind() {
                 clap::error::ErrorKind::DisplayHelp => ParseOutcome::Help {
                     text: error.to_string(),
-                    catalog: catalog(&model),
+                    catalog: scoped(catalog(&model), &help_scope(&model, &argv)),
                     globals,
                 },
                 clap::error::ErrorKind::DisplayVersion => ParseOutcome::Version { globals },
@@ -394,6 +394,21 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         _ => {}
     }
     Ok(())
+}
+/// The subcommand path named in argv, such as `provenant fabric mail`. Flags
+/// and values that are not subcommands are skipped.
+fn help_scope(model: &clap::Command, argv: &[OsString]) -> String {
+    let mut scope = String::from("provenant");
+    let mut current = model;
+    for arg in argv.iter().skip(1).take_while(|arg| *arg != "--") {
+        if let Some(child) = arg.to_str().and_then(|name| current.find_subcommand(name))
+            && !child.is_hide_set()
+        {
+            scope = format!("{scope} {}", child.get_name());
+            current = child;
+        }
+    }
+    scope
 }
 /// Keep the named command and its descendants; `help` alone keeps all.
 fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
@@ -900,6 +915,14 @@ mod tests {
         assert!(!error.to_string().contains("Usage:"));
     }
     #[test]
+    fn usage_verbs_include_optional_parents_only() {
+        let verbs = usage_verbs();
+        assert!(verbs.contains(&"hosts".to_owned()));
+        assert!(verbs.contains(&"hosts doctor".to_owned()));
+        assert!(!verbs.contains(&"accounts".to_owned()));
+        assert!(!verbs.contains(&"fabric".to_owned()));
+    }
+    #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [
             &["lanes", "--json", "--limit", "0"][..],
@@ -958,6 +981,33 @@ mod tests {
             panic!("reconcile help")
         };
         assert_eq!(catalog.commands.len(), 1);
+        let names = |words: &[&str]| match parsed(words) {
+            ParseOutcome::Help { catalog, .. } => catalog
+                .commands
+                .into_iter()
+                .map(|c| c.command)
+                .collect::<Vec<_>>(),
+            other => panic!("{words:?}: {other:?}"),
+        };
+        let mail = names(&["help", "fabric", "mail", "--json"]);
+        assert!(mail.contains(&"provenant fabric mail send".to_owned()));
+        assert!(mail.iter().all(|c| c.starts_with("provenant fabric mail")));
+        assert_eq!(
+            names(&["help", "hosts", "--json"]),
+            vec![
+                "provenant hosts".to_owned(),
+                "provenant hosts doctor".to_owned()
+            ]
+        );
+        assert_eq!(
+            names(&["fabric", "mail", "send", "--help", "--json"]),
+            vec!["provenant fabric mail send".to_owned()]
+        );
+        assert!(names(&["hosts", "--help", "--json"]).len() == 2);
+        assert!(matches!(
+            parsed(&["help", "nope", "--json"]),
+            ParseOutcome::Invalid { .. }
+        ));
         assert!(!text.contains("--abandon-uncertain"));
         let reconcile = catalog
             .commands

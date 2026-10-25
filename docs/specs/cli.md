@@ -41,14 +41,15 @@ it by the grammar tests.
 ### Command tree
 
 One spelling per name: no aliases, abbreviated long options or short flags
-other than what clap generates. Every leaf takes `--help`, and `help [COMMAND]`
-shows a top-level command's help. `help --json` lists the whole surface, and
-`help COMMAND --json` lists only that command and its subcommands. Unknown, duplicate singleton or conflicting
-options fail. Only options marked repeatable may repeat.
+other than what clap generates. Every leaf takes `--help`, and `help [COMMAND...]`
+shows the help of a command at any depth. `help --json` lists the whole surface;
+`help COMMAND... --json` and `COMMAND... --help --json` list only that command
+and its subcommands. Unknown, duplicate singleton or conflicting options fail.
+Only options marked repeatable may repeat.
 
 ```text
 provenant
-  help [COMMAND]
+  help [COMMAND...]
   root
   hosts [doctor [SSH_ALIAS]]
   config show | set | unset
@@ -79,7 +80,7 @@ Global options are accepted before or after the subcommand:
 | Option | Meaning |
 | --- | --- |
 | `--help`, `--version` | Pure output, exit 0. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, output is terse text: one `key=value` line per record, never pretty-printed JSON. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree` and every `fabric` leaf print terse text: one `key=value` line per record. `config show` and `workflow` print pretty JSON, and other leaves print their own text. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 
