@@ -74,3 +74,91 @@ fn register_writes_typed_quota_options_to_state_config() -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn set_writes_clears_and_resolves_by_id_and_label() -> Result {
+    let rig = TestRig::new()?;
+    support::register_account(&rig, "codex", "alpha", "k1", &rig.root)?;
+    support::register_account(&rig, "opencode", "alpha", "k2", &rig.root)?;
+    support::register_account(&rig, "opencode", "beta", "k3", &rig.root)?;
+    let run = |args: &[&str]| -> Result<(i64, serde_json::Value)> {
+        let out = rig.command(args)?;
+        let value = serde_json::from_slice(&out.stdout.bytes).unwrap_or_default();
+        Ok((code(&out), value))
+    };
+    let (status, _) = run(&["accounts", "set", "alpha", "--order", "1", "--json"])?;
+    assert_ne!(status, 0, "ambiguous label must be refused");
+    assert_ne!(
+        run(&["accounts", "set", "missing", "--order", "1", "--json"])?.0,
+        0
+    );
+    assert_ne!(run(&["accounts", "set", "beta", "--json"])?.0, 0);
+    assert_ne!(
+        run(&["accounts", "set", "beta", "--order", "1000", "--json"])?.0,
+        0
+    );
+    assert_ne!(
+        run(&[
+            "accounts",
+            "set",
+            "beta",
+            "--display-name",
+            &"x".repeat(65),
+            "--json"
+        ])?
+        .0,
+        0
+    );
+    let (status, out) = run(&[
+        "accounts",
+        "set",
+        "beta",
+        "--display-name",
+        "  Spare ",
+        "--hidden",
+        "true",
+        "--order",
+        "7",
+        "--headline",
+        "5h",
+        "--json",
+    ])?;
+    assert_eq!(status, 0);
+    let entry = &out["data"]["entries"]["opencode-beta"];
+    assert_eq!(entry["display_name"], "Spare");
+    assert_eq!(entry["hidden"], true);
+    assert_eq!(entry["order"], 7);
+    assert_eq!(entry["headline"], "5h");
+    let config = fs::read_to_string(rig.state.join("config.toml"))?;
+    assert!(config.contains("headline = \"5h\""), "{config}");
+    let (status, out) = run(&[
+        "accounts",
+        "set",
+        "codex-alpha",
+        "--display-name",
+        "A",
+        "--json",
+    ])?;
+    assert_eq!(status, 0);
+    assert_eq!(out["data"]["entries"]["codex-alpha"]["display_name"], "A");
+    let (status, out) = run(&[
+        "accounts",
+        "set",
+        "opencode-beta",
+        "--display-name",
+        "",
+        "--hidden",
+        "false",
+        "--order",
+        "0",
+        "--headline",
+        "default",
+        "--json",
+    ])?;
+    assert_eq!(status, 0);
+    let entry = &out["data"]["entries"]["opencode-beta"];
+    for key in ["display_name", "hidden", "order", "headline"] {
+        assert!(entry.get(key).is_none(), "{key} should be cleared");
+    }
+    Ok(())
+}

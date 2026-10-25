@@ -20,7 +20,28 @@ struct QuotaReport {
     let reportPath: String
     let coverage: Coverage
     let sources: [Source]
+    var display = Display()
     var alertPercent: Double { 90 }
+
+    /// Which window a row or the menu bar leads with.
+    enum Headline: String, Equatable {
+        case auto, fiveHour = "5h", weekly
+        init(wire: String?) { self = wire.flatMap(Headline.init(rawValue:)) ?? .auto }
+    }
+    /// The global menu bar choices; the defaults are what an older report implies.
+    struct Display: Equatable {
+        static let mostConstrained = "most_constrained"
+        var headline = Headline.auto
+        var icon = Display.mostConstrained
+    }
+    /// An account's own choices, from its registered entry.
+    struct Entry: Equatable {
+        let id: String
+        let name: String?
+        let hidden: Bool
+        let order: Int?
+        let headline: Headline?
+    }
 
     struct Coverage { let total, known: UInt64 }
     struct Source {
@@ -47,6 +68,7 @@ struct QuotaReport {
         let creditBurnPerHour: Double?
         let schedule: Schedule?
         let banked: Resets?
+        let entry: Entry?
         private let hasSnapshot: Bool
 
         var id: String { "\(provider)/\(accountKey)" }
@@ -68,6 +90,10 @@ struct QuotaReport {
             }
             self.status = status
             error = row.error
+            entry = row.display.map {
+                Entry(id: $0.id, name: $0.name?.trimmingCharacters(in: .whitespaces).nilIfEmpty, hidden: $0.hidden ?? false,
+                      order: $0.order.map(Int.init), headline: $0.headline.map { Headline(wire: $0) })
+            }
             hasSnapshot = row.snapshot != nil
             providerName = QuotaReport.providerName(provider)
             displayName = account == "default" || account.isEmpty ? nil : account
@@ -258,10 +284,15 @@ struct QuotaReport {
             return Source(adapter: source.adapter, status: status, error: source.error,
                           nextDueAt: source.nextDueUnixSeconds.map(date))
         }
+        var display = Display()
+        if let block = wire.display {
+            display = Display(headline: Headline(wire: block.headline),
+                              icon: block.icon.flatMap { $0.isEmpty ? nil : $0 } ?? Display.mostConstrained)
+        }
         return QuotaReport(accounts: accounts, generatedAt: generatedAt,
                            nextDueAt: wire.nextDueUnixSeconds.map(date), refreshing: wire.refreshingIds,
                            reportPath: wire.reportPath, coverage: Coverage(total: wire.coverage.total, known: wire.coverage.known),
-                           sources: sources)
+                           sources: sources, display: display)
     }
 
     func isRefreshing(now: Date) -> Bool { !refreshing.isEmpty && now.timeIntervalSince(generatedAt) < 60 }
@@ -270,16 +301,42 @@ struct QuotaReport {
         accounts.enumerated().sorted { ($0.element.rank(now), $0.element.priority ?? 100, $0.offset)
             < ($1.element.rank(now), $1.element.priority ?? 100, $1.offset) }.map(\.element)
     }
+    /// Accounts the user has not hidden.
+    var visible: [Account] { accounts.filter { !$0.isHidden } }
+    /// The account's own headline, else the global one.
+    func leading(_ account: Account) -> Headline { account.entry?.headline ?? display.headline }
+    /// The accounts a menu lists: hidden ones left out; those with an `order` first, in that order (a stable sort);
+    /// the rest after, kept together by provider in the order of each provider's most pressing account.
+    func listed(now: Date) -> [Account] {
+        let shown = sorted(now: now).filter { !$0.isHidden }
+        let ordered = shown.enumerated().filter { $0.element.entry?.order != nil }
+            .sorted { ($0.element.entry?.order ?? 0, $0.offset) < ($1.element.entry?.order ?? 0, $1.offset) }.map(\.element)
+        let rest = shown.filter { $0.entry?.order == nil }
+        var providers: [String] = []
+        for account in rest where !providers.contains(account.provider) { providers.append(account.provider) }
+        return ordered + providers.flatMap { provider in rest.filter { $0.provider == provider } }
+    }
+    /// The account the icon follows when one is chosen and still reported.
+    var chosen: Account? {
+        display.icon == Display.mostConstrained ? nil : accounts.first { $0.entry?.id == display.icon }
+    }
     func top(now: Date) -> (account: Account, window: Window)? {
-        accounts.filter { $0.rank(now) == 0 }.compactMap { account in account.binding(now: now).map { (account, $0) } }
+        visible.filter { $0.rank(now) == 0 }.compactMap { account in account.binding(now: now).map { (account, $0) } }
             .max { ($0.window.usedPercent ?? -1) < ($1.window.usedPercent ?? -1) }
     }
+    /// The menu bar's account and window: the chosen account, else the most constrained visible one.
     func featured(now: Date) -> (account: Account, window: Window)? {
-        top(now: now).map { ($0.account, $0.account.display(now: now, alert: alertPercent) ?? $0.window) }
+        if let chosen {
+            guard chosen.rank(now) == 0, let binding = chosen.binding(now: now) else { return nil }
+            return (chosen, chosen.display(now: now, alert: alertPercent, headline: leading(chosen)) ?? binding)
+        }
+        return top(now: now).map {
+            ($0.account, $0.account.display(now: now, alert: alertPercent, headline: leading($0.account)) ?? $0.window)
+        }
     }
-    func exhausted(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 3 } }
+    func exhausted(now: Date) -> [Account] { (chosen.map { [$0] } ?? visible).filter { $0.rank(now) == 3 } }
     var iconOnly: Bool { accounts.isEmpty }
-    func drawing(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 1 } }
+    func drawing(now: Date) -> [Account] { (chosen.map { [$0] } ?? visible).filter { $0.rank(now) == 1 } }
     func headline(now: Date) -> Double? {
         top(now: now)?.window.usedPercent ?? (exhausted(now: now).isEmpty && drawing(now: now).isEmpty ? nil : 100)
     }
@@ -294,6 +351,15 @@ private struct QuotaWireReport: Decodable {
     let nextDueUnixSeconds: Int64?
     let reportPath: String
     let sources: [QuotaWireSource]?
+    let display: QuotaWireDisplay?
+}
+private struct QuotaWireDisplay: Decodable { let headline, icon: String? }
+private struct QuotaWireRowDisplay: Decodable {
+    let id: String
+    let name: String?
+    let hidden: Bool?
+    let order: UInt64?
+    let headline: String?
 }
 private struct QuotaEnvelope<Payload: Decodable>: Decodable {
     let schemaVersion: UInt64
@@ -310,6 +376,7 @@ private struct QuotaWireAccount: Decodable {
     let nextDueUnixSeconds: Int64?
     let refreshing: Bool
     let error: String?
+    let display: QuotaWireRowDisplay?
 }
 private struct QuotaWireScope: Decodable { let adapter, accountKey, label: String }
 private struct QuotaWireSnapshot: Decodable {
@@ -372,10 +439,18 @@ extension QuotaReport.Account {
         return groups.isEmpty ? [(nil, windows)] : groups
     }
     func binding(now: Date) -> Window? { Self.binding(in: windows, now: now) }
-    func display(now: Date, alert: Double) -> Window? {
+    func display(now: Date, alert: Double, headline: QuotaReport.Headline = .auto) -> Window? {
         let pool = binding(now: now)?.pool
-        return Self.shown(Self.current(pools.isEmpty ? windows : windows(in: pool), now: now), alert: alert)
+        let group = Self.current(pools.isEmpty ? windows : windows(in: pool), now: now)
+        switch headline {
+        case .auto: return Self.shown(group, alert: alert)
+        case .fiveHour:
+            return group.min { ($0.windowMinutes ?? .max) < ($1.windowMinutes ?? .max) } ?? Self.shown(group, alert: alert)
+        case .weekly:
+            return group.max { ($0.windowMinutes ?? 0) < ($1.windowMinutes ?? 0) } ?? Self.shown(group, alert: alert)
+        }
     }
+    var isHidden: Bool { entry?.hidden ?? false }
     func showsShortWindow(now: Date, alert: Double) -> Bool {
         guard let shown = display(now: now, alert: alert) else { return false }
         let group = Self.current(pools.isEmpty ? windows : windows(in: shown.pool), now: now)
@@ -405,7 +480,10 @@ extension QuotaReport.Account {
         default: 2
         }
     }
-    var title: String { [providerName ?? Fmt.human(provider), displayName].compactMap { $0 }.joined(separator: " · ") }
+    var title: String {
+        if let name = entry?.name { return name }
+        return [providerName ?? Fmt.human(provider), displayName].compactMap { $0 }.joined(separator: " · ")
+    }
     var planTitle: String? { planLabel ?? plan.map(Fmt.human) }
 }
 enum Fmt {
@@ -577,3 +655,5 @@ enum Fmt {
         return back.map { "Allowance " + $0 } ?? "Allowance spent"
     }
 }
+
+extension String { fileprivate var nilIfEmpty: String? { isEmpty ? nil : self } }

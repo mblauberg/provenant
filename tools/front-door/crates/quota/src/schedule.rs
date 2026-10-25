@@ -383,6 +383,7 @@ pub fn report(
                 .as_ref()
                 .is_some_and(|c| c.deadline_unix_seconds > now),
             error: record.last_error,
+            display: None,
         });
     }
     let sources = detections
@@ -425,6 +426,7 @@ pub fn report(
         refreshing_ids,
         next_due_unix_seconds,
         report_path: path,
+        display: crate::Display::default(),
     })
 }
 

@@ -565,6 +565,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]
@@ -577,6 +578,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

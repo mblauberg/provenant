@@ -34,6 +34,17 @@ pub struct Registration {
     pub billing_anchor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
+    /// Menu bar name; trimmed, non-empty, at most 64 characters, no control characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Menu bar position, 1..=999; absent means unordered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u16>,
+    /// Per-account headline override; absent follows the global choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline: Option<provenant_quota::Headline>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,14 +84,20 @@ impl DomainConfig for Settings {
                             a.adapter == e.adapter && (a.label == e.label || a.key == e.key)
                         })
                 });
+        let mut errors = Vec::new();
         if bad {
-            vec![SectionError {
+            errors.push(SectionError {
                 field: "entries".into(),
                 code: "registration",
-            }]
-        } else {
-            Vec::new()
+            });
         }
+        if self.entries.iter().any(|(id, e)| !valid_display(id, e)) {
+            errors.push(SectionError {
+                field: "entries".into(),
+                code: "display",
+            });
+        }
+        errors
     }
 }
 fn valid_entry(entry: &Registration) -> bool {
@@ -101,6 +118,15 @@ fn valid_entry(entry: &Registration) -> bool {
                 std::path::Component::ParentDir | std::path::Component::CurDir
             )
         })
+}
+/// Display fields only; the entry id must also be usable as a quota icon reference.
+fn valid_display(id: &str, entry: &Registration) -> bool {
+    provenant_quota::valid_icon(id)
+        && entry.display_name.as_deref().is_none_or(valid_display_name)
+        && entry.order.is_none_or(|o| (1..=999).contains(&o))
+}
+pub fn valid_display_name(s: &str) -> bool {
+    !s.is_empty() && s.trim() == s && s.chars().count() <= 64 && !s.chars().any(char::is_control)
 }
 pub fn label(s: &str) -> bool {
     !s.is_empty()

@@ -50,6 +50,22 @@ Inspect effective weights, pacing factors and readiness with
 `provenant route remove POOL MODEL`; restore the bundled pool with
 `provenant route reset POOL`.
 
+## Quota menu display
+
+The menu bar reads display choices from `quota show --json`. Per account, set
+them with `provenant accounts set <account> [--display-name NAME] [--hidden
+true|false] [--order N] [--headline auto|5h|weekly|default]`. `<account>` is an
+entry id such as `claude-work` or a label unique across adapters. An empty
+`--display-name`, `--order 0` and `--headline default` clear the field. Stored
+as `display_name`, `hidden`, `order` (1 to 999) and `headline` on
+`[domains.accounts.entries.<id>]`.
+
+Globally, `provenant quota display [--headline auto|5h|weekly] [--icon
+most_constrained|<account>]` writes `[domains.quota.display]` and returns the
+quota report. Reports carry a top-level `display` block and a per-row `display`
+block (`id`, `name`, `hidden`, `order`, `headline`). Hidden accounts and order
+are not applied by the CLI; the app does that.
+
 ## Chair account switching
 
 Claude chair switching is opt-in and has no daemon. Register each account with

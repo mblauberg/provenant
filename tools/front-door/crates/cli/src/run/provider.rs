@@ -121,6 +121,10 @@ fn prepare_with(
                 priority: None,
                 billing_anchor: None,
                 limits: None,
+                display_name: None,
+                hidden: false,
+                order: None,
+                headline: None,
             });
         }
     }
@@ -137,6 +141,10 @@ fn prepare_with(
                 priority: None,
                 billing_anchor: None,
                 limits: None,
+                display_name: None,
+                hidden: false,
+                order: None,
+                headline: None,
             });
         }
     }
