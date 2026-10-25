@@ -87,8 +87,6 @@ pub enum WorktreeError {
     Repository(#[from] RepoError),
     #[error(transparent)]
     PathWire(#[from] PathWireError),
-    #[error(transparent)]
-    Permissions(#[from] crate::permissions::PermissionError),
 }
 
 /// Dependencies at the actual OS and utility seams. The caller supplies the
@@ -1487,7 +1485,10 @@ fn remove_tree(
         }
         WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
     }
-    let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)?;
+    // A cache that cannot be derived must not block removal; warn and skip it.
+    let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
+        .map_err(|error| warn_cache_removal(&error))
+        .ok();
     let verified_path = locked.verified.path().to_path_buf();
     execute_mutation(
         context,
@@ -1500,8 +1501,9 @@ fn remove_tree(
     tombstone_identity(&locked)?;
     // Keep writer exclusion through cache detachment and verified deletion.
     // Cleanup remains best-effort after Git has removed the worktree.
-    if let Err(error) =
-        crate::permissions::prune_worktree_cargo_cache(context.home, &cargo_cache.path)
+    if let Some(cargo_cache) = cargo_cache
+        && let Err(error) =
+            crate::permissions::prune_worktree_cargo_cache(context.home, &cargo_cache.path)
     {
         warn_cache_removal(&error);
     }
