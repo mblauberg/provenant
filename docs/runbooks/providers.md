@@ -26,12 +26,13 @@ worktrees keep per-lane targets (`provenant worktree remove` and
 `provenant gc` prune the lane caches), because a target shared across
 worktrees can run another checkout's stale test binaries.
 
-A writer can exec build scripts and other binaries under any directory it holds
-write access to, such as a path declared with `--write-root DIR`. An env var
-alone grants nothing, and the lane then fails with "operation not permitted".
-Fabric, manifest, nested and `--host` dispatch cannot pass `--write-root`, so
-declare the directory in `[domains.run] writer_writes` instead; see
-[configuration](configuration.md#writer-extra-write-paths). Its entries are
+A writer can exec build scripts and other binaries under its write roots
+(`--write-root DIR` or `writer_writes`), but not in scratch, its `TMPDIR` or
+other state it can write. An env var alone grants nothing, and the lane then
+fails with "operation not permitted". Fabric, manifest, nested and `--host`
+dispatch cannot pass `--write-root`, so declare the directory in
+`[domains.run] writer_writes` instead, in the peer's own config for `--host`;
+see [configuration](configuration.md#writer-extra-write-paths). Its entries are
 used as written and must be real paths (`/private/tmp`, not `/tmp`).
 
 Writers hold no Git credentials, and remote-tracking refs and shared config are
