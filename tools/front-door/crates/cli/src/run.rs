@@ -637,8 +637,9 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
         (None, true) if !writer => Some(run::NetworkAccess::Local),
         (None, _) => None,
     };
+    // A first dispatch can precede the state root's creation; compare lexically then.
     let state = provenant_supervisor::fs::canonicalize(state_root)
-        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+        .unwrap_or_else(|_| state_root.to_path_buf());
     let resolve = |paths: &[PathBuf], flag: &str| {
         paths
             .iter()
