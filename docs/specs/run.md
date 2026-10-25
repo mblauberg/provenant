@@ -1,10 +1,10 @@
 # Execution: runs
 
 Status: proposed for chair acceptance and the command-tree freeze in
-`design/cli.md`. Author route: `codex/gpt-6.1-sol@high`, via Fabric.
-Governing rules: [PORTING.md v7](../PORTING.md), especially R0, R1 and R9;
-dependencies: [ADR 0028](../../../adr/0028-rust-port-dependencies.md), decision 3,
-and PORTING R6. The [cross-area decisions](README.md#cross-area-decisions) bind
+`cli.md`. Author route: `codex/gpt-6.1-sol@high`, via Fabric.
+Governing rules: [PORTING.md v7](rust-workspace.md), especially R0, R1 and R9;
+dependencies: [ADR 0028](../adr/0028-rust-port-dependencies.md), decision 3,
+and PORTING R6. The [cross-area decisions](README.md#cross-cutting-decisions) bind
 ownership, layout, commands, waits and telemetry.
 Audience: the `provenant-run` build lane and the Fabric, routing and supervisor
 owners. Names below are proposed Rust interfaces, not existing APIs.
@@ -93,7 +93,7 @@ never runtime dependencies. No credentials or authentication stores were read.
 
 The binding subtree is top-level `provenant dispatch`, `lanes [--wait SECONDS]`,
 `output`, `cancel`, `resume` and `reconcile`. There is no `run`, `fabric run`,
-`fabric lanes` or supervisor control subtree. `design/cli.md` freezes flags;
+`fabric lanes` or supervisor control subtree. `cli.md` freezes flags;
 Fabric owns MCP registration/rendering and routes requests to the same run API.
 Every command accepts `--json` and the state override from the shared decisions.
 
@@ -107,7 +107,7 @@ Every command accepts `--json` and the state override from the shared decisions.
 | `reconcile` | Exact runs (mapped to their operations) or project-scoped recovery scan, and optional typed decision for uncertain work. Recover queued scheduler work, reattach/check holders, finish pending publication and repair summaries/events; never blindly replay an uncertain launch. |
 
 CLI waits take an explicit 1–14400 seconds; MCP 1–55. There is no default,
-and zero is not a wait budget. `design/cli.md` owns the exact flags. Fabric's earlier 3600/30 caps are superseded by the shared Waits
+and zero is not a wait budget. `cli.md` owns the exact flags. Fabric's earlier 3600/30 caps are superseded by the shared Waits
 row. `wait(Any|All)` snapshots the selected set at entry, excluding caller and
 ancestors; later launches belong to the next wait. Any returns on the next
 unseen terminal/InputRequired; All returns when all are terminal **or any is
@@ -162,7 +162,7 @@ A provider timeout is recorded as `timed_out`, distinct from reader expiry.
 
 ## Records, layout and publication
 
-`StateRoot` comes from `design/state.md`; this area does not pick a second
+`StateRoot` comes from `state.md`; this area does not pick a second
 home or fall back to an old root. All paths below are relative to that fresh
 root. Run IDs are opaque core IDs, not timestamp suffixes or PID aliases.
 
@@ -208,7 +208,7 @@ the original `--state-dir` for identity/config. The confinement grant covers
 only the child subtree, shared Fabric SQLite files and required lock/helper
 state, with no child-setup symlink exception or parent `runs/` write grant.
 The child store is lane-writable ingress, not independent evidence against its
-submitting lane. See [lane MCP and nesting](execution-route.md#lane-mcp-hooks-and-nesting-2026-10-24).
+submitting lane. See [lane MCP and nesting](routing.md#lane-mcp-hooks-and-nesting-2026-10-24).
 
 This shared attempt path and these supervisor filenames are the run/supervisor
 contract, under the binding top-level Layout row; there is no
@@ -919,7 +919,7 @@ scheduler daemon. Within that, the lane decided:
   summary stay uncertain; absence of an attempt-local reader reservation
   cannot withdraw them. A retained
   reservation after a provider's terminal commit also stays uncertain. The chair recovery
-  procedure is in [worktrees](../../../worktrees.md#writer-custody-recovery).
+  procedure is in [worktrees](../worktrees.md#writer-custody-recovery).
   Reader fences on terminal attempts stay, because attempt directories are
   never reused. A per-attempt or per-run error is reported in
   place and the scan continues; anything left uncertain, unlaunched or in

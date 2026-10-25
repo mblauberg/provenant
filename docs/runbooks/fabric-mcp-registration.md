@@ -7,5 +7,5 @@ so a client registration must name `fabric mcp`.
 
 Installation registers the transport for each selected harness and preserves
 unrelated client configuration; there is no separate registry editor. See the
-[state design](../specs/rust-port/design/state.md) and the
-[Fabric design](../specs/rust-port/design/fabric.md).
+[state design](../specs/state.md) and the
+[Fabric design](../specs/fabric.md).

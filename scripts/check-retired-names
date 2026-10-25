@@ -27,10 +27,13 @@ delivery-profile-scenarios
 security-evidence.json
 skills/_shared'
 hits=$(printf '%s\n' "$names" | git grep -n -I -F -f - -- . \
-  ':(exclude)docs/specs/rust-port/design' ':(exclude)docs/adr' \
+  ':(exclude)docs/specs/cli.md' ':(exclude)docs/specs/state.md' \
+  ':(exclude)docs/specs/routing.md' ':(exclude)docs/specs/run.md' \
+  ':(exclude)docs/specs/telemetry.md' ':(exclude)docs/specs/fabric.md' \
+  ':(exclude)docs/specs/supervisor.md' ':(exclude)docs/specs/workflow.md' ':(exclude)docs/adr' \
   ':(exclude)docs/research' ':(exclude)assets/install/legacy.toml' \
   ':(exclude)scripts' \
-  ':(exclude)docs/specs/rust-port/README.md' ':(exclude)tools/front-door/crates/config/src/managed_tests.rs' || true)
+  ':(exclude)tools/front-door/crates/config/src/managed_tests.rs' || true)
 if [ -n "$hits" ]; then
   printf '%s\n' "$hits"
   echo "check-retired-names: retired names above must be removed" >&2

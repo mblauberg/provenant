@@ -2,7 +2,7 @@
 
 > Legacy source references below describe the pre-rewrite implementation.
 > Use `provenant help` for current Rust commands and the accepted
-> [Rust designs](../specs/rust-port/design/README.md) for owners.
+> [Rust designs](../specs/README.md) for owners.
 
 **Status:** Accepted 2026-08-29 (issue [#682](https://github.com/mblauberg/provenant/issues/682)); amended by [ADR
 0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01

@@ -1,8 +1,8 @@
 # Execution: routing, providers and quota
 
-Status: proposed for chair acceptance under [PORTING v7](../PORTING.md).
+Status: proposed for chair acceptance under [PORTING v7](rust-workspace.md).
 Author route: `codex/gpt-6.1-sol@high` via Fabric.
-The [cross-area decisions](README.md#cross-area-decisions) bind this design.
+The [cross-area decisions](README.md#cross-cutting-decisions) bind this design.
 
 Provider step 1 status: Agy `--print-timeout` handling remains a gap. The current
 Rust `finish(ExitObservation)` has no artifacts/stderr input, so it cannot
@@ -37,7 +37,7 @@ Transcripts and run recordings are research inputs only, never runtime state.
 | Real probe, cooldown, account-pin and endpoint use 0 | Drop public capability/cooldown verbs, canary inference, account pins and endpoint profiles. Required adapter preflight and quota reads remain internal effects. |
 | Confidential true 1,155 times, never false | Confidentiality is always on. No flag or unsafe fallback. |
 | Kiro dispatches 0; no v3 recording | Drop Kiro, alongside dormant Copilot/Pi/Herdr execution. Keep Claude, Codex, Cursor, Agy and OpenCode v2 only when fixture-backed and confined. |
-| Council observed the running `dev.provenant.quota-menubar` LaunchAgent | Keep `quota show\|tick`. [QuotaModel.swift:123](../../../../apps/quota-menubar/Sources/QuotaMenuBar/QuotaModel.swift#L123) calls `quota tick --trigger TRIGGER --power POWER --json`; the [app README](../../../../apps/quota-menubar/README.md) defines its LaunchAgent. |
+| Council observed the running `dev.provenant.quota-menubar` LaunchAgent | Keep `quota show\|tick`. [QuotaModel.swift:123](../../apps/quota-menubar/Sources/QuotaMenuBar/QuotaModel.swift#L123) calls `quota tick --trigger TRIGGER --power POWER --json`; the [app README](../../apps/quota-menubar/README.md) defines its LaunchAgent. |
 
 Also drop hidden model classification, shadow stages, the routing-context hook,
 `extract`/Ajv, old-tier migration, typo guessing, manual credit/history/forecast

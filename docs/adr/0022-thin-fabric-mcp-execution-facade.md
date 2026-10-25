@@ -18,7 +18,7 @@ runtime ownership.
 
 Fabric MCP exposes `fabric_submit` for one or more ordinary configured-provider
 tasks and `fabric_graph` for checkpointed graph workflows. The typed catalogue
-and current request contracts live in the [Rust Fabric design](../specs/rust-port/design/fabric.md#cli-and-mcp-surfaces).
+and current request contracts live in the [Rust Fabric design](../specs/fabric.md#cli-and-mcp-surfaces).
 Submission uses `op: submission`, a `tasks` list, `concurrency` and an
 `operation_id`. Route preferences are carried per task. Writers declare
 `access: worktree_write` and a verified registered `worktree`; read-only tasks

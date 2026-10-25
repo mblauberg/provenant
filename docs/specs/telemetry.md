@@ -1,7 +1,7 @@
 # Telemetry design
 
-Build contract for the one-pass Rust rewrite under [PORTING.md v7](../PORTING.md).
-The [cross-area decisions](README.md#cross-area-decisions) bind state, commands,
+Build contract for the one-pass Rust rewrite under [PORTING.md v7](rust-workspace.md).
+The [cross-area decisions](README.md#cross-cutting-decisions) bind state, commands,
 records and cut-over. Author route: `codex/gpt-6.1-sol@high` via Fabric.
 
 ## Purpose and removals
@@ -166,7 +166,7 @@ counts (`u64`), reviewer and `delivery_id`. Usage categories are optional, disjo
 uncached input, cache read, cache write, output excluding reasoning, and
 reasoning counts; unknown values stay unknown. `StatsReport` is `Serialize`-only.
 
-Run owns the timing fields ([execution-run](execution-run.md#records-layout-and-publication)).
+Run owns the timing fields ([execution-run](run.md#records-layout-and-publication)).
 `queued_at` is when admission accepted the request, `started_at` when admission
 granted the ticket, and `provider_ms` the supervisor-observed provider execution
 time. `started_at` and `provider_ms` are absent when the attempt never started or
