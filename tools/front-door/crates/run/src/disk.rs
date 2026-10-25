@@ -1,6 +1,9 @@
 //! Read-only classification of physical run-store contents.
 use crate::{Result, RunStore};
-use provenant_supervisor::{disk::DiskReport, fs::Directory};
+use provenant_supervisor::{
+    disk::{DiskEntry, DiskReport},
+    fs::Directory,
+};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -52,6 +55,12 @@ fn scan_store(
     terminal: &BTreeMap<(String, String), bool>,
     report: &mut DiskReport,
 ) {
+    let mut other = DiskEntry {
+        class: "other_state".into(),
+        path: path.into(),
+        ..Default::default()
+    };
+    let mut observed_other = false;
     for name in entries(root, path, report) {
         let child = path.join(&name);
         if name == "runs" {
@@ -73,8 +82,12 @@ fn scan_store(
             .to_str()
             .is_some_and(|name| name.starts_with("run.sqlite3"))
         {
-            report.measure_at("other_state", root, &name, &child);
+            report.measure_into_at(&mut other, root, &name, &child);
+            observed_other = true;
         }
+    }
+    if observed_other {
+        report.add_rollup(other);
     }
 }
 
@@ -89,10 +102,22 @@ fn scan_runs(
         let Some(run) = open(runs, &run_name, path, report) else {
             continue;
         };
+        let mut other = DiskEntry {
+            class: "other_state".into(),
+            path: run_path.clone(),
+            ..Default::default()
+        };
+        let mut retained = DiskEntry {
+            class: "attempt_retained".into(),
+            path: run_path.clone(),
+            ..Default::default()
+        };
+        let (mut observed_other, mut observed_retained) = (false, false);
         for name in entries(&run, &run_path, report) {
             let child = run_path.join(&name);
             if name != "attempts" {
-                report.measure_at("other_state", &run, &name, &child);
+                report.measure_into_at(&mut other, &run, &name, &child);
+                observed_other = true;
                 continue;
             }
             let Some(attempts) = open(&run, &name, &run_path, report) else {
@@ -117,14 +142,32 @@ fn scan_runs(
                         ) => "attempt_retained",
                         _ => "other_state",
                     };
-                    if let Some(index) =
-                        report.measure_at(class, &attempt, &part, &attempt_path.join(&part))
-                        && class == "attempt_tmp"
-                    {
-                        report.entries[index].leak = is_terminal;
+                    let part_path = attempt_path.join(&part);
+                    match class {
+                        "attempt_tmp" => {
+                            if let Some(index) =
+                                report.measure_at(class, &attempt, &part, &part_path)
+                            {
+                                report.entries[index].leak = is_terminal;
+                            }
+                        }
+                        "attempt_retained" => {
+                            report.measure_into_at(&mut retained, &attempt, &part, &part_path);
+                            observed_retained = true;
+                        }
+                        _ => {
+                            report.measure_into_at(&mut other, &attempt, &part, &part_path);
+                            observed_other = true;
+                        }
                     }
                 }
             }
+        }
+        if observed_other {
+            report.add_rollup(other);
+        }
+        if observed_retained {
+            report.add_rollup(retained);
         }
     }
 }
@@ -156,6 +199,7 @@ fn open(
 ) -> Option<Directory> {
     match parent.open_verified_directory(name) {
         Ok(directory) => Some(directory),
+        Err(error) if error.is_not_found() => None,
         Err(error) => {
             report.error(path.join(name), error.to_string());
             None
@@ -200,13 +244,12 @@ mod tests {
             .join(input.attempts[0].attempt_id.to_string());
         fs::create_dir_all(child.join("runs/nested/attempts/child/tmp"))?;
         fs::write(child.join("run.sqlite3"), "opaque child store")?;
-        writer.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         let before = snapshot(state)?;
         let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("missing store")?;
         let mut report = DiskReport::new(state.to_owned(), 0);
         reader.disk_usage(&mut report)?;
         drop(reader);
-        assert_eq!(snapshot(state)?, before);
+        assert_unchanged_except_sqlite_companions(&before, &snapshot(state)?);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(
             report
@@ -222,7 +265,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.class == "attempt_retained")
                 .count(),
-            5
+            1
         );
         assert_eq!(
             report
@@ -248,13 +291,12 @@ mod tests {
         )?;
         fs::create_dir(attempt.join("tmp"))?;
         fs::write(attempt.join("tmp/keep"), "leak")?;
-        writer.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         let before = snapshot(state)?;
         let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("missing store")?;
         let mut report = DiskReport::new(state.to_owned(), 0);
         reader.disk_usage(&mut report)?;
         drop(reader);
-        assert_eq!(snapshot(state)?, before);
+        assert_unchanged_except_sqlite_companions(&before, &snapshot(state)?);
         assert!(
             report
                 .entries
@@ -268,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_reader_refuses_wal_without_changing_sidecars() -> TestResult {
+    fn disk_reader_reads_live_wal_without_durable_writes() -> TestResult {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -276,11 +318,39 @@ mod tests {
         let writer = RunStore::open(&context, &call)?;
         writer.create(&input(), &call)?;
         let before = snapshot(context.state_root.as_path())?;
-        assert!(RunStore::open_disk_read_only(&context, &call).is_err());
-        assert!(
-            snapshot(context.state_root.as_path())? == before,
-            "disk reader modified state"
+        let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("missing store")?;
+        let mut report = DiskReport::new(context.state_root.as_path().into(), 0);
+        reader.disk_usage(&mut report)?;
+        drop(reader);
+        assert_unchanged_except_sqlite_companions(
+            &before,
+            &snapshot(context.state_root.as_path())?,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn disk_reader_never_creates_missing_state_or_database() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let state = context.state_root.as_path();
+        assert!(RunStore::open_disk_read_only(&context, &call)?.is_none());
+        assert!(!state.exists());
+        fs::create_dir(state)?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(state, fs::Permissions::from_mode(0o700))?;
+        assert!(RunStore::open_disk_read_only(&context, &call)?.is_none());
+        assert_eq!(fs::read_dir(state)?.count(), 0);
+        let writer = RunStore::open(&context, &call)?;
+        drop(writer);
+        let before = snapshot(state)?;
+        let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("store")?;
+        let mut report = DiskReport::new(state.into(), 0);
+        reader.disk_usage(&mut report)?;
+        drop(reader);
+        assert_unchanged_except_sqlite_companions(&before, &snapshot(state)?);
         Ok(())
     }
 
@@ -313,6 +383,9 @@ mod tests {
         let temporary = state.join("runs/run/attempts/attempt/tmp");
         fs::create_dir_all(&temporary)?;
         fs::write(temporary.join("keep"), "unindexed")?;
+        let target = temporary.join("candidate-0/target");
+        fs::create_dir_all(&target)?;
+        fs::write(target.join("payload"), vec![7; 16384])?;
         fs::create_dir(state.join("lane-caches"))?;
         fs::write(state.join("lane-caches/keep"), "outside run classification")?;
         let before = snapshot(state)?;
@@ -326,10 +399,80 @@ mod tests {
                 .iter()
                 .any(|entry| entry.class == "attempt_tmp"
                     && entry.path == temporary
+                    && entry.allocated_bytes >= 16384
                     && entry.leak.is_none())
         );
         assert!(!state.join("run.sqlite3").exists());
         Ok(())
+    }
+
+    #[test]
+    fn disk_usage_rolls_many_attempts_up_per_run() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let state = context.state_root.as_path();
+        for index in 0..100 {
+            let attempt = state.join(format!("runs/run/attempts/{index}"));
+            fs::create_dir_all(attempt.join("provider-state"))?;
+            for part in [
+                "result.md",
+                "process-exit.json",
+                "prompt.md",
+                "stdout.log",
+                "stderr.log",
+            ] {
+                fs::write(attempt.join(part), vec![1; 4096])?;
+            }
+            fs::write(attempt.join("provider-state/keep"), vec![2; 4096])?;
+        }
+        let before = snapshot(state)?;
+        let mut report = DiskReport::new(state.into(), 0);
+        RunStore::disk_usage_unindexed(&context.state_root, &mut report)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.entries.len(), 2);
+        assert!(
+            report
+                .entries
+                .iter()
+                .all(|entry| entry.path == state.join("runs/run"))
+        );
+        assert!(
+            report
+                .entries
+                .iter()
+                .map(|entry| entry.allocated_bytes)
+                .sum::<u64>()
+                >= 600 * 4096
+        );
+        assert_eq!(snapshot(state)?, before);
+        Ok(())
+    }
+
+    fn assert_unchanged_except_sqlite_companions(
+        before: &BTreeMap<std::path::PathBuf, Vec<u8>>,
+        after: &BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        let durable = |entries: &BTreeMap<std::path::PathBuf, Vec<u8>>| {
+            entries
+                .iter()
+                .filter(|(path, _)| {
+                    let companion = matches!(
+                        path.file_name().and_then(OsStr::to_str),
+                        Some("run.sqlite3-shm" | "run.sqlite3-wal")
+                    );
+                    !(companion
+                        && path
+                            .parent()
+                            .is_some_and(|parent| before.contains_key(&parent.join("run.sqlite3"))))
+                })
+                .map(|(path, bytes)| (path.clone(), bytes.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            durable(before),
+            durable(after),
+            "disk reader modified durable state"
+        );
     }
 
     #[cfg(unix)]

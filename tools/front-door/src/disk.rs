@@ -265,6 +265,12 @@ fn other_state(path: &Path, report: &mut DiskReport) {
             return;
         }
     };
+    let mut other = provenant_supervisor::disk::DiskEntry {
+        class: "other_state".into(),
+        path: path.into(),
+        ..Default::default()
+    };
+    let mut observed = false;
     for name in names {
         if name != "runs"
             && name != "children"
@@ -272,8 +278,12 @@ fn other_state(path: &Path, report: &mut DiskReport) {
                 .to_str()
                 .is_some_and(|name| name.starts_with("run.sqlite3"))
         {
-            report.measure_at("other_state", &directory, &name, &path.join(&name));
+            report.measure_into_at(&mut other, &directory, &name, &path.join(&name));
+            observed = true;
         }
+    }
+    if observed {
+        report.add_rollup(other);
     }
 }
 
@@ -333,6 +343,9 @@ mod tests {
             "unindexed",
         )?;
         fs::write(rig.state.join("config.toml"), "schema_version = 1\n")?;
+        for index in 0..50 {
+            fs::write(rig.state.join(format!("metadata-{index}")), "state")?;
+        }
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
         // A project identity need not have any worktree registry yet.
@@ -344,6 +357,7 @@ mod tests {
         assert!(snapshot(&rig.root)? == before, "report changed files");
         assert_eq!(report.totals["worktree"].count, 2);
         assert_eq!(report.totals["attempt_tmp"].count, 1);
+        assert_eq!(report.totals["other_state"].count, 1);
         let linked = report
             .entries
             .iter()

@@ -5,7 +5,35 @@ use std::{
     collections::{BTreeMap, HashSet},
     ffi::OsStr,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
+
+struct WalkBudget {
+    remaining: usize,
+    started: Instant,
+    reported: bool,
+}
+
+impl Default for WalkBudget {
+    fn default() -> Self {
+        Self {
+            remaining: 1_000_000,
+            started: Instant::now(),
+            reported: false,
+        }
+    }
+}
+
+impl WalkBudget {
+    fn reached_limit(&mut self, report: &mut DiskReport, path: &Path) -> bool {
+        let exhausted = self.remaining == 0 || self.started.elapsed() >= Duration::from_secs(10);
+        if exhausted && !self.reported {
+            report.error(path, "walk entry or time budget reached");
+            self.reported = true;
+        }
+        exhausted
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct DiskVolume {
@@ -43,13 +71,13 @@ pub struct DiskEntry {
     pub parts: Option<DiskParts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim: Option<String>,
-    #[serde(skip)]
-    target_contents_excluded: bool,
 }
 
 impl DiskEntry {
-    pub fn target_contents_excluded(&self) -> bool {
-        self.target_contents_excluded
+    fn absorb(&mut self, other: Self) {
+        self.allocated_bytes = self.allocated_bytes.saturating_add(other.allocated_bytes);
+        self.unshared_bytes = self.unshared_bytes.saturating_add(other.unshared_bytes);
+        self.newest_write_ns = self.newest_write_ns.max(other.newest_write_ns);
     }
 }
 
@@ -74,10 +102,11 @@ pub struct DiskReport {
     pub entries: Vec<DiskEntry>,
     pub totals: BTreeMap<String, DiskTotal>,
     pub errors: Vec<DiskError>,
-    // One set spans every owner, so overlapping roots and hard links contribute
-    // bytes only to their first observation. Directories are included too.
+    // Only multiply linked non-directories need inode deduplication.
     #[serde(skip)]
     seen: HashSet<(u64, u64)>,
+    #[serde(skip)]
+    measured_worktrees: BTreeMap<PathBuf, (i128, bool)>,
 }
 
 impl DiskReport {
@@ -98,6 +127,7 @@ impl DiskReport {
             totals: BTreeMap::new(),
             errors: Vec::new(),
             seen: HashSet::new(),
+            measured_worktrees: BTreeMap::new(),
         }
     }
 
@@ -130,6 +160,32 @@ impl DiskReport {
         path: &Path,
     ) -> Option<usize> {
         self.measure_node(class, parent, name, path, false)
+    }
+
+    /// Add a disjoint inventory part to a caller-owned aggregate. Tagged caches
+    /// remain separate entries. No per-file report rows are retained.
+    pub fn measure_into_at(
+        &mut self,
+        entry: &mut DiskEntry,
+        parent: &Directory,
+        name: &OsStr,
+        path: &Path,
+    ) {
+        let mut budget = WalkBudget::default();
+        self.walk(parent, name, path, entry, false, 0, &mut budget);
+    }
+
+    /// Publish an aggregate, combining shared host-root observations.
+    pub fn add_rollup(&mut self, entry: DiskEntry) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.class == entry.class && existing.path == entry.path)
+        {
+            existing.absorb(entry);
+        } else {
+            self.entries.push(entry);
+        }
     }
 
     pub fn measure_lane_at(
@@ -170,8 +226,21 @@ impl DiskReport {
             parts: lane.then(DiskParts::default),
             ..DiskEntry::default()
         };
-        if !self.walk(parent, name, path, &mut entry, lane, 0) {
+        let mut budget = WalkBudget::default();
+        let errors_before = self.errors.len();
+        let entries_before = self.entries.len();
+        if !self.walk(parent, name, path, &mut entry, lane, 0, &mut budget) {
             return None;
+        }
+        if class == "worktree" {
+            // Include separately classified tagged caches in the conservative
+            // timestamp inherited by later overlapping inventories.
+            let newest = self.entries[entries_before..]
+                .iter()
+                .map(|entry| entry.newest_write_ns)
+                .fold(entry.newest_write_ns, i128::max);
+            self.measured_worktrees
+                .insert(path.into(), (newest, self.errors.len() == errors_before));
         }
         let index = self.entries.len();
         self.entries.push(entry);
@@ -192,9 +261,12 @@ impl DiskReport {
 
     fn claim(&mut self, entry: &mut DiskEntry, metadata: Metadata) -> bool {
         entry.newest_write_ns = entry.newest_write_ns.max(metadata.modified_ns);
-        self.seen.insert((metadata.device, metadata.inode))
+        metadata.kind == FileKind::Directory
+            || metadata.links <= 1
+            || self.seen.insert((metadata.device, metadata.inode))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
         parent: &Directory,
@@ -203,21 +275,35 @@ impl DiskReport {
         entry: &mut DiskEntry,
         lane: bool,
         depth: usize,
+        budget: &mut WalkBudget,
     ) -> bool {
+        if let Some((newest, complete)) = path
+            .ancestors()
+            .find_map(|root| self.measured_worktrees.get(root))
+            .copied()
+        {
+            entry.newest_write_ns = entry.newest_write_ns.max(newest);
+            if !complete {
+                self.error(path, "overlapping worktree measurement was incomplete");
+            }
+            return true;
+        }
+        if budget.reached_limit(self, path) {
+            return false;
+        }
+        budget.remaining -= 1;
         let metadata = match parent.metadata_at(name, false) {
             Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => return false,
             Err(error) => {
                 self.error(path, error);
                 return false;
             }
         };
-        // Suppress duplicate allocation, retaining each owner's newest write.
-        if !self.claim(entry, metadata) {
-            return true;
-        }
         let child = if metadata.kind == FileKind::Directory {
             match parent.open_verified_directory(name) {
                 Ok(child) => Some(child),
+                Err(error) if error.is_not_found() => return false,
                 Err(error) => {
                     self.error(path, error);
                     return false;
@@ -227,8 +313,8 @@ impl DiskReport {
             None
         };
         // Cache tags are only read as metadata. A symlink marker is refused.
-        let host_target = !lane
-            && !(entry.class == "host_target" && entry.path == path)
+        let host_target = matches!(entry.class.as_str(), "worktree" | "other_state")
+            && !lane
             && child.as_ref().is_some_and(|dir| {
                 dir.metadata_at(OsStr::new("CACHEDIR.TAG"), false)
                     .is_ok_and(|tag| tag.kind == FileKind::Regular)
@@ -248,6 +334,7 @@ impl DiskReport {
                 &mut cache,
                 false,
                 depth,
+                budget,
             );
             self.entries.push(cache);
         } else {
@@ -260,6 +347,7 @@ impl DiskReport {
                 entry,
                 lane,
                 depth,
+                budget,
             );
         }
         true
@@ -276,41 +364,56 @@ impl DiskReport {
         entry: &mut DiskEntry,
         lane: bool,
         depth: usize,
+        budget: &mut WalkBudget,
     ) {
         let private = match parent.private_size_at(name) {
             Ok(private) => private,
+            Err(error) if error.is_not_found() => return,
             Err(error) => {
                 self.error(path, error);
                 None
             }
         };
-        self.observe(entry, metadata, private);
-        let Some(child) = child else { return };
-        // An explicit traversal boundary, including targets nested in scratch.
-        if name == "target" {
-            entry.target_contents_excluded = true;
+        // Claim only after observation: a vanished name must not suppress a
+        // surviving hard link. Duplicate names still retain their newest write.
+        if !self.claim(entry, metadata) {
             return;
         }
+        self.observe(entry, metadata, private);
+        let Some(child) = child else { return };
         if depth >= 256 {
             self.error(path, "directory depth limit reached");
             return;
         }
-        let names = match child
-            .entries()
-            .and_then(|names| names.collect::<crate::fs::Result<Vec<_>>>())
-        {
-            Ok(mut names) => {
-                names.sort();
-                names
-            }
+        let names = match child.entries() {
+            Ok(names) => names,
             Err(error) => {
                 self.error(path, error);
                 return;
             }
         };
         for name in names {
+            let name = match name {
+                Ok(name) => name,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => {
+                    self.error(path, error);
+                    break;
+                }
+            };
+            if budget.reached_limit(self, path) {
+                break;
+            }
             let before = entry.unshared_bytes;
-            self.walk(child, &name, &path.join(&name), entry, lane, depth + 1);
+            self.walk(
+                child,
+                &name,
+                &path.join(&name),
+                entry,
+                lane,
+                depth + 1,
+                budget,
+            );
             if lane && depth == 0 {
                 let bytes = entry.unshared_bytes.saturating_sub(before);
                 if let Some(parts) = &mut entry.parts {
@@ -354,20 +457,187 @@ mod tests {
     };
 
     #[test]
-    fn measurement_counts_hard_links_once_and_does_not_descend_target() -> Result<(), Box<dyn Error>>
+    fn nested_target_contents_belong_to_temporary_entry() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(temp.path().join("candidate-0/target/debug"))?;
+        fs::write(temp.path().join("candidate-0/target/CACHEDIR.TAG"), "cache")?;
+        fs::write(
+            temp.path().join("candidate-0/target/debug/payload"),
+            vec![1; 16384],
+        )?;
+        let mut report = DiskReport::new(temp.path().into(), 0);
+        let index = report
+            .measure("attempt_tmp", temp.path())
+            .ok_or("measurement")?;
+        assert!(report.entries[index].allocated_bytes >= 16384);
+        assert_eq!(report.entries.len(), 1);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn walk_budget_preserves_partial_bytes_and_reports_exhaustion() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        for index in 0..20 {
+            let child = temp.path().join(index.to_string());
+            fs::create_dir(&child)?;
+            fs::write(child.join("payload"), vec![1; 4096])?;
+        }
+        let parent = Directory::open_anchor(temp.path().parent().ok_or("parent")?)?;
+        let name = temp.path().file_name().ok_or("name")?;
+        let mut report = DiskReport::new(temp.path().into(), 0);
+        let mut entry = DiskEntry::default();
+        let mut budget = WalkBudget {
+            remaining: 5,
+            ..Default::default()
+        };
+        report.walk(
+            &parent,
+            name,
+            temp.path(),
+            &mut entry,
+            false,
+            0,
+            &mut budget,
+        );
+        assert!(entry.allocated_bytes >= 2 * 4096);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].reason.contains("budget"));
+        let mut budget = WalkBudget {
+            started: Instant::now() - Duration::from_secs(11),
+            ..Default::default()
+        };
+        assert!(!report.walk(
+            &parent,
+            name,
+            temp.path(),
+            &mut entry,
+            false,
+            0,
+            &mut budget
+        ));
+        assert_eq!(report.errors.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_directory_entry_is_benign() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("gone"), b"temporary")?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let name = directory.entries()?.next().ok_or("entry")??;
+        fs::remove_file(temp.path().join(&name))?;
+        let mut report = DiskReport::new(temp.path().into(), 0);
+        assert!(
+            report
+                .measure_at("lane_cache", &directory, &name, &temp.path().join(&name))
+                .is_none()
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vanished_name_does_not_claim_a_surviving_hard_link() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("gone");
+        fs::write(&path, b"temporary")?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let name = OsStr::new("gone");
+        let mut metadata = directory.metadata_at(name, false)?;
+        // Model three names without requiring link creation on the host.
+        metadata.links = 3;
+        fs::remove_file(&path)?;
+        let mut report = DiskReport::new(temp.path().into(), 0);
+        let mut entry = DiskEntry::default();
+        report.walk_contents(
+            &directory,
+            name,
+            &path,
+            metadata,
+            None,
+            &mut entry,
+            false,
+            0,
+            &mut WalkBudget::default(),
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(entry.allocated_bytes, 0);
+        assert!(report.claim(&mut entry, metadata));
+        Ok(())
+    }
+
+    #[test]
+    fn nested_worktree_is_counted_once_across_overlapping_roots() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let nested = temp.path().join(".worktrees/feature");
+        fs::create_dir_all(&nested)?;
+        fs::write(nested.join("payload"), vec![1; 16384])?;
+        let mut report = DiskReport::new(temp.path().into(), 0);
+        let child = report.measure("worktree", &nested).ok_or("nested")?;
+        let child_bytes = report.entries[child].allocated_bytes;
+        let parent = report.measure("worktree", temp.path()).ok_or("parent")?;
+        let expected = fs::symlink_metadata(temp.path())?.blocks() * 512
+            + fs::symlink_metadata(temp.path().join(".worktrees"))?.blocks() * 512;
+        assert_eq!(report.entries[parent].allocated_bytes, expected);
+        assert!(child_bytes >= 16384);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn state_inside_a_worktree_keeps_first_observation_ownership() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let temporary = temp.path().join("state/runs/run/attempts/a/tmp");
+        fs::create_dir_all(temporary.join("target"))?;
+        fs::write(temporary.join("target/CACHEDIR.TAG"), "cache")?;
+        fs::write(temporary.join("target/payload"), vec![1; 16384])?;
+        let mut report = DiskReport::new(temp.path().into(), 0);
+        report.measure("worktree", temp.path()).ok_or("worktree")?;
+        let before: u64 = report
+            .entries
+            .iter()
+            .map(|entry| entry.allocated_bytes)
+            .sum();
+        let newest = report
+            .entries
+            .iter()
+            .map(|entry| entry.newest_write_ns)
+            .max()
+            .ok_or("newest")?;
+        let index = report
+            .measure("attempt_tmp", &temporary)
+            .ok_or("temporary")?;
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .map(|entry| entry.allocated_bytes)
+                .sum::<u64>(),
+            before
+        );
+        assert_eq!(report.entries[index].newest_write_ns, newest);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn measurement_counts_hard_links_once_and_sizes_target_contents() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("one"), vec![7; 8192])?;
         fs::hard_link(temp.path().join("one"), temp.path().join("two"))?;
         fs::create_dir(temp.path().join("target"))?;
-        fs::write(temp.path().join("target/ignored"), vec![9; 16384])?;
+        fs::write(temp.path().join("target/payload"), vec![9; 16384])?;
         let mut report = DiskReport::new(temp.path().into(), 0);
         let index = report
             .measure_lane(temp.path())
             .ok_or("missing measurement")?;
         let expected = fs::symlink_metadata(temp.path())?.blocks() * 512
             + fs::symlink_metadata(temp.path().join("one"))?.blocks() * 512
-            + fs::symlink_metadata(temp.path().join("target"))?.blocks() * 512;
+            + fs::symlink_metadata(temp.path().join("target"))?.blocks() * 512
+            + fs::symlink_metadata(temp.path().join("target/payload"))?.blocks() * 512;
         assert_eq!(report.entries[index].allocated_bytes, expected);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let parts = report.entries[index]

@@ -76,7 +76,8 @@ impl RunStore {
         self.writer_registry = state.to_owned();
         self
     }
-    /// Opens an existing, initialised store without creating or changing files.
+    /// Opens an existing, initialised store without changing durable state.
+    /// SQLite may create or update WAL/shared-memory companions.
     /// A missing store or schema is an empty read; unsupported versions fail.
     pub fn open_read_only(
         context: &ExecutionContext,
@@ -85,9 +86,9 @@ impl RunStore {
         Self::open_read_only_mode(context, request, false)
     }
 
-    /// Inspect the main database without SQLite locks or shared-memory writes.
-    /// WAL frames are deliberately excluded. Callers must treat an outstanding
-    /// WAL as an incomplete terminal-state index and use filesystem inventory.
+    /// Inspect an existing store, including committed WAL frames. SQLite may
+    /// update read marks or create WAL/shared-memory companions of that store.
+    /// Never create a database, initialise a schema or recover a journal.
     pub fn open_disk_read_only(
         context: &ExecutionContext,
         request: &Request<'_>,
@@ -98,7 +99,7 @@ impl RunStore {
     fn open_read_only_mode(
         context: &ExecutionContext,
         request: &Request<'_>,
-        immutable: bool,
+        disk_report: bool,
     ) -> Result<Option<Self>> {
         request.retry(|| Ok(()))?;
         let mut root = Directory::root(true)?;
@@ -120,43 +121,25 @@ impl RunStore {
             Err(error) => return Err(error.into()),
         }
         companions(&root, "run.sqlite3")?;
-        if immutable {
-            for name in ["run.sqlite3-wal", "run.sqlite3-journal"] {
-                match root.metadata_at(OsStr::new(name), false) {
-                    Ok(metadata) if metadata.size > 0 => {
-                        return Err(RunError::Validation(
-                            "run database has journal data; terminal state is unknown in the read-only disk report",
-                        ));
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.is_not_found() => {}
-                    Err(error) => return Err(error.into()),
+        if disk_report {
+            match root.metadata_at(OsStr::new("run.sqlite3-journal"), false) {
+                Ok(metadata) if metadata.size > 0 => {
+                    return Err(RunError::Validation(
+                        "run database has rollback journal data; terminal state is unknown in the disk report",
+                    ));
                 }
+                Ok(_) => {}
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
             }
         }
         let path = context.state_root.as_path().join("run.sqlite3");
-        let db = if immutable {
-            use std::os::unix::ffi::OsStrExt;
-            let mut uri = String::from("file:");
-            for byte in path.as_os_str().as_bytes() {
-                uri.push_str(&format!("%{byte:02X}"));
-            }
-            uri.push_str("?mode=ro&immutable=1");
-            Connection::open_with_flags(
-                uri,
-                OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                    | OpenFlags::SQLITE_OPEN_NOFOLLOW
-                    | OpenFlags::SQLITE_OPEN_URI,
-            )?
-        } else {
-            Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            )?
-        };
+        let db = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         db.busy_timeout(Duration::ZERO)?;
         if request.retry(|| version(&db))? == 0 {
             return Ok(None);

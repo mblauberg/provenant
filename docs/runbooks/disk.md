@@ -2,7 +2,9 @@
 
 Use this procedure to inspect Provenant storage before deciding whether to run
 an existing cleanup command. It requires read access to the selected checkout,
-host state and lane-cache directories. The report itself never changes files.
+host state and lane-cache directories. The report does not change durable
+state. SQLite may create or update `run.sqlite3-shm` and `run.sqlite3-wal`
+companions of an existing store while reading its live index.
 
 1. Select the checkout and request the report:
 
@@ -28,20 +30,28 @@ host state and lane-cache directories. The report itself never changes files.
    does not run it. Foreign, legacy, refused and unmarked caches require owner
    investigation. An `attempt_tmp` entry with `leak: true` belongs to an indexed
    terminal attempt. Scratch, provider state, quarantine and logs are retained
-   output, so their presence alone is not a leak.
+   output, so their presence alone is not a leak. Retained output and other run
+   metadata are rolled up per run; remaining host state is rolled up at the
+   state root. Temporary directories and caches keep their individual paths.
 
-Every `target` directory is a traversal boundary. Its contents are absent from
-the figures, including `parts.target`; these are partial observations rather
-than full build-cache sizes. A worktree's `merged` fact describes containment in
-the main checkout's observed HEAD and grants no removal authority.
+Every `target` directory is sized, including nested attempt targets and
+`parts.target` in lane caches. Build artefacts are never parsed. Each measured
+path stops at 1,000,000 entries, ten seconds between filesystem operations or
+256 directory levels, reporting an error and the bytes observed so far. Files
+that disappear during the walk are skipped without an error. A worktree's
+`merged` fact describes containment in the main checkout's observed HEAD and
+grants no removal authority.
 
-If a journal prevents terminal-state inspection, expect an error and omitted
+Live WAL data is included in terminal-state inspection. If a rollback journal
+or an index error prevents inspection, expect an error and omitted
 `leak` fields. Let ordinary run-store owners finish their work, then report
 again. The report does not checkpoint, repair or settle state. Permission,
-cross-device or depth errors also make totals partial. A result over 1 MiB
-fails without writing an overflow artefact; select a narrower project or state
-root where appropriate.
+cross-device, depth or walk-budget errors also make totals partial. A result
+over 1 MiB fails without writing an overflow artefact. The run inventory covers
+the whole resolved host state root, so narrowing the selected project does not
+reduce its rows. Select a different state root only when it is the intended
+inventory scope.
 
-No rollback is needed because reporting changes no files. Preserve the JSON in
-your own chosen destination if evidence is required; investigate remaining
-errors with the owner of each reported path.
+No rollback is needed because reporting changes no durable state. Preserve the
+JSON in your own chosen destination if evidence is required; investigate
+remaining errors with the owner of each reported path.

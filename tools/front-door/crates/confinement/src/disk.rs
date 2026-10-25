@@ -53,14 +53,7 @@ pub fn lane_caches(home: &Path, policy: &CacheGcPolicy, report: &mut DiskReport)
         let Some(index) = report.measure_lane_at(&root, &name, &path) else {
             continue;
         };
-        let mut newest = report.entries[index].newest_write_ns;
-        // A skipped target can contain newer writes than its directory mtime.
-        // Retain it rather than claiming idle eligibility from incomplete facts.
-        if report.entries[index].target_contents_excluded()
-            && let Some(threshold) = policy.idle_before_ns
-        {
-            newest = newest.max(threshold);
-        }
+        let newest = report.entries[index].newest_write_ns;
         let classified = if report.errors.len() != errors_before
             || metadata.uid != effective_uid()
             || metadata.mode & 0o7777 != 0o700
@@ -323,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn lane_inventory_retains_targets_whose_contents_were_not_observed()
+    fn lane_inventory_can_classify_a_measured_target_as_idle()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = tempfile::tempdir()?;
         let cache = fixture
@@ -335,6 +328,7 @@ mod tests {
         std::fs::create_dir(&owner)?;
         std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
         marker(&cache, &owner)?;
+        std::fs::write(cache.join("target/payload"), vec![1; 8192])?;
         let policy = CacheGcPolicy {
             idle_before_ns: Some(i128::MAX),
             project_owners: [owner].into(),
@@ -344,8 +338,9 @@ mod tests {
         lane_caches(fixture.path(), &policy, &mut report);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.entries.len(), 1);
-        assert_eq!(report.entries[0].state.as_deref(), Some("live"));
-        assert_eq!(report.entries[0].reclaim, None);
+        assert_eq!(report.entries[0].state.as_deref(), Some("idle"));
+        assert_eq!(report.entries[0].reclaim.as_deref(), Some("gc"));
+        assert!(report.entries[0].parts.as_ref().ok_or("parts")?.target > 0);
         Ok(())
     }
 
