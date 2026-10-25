@@ -35,6 +35,14 @@ const LOG: &str = "agent.log";
 /// Bound on one relayed request; the caller's SSH budget is shorter.
 const REQUEST: Duration = Duration::from_secs(90);
 const CONCURRENT: usize = 16;
+/// Written to a connection refused at the cap. It is not a `PeerResponse`, so
+/// the caller recognises it and builds the busy reply itself; the agent never
+/// parses a request.
+const BUSY: &[u8] = b"{\"agent\":\"busy\"}\n";
+/// Pause after a failed `accept`, and the run of consecutive failures after
+/// which the agent exits so launchd restarts it.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+const ACCEPT_FAILURES: u32 = 50;
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -96,10 +104,13 @@ fn read_bounded(stream: &mut UnixStream, timeout: Duration) -> Result<Vec<u8>, A
 
 /// Where one framed request went. Nothing is sent before the connection is
 /// accepted, so only `Unreachable` may fall back to in-process handling; a
-/// failure after that is an error, never a second attempt.
+/// failure after that is an error, never a second attempt. `Busy` means the
+/// agent refused the request at its cap without reading it, so nothing ran and
+/// the caller reports a retryable busy, not an unknown outcome.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Forward {
     Replied(Vec<u8>),
+    Busy,
     Unreachable,
 }
 
@@ -113,11 +124,26 @@ pub fn forward(state: &Path, request: &[u8]) -> Result<Forward, AgentError> {
     };
     stream.set_write_timeout(Some(REQUEST))?;
     stream.set_read_timeout(Some(REQUEST))?;
-    stream.write_all(request)?;
+    if let Err(error) = stream.write_all(request) {
+        // A refusal at the cap closes unread, so a request larger than the
+        // socket buffers fails to write; the busy frame is still waiting.
+        // Only `refuse` writes it, so seeing it proves nothing ran.
+        if matches!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+        ) && read_bounded(&mut stream, Duration::from_secs(5)).is_ok_and(|reply| reply == BUSY)
+        {
+            return Ok(Forward::Busy);
+        }
+        return Err(error.into());
+    }
     stream.shutdown(Shutdown::Write)?;
     let reply = read_bounded(&mut stream, REQUEST + Duration::from_secs(5))?;
     if reply.is_empty() {
         return Err(AgentError::NoReply(directory.join(LOG)));
+    }
+    if reply == BUSY {
+        return Ok(Forward::Busy);
     }
     Ok(Forward::Replied(reply))
 }
@@ -178,6 +204,51 @@ fn relay(
     Ok(())
 }
 
+/// Refuse a connection at the cap with the busy frame. Best effort: a caller
+/// that has already gone away needs no reply. The request is then read and
+/// discarded, briefly and within the frame bound: closing with unread data
+/// resets the connection, and on Linux the reset can discard the busy frame
+/// before the caller reads it. It runs on its own thread so a slow caller
+/// cannot stall the accept loop.
+fn refuse(mut stream: UnixStream) {
+    std::thread::spawn(move || {
+        let timeout = Some(Duration::from_secs(1));
+        if stream.set_write_timeout(timeout).is_err()
+            || stream.set_read_timeout(timeout).is_err()
+            || stream.write_all(BUSY).is_err()
+        {
+            return;
+        }
+        let _ = stream.shutdown(Shutdown::Write);
+        let _ = read_bounded(&mut stream, Duration::from_secs(2));
+    });
+}
+
+/// Count consecutive `accept` failures: pause and carry on, then give up once
+/// the run is long enough that the cause (such as descriptor exhaustion) is
+/// not passing. A success resets the run.
+fn accepted<T>(
+    result: io::Result<T>,
+    failures: &mut u32,
+    pause: Duration,
+) -> Result<Option<T>, AgentError> {
+    match result {
+        Ok(value) => {
+            *failures = 0;
+            Ok(Some(value))
+        }
+        Err(error) => {
+            log(&format!("accept: {error}"));
+            *failures += 1;
+            if *failures >= ACCEPT_FAILURES {
+                return Err(error.into());
+            }
+            std::thread::park_timeout(pause);
+            Ok(None)
+        }
+    }
+}
+
 fn listen(state: &Path) -> Result<UnixListener, AgentError> {
     let directory = directory(state);
     fs::DirBuilder::new()
@@ -205,17 +276,15 @@ fn serve_state(state: &Path) -> Result<(), AgentError> {
     let program = std::env::current_exe()?;
     let cwd = crate::roots::home().map_err(|error| io::Error::other(error.to_string()))?;
     let active = Arc::new(AtomicUsize::new(0));
+    let mut failures = 0;
     loop {
-        let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
-            Err(error) => {
-                log(&format!("accept: {error}"));
-                continue;
-            }
+        let Some((stream, _)) = accepted(listener.accept(), &mut failures, ACCEPT_PAUSE)? else {
+            continue;
         };
-        // Over the cap the connection closes empty, which the caller reports.
+        // Over the cap the request is refused unread, with a busy frame.
         if active.fetch_add(1, Ordering::SeqCst) >= CONCURRENT {
             active.fetch_sub(1, Ordering::SeqCst);
+            refuse(stream);
             continue;
         }
         let (program, state, cwd, active) = (
@@ -495,6 +564,63 @@ mod tests {
             Err(AgentError::NoReply(_))
         ));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_request_refused_at_the_cap_is_busy_not_unknown() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().to_path_buf();
+        let server_state = state.clone();
+        std::thread::spawn(move || {
+            let _ = serve_state(&server_state);
+        });
+        let socket = directory(&state).join(SOCKET);
+        for _ in 0..200 {
+            if UnixStream::connect(&socket).is_ok() {
+                break;
+            }
+            std::thread::park_timeout(Duration::from_millis(25));
+        }
+        // Hold the cap with connections that never finish their request.
+        let held: Vec<UnixStream> = (0..CONCURRENT)
+            .map(|_| UnixStream::connect(&socket).unwrap())
+            .collect();
+        for _ in 0..200 {
+            if forward(&state, b"x").unwrap() == Forward::Busy {
+                break;
+            }
+            std::thread::park_timeout(Duration::from_millis(25));
+        }
+        assert_eq!(forward(&state, b"x").unwrap(), Forward::Busy);
+        // A request beyond the socket buffers must not lose the busy reply.
+        assert_eq!(
+            forward(&state, &vec![b'x'; 256 * 1024]).unwrap(),
+            Forward::Busy
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn accept_errors_pause_then_give_up_and_success_resets() {
+        use super::*;
+        let fail = || Err::<(), _>(io::Error::from_raw_os_error(24));
+        let mut failures = 0;
+        for _ in 0..ACCEPT_FAILURES - 1 {
+            assert!(matches!(
+                accepted(fail(), &mut failures, Duration::ZERO),
+                Ok(None)
+            ));
+        }
+        assert!(matches!(
+            accepted(Ok(()), &mut failures, Duration::ZERO),
+            Ok(Some(()))
+        ));
+        assert_eq!(failures, 0);
+        for _ in 0..ACCEPT_FAILURES - 1 {
+            assert!(accepted(fail(), &mut failures, Duration::ZERO).is_ok());
+        }
+        assert!(accepted(fail(), &mut failures, Duration::ZERO).is_err());
     }
 
     #[test]

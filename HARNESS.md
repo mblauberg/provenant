@@ -109,8 +109,10 @@ The bundled routing catalogue provides weighted `utility`, `junior`, `senior`,
 `principal`, `writing` and `design` pools. Each task selects one named route or
 one exact model; a pool makes a deterministic weighted draw among ready
 positive-weight members, with zero-weight members reserved as ordered fallbacks.
-Provider pacing policies and factor reporting are wired, while the factor is
-currently 1.0 pending quota-aware pacing.
+Provider pacing policies are wired: under `pace` the factor scales quota
+headroom against the remaining window (clamped to 0.25 to 2.0), and `spend` and
+`max` stay at 1.0. The `quota.pace_tolerance` knob is advisory and routing does
+not read it.
 Routing overrides live in the state root's `config.toml`. Use
 `provenant route set` or `provenant route pacing` to change routing, and
 `provenant route list` to inspect effective weights, factors and readiness.

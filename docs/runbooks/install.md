@@ -1,7 +1,7 @@
 # Build, package and install
 
 The `provenant-config` crate owns release stamping, packaging and managed-file
-installation. See the [state design](../specs/rust-port/design/state.md) for
+installation. See the [state design](../specs/state.md) for
 the full contract. A staged release contains a verified manifest and immutable
 assets. Installation publishes its receipt last, and exact desired bytes and
 links are no-ops, including after a crash before receipt publication.
@@ -27,8 +27,10 @@ cargo run --locked --example package-release -- --out "$RELEASE"
 
 Host builds use a fresh target directory. Confined writers use the separate
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>` namespace, derived from
-verified worktree and repository identities. Never use a lane cache for a host
-build.
+verified worktree and repository identities. It also holds the lane's private
+Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry`,
+`~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
+a lane cache for a host build.
 
 The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
 workspace's `target/release/provenant` without that variable. Pass
@@ -87,7 +89,7 @@ it, every recorded target of the harness.
 
 `build.rs` stamps the source and asset digests, and the packaging example
 produces the typed `release.json`. The CLI grammar is described in
-[cli.md](../specs/rust-port/design/cli.md); `help --json` describes the command
+[cli.md](../specs/cli.md); `help --json` describes the command
 surface without resolving roots or creating state.
 
 ## Migrating from a pre-1.0 install
@@ -117,4 +119,4 @@ client registration must name `fabric mcp`.
 
 Installation registers the transport for each selected harness and preserves
 unrelated client configuration; there is no separate registry editor. See the
-[Fabric design](../specs/rust-port/design/fabric.md).
+[Fabric design](../specs/fabric.md).
