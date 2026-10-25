@@ -73,6 +73,7 @@ impl CoordinationError {
                 provenant_fabric_store::Error::Decode(_)
                 | provenant_fabric_store::Error::SchemaVersion(_)
                 | provenant_fabric_store::Error::UnversionedDatabase
+                | provenant_fabric_store::Error::LegacyImportData(_)
                 | provenant_fabric_store::Error::Encode(_) => "state_corrupt",
                 _ => "io",
             },

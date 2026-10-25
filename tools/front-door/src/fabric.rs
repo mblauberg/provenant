@@ -749,6 +749,7 @@ fn store_error_code(error: &provenant_fabric_store::Error) -> &'static str {
         | StoreError::Encode(_)
         | StoreError::SchemaVersion(_)
         | StoreError::UnversionedDatabase
+        | StoreError::LegacyImportData(_)
         | StoreError::JournalMode(_) => "state_corrupt",
         _ => "io",
     }

@@ -86,18 +86,8 @@ pub enum Error {
     Encode(#[from] provenant_records::CanonicalError),
     #[error("time is outside the supported range")]
     Time(#[from] provenant_core::TimeError),
-    #[error("import exceeds its row or byte bound")]
-    ImportLimit,
-    #[error("stop the old Fabric and retry with a cleanly closed source (journal sidecars remain)")]
-    ImportNotQuiescent,
-    #[error("cannot open import source read-only at {path}; stop the old Fabric and retry")]
-    ImportReadOnly {
-        path: std::path::PathBuf,
-        #[source]
-        source: rusqlite::Error,
-    },
-    #[error("import source must be a self-contained, quiescent snapshot")]
-    ImportSource,
+    #[error("database holds legacy import data ({0}); refusing the upgrade that would discard it")]
+    LegacyImportData(&'static str),
 }
 
 fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {

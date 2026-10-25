@@ -20,6 +20,49 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/006-federation.sql"),
     include_str!("migrations/007-remove-legacy-import.sql"),
 ];
+// Index of 007, which may drop only the always-null legacy members. Anything
+// the removed import actually wrote would be lost or would stop decoding, so
+// the upgrade refuses it instead.
+const REMOVE_LEGACY_IMPORT: usize = 6;
+const LEGACY_IMPORT_DATA: &[(&str, &str)] = &[
+    ("import receipts", "SELECT EXISTS(SELECT 1 FROM imports)"),
+    (
+        "imported events",
+        "SELECT EXISTS(SELECT 1 FROM events \
+         WHERE json_extract(CAST(record AS TEXT),'$.kind')='imported')",
+    ),
+    (
+        "imported messages",
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE \
+         json_type(CAST(record AS TEXT),'$.legacy')<>'null' \
+         OR json_type(CAST(record AS TEXT),'$.legacy_output_path')<>'null' \
+         OR 'legacy' IN (json_extract(CAST(record AS TEXT),'$.conversation.scope'), \
+         json_extract(CAST(record AS TEXT),'$.reply_to.scope'), \
+         json_extract(CAST(record AS TEXT),'$.task.scope')))",
+    ),
+    (
+        "imported tasks",
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE json_type(CAST(record AS TEXT),'$.legacy')<>'null')",
+    ),
+    (
+        "imported task receipts",
+        "SELECT EXISTS(SELECT 1 FROM coordination_operations \
+         WHERE json_type(CAST(result AS TEXT),'$.task.legacy')<>'null')",
+    ),
+    (
+        "imported peer task replies",
+        "SELECT EXISTS(SELECT 1 FROM peer_operations WHERE CASE WHEN json_valid(CAST(response AS TEXT)) \
+         THEN json_type(CAST(response AS TEXT),'$.result.data.result.task.legacy')<>'null' END)",
+    ),
+];
+fn refuse_legacy_import_data(db: &Connection) -> Result<()> {
+    for (kind, sql) in LEGACY_IMPORT_DATA {
+        if db.query_row(sql, [], |row| row.get::<_, bool>(0))? {
+            return Err(Error::LegacyImportData(kind));
+        }
+    }
+    Ok(())
+}
 fn schema_version(db: &Connection) -> Result<usize> {
     // One statement reads both values from one snapshot, so a concurrent first
     // migration cannot show tables without their version.
@@ -205,6 +248,9 @@ impl Store {
                 let Some(sql) = MIGRATIONS.get(version) else {
                     return Ok(true);
                 };
+                if version == REMOVE_LEGACY_IMPORT {
+                    refuse_legacy_import_data(tx)?;
+                }
                 tx.execute_batch(sql)?;
                 tx.pragma_update(None, "user_version", (version + 1) as i64)?;
                 Ok(false)

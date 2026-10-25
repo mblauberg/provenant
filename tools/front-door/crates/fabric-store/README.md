@@ -107,6 +107,10 @@ a changed expected or candidate OID conflicts, including during an unresolved pu
 
 Migration 3 adds claims, paths and push operations after the two F1 migrations.
 Migration 4 adds persistent counters and indexed path lookup/pruning.
+Migration 7 drops the removed legacy import's table and strips its always-null
+`legacy` members from messages, tasks, coordination receipts and committed peer
+replies. Opening refuses it, and changes nothing, while any data that import
+wrote remains.
 All mutations and their events share F1's immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.

@@ -860,27 +860,150 @@ fn store_clock_controls_fence_checks_mutation_times_and_acknowledgements() {
     ));
 }
 
+// The TaskResult shape a coordination receipt stores, without the runtime crate.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+enum TaskReceipt {
+    Created { task: Task },
+}
+const PEER_TASK: &str = "/result/data/result/task";
+// A committed PeerResponse is plain serde_json in field order, not canonical.
+fn peer_reply(task: &str) -> Vec<u8> {
+    format!(
+        r#"{{"version":1,"host":"{0}","project":"{0}","result":{{"result":"coordination","data":{{"domain":"task","result":{{"result":"created","task":{task}}}}}}}}}"#,
+        "07".repeat(16)
+    )
+    .into_bytes()
+}
+// Every column that holds a serialised Task, Message or Event, as text.
+fn stored_records(db: &rusqlite::Connection) -> Vec<String> {
+    let mut result = Vec::new();
+    for query in [
+        "SELECT record FROM messages ORDER BY id",
+        "SELECT record FROM tasks ORDER BY id",
+        "SELECT record FROM events ORDER BY seq",
+        "SELECT result FROM coordination_operations ORDER BY id",
+        "SELECT response FROM peer_operations ORDER BY id",
+    ] {
+        let mut stmt = db.prepare(query).unwrap();
+        result.extend(
+            stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))
+                .unwrap()
+                .map(|r| String::from_utf8(r.unwrap()).unwrap()),
+        );
+    }
+    result
+}
+// Versions 1 to 6 carry the imports table that migration 7 drops.
+const IMPORTS_TABLE: &str = "CREATE TABLE imports(source TEXT PRIMARY KEY, \
+     project TEXT NOT NULL, legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
+     tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
+     skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT;";
+fn downgrade_to_six(store: &Store, rows: &str) {
+    store
+        .db
+        .execute_batch(&format!("{IMPORTS_TABLE} {rows} PRAGMA user_version=6;"))
+        .unwrap();
+}
+// Seed each record kind that carried the removed members: a message, a task,
+// its coordination receipt and a committed peer reply carrying that task.
+fn seed_records(f: &Fixture, store: &Store) -> (Message, Task) {
+    let request = f.request();
+    let mut m = message(f, 5);
+    m.body = "Review \"this\"\tnow é".into();
+    let mut t = task(f);
+    t.objective = "Ship \"F1\"\n é".into();
+    store.send(&m, &request).unwrap();
+    let id = provenant_core::OperationId::parse("create-1").unwrap();
+    let receipt = store
+        .coordination_operation(project(), actor(2), &id, &"create", &request, || {
+            store.create_task(&t, &request)?;
+            Ok::<_, Error>(TaskReceipt::Created { task: t.clone() })
+        })
+        .unwrap();
+    assert_eq!(receipt, TaskReceipt::Created { task: t.clone() });
+    let peer = provenant_core::OperationId::parse("peer-1").unwrap();
+    let digest = provenant_core::Digest::from_bytes([7; 32]);
+    store
+        .prepare_peer(project(), actor(2), &peer, digest, b"{}", &request)
+        .unwrap();
+    store
+        .peer_phase(project(), actor(2), &peer, PeerPhaseChange::Sent, &request)
+        .unwrap();
+    let response = peer_reply(&serde_json::to_string(&t).unwrap());
+    store
+        .peer_phase(
+            project(),
+            actor(2),
+            &peer,
+            PeerPhaseChange::Committed { response },
+            &request,
+        )
+        .unwrap();
+    (m, t)
+}
+
 #[test]
 fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     let f = Fixture::new();
-    let (m, t) = (message(&f, 5), task(&f));
     let store = f.open();
-    store.send(&m, &f.request()).unwrap();
-    store.create_task(&t, &f.request()).unwrap();
+    let (m, t) = seed_records(&f, &store);
+    let before = stored_records(&store.db);
+    // Rewrite each row as version 6 wrote it. Canonical records sort `legacy`
+    // and `legacy_output_path` into place; the peer reply's Task had `legacy`
+    // as its last field.
+    let null_members = |bytes: Vec<u8>, pointer: &str, names: &[&str]| {
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let object = value.pointer_mut(pointer).unwrap().as_object_mut().unwrap();
+        for name in names {
+            object.insert((*name).into(), serde_json::Value::Null);
+        }
+        encode(&value).unwrap()
+    };
+    let rows = [
+        (
+            "messages",
+            "record",
+            "",
+            &["legacy", "legacy_output_path"][..],
+        ),
+        ("tasks", "record", "", &["legacy"][..]),
+        (
+            "coordination_operations",
+            "result",
+            "/task",
+            &["legacy"][..],
+        ),
+    ];
+    for (table, column, pointer, names) in rows {
+        let bytes: Vec<u8> = store
+            .db
+            .query_row(&format!("SELECT {column} FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        let old = null_members(bytes, pointer, names);
+        assert!(
+            String::from_utf8(old.clone())
+                .unwrap()
+                .contains(r#""legacy":null,"#)
+        );
+        store
+            .db
+            .execute(&format!("UPDATE {table} SET {column}=?1"), [old])
+            .unwrap();
+    }
+    let task_json = serde_json::to_string(&t).unwrap();
+    let old_reply = peer_reply(&format!(
+        "{},\"legacy\":null}}",
+        task_json.strip_suffix('}').unwrap()
+    ));
+    store
+        .db
+        .execute("UPDATE peer_operations SET response=?1", [old_reply])
+        .unwrap();
+    downgrade_to_six(&store, "");
+    assert_ne!(stored_records(&store.db), before);
     drop(store);
-    // Rebuild the version-6 shape: the imports table and the null legacy members.
-    let db = rusqlite::Connection::open(f.path()).unwrap();
-    db.execute_batch(
-        "CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, \
-         legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, tasks INTEGER NOT NULL, \
-         messages INTEGER NOT NULL, skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT; \
-         UPDATE messages SET record=CAST(json_insert(CAST(record AS TEXT),'$.legacy',json('null'),\
-         '$.legacy_output_path',json('null')) AS BLOB); \
-         UPDATE tasks SET record=CAST(json_insert(CAST(record AS TEXT),'$.legacy',json('null')) AS BLOB); \
-         PRAGMA user_version=6;",
-    )
-    .unwrap();
-    drop(db);
+
     let store = f.open();
     assert_eq!(
         store
@@ -898,11 +1021,113 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
         )
         .unwrap();
     assert_eq!(imports, 0);
-    // Replaying the same records succeeds only if the stored bytes match a fresh encode.
-    store.send(&m, &f.request()).unwrap();
-    assert_eq!(store.task(t.project, t.id, &f.request()).unwrap(), t);
+    // Each replay succeeds only if the stored bytes match a fresh encode, or
+    // for receipts, only if the stored reply still decodes.
+    let request = f.request();
+    store.send(&m, &request).unwrap();
+    store.create_task(&t, &request).unwrap();
+    let id = provenant_core::OperationId::parse("create-1").unwrap();
+    let replayed = store
+        .coordination_operation(project(), actor(2), &id, &"create", &request, || {
+            Err::<TaskReceipt, Error>(Error::Invalid("receipt replay reran its effect"))
+        })
+        .unwrap();
+    assert_eq!(replayed, TaskReceipt::Created { task: t.clone() });
+    assert_eq!(
+        store
+            .coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request)
+            .unwrap(),
+        Some(TaskReceipt::Created { task: t.clone() })
+    );
+    let peer = provenant_core::OperationId::parse("peer-1").unwrap();
+    let digest = provenant_core::Digest::from_bytes([7; 32]);
+    let operation = store
+        .prepare_peer(project(), actor(2), &peer, digest, b"{}", &request)
+        .unwrap();
+    assert_eq!(operation.phase, PeerPhase::Committed);
+    let reply: serde_json::Value = provenant_records::decode(
+        operation.response.as_deref().unwrap(),
+        provenant_records::Limits::CONFIG,
+    )
+    .unwrap();
+    let task: Task = serde_json::from_value(reply.pointer(PEER_TASK).unwrap().clone()).unwrap();
+    assert_eq!(task, t);
+    assert_eq!(stored_records(&store.db), before);
     drop(store);
     drop(f.open());
+}
+
+#[test]
+fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
+    let reference = r#"json('{"id":"i","project":"p","source":"s"}')"#;
+    let cases = [
+        (
+            "import receipts",
+            "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,1,X'7B7D');".to_owned(),
+        ),
+        (
+            "imported events",
+            "UPDATE events SET record=CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
+             WHERE seq=1;"
+                .to_owned(),
+        ),
+        (
+            "imported messages",
+            format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+        (
+            "imported messages",
+            "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy_output_path','out.md') AS BLOB);"
+                .to_owned(),
+        ),
+        (
+            "imported messages",
+            format!(
+                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.reply_to',\
+                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
+            ),
+        ),
+        (
+            "imported tasks",
+            format!(
+                "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+        (
+            "imported task receipts",
+            format!(
+                "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.task.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+        (
+            "imported peer task replies",
+            format!(
+                "UPDATE peer_operations SET response=CAST(json_set(CAST(response AS TEXT),'$.result.data.result.task.legacy',{reference}) AS BLOB);"
+            ),
+        ),
+    ];
+    for (kind, rows) in cases {
+        let f = Fixture::new();
+        let store = f.open();
+        seed_records(&f, &store);
+        downgrade_to_six(&store, &rows);
+        let before = stored_records(&store.db);
+        drop(store);
+        let refused = Store::open(&f.root, &f.request());
+        assert!(
+            matches!(refused, Err(Error::LegacyImportData(found)) if found == kind),
+            "{kind}: {:?}",
+            refused.err()
+        );
+        let db = rusqlite::Connection::open(f.path()).unwrap();
+        let version: i64 = db
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6, "{kind}");
+        assert_eq!(stored_records(&db), before, "{kind}");
+    }
 }
 
 #[test]
