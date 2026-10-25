@@ -235,9 +235,36 @@ impl LaunchConfinement {
     }
 }
 
+/// Whether the writer's worktree directory no longer exists.
+pub(crate) fn worktree_removed(writer: &WriterRequest) -> bool {
+    matches!(Directory::open_anchor(&writer.worktree), Err(error) if error.is_not_found())
+}
+
 /// A retained reservation, including an exact path for chair recovery.
 pub use provenant_supervisor::custody::WriterReservation as WriterFence;
 impl crate::RunStore {
+    /// The writer's custody directory. When its worktree directory has been
+    /// removed, the retained reservation for this attempt names it instead.
+    pub(crate) fn writer_custody_directory(
+        &self,
+        record: &crate::AttemptRecord,
+        writer: &WriterRequest,
+    ) -> Result<Directory> {
+        match prepare_writer(writer, &self.writer_registry, record.project_id) {
+            Ok(mut launch) => Ok(launch.custody.take().ok_or(RunError::UnsafePath)?.0),
+            Err(failure) if worktree_removed(writer) => {
+                let scope = Self::scope(record);
+                let fence = self
+                    .writer_fences()?
+                    .into_iter()
+                    .find(|fence| fence.scope == scope)
+                    .ok_or(failure)?;
+                let parent = fence.reservation.parent().ok_or(RunError::UnsafePath)?;
+                Ok(Directory::open_anchor(parent)?)
+            }
+            Err(failure) => Err(failure),
+        }
+    }
     pub fn writer_fences(&self) -> Result<Vec<WriterFence>> {
         Ok(self.writer_fence_listing()?.reservations)
     }

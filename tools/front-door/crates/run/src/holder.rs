@@ -193,9 +193,7 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing"))?;
         let recovery = if let Some(writer) = &task.writer {
-            let mut writer =
-                crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
-            let (directory, _) = writer.custody.take().ok_or(RunError::UnsafePath)?;
+            let directory = self.writer_custody_directory(&record, writer)?;
             if matches!(record.state, AttemptState::Terminal { .. }) {
                 match directory.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
                     Err(error) if error.is_not_found() => return Ok(record),
@@ -350,6 +348,44 @@ impl RunStore {
                     )
                 });
             match check {
+                _ if crate::writer::worktree_removed(writer) => {
+                    // Custody is proven absent at settlement; the work went
+                    // with the directory, so no archive can be taken.
+                    if decoded.outcome == Outcome::Succeeded {
+                        decoded.outcome = Outcome::Lost;
+                    }
+                    let note = format!(
+                        "worktree removed after the attempt lost custody: {}",
+                        writer.worktree.display()
+                    );
+                    decoded.reason = Some(match decoded.reason.take() {
+                        Some(reason) => format!("{reason}; {note}"),
+                        None => note,
+                    });
+                    let archive = crate::artifacts::subdir(
+                        attempt,
+                        std::ffi::OsStr::new("quarantine"),
+                        true,
+                    )?;
+                    #[derive(Serialize)]
+                    struct RemovedManifest {
+                        schema_version: u64,
+                        scope: custody::Scope,
+                        kind: &'static str,
+                        disposition: &'static str,
+                    }
+                    crate::artifacts::seal(
+                        &archive,
+                        "manifest.json",
+                        &crate::db::bytes(&RemovedManifest {
+                            schema_version: 1,
+                            scope: exit.scope,
+                            kind: "quarantine_manifest",
+                            disposition: "worktree_removed",
+                        })?,
+                        RECORD_LIMIT,
+                    )?;
+                }
                 Ok(false) => {}
                 Ok(true) => {
                     decoded.outcome = Outcome::Failed;
