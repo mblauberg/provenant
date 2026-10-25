@@ -1358,6 +1358,27 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (PeerResult::Push(wrong_push), Some("state_corrupt")),
         (
             PeerResult::Error {
+                code: "busy".into(),
+                operation_id: None,
+            },
+            Some("QUEUE_FULL"),
+        ),
+        (
+            PeerResult::Error {
+                code: "busy".into(),
+                operation_id: Some(OperationId::parse("landing-local")?),
+            },
+            Some("QUEUE_FULL"),
+        ),
+        (
+            PeerResult::Error {
+                code: "stale_fence".into(),
+                operation_id: Some(OperationId::parse("landing-local")?),
+            },
+            Some("landing_refused"),
+        ),
+        (
+            PeerResult::Error {
                 code: "launch_unknown".into(),
                 operation_id: Some(OperationId::parse("unrelated")?),
             },
@@ -1411,6 +1432,13 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 assert_eq!(result["error"]["code"], expected, "{op}: {result}");
                 if expected == "launch_unknown" {
                     assert_eq!(result["data"]["operation_id"], "landing-local");
+                }
+                if expected == "QUEUE_FULL" {
+                    assert_eq!(result["status"], "refused", "{op}: {result}");
+                    assert_eq!(result["data"]["operation_id"], "landing-local");
+                    let repair = result["error"]["repair"].as_str().ok_or("repair")?;
+                    assert!(repair.contains("same fence and operation id"), "{repair}");
+                    assert!(repair.contains(&format!("fabric landing {op}")), "{repair}");
                 }
             } else {
                 assert_eq!(status, 0, "{op}: {result}");
