@@ -136,6 +136,9 @@ pub fn detect_with_org(
     directory: &Path,
     cwd: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
+    if adapter == "agy" {
+        return detect_agy(executor, executable, home, user, cwd).map(|key| (key, None));
+    }
     if adapter == "codex" {
         let bytes = read_following(
             &directory.join("auth.json"),
@@ -229,4 +232,76 @@ pub fn detect_with_org(
             .as_deref()
             .and_then(crate::identity::org_fingerprint),
     ))
+}
+
+fn detect_agy(
+    executor: &dyn Executor,
+    executable: &Path,
+    home: &Path,
+    user: &OsStr,
+    cwd: &Path,
+) -> Result<String, ProviderError> {
+    use provenant_supervisor::fs::{Directory, temporary_name};
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let parent =
+        std::fs::canonicalize(std::env::temp_dir()).map_err(|_| ProviderError::UnknownIdentity)?;
+    let anchor = Directory::open_anchor(&parent).map_err(|_| ProviderError::UnknownIdentity)?;
+    let name = temporary_name().map_err(|_| ProviderError::UnknownIdentity)?;
+    anchor
+        .mkdir(&name, 0o700)
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let scratch = Scratch(parent.join(name));
+    let log = scratch.0.join("cli.log");
+    let argv: Vec<OsString> = [
+        executable.as_os_str(),
+        OsStr::new("-p"),
+        OsStr::new("/usage"),
+        OsStr::new("--output-format"),
+        OsStr::new("json"),
+        OsStr::new("--log-file"),
+        log.as_os_str(),
+    ]
+    .map(Into::into)
+    .to_vec();
+    let env = [
+        ("HOME".into(), home.into()),
+        ("USER".into(), user.into()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    let mut options = ExecOptions::new(
+        &argv,
+        cwd,
+        Duration::from_secs(crate::agy::REGISTRATION.quota.probe_seconds),
+    );
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
+    options.stderr = StreamPolicy::Discard;
+    options.stop_on_output_limit = true;
+    let out = executor
+        .execute(options)
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    if out.termination != Termination::Exit(0)
+        || out.stdout.truncated
+        || out.stdout.read_failed
+        || out.timed_out
+        || out.drain_truncated
+        || out.overflow_stopped
+    {
+        return Err(ProviderError::UnknownIdentity);
+    }
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProviderError::UnknownIdentity)?;
+    if payload.get("status").and_then(serde_json::Value::as_str) != Some("SUCCESS") {
+        return Err(ProviderError::LoginRequired);
+    }
+    let bytes = read_following(&log, ReadOptions { limit: 1024 * 1024 })
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    crate::identity::agy_fingerprint(&bytes)
+        .map(|fingerprint| format!("agy-{fingerprint}"))
+        .ok_or(ProviderError::UnknownIdentity)
 }

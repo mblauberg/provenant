@@ -29,23 +29,21 @@ pub struct QuotaTick {
     pub power: Power,
 }
 
-const INTERVALS: &[(&str, u64, u64)] = &[
-    ("claude", 300, 120),
-    ("codex", 900, 300),
-    ("cursor", 1800, 600),
-    ("agy", 1200, 900),
-    ("opencode", 300, 120),
-];
 pub const TICK_BUDGET_SECONDS: i64 = 55;
-pub fn interval(adapter: &str, trigger: Trigger, power: Power) -> Option<u64> {
-    let (_, timer, panel) = INTERVALS.iter().find(|(id, _, _)| *id == adapter)?;
-    if adapter == "agy" && power == Power::Low {
+pub fn interval(
+    policies: &[QuotaPolicy],
+    adapter: &str,
+    trigger: Trigger,
+    power: Power,
+) -> Option<u64> {
+    let policy = policies.iter().find(|policy| policy.adapter == adapter)?;
+    if !policy.low_power && power == Power::Low {
         return None;
     }
     let base = match trigger {
         Trigger::Manual => 30,
-        Trigger::Panel => *panel,
-        _ => *timer,
+        Trigger::Panel => policy.panel_seconds,
+        _ => policy.timer_seconds,
     };
     Some(
         base * match power {
@@ -60,11 +58,12 @@ fn add(now: i64, seconds: u64) -> Result<i64, QuotaError> {
         .ok_or(QuotaError::TimeRange)
 }
 pub fn next_due(
+    policies: &[QuotaPolicy],
     record: &AccountRecord,
     trigger: Trigger,
     power: Power,
 ) -> Result<Option<i64>, QuotaError> {
-    let Some(ttl) = interval(&record.account.adapter, trigger, power) else {
+    let Some(ttl) = interval(policies, &record.account.adapter, trigger, power) else {
         return Ok(None);
     };
     let mut due = match record.last_attempt_unix_seconds {
@@ -91,6 +90,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
     base.max(retry_after_seconds.unwrap_or(0).min(86400))
 }
 pub fn reserve(
+    policies: &[QuotaPolicy],
     current: Option<&AccountRecord>,
     account: &AccountScope,
     now: i64,
@@ -109,7 +109,7 @@ pub fn reserve(
     // Identity is adapter and key; a changed display label is adopted below.
     if record.account.adapter != account.adapter
         || record.account.account_key != account.account_key
-        || next_due(&record, trigger, power)?.is_none_or(|due| due > now)
+        || next_due(policies, &record, trigger, power)?.is_none_or(|due| due > now)
     {
         return Err(QuotaError::Conflict);
     }
@@ -207,14 +207,23 @@ pub struct TickPlan {
     pub deadline_unix_seconds: i64,
 }
 pub fn plan_tick(
+    policies: &[QuotaPolicy],
     records: &[AccountRecord],
     detections: &[Detection],
     tick: &QuotaTick,
     now: i64,
 ) -> Result<TickPlan, QuotaError> {
-    plan_tick_with_settings(records, detections, tick, now, &Settings::default())
+    plan_tick_with_settings(
+        policies,
+        records,
+        detections,
+        tick,
+        now,
+        &Settings::default(),
+    )
 }
 pub fn plan_tick_with_settings(
+    policies: &[QuotaPolicy],
     records: &[AccountRecord],
     detections: &[Detection],
     tick: &QuotaTick,
@@ -229,7 +238,9 @@ pub fn plan_tick_with_settings(
     let selected = |id: &str| tick.adapter.as_ref().is_none_or(|s| s == id);
     let mut drops = Vec::new();
     for record in records {
-        if selected(&record.account.adapter)
+        // Keep past Google accounts so returning to a sign-in restores its cooldown.
+        if record.account.adapter != "agy"
+            && selected(&record.account.adapter)
             && detections.iter().any(|d| {
                 d.adapter == record.account.adapter
                     && d.accounts.as_ref().is_some_and(|accounts| {
@@ -259,11 +270,16 @@ pub fn plan_tick_with_settings(
             r.account.adapter == account.adapter && r.account.account_key == account.account_key
         });
         let due = match current {
-            Some(record) => next_due(record, tick.trigger, tick.power)?,
-            None => interval(&account.adapter, tick.trigger, tick.power).map(|_| i64::MIN),
+            Some(record) => next_due(policies, record, tick.trigger, tick.power)?,
+            None => {
+                interval(policies, &account.adapter, tick.trigger, tick.power).map(|_| i64::MIN)
+            }
         };
         if due.is_some_and(|due| due <= now) {
-            if account.adapter == "agy" {
+            if policies
+                .iter()
+                .any(|policy| policy.adapter == account.adapter && policy.solo)
+            {
                 solo.push(vec![account.clone()]);
             } else {
                 cheap.push(account.clone());
@@ -326,6 +342,7 @@ fn validate_inputs(records: &[AccountRecord], detections: &[Detection]) -> Resul
     Ok(())
 }
 pub fn report(
+    policies: &[QuotaPolicy],
     records: &[AccountRecord],
     detections: &[Detection],
     query: &QuotaQuery,
@@ -343,7 +360,8 @@ pub fn report(
             s.observed_unix_seconds <= now
                 && record.last_error.is_none()
                 && age.is_some_and(|a| {
-                    a < interval(&record.account.adapter, Trigger::Timer, Power::Ac).unwrap_or(0)
+                    a < interval(policies, &record.account.adapter, Trigger::Timer, Power::Ac)
+                        .unwrap_or(0)
                 })
         });
         let status = match &record.snapshot {
@@ -358,7 +376,8 @@ pub fn report(
             snapshot: record.snapshot.clone(),
             status,
             age_seconds: age,
-            next_due_unix_seconds: next_due(record, Trigger::Timer, Power::Ac)?.map(|d| d.max(now)),
+            next_due_unix_seconds: next_due(policies, record, Trigger::Timer, Power::Ac)?
+                .map(|d| d.max(now)),
             refreshing: record
                 .claim
                 .as_ref()
@@ -428,8 +447,20 @@ mod tests {
             token: "old".into(),
             deadline_unix_seconds: 155,
         });
-        assert_eq!(next_due(&r, Trigger::Manual, Power::Ac).unwrap(), Some(400));
-        let claim = reserve(Some(&r), &r.account, 400, "new", Trigger::Manual, Power::Ac).unwrap();
+        assert_eq!(
+            next_due(crate::source::TEST_POLICIES, &r, Trigger::Manual, Power::Ac).unwrap(),
+            Some(400)
+        );
+        let claim = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&r),
+            &r.account,
+            400,
+            "new",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap();
         assert!(claim.check(Some(&r)).is_ok());
         assert_eq!(
             claim
@@ -443,7 +474,15 @@ mod tests {
             455
         );
         assert!(matches!(
-            reserve(Some(&r), &r.account, 399, "new", Trigger::Manual, Power::Ac),
+            reserve(
+                crate::source::TEST_POLICIES,
+                Some(&r),
+                &r.account,
+                399,
+                "new",
+                Trigger::Manual,
+                Power::Ac
+            ),
             Err(QuotaError::Conflict)
         ));
     }
@@ -461,7 +500,16 @@ mod tests {
         let mut renamed = a.clone();
         renamed.label = "renamed".into();
         let r = AccountRecord::empty(a.clone());
-        let intent = reserve(Some(&r), &renamed, 400, "claim", Trigger::Manual, Power::Ac).unwrap();
+        let intent = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&r),
+            &renamed,
+            400,
+            "claim",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap();
         intent.check(Some(&r)).unwrap();
         let reserved = intent.replacement.unwrap();
         assert_eq!(reserved.account, renamed);
@@ -483,7 +531,16 @@ mod tests {
             details: None,
             windows: vec![],
         });
-        let intent = reserve(Some(&r), &a, 400, "claim", Trigger::Manual, Power::Ac).unwrap();
+        let intent = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&r),
+            &a,
+            400,
+            "claim",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap();
         let current = intent.replacement.unwrap();
         assert!(matches!(
             complete(&current, "claim", 456, Err(ProbeFailure::Network), None),
@@ -492,6 +549,7 @@ mod tests {
         let failed = complete(&current, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
         assert_eq!(failed.replacement.as_ref().unwrap().snapshot, r.snapshot);
         let row = report(
+            crate::source::TEST_POLICIES,
             &[failed.replacement.clone().unwrap()],
             &[],
             &QuotaQuery { adapter: None },
@@ -525,6 +583,7 @@ mod transition_tests {
         let mut renamed = record.account.clone();
         renamed.label = "renamed".into();
         let plan = plan_tick(
+            crate::source::TEST_POLICIES,
             &[record],
             &[Detection {
                 adapter: "claude".into(),
@@ -556,7 +615,7 @@ mod transition_tests {
             status: QuotaStatus::Unknown,
         }];
         assert!(
-            plan_tick(&records, &unknown, &tick, 100)
+            plan_tick(crate::source::TEST_POLICIES, &records, &unknown, &tick, 100)
                 .unwrap()
                 .drops
                 .is_empty()
@@ -577,7 +636,14 @@ mod transition_tests {
                 status: QuotaStatus::Available,
             },
         ];
-        let plan = plan_tick(&records, &detected, &tick, 100).unwrap();
+        let plan = plan_tick(
+            crate::source::TEST_POLICIES,
+            &records,
+            &detected,
+            &tick,
+            100,
+        )
+        .unwrap();
         assert_eq!(plan.drops.len(), 1);
         assert_eq!(
             plan.batches.iter().map(Vec::len).collect::<Vec<_>>(),
@@ -589,7 +655,7 @@ mod transition_tests {
             ..tick
         };
         assert!(
-            plan_tick(&records, &detected, &low, 100)
+            plan_tick(crate::source::TEST_POLICIES, &records, &detected, &low, 100)
                 .unwrap()
                 .batches
                 .iter()
@@ -601,6 +667,7 @@ mod transition_tests {
     fn competing_claims_and_stale_completions_cannot_overwrite() {
         let r = AccountRecord::empty(account("claude", "work"));
         let first = reserve(
+            crate::source::TEST_POLICIES,
             Some(&r),
             &r.account,
             100,
@@ -610,6 +677,7 @@ mod transition_tests {
         )
         .unwrap();
         let second = reserve(
+            crate::source::TEST_POLICIES,
             Some(&r),
             &r.account,
             100,
@@ -622,6 +690,7 @@ mod transition_tests {
         assert!(second.check(Some(claimed)).is_err());
         assert!(
             reserve(
+                crate::source::TEST_POLICIES,
                 Some(claimed),
                 &r.account,
                 110,
@@ -632,6 +701,7 @@ mod transition_tests {
             .is_err()
         );
         let next = reserve(
+            crate::source::TEST_POLICIES,
             Some(claimed),
             &r.account,
             160,
@@ -647,6 +717,7 @@ mod transition_tests {
         // Detection removed the first claim; the same account now starts a new
         // refresh with the same revision but a different claim identity.
         let recreated = reserve(
+            crate::source::TEST_POLICIES,
             None,
             &r.account,
             125,
@@ -662,6 +733,7 @@ mod transition_tests {
 
         assert!(matches!(
             reserve(
+                crate::source::TEST_POLICIES,
                 Some(&AccountRecord {
                     revision: u64::MAX,
                     ..r.clone()
@@ -684,6 +756,7 @@ mod transition_tests {
         });
         record.last_attempt_unix_seconds = Some(45);
         let report = report(
+            crate::source::TEST_POLICIES,
             &[record.clone()],
             &[],
             &QuotaQuery { adapter: None },
@@ -701,6 +774,7 @@ mod transition_tests {
     }
     fn report_for_bad(record: AccountRecord) -> Result<QuotaReport, QuotaError> {
         report(
+            crate::source::TEST_POLICIES,
             &[record],
             &[],
             &QuotaQuery { adapter: None },

@@ -197,6 +197,7 @@ fn quota_observations(
     availability: &[AvailabilityRecord],
     records: &[provenant_quota::AccountRecord],
 ) -> Result<Vec<QuotaObservation>, EdgeError> {
+    let policies = provenant_providers::quota_policies(REGISTRY);
     let mut observations = Vec::new();
     for available in availability {
         let Some(account_key) = available.account_key.as_deref() else {
@@ -211,6 +212,7 @@ fn quota_observations(
             continue;
         };
         let Some(ttl) = provenant_quota::schedule::interval(
+            &policies,
             &available.adapter,
             provenant_quota::schedule::Trigger::Timer,
             provenant_quota::schedule::Power::Ac,
@@ -332,7 +334,9 @@ pub(crate) fn resolve_dispatch(
                     context.catalogue.is_free_model(&model)
                 });
                 let now_unix_seconds = context.now.as_timestamp().as_second();
+                let policies = provenant_providers::quota_policies(context.registry);
                 let admission = provenant_quota::Admission {
+                    policies: &policies,
                     now_unix_seconds,
                     records,
                     pools: &pools,
@@ -458,6 +462,7 @@ pub(crate) fn check_dispatch_candidate(
         ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
     let pools = free_pools(&route.adapter, || catalogue.is_free_model(&model));
     provenant_quota::Admission {
+        policies: &provenant_providers::quota_policies(REGISTRY),
         now_unix_seconds: jiff::Timestamp::now().as_second(),
         records: &crate::quota::read_cache(roots).map_err(|e| e.to_string())?,
         pools: &pools,

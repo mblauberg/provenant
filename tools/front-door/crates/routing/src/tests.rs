@@ -282,16 +282,16 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
     ];
     let registry = [
         provenant_providers::Registration {
-            adapter: &provenant_providers::codex::Codex,
             quota_source: None,
+            ..provenant_providers::codex::REGISTRATION
         },
         provenant_providers::Registration {
-            adapter: &provenant_providers::claude::Claude,
             quota_source: None,
+            ..provenant_providers::claude::REGISTRATION
         },
         provenant_providers::Registration {
-            adapter: &provenant_providers::agy::Agy,
             quota_source: None,
+            ..provenant_providers::agy::REGISTRATION
         },
     ];
     let access = [
@@ -947,8 +947,8 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
             .satisfied()
     );
     let registry = [provenant_providers::Registration {
-        adapter: &Claude,
         quota_source: None,
+        ..provenant_providers::claude::REGISTRATION
     }];
     let mut record = availability();
     record.adapter = "claude".into();
@@ -1020,8 +1020,8 @@ fn availability_access_and_scoped_quota_are_independent_gates()
     let config = RoutingConfig::default();
     let mut context = context(&catalogue, &config, now()?);
     let registry = [provenant_providers::Registration {
-        adapter: &provenant_providers::codex::Codex,
         quota_source: None,
+        ..provenant_providers::codex::REGISTRATION
     }];
     context.registry = &registry;
     let query = request("codex/test")?;
