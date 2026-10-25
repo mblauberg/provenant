@@ -61,9 +61,13 @@ Route and access inputs on `dispatch`:
 
 - Exactly one `--model ADAPTER/ID` or `--route NAME`, an optional `--effort`,
   and an optional `--fallback` of at most two models. `--confidential` and
-  `--allow-free` are the routing filters in [routing](routing.md). There is no
-  `--account` flag; each attempt records its resolved account label, and a
-  manifest task may name a registered account key to override resolution.
+  `--allow-free` are the routing filters in [routing](routing.md). Each
+  attempt records its resolved account label. `--account NAME` pins a
+  registered account key or label for the lane, like a manifest task's
+  `account`; it works with every access flag and conflicts with `--manifest`,
+  whose tasks name their own. An unknown or ineligible account fails as a
+  manifest task's does. With `--host`, the peer checks the account against its
+  own registrations.
 - `--mode read-only` (default) or `worktree-write` with `--worktree`. Optional
   `--read-root` and `--write-root` (repeatable), `--network on|off` (on for
   writers, off for read-only), `--capability` (postgres) and `--knob NAME=VALUE`.
