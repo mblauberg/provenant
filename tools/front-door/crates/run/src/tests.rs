@@ -948,6 +948,34 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
 }
 
 #[test]
+fn a_version_two_store_drops_the_unused_spacing_table() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 2 left it, with the unused table back.
+    RunStore::open(&context, &call)?.db.execute_batch(
+        "CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
+    )?;
+    let store = RunStore::open(&context, &call)?;
+    let remaining: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='spacing'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(remaining, 0);
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 3);
+    Ok(())
+}
+
+#[test]
 fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
