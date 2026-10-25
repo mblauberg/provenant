@@ -24,7 +24,7 @@ Common config, remote tracking and packed
 refs stay immutable: host fetch/upstream composition remains required under
 the accepted supervisor design (#1255). Hard links are denied; symlinks are
 denied only in provider and private state. Toolchain, network and write-root
-policy is in supervisor.md, Permission policy.
+policy is in supervisor.md, Contract (Permission policy).
 
 No provider profile files are loaded here. Unsupported or nested enforcement refuses before launch. Linux builds
 and tests policy/evidence/worktree code but has no enforcing backend.

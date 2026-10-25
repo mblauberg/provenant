@@ -5,7 +5,7 @@ Status: Durable research reference
 Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
 
 Normative owners: [HARNESS](../../HARNESS.md) for ownership and topology; the
-[harness route/topology evidence boundary](../specs/harness/lifecycle.md#route-and-topology-evidence-boundary);
+[harness route/topology evidence boundary](../specs/workflow.md#route-and-topology-evidence-boundary);
 project sessions; and the chair.
 
 ## Conclusions
