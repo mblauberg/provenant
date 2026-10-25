@@ -445,33 +445,80 @@ fn child_launches_for_its_parent_requester_not_its_store_record() -> TestResult 
 }
 
 #[test]
-fn host_cancels_a_child_for_its_sealed_requester_not_its_summary() -> TestResult {
+fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
     let sealed = provenant_core::ActorId::from_bytes([7; 16]);
     let forged = provenant_core::ActorId::from_bytes([66; 16]);
-    for host in [true, false] {
+    // Each rewrite once made the host skip, withdraw or misdirect the stop.
+    let forgeries: [fn(&mut AttemptRecord); 3] = [
+        |record| {
+            record.state = AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                exit_code: None,
+                finished_at: record.queued_at,
+                reason: Some("rejected, says the lane".into()),
+            };
+            let mut result = record.prompt.clone();
+            result.path =
+                artifacts::artifact_path(record.attempt_id, "result.md").expect("result path");
+            record.result = Some(result);
+        },
+        |record| record.state = AttemptState::Queued,
+        |record| record.generation += 5,
+    ];
+    for forge in forgeries {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        if host {
-            store = store.with_sealed_requester(sealed);
-        }
+        let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
         let run = input();
         let id = run.attempts[0].attempt_id;
         store.create(&run, &call)?;
-        store.mark_starting(id, &route(), &[], None, &call)?;
-        // The lane rewrites the requester in its child's launch summary.
+        let started = store.mark_starting(id, &route(), &[], None, &call)?;
+        let ticket: Vec<u8> = store.db.query_row(
+            "SELECT record FROM admission WHERE attempt=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        let ticket: serde_json::Value = crate::db::decode(&ticket)?;
+        assert_eq!(ticket["holder"], serde_json::to_value(sealed)?);
         let scope = provenant_supervisor::custody::Scope {
             run: run.run_id,
             attempt: id,
-            generation: 1,
+            generation: started.generation,
         };
-        let summary = serde_json::json!({"schema_version": 1, "scope": scope, "requester": forged});
+        // As hand-off holds it just before launching the guardian.
+        store.launched.borrow_mut().push(scope);
+        // The lane rewrites the record, the launch summary and the stop.
+        let mut record = store.record(id, &call)?;
+        forge(&mut record);
+        store.db.execute(
+            "UPDATE attempts SET record=?1, terminal=?2 WHERE id=?3",
+            rusqlite::params![
+                crate::db::bytes(&record)?,
+                matches!(record.state, AttemptState::Terminal { .. }),
+                id.to_string()
+            ],
+        )?;
+        assert_eq!(store.record(id, &call)?, record);
         let dir = store.attempt_dir(run.run_id, id, false)?;
+        let summary = serde_json::json!({"schema_version": 1, "scope": scope, "requester": forged});
         artifacts::seal(
             &dir,
             "launch.json",
             &serde_json::to_vec(&summary)?,
+            RECORD_LIMIT,
+        )?;
+        let planted = serde_json::json!({
+            "schema_version": 1,
+            "scope": scope,
+            "request_id": format!("{}.{id}.{}.cancel", run.run_id, scope.generation),
+            "requester": forged,
+            "reason": "explicit_cancellation",
+        });
+        artifacts::seal(
+            &dir,
+            "cancel.json",
+            &serde_json::to_vec(&planted)?,
             RECORD_LIMIT,
         )?;
         assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
@@ -482,11 +529,66 @@ fn host_cancels_a_child_for_its_sealed_requester_not_its_summary() -> TestResult
                 .as_path()
                 .join(format!("runs/{}/attempts/{id}/cancel.json", run.run_id)),
         )?)?;
-        // The guardian honours only its own requester. A lane's view of its
-        // own child has nothing better than the summary.
-        let expected = if host { sealed } else { forged };
-        assert_eq!(request["requester"], serde_json::to_value(expected)?);
+        assert_eq!(request["requester"], serde_json::to_value(sealed)?);
+        assert_eq!(request["scope"], serde_json::to_value(scope)?);
     }
+    Ok(())
+}
+
+#[test]
+fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let forged = provenant_core::ActorId::from_bytes([66; 16]);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let started = store.mark_starting(id, &route(), &[], None, &call)?;
+    // Before hand-off the host only stamped the owner; nothing is held yet.
+    let mut record = store.record(id, &call)?;
+    record.verified_owner = Some(forged);
+    let rename = |record: &AttemptRecord| {
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(record)?, id.to_string()],
+        )?;
+        TestResult::Ok(())
+    };
+    rename(&record)?;
+    assert!(store.record(id, &call).is_ok());
+    store
+        .launched
+        .borrow_mut()
+        .push(provenant_supervisor::custody::Scope {
+            run: run.run_id,
+            attempt: id,
+            generation: started.generation,
+        });
+    let renamed = |result: Result<()>| {
+        matches!(
+            result,
+            Err(RunError::Validation("child record names another owner"))
+        )
+    };
+    assert!(renamed(store.record(id, &call).map(drop)));
+    // The stamped owner reads again. A renamed run refuses every read,
+    // including the terminal fact that carries the owner.
+    rename(&started)?;
+    assert!(store.record(id, &call).is_ok());
+    let mut owner = store.run(run.run_id, &call)?;
+    owner.actor_id = forged;
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&owner)?, run.run_id.to_string()],
+    )?;
+    assert!(renamed(store.run(run.run_id, &call).map(drop)));
+    assert!(renamed(store.record(id, &call).map(drop)));
+    assert!(renamed(
+        crate::AttemptReader::attempt(&store, id, &call).map(drop)
+    ));
     Ok(())
 }
 

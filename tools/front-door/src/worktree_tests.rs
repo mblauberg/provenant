@@ -2379,23 +2379,55 @@ fn verify_lane_profile(
             )),
             Duration::from_secs(8),
         )?;
-        // The lane can rewrite its child's launch summary. The host must still
-        // stop the child for the requester its guardian holds.
-        let path = child.join(format!("runs/{run}/attempts/{attempt_id}/launch.json"));
+        // The lane can write its child's store and attempt directory. It
+        // marks the child finished, renames the requester in its launch
+        // summary and plants a stop the guardian ignores. The host must still
+        // stop the child, from the scope and requester it held at hand-off.
+        let attempt = child.join(format!("runs/{run}/attempts/{attempt_id}"));
+        let mut finished = store.record(attempt_id, &call)?;
+        finished.state = provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Rejected,
+            exit_code: None,
+            finished_at: finished.queued_at,
+            reason: Some("rejected, says the lane".into()),
+        };
+        finished.started_at = None;
+        let mut result = serde_json::to_value(&finished.prompt)?;
+        result["path"]["path"] = format!("attempts/{attempt_id}/result.md").into();
+        finished.result = Some(serde_json::from_value(result)?);
+        rusqlite::Connection::open(child.join("run.sqlite3"))?.execute(
+            "UPDATE attempts SET record=?1, terminal=1 WHERE id=?2",
+            rusqlite::params![
+                provenant_records::CanonicalV1::bytes(&finished)?.as_bytes(),
+                attempt_id.to_string()
+            ],
+        )?;
+        let path = attempt.join("launch.json");
         let mut summary: Value = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
         summary["requester"] = serde_json::to_value(forged)?;
         fs::remove_file(&path)?;
         fs::write(&path, serde_json::to_vec(&summary)?)?;
+        let scope = &summary["scope"];
+        let planted = serde_json::json!({
+            "schema_version": 1,
+            "scope": scope,
+            "request_id": format!("{run}.{attempt_id}.{}.cancel", scope["generation"]),
+            "requester": forged,
+            "reason": "explicit_cancellation",
+        });
+        fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
         host.provider_exited(
             &parent.encode()?,
             Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
         )?;
+        // The forged terminal record stands, so the guardian's own exit is
+        // the evidence. Unstopped, the child would run to its wall deadline.
+        wait_for_path(&attempt.join("process-exit.json"), Duration::from_secs(8))?;
+        let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
+        assert_eq!(exit["stop_reason"], "explicit_cancellation", "{exit}");
     }
     let record = await_terminal(&store, attempt_id, &call)?;
-    if cancel_child {
-        assert_terminal_outcome(&record, provenant_run::Outcome::Cancelled)?;
-    }
     let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {
         return Err("child attempt was not terminal".into());
     };
@@ -2416,9 +2448,10 @@ fn verify_lane_profile(
             vec![confinement.home.join(".codex/auth.json")],
             "{reason}"
         );
+    }
+    if !cancel_child {
         assert_eq!(record.provider_launched, Some(true), "{reason}");
     }
-    assert_eq!(record.provider_launched, Some(true), "{reason}");
     // The lane's operation keeps its own actor. The host launches for, and
     // records as owner, the requester sealed in the parent's holder context.
     let actor: String = rusqlite::Connection::open(child.join("run.sqlite3"))?.query_row(

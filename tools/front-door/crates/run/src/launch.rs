@@ -371,7 +371,7 @@ impl RunStore {
         };
         self.start_inner(run, providers, context, acquire_writer, child, call)
     }
-    fn child_requester(&self) -> Result<ActorId> {
+    pub(crate) fn child_requester(&self) -> Result<ActorId> {
         self.sealed_requester.ok_or(RunError::Validation(
             "child launch lacks a sealed requester",
         ))
@@ -705,6 +705,10 @@ impl RunStore {
             holder_context,
         };
         let capture = capture_plan(task);
+        // Held before launch: an unconfirmed handoff may still have a guardian.
+        if self.sealed_requester.is_some() {
+            self.launched.borrow_mut().push(scope);
+        }
         custody::launch(
             OwnedLaunch {
                 command,

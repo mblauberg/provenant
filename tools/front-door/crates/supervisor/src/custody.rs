@@ -771,7 +771,7 @@ pub fn launch(
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CancelRequest {
     pub schema_version: u64,
@@ -808,12 +808,34 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
             Ok(StopReceipt::Requested)
         }
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
-            let previous: CancelRequest =
+            match read_record::<CancelRequest>(&handle.directory, "cancel.json", RECORD_LIMIT) {
+                Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
+                // A stale handle never displaces a later generation's request.
+                Ok(previous)
+                    if previous.scope.run == request.scope.run
+                        && previous.scope.attempt == request.scope.attempt
+                        && previous.scope.generation > request.scope.generation =>
+                {
+                    return Err(CustodyError::InvalidRecord);
+                }
+                Ok(_) | Err(CustodyError::InvalidRecord) => {}
+                Err(error) => return Err(error),
+            }
+            // The guardian honours only its own scope and requester, so a
+            // stale, foreign or unreadable request would leave it running.
+            // Replace it and confirm the replacement is the one now visible.
+            require_durable(write_record(
+                &handle.directory,
+                "cancel.json",
+                &request,
+                PublishMode::Replace,
+            )?)?;
+            let visible: CancelRequest =
                 read_record(&handle.directory, "cancel.json", RECORD_LIMIT)?;
-            if previous.scope != handle.scope {
+            if visible != request {
                 return Err(CustodyError::InvalidRecord);
             }
-            Ok(StopReceipt::AlreadyRequested)
+            Ok(StopReceipt::Requested)
         }
         Err(error) => Err(error),
     }
@@ -1608,23 +1630,6 @@ impl CustodyLease {
 
 /// Reattach only a generation already named by the durable redacted summary.
 pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
-    reattach_inner(directory, scope, None)
-}
-/// Reattach for a requester the caller holds, not the one the summary names.
-/// A host whose attempt directory a lane can write uses this, so a rewritten
-/// summary cannot make the guardian ignore its stop request.
-pub fn reattach_for(
-    directory: Directory,
-    scope: Scope,
-    requester: ActorId,
-) -> Result<CustodyHandle> {
-    reattach_inner(directory, scope, Some(requester))
-}
-fn reattach_inner(
-    directory: Directory,
-    scope: Scope,
-    held: Option<ActorId>,
-) -> Result<CustodyHandle> {
     #[derive(Deserialize)]
     struct Summary {
         scope: Scope,
@@ -1637,8 +1642,20 @@ fn reattach_inner(
     Ok(CustodyHandle {
         directory,
         scope,
-        requester: held.unwrap_or(summary.requester),
+        requester: summary.requester,
     })
+}
+/// A handle from the scope and requester the caller handed the guardian, read
+/// from nothing in the attempt directory. A host whose attempt directory a lane
+/// can write stops through this, so no summary the lane rewrites or deletes
+/// decides for whom it stops. The stop request itself still lands in that
+/// directory, where the lane can remove it after the host writes it.
+pub fn hold(directory: Directory, scope: Scope, requester: ActorId) -> CustodyHandle {
+    CustodyHandle {
+        directory,
+        scope,
+        requester,
+    }
 }
 
 /// Trusted Run service composition seam for its permissions owner. This trait

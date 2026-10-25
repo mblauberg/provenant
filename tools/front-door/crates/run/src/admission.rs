@@ -172,6 +172,7 @@ impl RunStore {
             // own actor, which scopes its replay and listing.
             if let Some(requester) = self.sealed_requester {
                 next.verified_owner = Some(requester);
+                ticket.holder = Some(requester);
                 let mut run = self.run_on(tx, old.run_id)?;
                 if run.actor_id != requester {
                     run.actor_id = requester;

@@ -629,7 +629,7 @@ fn cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root: &Path) 
     assert!(root.join("cancel-writer/reservation.json").is_file());
     Ok(())
 }
-fn reattach_for_stops_for_the_held_requester_not_a_rewritten_summary(root: &Path) -> Result<()> {
+fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Result<()> {
     let socket = root.join("held.sock");
     let listener = UnixListener::bind(&socket)?;
     let (writer, _handle) = start(
@@ -645,27 +645,64 @@ fn reattach_for_stops_for_the_held_requester_not_a_rewritten_summary(root: &Path
     )?;
     let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
     byte(&mut held, b'R')?;
-    // A lane that can write the attempt directory renames the requester its
-    // guardian launched for, so a summary-sourced stop would go unheard.
-    let summary = root.join("held-attempt/launch.json");
-    let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&summary)?)?;
-    let requester = provenant_core::ActorId::from_bytes([4; 16]);
-    assert_eq!(record["requester"], serde_json::to_value(requester)?);
-    record["requester"] = serde_json::to_value(provenant_core::ActorId::from_bytes([66; 16]))?;
-    std::fs::remove_file(&summary)?;
-    std::fs::write(&summary, serde_json::to_vec(&record)?)?;
-    let handle = reattach_for(
-        Directory::open_anchor(&root.join("held-attempt"))?,
-        scope(),
-        requester,
-    )?;
+    // A lane that can write the attempt directory deletes the launch summary
+    // and plants a stop for another requester, which the guardian ignores.
+    let attempt = root.join("held-attempt");
+    std::fs::remove_file(attempt.join("launch.json"))?;
+    let scope = scope();
+    let planted = serde_json::json!({
+        "schema_version": 1,
+        "scope": scope,
+        "request_id": format!("{}.{}.{}.cancel", scope.run, scope.attempt, scope.generation),
+        "requester": provenant_core::ActorId::from_bytes([66; 16]),
+        "reason": "explicit_cancellation",
+    });
+    std::fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
+    let handle = hold(
+        Directory::open_anchor(&attempt)?,
+        scope,
+        provenant_core::ActorId::from_bytes([4; 16]),
+    );
     assert_eq!(
         stop(&handle, StopReason::ExplicitCancellation)?,
         StopReceipt::Requested
     );
     let exit = exited(&handle)?;
     assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
+    assert_eq!(
+        stop(&handle, StopReason::ExplicitCancellation)?,
+        StopReceipt::AlreadyRequested
+    );
     drop(writer);
+    Ok(())
+}
+fn stop_replaces_an_unreadable_request_but_not_a_later_generation(root: &Path) -> Result<()> {
+    let attempt = root.join("bare-attempt");
+    std::fs::create_dir(&attempt)?;
+    let requester = provenant_core::ActorId::from_bytes([4; 16]);
+    std::fs::write(attempt.join("cancel.json"), b"not a request")?;
+    let handle = hold(Directory::open_anchor(&attempt)?, scope(), requester);
+    assert_eq!(
+        stop(&handle, StopReason::ExplicitCancellation)?,
+        StopReceipt::Requested
+    );
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+    assert_eq!(written["requester"], serde_json::to_value(requester)?);
+    let stale = Scope {
+        generation: 0,
+        ..scope()
+    };
+    assert!(matches!(
+        stop(
+            &hold(Directory::open_anchor(&attempt)?, stale, requester),
+            StopReason::ExplicitCancellation
+        ),
+        Err(CustodyError::InvalidRecord)
+    ));
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+    assert_eq!(kept, written);
     Ok(())
 }
 fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Path) -> Result<()> {
@@ -1717,8 +1754,12 @@ const CASES: &[Case] = &[
         live_provider_publishes_initial_checkpoint,
     ),
     (
-        "reattach_for_stops_for_the_held_requester_not_a_rewritten_summary",
-        reattach_for_stops_for_the_held_requester_not_a_rewritten_summary,
+        "held_stop_ignores_lane_written_summary_and_cancel_request",
+        held_stop_ignores_lane_written_summary_and_cancel_request,
+    ),
+    (
+        "stop_replaces_an_unreadable_request_but_not_a_later_generation",
+        stop_replaces_an_unreadable_request_but_not_a_later_generation,
     ),
     (
         "descendant_journal_failure_is_reported",

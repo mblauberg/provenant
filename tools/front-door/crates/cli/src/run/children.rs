@@ -314,21 +314,26 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 )
             ) {
                 for (id, generation) in accepted {
-                    let record = match session.store.record(id, &call) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            launch_error = Some(error.to_string());
+                    // A child handed to a guardian stops from the scope the
+                    // host held at hand-off. The lane-writable record decides
+                    // only for children that never reached one.
+                    if !session.store.holds(id) {
+                        let record = match session.store.record(id, &call) {
+                            Ok(record) => record,
+                            Err(error) => {
+                                launch_error = Some(error.to_string());
+                                continue;
+                            }
+                        };
+                        if matches!(record.state, run::AttemptState::Terminal { .. }) {
                             continue;
                         }
-                    };
-                    if matches!(record.state, run::AttemptState::Terminal { .. }) {
-                        continue;
-                    }
-                    let still_queued = record.state == run::AttemptState::Queued
-                        && record.generation.checked_add(1) == Some(generation);
-                    if record.generation != generation && !still_queued {
-                        launch_error = Some("accepted child generation changed".into());
-                        continue;
+                        let still_queued = record.state == run::AttemptState::Queued
+                            && record.generation.checked_add(1) == Some(generation);
+                        if record.generation != generation && !still_queued {
+                            launch_error = Some("accepted child generation changed".into());
+                            continue;
+                        }
                     }
                     match session.store.cancel(id, "host parent stopped", &call) {
                         Ok(run::CancelReceipt::Unobservable { reason }) => {

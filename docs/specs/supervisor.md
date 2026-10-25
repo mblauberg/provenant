@@ -359,7 +359,7 @@ byte-path encoding. Edge-built facts are `Serialize` only.
 | `ProcessObservation` | Atomic replace. A stale observation cannot establish death. |
 | `ProcessExit` | No-replace, with file and parent fsync. Failure keeps custody for retry. |
 | `WriterReservation` | Published atomically under the writer lock before spawn. It is cleared only after proved quiescence, quarantine and the canonical terminal commit, or an authorised recorded reconcile disposition. A missing or malformed record with conflicting run evidence refuses acquisition. |
-| `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. |
+| `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. A stop that finds an unreadable request, or one for another requester or an earlier generation, atomically replaces it and re-reads it, since the guardian would ignore it; it never replaces a later generation's request. |
 | `QuarantineManifest`, `GitEvidence` | Evidence files are durable before the no-replace manifest, and partial capture claims no success. |
 
 Authoritative writes use held-directory `SafeFs` capabilities, exclusive 0600
