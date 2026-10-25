@@ -112,7 +112,7 @@ fn output_absolute_path() -> Value {
         }))
     }))
 }
-fn output_schema(kind: ToolKind) -> Option<Value> {
+pub(crate) fn output_schema(kind: ToolKind) -> Option<Value> {
     let any_object = json!({"type":"object"});
     let text_value = json!({"type":"string"});
     match kind {
@@ -123,7 +123,8 @@ fn output_schema(kind: ToolKind) -> Option<Value> {
             "federation":{"anyOf":[any_object,{"type":"null"}]}
         }))),
         ToolKind::Submit => Some(output_object(json!({
-            "operation_id":text_value,"targets":array(output_attempt_target(),0,100)
+            "operation_id":text_value,"targets":array(output_attempt_target(),0,100),
+            "worktree?":output_object(json!({"path":text_value,"branch":text_value}))
         }))),
         _ => None,
     }

@@ -1345,6 +1345,22 @@
           "maxItems": 100,
           "minItems": 0,
           "type": "array"
+        },
+        "worktree": {
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch",
+            "path"
+          ],
+          "type": "object"
         }
       },
       "required": [

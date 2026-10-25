@@ -795,6 +795,87 @@ fn output_schema_lists_only_supported_parts() {
 }
 
 #[test]
+fn published_output_schemas_accept_real_runtime_records() {
+    use provenant_core::{AttemptId, HostId, OperationId, ProjectId};
+    use provenant_fabric_runtime::{
+        coordination::facade::AttemptTarget,
+        identity::{Address, CrossHostProjectKey, FederatedProject, Identity},
+        runs::{PeerWorktree, SubmissionReceipt},
+    };
+    use provenant_records::AbsolutePath;
+
+    let host = HostId::from_bytes([1; 16]);
+    let mut identity = Identity {
+        project: ProjectId::from_bytes([2; 16]),
+        host,
+        inbox: Address::new(host, "schema-test").unwrap(),
+        client: "codex".into(),
+        cwd: AbsolutePath::new(Path::new("/repo/worktree")).unwrap(),
+        common_dir: AbsolutePath::new(Path::new("/repo/.git")).unwrap(),
+        federation: None,
+    };
+    let mut receipt = SubmissionReceipt {
+        operation_id: OperationId::parse("schema-test").unwrap(),
+        targets: vec![AttemptTarget {
+            attempt: AttemptId::from_bytes([3; 16]),
+            host: None,
+        }],
+        worktree: None,
+    };
+    let output_schema = |name| {
+        &catalogue()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()["outputSchema"]
+    };
+    let check = |name, value: Value| {
+        let schema = output_schema(name);
+        assert!(accepts(schema, schema, &value), "{name}: {value}");
+    };
+    check("fabric_identity", serde_json::to_value(&identity).unwrap());
+    check("fabric_submit", serde_json::to_value(&receipt).unwrap());
+    identity.federation = Some(FederatedProject {
+        key: CrossHostProjectKey::from_home(Path::new("/"), Path::new("/repo/.git")).unwrap(),
+        project: ProjectId::from_bytes([4; 16]),
+    });
+    receipt.targets[0].host = Some(host);
+    receipt.worktree = Some(PeerWorktree {
+        path: "/repo/.worktrees/feat/schema-test".into(),
+        branch: "feat/schema-test".into(),
+    });
+    check("fabric_identity", serde_json::to_value(&identity).unwrap());
+    check("fabric_submit", serde_json::to_value(&receipt).unwrap());
+}
+
+#[test]
+fn peer_worktree_requests_are_not_mcp_submit_inputs() {
+    use provenant_fabric_runtime::coordination::facade::SubmitInput;
+
+    let schema = &catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_submit")
+        .unwrap()["inputSchema"];
+    for new_worktree in [
+        json!({"base":"main","branch":"feat/peer-writer"}),
+        Value::Null,
+    ] {
+        let input = json!({
+            "op":"submission", "operation_id":"peer-writer", "tasks":[{
+                "prompt":"work", "route":{}, "timeout_ms":1000,
+                "access":"worktree_write", "new_worktree":new_worktree
+            }]
+        });
+        // Peer ingress still deserialises the shared wire type.
+        assert!(serde_json::from_value::<SubmitInput>(input.clone()).is_ok());
+        assert!(!accepts(schema, schema, &input));
+        assert!(matches!(
+            ToolCall::parse("fabric_submit", input),
+            Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].new_worktree"
+        ));
+    }
+}
+
+#[test]
 fn text_byte_limit_is_enforced_even_when_codepoint_length_is_smaller() {
     let at_limit = "😀".repeat(16_384);
     assert_eq!(at_limit.len(), 65_536);

@@ -177,6 +177,23 @@ impl ToolCall {
     /// Strict runtime serde contracts own argument validation. The catalogue
     /// supplies a field path for serde's structural errors at the MCP edge.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
+        // The shared serde record accepts peer-ingress worktree creation.
+        // MCP cannot request it; reject the field (including null) at its edge.
+        if schema::tool_kind(name) == Some(schema::ToolKind::Submit)
+            && let Some(index) =
+                arguments
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .and_then(|tasks| {
+                        tasks
+                            .iter()
+                            .position(|task| task.get("new_worktree").is_some())
+                    })
+        {
+            return Err(InvalidInput::Arguments {
+                path: format!("arguments.tasks[{index}].new_worktree"),
+            });
+        }
         let mut arguments = arguments;
         if let Some(operation) = schema::sole_operation(name)
             && let Some(object) = arguments.as_object_mut()
