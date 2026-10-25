@@ -256,7 +256,8 @@ On the calling host the command:
    checkpoint, so a refused or lost request leaves the checkpoint unchanged.
 
 The peer checks `--account` against its registered Claude accounts and
-refuses with the valid labels when it does not match. It then claims
+refuses with `account_unregistered` when it does not match, without listing
+the registered labels. It then claims
 `handoff/<project-id>/op-<operation-id>/` in its state directory, fetches
 `origin` and recreates each branch's worktree from `origin/<branch>`. An
 existing worktree, or an existing local branch, is reused; when its commit

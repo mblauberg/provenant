@@ -152,10 +152,25 @@ pub fn forward(state: &Path, request: &[u8]) -> Result<Forward, AgentError> {
         }
         return Err(error.into());
     }
-    stream.shutdown(Shutdown::Write)?;
-    let reply = read_bounded(&mut stream, REQUEST + Duration::from_secs(5))?;
+    forward_reply(&mut stream, &directory.join(LOG))
+}
+
+fn forward_reply(stream: &mut UnixStream, log: &Path) -> Result<Forward, AgentError> {
+    if let Err(error) = stream.shutdown(Shutdown::Write) {
+        // Refusing at both caps closes with the request unread. The peer may
+        // already be disconnected while its busy reply is still buffered.
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::NotConnected
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+        ) {
+            return Err(error.into());
+        }
+    }
+    let reply = read_bounded(stream, REQUEST + Duration::from_secs(5))?;
     if reply.is_empty() {
-        return Err(AgentError::NoReply(directory.join(LOG)));
+        return Err(AgentError::NoReply(log.into()));
     }
     if reply == BUSY {
         return Ok(Forward::Busy);
@@ -903,23 +918,41 @@ mod tests {
     }
 
     #[test]
+    fn forward_reads_busy_after_a_written_request_is_refused_at_both_caps() {
+        use super::*;
+        let (mut client, server) = UnixStream::pair().unwrap();
+        // The request is buffered before accept/refuse, so closing the server
+        // leaves it unread and disconnects the caller on macOS.
+        client.write_all(b"request").unwrap();
+        let refusing = Arc::new(AtomicUsize::new(REFUSING));
+        refuse(server, &refusing);
+        assert_eq!(refusing.load(Ordering::SeqCst), REFUSING);
+        assert_eq!(
+            forward_reply(&mut client, Path::new("agent.log")).unwrap(),
+            Forward::Busy
+        );
+    }
+
+    #[test]
     fn refusal_threads_are_bounded_while_64_connections_are_held() {
         use super::*;
         let refusing = Arc::new(AtomicUsize::new(0));
         let mut refused = Vec::new();
+        let mut peak = 0;
         for _ in 0..64 {
             let (mut client, stream) = UnixStream::pair().unwrap();
             client
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
             refuse(stream, &refusing);
-            assert!(refusing.load(Ordering::SeqCst) <= REFUSING);
+            peak = peak.max(refusing.load(Ordering::SeqCst));
+            assert!(peak <= REFUSING);
             let mut busy = [0; BUSY.len()];
             client.read_exact(&mut busy).unwrap();
             assert_eq!(busy, BUSY);
             refused.push(client);
         }
-        assert_eq!(refusing.load(Ordering::SeqCst), REFUSING);
+        assert_eq!(refused.len(), 64);
         drop(refused);
     }
 

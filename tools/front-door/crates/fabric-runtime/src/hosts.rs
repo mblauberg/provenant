@@ -41,6 +41,8 @@ pub enum PeerError {
     Version,
     #[error("peer project is outside the selected home")]
     Project,
+    #[error("peer source host must be a configured peer other than this host")]
+    SourceHost,
     #[error("peer is unavailable")]
     Unavailable,
     /// A read-only exchange failed for a known cause. Same wire code as
@@ -60,7 +62,7 @@ impl PeerError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Version => "peer_version",
-            Self::Project => "invalid_input",
+            Self::Project | Self::SourceHost => "invalid_input",
             Self::Unavailable | Self::Failed(_) => "home_unavailable",
             Self::Unknown { .. } => "launch_unknown",
             Self::Cancelled => "cancelled",
@@ -300,7 +302,7 @@ impl PeerRequest {
                 .values()
                 .any(|peer| peer.host == self.source_host)
         {
-            return Err(PeerError::Project);
+            return Err(PeerError::SourceHost);
         }
         self.project.resolve(home)?;
         self.actor()?;
@@ -589,18 +591,25 @@ mod tests {
         };
         assert!(matches!(
             request.validate(local, &config, home),
-            Err(PeerError::Project)
+            Err(PeerError::SourceHost)
         ));
         assert_eq!(
             request.validate(local, &config, home).unwrap_err().code(),
             "invalid_input"
+        );
+        assert_eq!(
+            request
+                .validate(local, &config, home)
+                .unwrap_err()
+                .to_string(),
+            "peer source host must be a configured peer other than this host"
         );
         request.source_host = remote;
         assert!(request.validate(local, &config, home).is_ok());
         request.source_host = HostId::from_bytes([3; 16]);
         assert!(matches!(
             request.validate(local, &config, home),
-            Err(PeerError::Project)
+            Err(PeerError::SourceHost)
         ));
     }
 
