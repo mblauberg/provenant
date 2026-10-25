@@ -409,6 +409,15 @@ fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migrat
         for _ in 0..2 {
             install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
         }
+        assert_eq!(
+            read_receipt(&f.targets, &LocalFs)
+                .unwrap()
+                .unwrap()
+                .legacy
+                .unwrap()
+                .relinquished_hooks,
+            ["pre-push"]
+        );
         let inspection = inspect_install(
             &f.targets,
             Some(&f.release()),
