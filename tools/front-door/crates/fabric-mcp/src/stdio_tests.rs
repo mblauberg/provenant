@@ -183,15 +183,12 @@ fn invalid_tool_arguments_are_results_with_the_field_path() {
     assert_eq!(frames[1]["id"], "bad");
     assert!(frames[1]["result"]["isError"].as_bool().unwrap());
     assert!(frames[1].get("error").is_none());
-    assert_eq!(
-        frames[1]["result"]["structuredContent"]["code"],
-        "invalid_input"
-    );
+    assert!(frames[1]["result"].get("structuredContent").is_none());
     assert!(
-        frames[1]["result"]["structuredContent"]["path"]
+        frames[1]["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("extra")
+            .contains("invalid_input")
     );
     assert!(
         frames[1]["result"]["content"][0]["text"]
@@ -200,6 +197,49 @@ fn invalid_tool_arguments_are_results_with_the_field_path() {
             .contains("extra")
     );
     assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
+fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
+    for modern in [false, true] {
+        let gate = Arc::new(Gate::default());
+        gate.release();
+        gate.state.lock().unwrap().submit_error = Some(FacadeError::LaunchUnknown {
+            operation_id: provenant_core::OperationId::parse("unknown-launch-17").unwrap(),
+        });
+        let server = Server::start(FakeFactory::new(gate), false);
+        if modern {
+            server.send_bytes(include_bytes!(
+                "../tests/fixtures/claude-code-2.1.309-discover.json"
+            ));
+        } else {
+            server.send(&initialize());
+            server.send(&notification("notifications/initialized", json!({})));
+        }
+        for (index, (id, name, arguments, code, detail)) in [
+            ("identity", "fabric_identity", json!({}), "not_found", "not_found"),
+            ("submit", "fabric_submit", json!({"operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{}, "timeout_ms":1000}]}), "launch_unknown", "unknown-launch-17"),
+            ("bad-identity", "fabric_identity", json!({"extra":true}), "invalid_input", "arguments.extra"),
+            ("bad-submit", "fabric_submit", json!({"operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.tasks"),
+        ].into_iter().enumerate() {
+            let mut request = tool_call(id, name, arguments);
+            if modern {
+                request["params"]["_meta"] = json!({
+                    "io.modelcontextprotocol/protocolVersion":protocol::MODERN,
+                    "io.modelcontextprotocol/clientCapabilities":{}
+                });
+            }
+            server.send(&request);
+            let frames = server.wait_for_frames(index + 2, TEST_WAIT).unwrap();
+            let result = &frames.iter().find(|frame| frame["id"] == id).unwrap()["result"];
+            assert_eq!(result["isError"], true, "{result}");
+            assert!(result.get("structuredContent").is_none(), "{result}");
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(code) && text.contains(detail), "{text}");
+            assert_eq!(result.get("resultType").is_some(), modern);
+        }
+        assert!(matches!(server.finish(), Ok(())));
+    }
 }
 
 #[test]
@@ -330,9 +370,12 @@ fn worker_panic_completes_its_request_and_other_workers_remain_available() {
     ));
     let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
     assert_eq!(frames[1]["id"], "panic");
-    assert_eq!(
-        frames[1]["result"]["structuredContent"]["code"],
-        "worker_panicked"
+    assert!(frames[1]["result"].get("structuredContent").is_none());
+    assert!(
+        frames[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("worker_panicked")
     );
     gate.release();
     server.send(&tool_call(
@@ -415,7 +458,13 @@ fn four_workers_and_queue_capacity_return_busy_after_thirty_six_calls() {
     ));
     let frames = server.wait_for_frames(3, TEST_WAIT).unwrap();
     assert!(frames[2]["result"]["isError"].as_bool().unwrap());
-    assert_eq!(frames[2]["result"]["structuredContent"]["code"], "busy");
+    assert!(frames[2]["result"].get("structuredContent").is_none());
+    assert!(
+        frames[2]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("busy")
+    );
     gate.release();
     assert!(gate.wait_for_returned(WORKERS + QUEUE, TEST_WAIT));
     assert!(matches!(server.finish(), Ok(())));
@@ -472,9 +521,12 @@ fn oversized_tool_reply_is_replaced_by_an_error_result_before_write() {
     let frames = shared.output.lock().unwrap();
     let actual: Value = serde_json::from_slice(&frames.frames[0]).unwrap();
     assert!(actual["result"]["isError"].as_bool().unwrap());
-    assert_eq!(
-        actual["result"]["structuredContent"]["code"],
-        "result_too_large"
+    assert!(actual["result"].get("structuredContent").is_none());
+    assert!(
+        actual["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("result_too_large")
     );
 }
 
@@ -731,6 +783,7 @@ struct GateState {
     panic_remaining: usize,
     run_cancel_calls: usize,
     output_bytes: Vec<u8>,
+    submit_error: Option<FacadeError>,
     tokens: Vec<CancelToken>,
 }
 impl Gate {
@@ -889,6 +942,9 @@ impl F3Facade for FakeFacade {
         _: WaitBudget,
         _: &CancelToken,
     ) -> Result<Fact, FacadeError> {
+        if let Some(error) = &self.0.state.lock().unwrap().submit_error {
+            return Err(error.clone());
+        }
         Ok(Fact { state: "accepted" })
     }
     fn run(

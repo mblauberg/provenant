@@ -147,11 +147,11 @@ enum Event {
     Completed(Completion),
 }
 
-fn failure(code: &str) -> Value {
-    tools::tool_error(code, json!({"code":code}))
+fn failure(tool: Option<&str>, code: &str) -> Value {
+    tools::tool_error(tool, code, json!({"code":code}))
 }
-fn service_error(error: &ServiceError) -> Value {
-    tools::tool_error(error.code(), error.structured_error())
+fn service_error(tool: &str, error: &ServiceError) -> Value {
+    tools::tool_error(Some(tool), error.code(), error.structured_error())
 }
 
 fn write_before(output: &mut impl Output, value: &Value, deadline: Instant) -> Result<(), Error> {
@@ -172,7 +172,7 @@ fn write_before(output: &mut impl Output, value: &Value, deadline: Instant) -> R
         };
         bytes = serde_json::to_vec(&protocol::result(
             &id,
-            failure("result_too_large"),
+            failure(None, "result_too_large"),
             result.get("resultType").is_some(),
         ))?;
     }
@@ -217,7 +217,7 @@ impl Drop for CompletionGuard {
         let response = self
             .response
             .take()
-            .unwrap_or_else(|| failure("worker_panicked"));
+            .unwrap_or_else(|| failure(Some(self.tool), "worker_panicked"));
         let reply = protocol::result(&self.id, response, self.modern);
         let _ = self.events.send(Event::Completed(Completion {
             id: self.id.clone(),
@@ -332,13 +332,13 @@ fn serve_with_timeouts(
                     job.started,
                 );
                 let response = if job.cancel.is_cancelled() {
-                    failure("cancelled")
+                    failure(Some(job.tool), "cancelled")
                 } else {
                     if service.is_none() {
                         match factory.open() {
                             Ok(opened) => service = Some(opened),
                             Err(error) => {
-                                completion.response = Some(service_error(&error));
+                                completion.response = Some(service_error(job.tool, &error));
                                 continue;
                             }
                         }
@@ -347,11 +347,11 @@ fn serve_with_timeouts(
                         Some(service) => match job.call.execute(service, &job.cancel) {
                             Ok(response) => match serde_json::to_value(response) {
                                 Ok(value) => value,
-                                Err(_) => failure("state_corrupt"),
+                                Err(_) => failure(Some(job.tool), "state_corrupt"),
                             },
-                            Err(error) => service_error(&error),
+                            Err(error) => service_error(job.tool, &error),
                         },
-                        None => failure("state_corrupt"),
+                        None => failure(Some(job.tool), "state_corrupt"),
                     }
                 };
                 completion.response = Some(response);
@@ -486,7 +486,7 @@ fn serve_loop(
                                 factory.record_usage(job.tool, "busy", 0);
                                 write(
                                     output,
-                                    &protocol::result(&id, failure("busy"), modern),
+                                    &protocol::result(&id, failure(Some(job.tool), "busy"), modern),
                                     timeouts,
                                 )?;
                             }

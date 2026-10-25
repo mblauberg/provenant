@@ -199,9 +199,34 @@ unreachable definitions are removed. Definitions used at least twice stay in
 `$defs` at the input-schema root, and an empty `$defs` is omitted.
 
 Only identity and submit publish `outputSchema`, each with `type: "object"`.
-Other tools still send `structuredContent`. Legacy catalogues omit all output
-schemas. Both protocol eras use the same compact input schemas; protocol
-versions and catalogue cache behaviour are unchanged.
+Submit's optional `worktree` receipt is an object with `path` and `branch`.
+Other tools still send `structuredContent`. `fabric_hosts` returns
+`{"hosts":[...]}`, including `{"hosts":[]}` for an empty page. The CLI host
+list keeps its JSON `data` array; peer health replies keep the single
+`HostHealth` record. The wrapper belongs only to the MCP edge. This also
+satisfies the object requirement in MCP 2025-11-25; MCP 2026-07-28 permits any
+JSON value.
+
+The shared submit wire type accepts `new_worktree` for peer ingress. The MCP
+submit owner refuses worktree creation, so MCP parsing rejects that field,
+including `null`, with `invalid_input` at `arguments.tasks[N].new_worktree`.
+It remains absent from the input schema. Peer deserialisation and worktree
+creation through CLI dispatch are unchanged.
+
+Both the [2025-11-25 output-schema rules](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#output-schema)
+and the [2026-07-28 rules](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema)
+require structured results to conform to a published output schema, without
+an explicit exemption for `isError`. Fabric therefore omits
+`structuredContent` on identity and submit errors. Their `content` text
+contains the stable code and JSON error details, including the field path
+for invalid input and `operation_id` for `launch_unknown`. This avoids
+validating error details against a success schema or inventing a success
+receipt after an uncertain launch. Other tools retain structured error
+details; a frame-size fallback whose tool is unknown uses text only.
+
+Legacy catalogues omit all output schemas. Both protocol eras use the same
+compact input schemas and error policy; protocol versions and catalogue
+cache behaviour are unchanged.
 
 Issue #1571 wave 1 measured the following bytes with
 `serde_json::to_vec(tool).len()`, including each complete tool object and

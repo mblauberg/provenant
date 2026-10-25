@@ -667,9 +667,18 @@ pub struct ToolResponse {
     pub structured_content: Value,
 }
 
-/// One shared construction for all MCP tool errors.
-pub fn tool_error(code: &str, detail: Value) -> Value {
-    serde_json::json!({"content":[{"type":"text","text":format!("{code}: {detail}")}],"structuredContent":detail,"isError":true})
+/// Schema-bearing tools report error details in text, because those details
+/// cannot satisfy their success schemas. Unknown-tool fallbacks do the same.
+pub fn tool_error(tool: Option<&str>, code: &str, detail: Value) -> Value {
+    let mut result = serde_json::json!({"content":[{"type":"text","text":format!("{code}: {detail}")}],"isError":true});
+    if tool.is_some_and(|name| {
+        schema::tool_kind(name)
+            .and_then(schema::output_schema)
+            .is_none()
+    }) {
+        result["structuredContent"] = detail;
+    }
+    result
 }
 
 pub fn catalogue() -> &'static [Value] {
