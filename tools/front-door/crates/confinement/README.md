@@ -10,8 +10,8 @@ observations constructed by the providers owner. Git write grants derive from a
 held linked `VerifiedWorktree` and `GitRefName`; records retain their digest.
 `WorktreeWriteAuthority::for_worktree` also takes the host home to derive the
 single `Library/Caches/provenant-lane-cargo/<sha256>` cache. Codex writer
-preparation sets `CARGO_TARGET_DIR` to its `target/` and `CARGO_HOME` to its
-`cargo-home/`; these children stay within the grant. Its hash binds canonical worktree and common Git paths plus held directory identities, so
+preparation sets `CARGO_TARGET_DIR` to its `target/`; `CARGO_HOME` is the
+user's own, with only its shared stores writable. Its hash binds canonical worktree and common Git paths plus held directory identities, so
 same-named and recreated worktrees do not share a lane cache. Host builds use
 separate target directories outside this namespace.
 Before collecting `required_anchors`, call `prepare_writer_directories` under
@@ -22,7 +22,9 @@ must belong to the effective user with mode 0700; setup refuses mismatches
 without changing their metadata. Compilation rechecks the held cache.
 Common config, remote tracking and packed
 refs stay immutable: host fetch/upstream composition remains required under
-the accepted supervisor design (#1255). Child-created symlinks are denied.
+the accepted supervisor design (#1255). Hard links are denied; symlinks are
+denied only in provider and private state. Toolchain, network and write-root
+policy is in supervisor.md, Permission policy.
 
 No provider profile files are loaded here. Unsupported or nested enforcement refuses before launch. Linux builds
 and tests policy/evidence/worktree code but has no enforcing backend.

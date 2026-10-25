@@ -614,6 +614,63 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
     }
 }
 
+/// Resolve dispatch access flags into the sealed record. Roots must be
+/// existing directories, stored canonically, and clear of the state root;
+/// the confinement compiler refuses credential, broad and Git roots.
+fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
+    let invalid = |message: String| Fail::new(Status::Invalid, "INVALID", message);
+    let mut postgres = false;
+    for name in &access.capability {
+        match name.as_str() {
+            "postgres" => postgres = true,
+            other => {
+                return Err(invalid(format!(
+                    "unknown capability {other}; known: postgres (Rust and Node toolchains are granted to every lane)"
+                )));
+            }
+        }
+    }
+    let writer = matches!(access.mode, Mode::WorktreeWrite);
+    let network = match (access.network, postgres) {
+        (Some(Switch::On), _) => Some(run::NetworkAccess::Open),
+        (Some(Switch::Off), true) => Some(run::NetworkAccess::Local),
+        (Some(Switch::Off), false) => Some(run::NetworkAccess::Provider),
+        (None, true) if !writer => Some(run::NetworkAccess::Local),
+        (None, _) => None,
+    };
+    // A first dispatch can precede the state root's creation; compare lexically then.
+    let state = provenant_supervisor::fs::canonicalize(state_root)
+        .unwrap_or_else(|_| state_root.to_path_buf());
+    let resolve = |paths: &[PathBuf], flag: &str| {
+        paths
+            .iter()
+            .map(|path| {
+                let canonical = provenant_supervisor::fs::canonicalize(path)
+                    .ok()
+                    .filter(|canonical| canonical.is_dir())
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "{flag} {} is not an existing directory",
+                            path.display()
+                        ))
+                    })?;
+                if canonical.starts_with(&state) || state.starts_with(&canonical) {
+                    return Err(invalid(format!(
+                        "{flag} {} overlaps the Provenant state root",
+                        path.display()
+                    )));
+                }
+                Ok(canonical)
+            })
+            .collect::<Result<Vec<_>, Fail>>()
+    };
+    Ok(run::LaneAccess {
+        network,
+        read_roots: resolve(&access.read_root, "--read-root")?,
+        write_roots: resolve(&access.write_root, "--write-root")?,
+    })
+}
+
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
     /// Fabric's route.task_class, retained separately from the resolved route.
@@ -627,6 +684,7 @@ pub struct Submitted {
     pub delivery_id: Option<DeliveryId>,
     pub deliver: Option<run::WriterDeliveryRequest>,
     pub worktree: Option<PathBuf>,
+    pub access: run::LaneAccess,
 }
 pub struct Submission {
     pub operation_id: OperationId,
@@ -659,6 +717,15 @@ pub fn submit(
     let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
     for task in submission.tasks {
         scan(&task.prompt)?;
+        // A lane's child launches outside the lane's sandbox, so it may not
+        // name access its parent never had.
+        if parent_attempt.is_some() && !task.access.is_default() {
+            return Err(Fail::new(
+                Status::Refused,
+                "UNSUPPORTED",
+                "a nested dispatch cannot set network, capability, read-root or write-root access",
+            ));
+        }
         if task.deliver.is_some() && task.worktree.is_none() {
             return Err(Fail::new(
                 Status::Invalid,
@@ -697,7 +764,8 @@ pub fn submit(
             #[serde(skip_serializing_if = "Option::is_none")]
             deliver: Option<&'a run::WriterDeliveryRequest>,
             cwd: &'a Path,
-            network: bool,
+            #[serde(skip_serializing_if = "run::LaneAccess::is_default")]
+            access: &'a run::LaneAccess,
         }
         let authority = CanonicalV1::record_digest(
             "run-authority",
@@ -706,7 +774,7 @@ pub fn submit(
                 writer: writer.as_ref(),
                 deliver: task.deliver.as_ref(),
                 cwd: edge.cwd,
-                network: false,
+                access: &task.access,
             },
         )
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
@@ -723,6 +791,7 @@ pub fn submit(
             provider_timeout_seconds: task.provider_timeout,
             delivery_id: task.delivery_id,
             deliver: task.deliver,
+            access: task.access,
         });
         attempts.push(run::NewAttempt {
             attempt_id: fresh(AttemptId::from_bytes)?,
@@ -769,12 +838,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         matches!(access.mode, Mode::WorktreeWrite) && command.branch.is_none(),
         access.worktree.as_deref(),
     )?;
-    if matches!(access.network, Switch::On)
-        || !access.capability.is_empty()
-        || !access.read_root.is_empty()
-    {
-        return unsupported("network, capability or read-root access");
-    }
+    let lane_access = lane_access(access, edge.roots.state.as_path())?;
     // Naming this host is ordinary local placement in any mode. A peer writer
     // names a new branch the peer creates, since --worktree is a local path.
     let mut new_worktree = None;
@@ -936,6 +1000,11 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             if !fallback.is_empty() {
                 return unsupported("route fallback with --host");
             }
+            if !lane_access.is_default() {
+                return unsupported(
+                    "network, capability, read-root or write-root access with --host",
+                );
+            }
             placed.push(remote::Task {
                 prompt,
                 route,
@@ -972,6 +1041,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 delivery_id,
                 deliver,
                 worktree: access.worktree.clone(),
+                access: lane_access.clone(),
             },
         )
         .collect();
@@ -2193,6 +2263,68 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+    #[test]
+    fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state)?;
+        std::fs::create_dir_all(&project)?;
+        let access = |mode, network, capability: &[&str], write_root: Vec<PathBuf>| crate::Access {
+            mode,
+            worktree: None,
+            read_root: Vec::new(),
+            write_root,
+            network,
+            capability: capability.iter().map(|name| name.to_string()).collect(),
+        };
+        let network = |mode, switch, capability: &[&str]| {
+            lane_access(&access(mode, switch, capability, Vec::new()), &state)
+                .map(|access| access.network)
+                .map_err(|fail| fail.message)
+        };
+        assert_eq!(network(Mode::WorktreeWrite, None, &[]), Ok(None));
+        assert_eq!(
+            network(Mode::ReadOnly, None, &["postgres"]),
+            Ok(Some(run::NetworkAccess::Local))
+        );
+        assert_eq!(
+            network(Mode::WorktreeWrite, Some(Switch::Off), &["postgres"]),
+            Ok(Some(run::NetworkAccess::Local))
+        );
+        assert_eq!(
+            network(Mode::ReadOnly, Some(Switch::On), &[]),
+            Ok(Some(run::NetworkAccess::Open))
+        );
+        assert!(
+            network(Mode::ReadOnly, None, &["rust"])
+                .is_err_and(|message| message.contains("known: postgres"))
+        );
+        let granted = lane_access(
+            &access(Mode::WorktreeWrite, None, &[], vec![project.clone()]),
+            &state,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(
+            granted.write_roots,
+            [provenant_supervisor::fs::canonicalize(&project)?]
+        );
+        for refused in [
+            state.join("projects"),
+            temp.path().to_path_buf(),
+            temp.path().join("absent"),
+        ] {
+            std::fs::create_dir_all(state.join("projects"))?;
+            assert!(
+                lane_access(
+                    &access(Mode::WorktreeWrite, None, &[], vec![refused]),
+                    &state
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
     #[test]
     fn paged_output_never_splits_a_character() {
         let bytes = "a☀b".as_bytes();

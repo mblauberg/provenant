@@ -1,5 +1,5 @@
 use super::*;
-use crate::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
+use crate::permissions::{AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions};
 use provenant_core::{ProjectId, WorkScope};
 use provenant_supervisor::{fs::LocalFs, home::HomeError};
 use std::{
@@ -26,8 +26,8 @@ fn request(root: &Path) -> PlanRequest {
             secret_roots: vec![],
             selected_authentication: None,
             include_continuation: false,
-            network: vec![],
-            capabilities: vec![],
+            write_roots: vec![],
+            network: NetworkAccess::Provider,
             nested_confinement: false,
         },
         codex: CodexPolicy::Clean,
@@ -54,6 +54,35 @@ fn private_state_cannot_expose_credentials_or_alias_the_source() {
         Err(HomeError::UnsafeEntry)
     ));
     assert!(!root.join("user-state/agy-home").exists());
+}
+
+#[test]
+fn write_roots_stay_clear_of_credentials_and_private_roots() {
+    let temp = fixture();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let with_write = |path: std::path::PathBuf| {
+        let mut input = request(&root);
+        input.agy_state = None;
+        input.permissions.write_roots = vec![PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        }];
+        ConfinedPlan::new(input)
+    };
+    assert!(with_write(root.join("repo/.agent-run")).is_ok());
+    for refused in [
+        root.join("scratch/locks"),
+        root.join("provider-state"),
+        root.join(".ssh"),
+        root.join("Archives/git-preservation"),
+        std::path::PathBuf::from("/Users/alice"),
+    ] {
+        assert!(
+            with_write(refused.clone()).is_err(),
+            "{}",
+            refused.display()
+        );
+    }
 }
 
 fn fixture() -> tempfile::TempDir {
