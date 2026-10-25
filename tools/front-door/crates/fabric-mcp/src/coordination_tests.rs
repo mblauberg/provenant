@@ -79,6 +79,39 @@ fn call(
     Ok(result.structured_content)
 }
 #[test]
+fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    let root = inputs.resolve(&Resolver)?.state;
+    let clock = TestClock::new(
+        WallTime::from_micros(2_000_000_000_000_000)?,
+        MonoTime::from_micros(0),
+    );
+    let coordination = CoordinationService::open(
+        &root,
+        ProjectId::from_bytes([1; 16]),
+        ActorId::from_bytes([2; 16]),
+        &clock,
+        &ThreadWait,
+        WaitBudget::mcp(clock.mono_now(), 5)?,
+        &CancelToken::new(),
+    )?;
+    let mut service = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
+    let result = ToolCall::Graph(GraphInput::Status {
+        id: "g-test".into(),
+    })
+    .execute(&mut service, &CancelToken::new());
+    // FakeFacade's default graph owner is unavailable, proving status got
+    // through the lane guard without needing a graph run in the fixture.
+    assert!(matches!(
+        result,
+        Err(ServiceError::Facade(FacadeError::OwnerUnavailable))
+    ));
+    Ok(())
+}
+#[test]
 fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;

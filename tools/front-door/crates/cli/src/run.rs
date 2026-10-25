@@ -840,6 +840,15 @@ pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
     reply_waited("dispatch", dispatch_inner(command, edge))
 }
 fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
+    // Check explicit placement before local aliases are normalised away and
+    // before writer validation or peer discovery can act on the request.
+    if command.host.is_some() && crate::fabric::in_lane() {
+        return Err(Fail::new(
+            Status::Refused,
+            "lane_coordination_refused",
+            "coordination mutations are not allowed inside a lane",
+        ));
+    }
     let access = &command.access;
     let unsupported = |what: &str| {
         Err(Fail::new(
@@ -1814,7 +1823,19 @@ fn align_utf8_tail(chunk: &mut run::OutputChunk) {
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
     match remote::find(edge.roots, command.target.run) {
-        Ok(Some(placement)) => return remote::cancel(&command, &placement, edge),
+        Ok(Some(placement)) => {
+            if crate::fabric::in_lane() {
+                return reply(
+                    "cancel",
+                    Err(Fail::new(
+                        Status::Refused,
+                        "lane_coordination_refused",
+                        "coordination mutations are not allowed inside a lane",
+                    )),
+                );
+            }
+            return remote::cancel(&command, &placement, edge);
+        }
         Ok(None) => {}
         Err(fail) => return reply("cancel", Err(fail)),
     }

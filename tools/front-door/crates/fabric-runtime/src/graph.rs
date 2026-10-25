@@ -301,6 +301,30 @@ impl FileJournal {
         })
     }
 
+    /// Read an atomic checkpoint snapshot without creating directories or
+    /// acquiring the writer lock. Concurrent saves publish whole files.
+    pub fn read_checkpoint(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        fs: &dyn SafeFs,
+    ) -> Result<Option<GraphCheckpoint>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = (|| -> Result<Box<dyn SafeDir>, FsError> {
+            let root = fs.open_anchor(root.as_path())?;
+            let fabric = root.open_verified_directory(OsStr::new("fabric"))?;
+            let graphs = fabric.open_verified_directory(OsStr::new("graphs"))?;
+            graphs.open_verified_directory(OsStr::new(&project.to_string()))
+        })();
+        match directory {
+            Ok(directory) => load_checkpoint(directory.as_ref(), graph_id),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn checkpoint_name(&self) -> OsString {
         format!("graph-{}.json", self.graph_id).into()
     }
@@ -313,37 +337,7 @@ impl GraphJournal for FileJournal {
         if graph_id != self.graph_id {
             return Err(JournalError::GraphMismatch);
         }
-        let file = match self.directory.open_read(&self.checkpoint_name()) {
-            Ok(file) => file,
-            Err(error) if error.is_not_found() => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let mut bytes = Vec::new();
-        let mut reader = file.take(MAX_CHECKPOINT_BYTES + 1);
-        reader.read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
-            return Err(JournalError::TooLarge);
-        }
-        let stored: StoredCheckpoint = decode_v1(
-            bytes.as_slice(),
-            Limits {
-                max_bytes: MAX_CHECKPOINT_BYTES,
-                max_depth: 64,
-                max_members: 10_000,
-            },
-        )?;
-        if stored.schema_version != 1 {
-            return Err(JournalError::BadEnvelope);
-        }
-        let digest = CanonicalV1::record_digest("fabric-graph-checkpoint", 1, &stored.checkpoint)?;
-        if digest.to_string() != stored.digest {
-            return Err(JournalError::BadDigest);
-        }
-        let checkpoint = stored.checkpoint;
-        if checkpoint.graph_id != self.graph_id {
-            return Err(JournalError::GraphMismatch);
-        }
-        Ok(Some(checkpoint))
+        load_checkpoint(self.directory.as_ref(), graph_id)
     }
 
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
@@ -373,6 +367,43 @@ impl GraphJournal for FileJournal {
             }
         }
     }
+}
+
+fn load_checkpoint(
+    directory: &dyn SafeDir,
+    graph_id: &str,
+) -> Result<Option<GraphCheckpoint>, JournalError> {
+    let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::new();
+    let mut reader = file.take(MAX_CHECKPOINT_BYTES + 1);
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+        return Err(JournalError::TooLarge);
+    }
+    let stored: StoredCheckpoint = decode_v1(
+        bytes.as_slice(),
+        Limits {
+            max_bytes: MAX_CHECKPOINT_BYTES,
+            max_depth: 64,
+            max_members: 10_000,
+        },
+    )?;
+    if stored.schema_version != 1 {
+        return Err(JournalError::BadEnvelope);
+    }
+    let digest = CanonicalV1::record_digest("fabric-graph-checkpoint", 1, &stored.checkpoint)?;
+    if digest.to_string() != stored.digest {
+        return Err(JournalError::BadDigest);
+    }
+    let checkpoint = stored.checkpoint;
+    if checkpoint.graph_id != graph_id {
+        return Err(JournalError::GraphMismatch);
+    }
+    Ok(Some(checkpoint))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1447,13 +1478,25 @@ mod file_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"reopen","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
+        assert!(
+            FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.as_path().join("fabric/graphs").exists());
         let checkpoint = {
             let mut journal =
                 FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock)
                     .unwrap();
-            advance(&document, &mut Owner, &mut journal)
+            let checkpoint = advance(&document, &mut Owner, &mut journal)
                 .unwrap()
-                .checkpoint
+                .checkpoint;
+            // Status must remain available while the writer holds its lock.
+            assert_eq!(
+                FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs).unwrap(),
+                Some(checkpoint.clone())
+            );
+            checkpoint
         };
         {
             let mut journal =
@@ -1462,18 +1505,34 @@ mod file_tests {
             assert_eq!(journal.load("reopen").unwrap(), Some(checkpoint));
         }
         {
-            let mut journal = FileJournal::open(
-                &root,
-                ProjectId::from_bytes([2; 16]),
-                "reopen",
-                &LocalFs,
-                budget,
-                &cancel,
-                &clock,
-            )
-            .unwrap();
-            assert!(journal.load("reopen").unwrap().is_none());
+            let other_project = ProjectId::from_bytes([2; 16]);
+            assert!(
+                FileJournal::read_checkpoint(&root, other_project, "reopen", &LocalFs,)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                !root
+                    .as_path()
+                    .join(format!("fabric/graphs/{other_project}"))
+                    .exists()
+            );
         }
+        let lock = root
+            .as_path()
+            .join(format!("fabric/graphs/{project}/graph-reopen.lock"));
+        std::fs::remove_file(&lock).unwrap();
+        assert!(
+            FileJournal::read_checkpoint(&root, project, "missing", &LocalFs)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!lock.exists());
         let path = root
             .as_path()
             .join(format!("fabric/graphs/{project}/graph-reopen.json"));
@@ -1481,6 +1540,10 @@ mod file_tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         stored["checkpoint"]["graph_id"] = serde_json::json!("changed");
         std::fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(matches!(
+            FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs),
+            Err(JournalError::BadDigest)
+        ));
         let mut journal =
             FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock).unwrap();
         assert!(matches!(

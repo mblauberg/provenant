@@ -82,16 +82,24 @@ values.
 
 Each lane's provider environment and generated MCP entry pin
 `PROVENANT_AGENT_LABEL` to `lane-<AttemptId>`, giving it a separate actor and
-inbox from the chair. The
-MCP edge captures the host-set lane environment at startup. A positive
-`PROVENANT_LANE_DEPTH` or a present `PROVENANT_RUN_STATE_DIR` refuses
+inbox from the chair. The MCP edge captures the host-set lane environment at
+startup. A positive `PROVENANT_LANE_DEPTH` or a present
+`PROVENANT_RUN_STATE_DIR` refuses
 coordination mutations with `lane_coordination_refused`: mail send and
-mark-read, task changes, event notes, claims and landing leases. The CLI
-coordination edge also refuses these mutations and landing push or reconcile
-under that environment. `fabric peer` and `fabric peer-agent` refuse to start
+mark-read, task changes, event notes, claims, landing leases, graph mutations
+and submission with an explicit host. The CLI coordination edge also refuses
+these mutations, landing push or reconcile, `dispatch --host` and
+`workflow session handoff` under that environment. Peer-target run cancel and
+resume are also refused. `fabric peer` and `fabric peer-agent` refuse to start
 there at all, because a peer frame names its own agent. Reads and child-store
-run submit, cancel and output remain available within the existing child
-policy.
+run submit, cancel, resume and output remain available within the existing
+child policy. Graph status reads an atomic checkpoint without creating graph
+directories or acquiring the writer lock.
+
+Lane event reads do not refresh execution events into the shared store and
+report incomplete host coverage. Host refresh never reads child stores, so a
+lane's own children's events are visible only through `fabric_run` status and
+wait.
 
 This guards the tool surface. Lanes still have direct write access to
 `fabric.sqlite3` and its companions because opening the current store for a
@@ -516,14 +524,20 @@ Fabric does not own these wire forms.
 Peer errors use the locally frozen request's operation ID. A supplied peer ID
 must match it; generic refusals may omit the ID. A mismatch is a protocol error
 (`state_corrupt`). A remote status snapshot must name the requested attempt,
-as must each record returned to a wait. Human lane listings remove control,
-escape and formatting characters from peer text through the shared plain-text
-sanitiser; structured records preserve the received values.
+as must each record returned to a wait or cancel. A resume receipt must name
+the requested continuation operation. Submission receipts must name the
+requested operation and placement; a peer writer must return the requested
+branch, and a read-only submission cannot return a worktree. Landing push and
+reconcile receipts must name the requested operation too.
+
+Human lane listings remove control, escape and formatting characters from peer
+text through the shared plain-text sanitiser; structured records preserve the
+received values.
 
 ## Follow-up: lane store isolation
 
 `lane-store-isolation` will add a read-only coordination store path and move
-lane event refresh and other shared-store writes to the host. It must preserve
+remaining shared-store writes to the host. It must preserve
 local and federated reads and child-store submission without granting lanes
 write access to shared SQLite or `fabric/locks`, then remove those grants.
 

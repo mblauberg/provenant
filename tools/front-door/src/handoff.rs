@@ -557,6 +557,12 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
 }
 
 fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal> {
+    if provenant_cli::fabric::in_lane() {
+        return Err(Refusal::refused(
+            "lane_coordination_refused",
+            "coordination mutations are not allowed inside a lane",
+        ));
+    }
     if args.provider != "claude" {
         return Err(Refusal::new(
             Outcome::Unavailable,

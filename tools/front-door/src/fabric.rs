@@ -896,14 +896,20 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                     seconds: ctx.config.limits.peer_seconds,
                 };
                 return match transport.exchange(peer, &request, budget, &cancel)?.result {
-                    PeerResult::Push(value) => Ok(value),
-                    PeerResult::Error {
-                        code,
-                        operation_id: Some(operation_id),
-                    } if code == "launch_unknown" => {
-                        Err(PeerError::Unknown { operation_id }.into())
+                    PeerResult::Push(value) if value.id == recovery_id => Ok(value),
+                    PeerResult::Error { code, operation_id } => {
+                        if operation_id.as_ref().is_some_and(|id| id != &recovery_id) {
+                            return Err(PeerError::Frame.into());
+                        }
+                        if code == "launch_unknown" {
+                            Err(PeerError::Unknown {
+                                operation_id: recovery_id.clone(),
+                            }
+                            .into())
+                        } else {
+                            Err(PeerError::Refused { code }.into())
+                        }
                     }
-                    PeerResult::Error { code, .. } => Err(PeerError::Refused { code }.into()),
                     _ => Err(PeerError::Frame.into()),
                 };
             }
@@ -969,6 +975,8 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                 Some(CoordinationError::LaneMutation)
             ) {
                 "lane_coordination_refused"
+            } else if matches!(error.downcast_ref::<PeerError>(), Some(PeerError::Frame)) {
+                "state_corrupt"
             } else {
                 "landing_refused"
             },
@@ -1398,7 +1406,7 @@ impl BinaryRunOwner<'_> {
                 return Err(FacadeError::OwnerUnavailable);
             }
             let input = SubmitInput::Submission {
-                operation_id,
+                operation_id: operation_id.clone(),
                 tasks,
                 concurrency,
                 knobs,
@@ -1406,7 +1414,10 @@ impl BinaryRunOwner<'_> {
             };
             return match self.peer(host, PeerAction::Submit { input }, budget, cancel)? {
                 PeerResult::Submitted(receipt)
-                    if receipt.targets.iter().all(|t| t.host == Some(host)) =>
+                    if receipt.operation_id == operation_id
+                        && receipt.worktree.is_none()
+                        && !receipt.targets.is_empty()
+                        && receipt.targets.iter().all(|t| t.host == Some(host)) =>
                 {
                     Ok(receipt)
                 }
@@ -1845,6 +1856,13 @@ impl BinaryRunOwner<'_> {
                 ref target,
                 ref operation_id,
             } => {
+                if self.factory.context.in_lane
+                    && target
+                        .host
+                        .is_some_and(|host| host != self.factory.context.identity.host)
+                {
+                    return Err(FacadeError::LaneCoordinationRefused);
+                }
                 if let Some(answer) = self.remote(
                     target,
                     PeerAction::Run {
@@ -1854,7 +1872,12 @@ impl BinaryRunOwner<'_> {
                     cancel,
                 )? {
                     return match answer {
-                        PeerResult::Run(value) => Ok(*value),
+                        PeerResult::Run(value)
+                            if matches!(&*value, RunResult::Cancel { attempt }
+                                if attempt.attempt_id == target.attempt) =>
+                        {
+                            Ok(*value)
+                        }
                         _ => Err(FacadeError::StateCorrupt),
                     };
                 }
@@ -1883,6 +1906,13 @@ impl BinaryRunOwner<'_> {
                 ref prompt,
                 expected_generation,
             } => {
+                if self.factory.context.in_lane
+                    && target
+                        .host
+                        .is_some_and(|host| host != self.factory.context.identity.host)
+                {
+                    return Err(FacadeError::LaneCoordinationRefused);
+                }
                 if let Some(answer) = self.remote(
                     target,
                     PeerAction::Run {
@@ -1892,7 +1922,12 @@ impl BinaryRunOwner<'_> {
                     cancel,
                 )? {
                     return match answer {
-                        PeerResult::Run(value) => Ok(*value),
+                        PeerResult::Run(value)
+                            if matches!(&*value, RunResult::Resume { attempt }
+                                if attempt.operation_id == *operation_id) =>
+                        {
+                            Ok(*value)
+                        }
                         _ => Err(FacadeError::StateCorrupt),
                     };
                 }
@@ -2134,9 +2169,7 @@ impl Factory {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         use provenant_fabric_runtime::coordination::input::ValidateInput;
-        use provenant_fabric_runtime::graph::{
-            FileJournal, GraphDocument, GraphJournal, GraphRun, GraphStatus,
-        };
+        use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphJournal};
         input
             .validate_input(provenant_core::WaitTransport::Cli)
             .map_err(|_| FacadeError::InvalidInput)?;
@@ -2178,6 +2211,26 @@ impl Factory {
                 .graph_id
                 .as_str(),
         };
+        if matches!(input, GraphInput::Status { .. }) {
+            let checkpoint = FileJournal::read_checkpoint(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                &provenant_supervisor::fs::LocalFs,
+            )
+            .map_err(|error| {
+                use provenant_fabric_runtime::graph::JournalError;
+                match error {
+                    // Unreadable is not corrupt: a denied or vanished read stays Io.
+                    JournalError::Filesystem(_)
+                    | JournalError::Io(_)
+                    | JournalError::DurabilityUnconfirmed(_) => FacadeError::Io,
+                    _ => FacadeError::StateCorrupt,
+                }
+            })?
+            .ok_or(FacadeError::NotFound)?;
+            return Ok(graph_snapshot(checkpoint));
+        }
         let mut journal = FileJournal::open(
             &self.context.roots.state,
             self.context.identity.project,
@@ -2239,22 +2292,28 @@ impl Factory {
                 return Err(error);
             }
         }
-        let status = if checkpoint.cancelled {
-            GraphStatus::Cancelled
-        } else if checkpoint.nodes.iter().any(|node| {
-            matches!(
-                node.state,
-                provenant_fabric_runtime::graph::NodeState::Pending
-                    | provenant_fabric_runtime::graph::NodeState::Running
-            )
-        }) {
-            GraphStatus::Pending
-        } else {
-            GraphStatus::Complete
-        };
-        Ok(GraphRun { status, checkpoint })
+        Ok(graph_snapshot(checkpoint))
     }
 }
+
+fn graph_snapshot(
+    checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> provenant_fabric_runtime::graph::GraphRun {
+    use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
+    let status = if checkpoint.cancelled {
+        GraphStatus::Cancelled
+    } else if checkpoint
+        .nodes
+        .iter()
+        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+    {
+        GraphStatus::Pending
+    } else {
+        GraphStatus::Complete
+    };
+    GraphRun { status, checkpoint }
+}
+
 impl Factory {
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
@@ -2326,6 +2385,9 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
     };
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let factory = factory(globals)?;
+        if factory.context.in_lane && !matches!(input, GraphInput::Status { .. }) {
+            return Err(CoordinationError::LaneMutation.into());
+        }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         Ok(factory.graph(input, budget, &cancel)?)
@@ -2344,13 +2406,25 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
                 false,
             )
         }
-        Err(error) => crate::fail(
-            command,
-            provenant_records::Outcome::Error,
-            "graph_owner",
-            &error.to_string(),
-            globals,
-        ),
+        Err(error) => {
+            let (outcome, code) = if matches!(
+                error.downcast_ref::<CoordinationError>(),
+                Some(CoordinationError::LaneMutation)
+            ) {
+                (
+                    provenant_records::Outcome::Refused,
+                    "lane_coordination_refused",
+                )
+            } else if matches!(
+                error.downcast_ref::<FacadeError>(),
+                Some(FacadeError::NotFound)
+            ) {
+                (provenant_records::Outcome::Invalid, "not_found")
+            } else {
+                (provenant_records::Outcome::Error, "graph_owner")
+            };
+            crate::fail(command, outcome, code, &error.to_string(), globals)
+        }
     }
 }
 
@@ -2369,6 +2443,16 @@ impl Factory {
         cancel: &CancelToken,
     ) -> Result<EventCoverage, FacadeError> {
         let ctx = &self.context;
+        if ctx.in_lane {
+            return Ok(EventCoverage {
+                unknown_hosts: std::iter::once(ctx.identity.host)
+                    .chain(ctx.config.peers.values().map(|peer| peer.host))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                more_events: false,
+            });
+        }
         if ctx.identity.federation.as_ref().is_some_and(|p| {
             ctx.config
                 .home_hosts

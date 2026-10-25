@@ -185,6 +185,8 @@ pub enum FacadeError {
     ContinuationUnsupported,
     #[error("lane depth exceeds lanes.max_depth")]
     LaneDepth,
+    #[error("coordination mutations are not allowed inside a lane")]
+    LaneCoordinationRefused,
     #[error("request violates confinement")]
     ConfinementRefused,
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
@@ -228,6 +230,7 @@ impl FacadeError {
             ("continuation_unsupported", _) => Self::ContinuationUnsupported,
             ("confinement_refused", _) => Self::ConfinementRefused,
             ("lane_depth", _) => Self::LaneDepth,
+            ("lane_coordination_refused", _) => Self::LaneCoordinationRefused,
             ("worktree_missing", _) => Self::WorktreeMissing,
             ("base_unreachable", _) => Self::BaseUnreachable,
             ("branch_exists", _) => Self::BranchExists,
@@ -255,6 +258,7 @@ impl FacadeError {
             Self::LaunchUnknown { .. } => "launch_unknown",
             Self::ContinuationUnsupported => "continuation_unsupported",
             Self::LaneDepth => "lane_depth",
+            Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",
             Self::WorktreeMissing => "worktree_missing",
             Self::BaseUnreachable => "base_unreachable",

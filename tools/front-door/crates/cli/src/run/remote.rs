@@ -479,6 +479,8 @@ pub(super) fn dispatch(
         || receipt.targets.is_empty()
         || receipt.targets.iter().any(|t| t.host != Some(host))
         || receipt.worktree.is_some() != (access == AccessMode::WorktreeWrite)
+        || receipt.worktree.as_ref().map(|w| &w.branch)
+            != batch.new_worktree.as_ref().map(|w| &w.branch)
     {
         return Err(corrupt());
     }
