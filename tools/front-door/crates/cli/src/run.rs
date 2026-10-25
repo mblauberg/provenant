@@ -1880,7 +1880,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                             ) {
                                 status = Status::Failed;
                             }
-                            human.push_str(&format!("{id} {}\n", state_tag(state)));
+                            human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
                             rows.push(json!({ "attempt_id": id, "found": state }));
                         }
                         data["recovered"] = Value::Array(rows);
@@ -1914,6 +1914,20 @@ fn state_tag(value: &impl Serialize) -> String {
         .ok()
         .and_then(|v| v.get("state").and_then(Value::as_str).map(str::to_owned))
         .unwrap_or_default()
+}
+
+fn reconcile_summary(state: &run::Reconciled) -> String {
+    match state {
+        run::Reconciled::TemporaryRetained { path, reason } => format!(
+            "temporary_retained {}: {}",
+            plain_text(&path.to_string_lossy(), usize::MAX),
+            plain_text(reason, usize::MAX)
+        ),
+        run::Reconciled::Uncertain { reason } => {
+            format!("uncertain: {}", plain_text(reason, usize::MAX))
+        }
+        _ => state_tag(state),
+    }
 }
 
 /// Continue one terminal attempt with new input as a new single-task run on
@@ -2065,7 +2079,7 @@ fn reconcile_inner(
                 ) {
                     *fenced = true;
                 }
-                human.push_str(&format!("{run}/{id} {}\n", state_tag(state)));
+                human.push_str(&format!("{run}/{id} {}\n", reconcile_summary(state)));
                 json!({ "attempt_id": id, "found": state })
             })
             .collect();
@@ -2336,6 +2350,19 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+
+    #[test]
+    fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_controls() {
+        let state = run::Reconciled::TemporaryRetained {
+            path: PathBuf::from("/state/runs/run/attempts/attempt/tmp"),
+            reason: "permission denied\n\x1b[31mretry later\x1b[0m".into(),
+        };
+        let rendered = reconcile_summary(&state);
+        assert!(rendered.contains("/state/runs/run/attempts/attempt/tmp"));
+        assert!(rendered.contains("permission denied"));
+        assert!(rendered.contains("retry later"));
+        assert!(!rendered.chars().any(char::is_control));
+    }
 
     #[test]
     fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {

@@ -976,7 +976,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn a_fresh_store_is_at_version_three_without_spacing() -> TestResult {
+fn temporary_tracking_initialises_at_version_four_without_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -989,7 +989,7 @@ fn a_fresh_store_is_at_version_three_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -1000,7 +1000,7 @@ fn a_fresh_store_is_at_version_three_without_spacing() -> TestResult {
 }
 
 #[test]
-fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
+fn temporary_tracking_upgrade_preserves_version_one_cancel_binding() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1010,7 +1010,7 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     RunStore::open(&context, &call)?
         .db
         .execute_batch(
-            "DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
+            "DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
         )?;
     let store = RunStore::open(&context, &call)?;
     let op = OperationId::parse("stop")?;
@@ -1023,7 +1023,7 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
 }
 
 #[test]
-fn a_version_two_store_drops_the_unused_spacing_table() -> TestResult {
+fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1031,7 +1031,7 @@ fn a_version_two_store_drops_the_unused_spacing_table() -> TestResult {
     let call = call(&clock, &cancel);
     // Shape the store exactly as version 2 left it, with the unused table back.
     RunStore::open(&context, &call)?.db.execute_batch(
-        "CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
+        "DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
     )?;
     let store = RunStore::open(&context, &call)?;
     let remaining: i64 = store.db.query_row(
@@ -1046,12 +1046,12 @@ fn a_version_two_store_drops_the_unused_spacing_table() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     Ok(())
 }
 
 #[test]
-fn a_store_newer_than_version_three_is_refused() -> TestResult {
+fn temporary_tracking_refuses_a_store_newer_than_version_four() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1059,10 +1059,10 @@ fn a_store_newer_than_version_three_is_refused() -> TestResult {
     let call = call(&clock, &cancel);
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("PRAGMA user_version=4;")?;
+        .execute_batch("PRAGMA user_version=5;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(4))
+        Err(RunError::Version(5))
     ));
     Ok(())
 }

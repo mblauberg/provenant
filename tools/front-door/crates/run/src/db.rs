@@ -194,7 +194,15 @@ impl RunStore {
             launched: Default::default(),
             _owner: PhantomData,
         };
-        if schema_version < 3 {
+        if schema_version < 4 {
+            // Read legacy paths once, outside the migration transaction. The
+            // initialisation lock serialises migrations. Unreadable paths and
+            // in-flight attempts keep the conservative retained default.
+            let absent_temporary = if schema_version > 0 {
+                store.terminal_without_temporary(request)?
+            } else {
+                Vec::new()
+            };
             store.write(request, |tx| {
                 if version(tx)? == 0 {
                     tx.execute_batch(include_str!("schema.sql"))?;
@@ -205,11 +213,42 @@ impl RunStore {
                 if version(tx)? == 2 {
                     tx.execute_batch(include_str!("schema_v3.sql"))?;
                 }
+                if version(tx)? == 3 {
+                    tx.execute_batch(include_str!("schema_v4.sql"))?;
+                    for id in &absent_temporary {
+                        tx.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
+                    }
+                }
                 Ok(())
             })?;
         }
         companions(&store.root, "run.sqlite3", request)?;
         Ok(store)
+    }
+
+    fn terminal_without_temporary(&self, request: &Request<'_>) -> Result<Vec<String>> {
+        let candidates: Vec<(String, String)> = request.retry(|| {
+            let mut query = self
+                .db
+                .prepare("SELECT run,id FROM attempts WHERE terminal=1")?;
+            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        let mut absent = Vec::new();
+        for (run, id) in candidates {
+            request.retry(|| Ok(()))?;
+            let run = provenant_core::RunId::parse(&run)
+                .map_err(|_| RunError::Validation("run index ID"))?;
+            let attempt = provenant_core::AttemptId::parse(&id)
+                .map_err(|_| RunError::Validation("attempt index ID"))?;
+            let remaining = self
+                .attempt_dir(run, attempt, false)
+                .and_then(|dir| Ok(dir.metadata_at(OsStr::new("tmp"), false)?));
+            if matches!(remaining, Err(RunError::Filesystem(ref error)) if error.is_not_found()) {
+                absent.push(id);
+            }
+        }
+        Ok(absent)
     }
     pub(crate) fn write<T>(
         &self,
@@ -317,7 +356,7 @@ pub(crate) fn open_database(
 }
 fn version(db: &Connection) -> Result<i64> {
     let (version, has_schema): (i64, bool) = db.query_row("SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    if !(0..=3).contains(&version) || (version == 0 && has_schema) {
+    if !(0..=4).contains(&version) || (version == 0 && has_schema) {
         return Err(RunError::Version(version));
     }
     Ok(version)

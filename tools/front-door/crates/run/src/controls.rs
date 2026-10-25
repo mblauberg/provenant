@@ -33,7 +33,7 @@ pub struct Resume {
     pub prompt: String,
     pub created_at: WallTime,
 }
-/// What reconcile found for one nonterminal attempt.
+/// What reconcile found for one attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Reconciled {
@@ -43,6 +43,13 @@ pub enum Reconciled {
     Held,
     /// A durable exit was committed and released.
     Finished,
+    /// Leftover temporary data was removed from a terminal attempt.
+    TemporaryRemoved,
+    /// The attempt is terminal, but temporary data could not be removed.
+    TemporaryRetained {
+        path: std::path::PathBuf,
+        reason: String,
+    },
     /// Launch never reached a guardian; ended as rejected.
     Withdrawn,
     /// Cleanup ended with these descendants possibly alive (for example one
@@ -332,8 +339,8 @@ impl RunStore {
         self.create(&prepared, call)
     }
 
-    /// Up to `limit` runs with nonterminal work in this project, oldest
-    /// first, for a recovery scan.
+    /// Up to `limit` runs needing recovery or terminal temporary cleanup in
+    /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
         let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = call.retry(|| {
@@ -352,12 +359,31 @@ impl RunStore {
                 runs.push(fence.scope.run);
             }
         }
+        if runs.len() < limit as usize {
+            call.retry(|| {
+                let mut query = self.db.prepare(
+                    "SELECT run FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
+                )?;
+                let mut rows = query.query(params![self.context.project_id.to_string(), limit])?;
+                while runs.len() < limit as usize {
+                    let Some(row) = rows.next()? else { break };
+                    let run = RunId::parse(&row.get::<_, String>(0)?)
+                        .map_err(|_| RunError::Validation("run index ID"))?;
+                    if runs.contains(&run) {
+                        continue;
+                    }
+                    runs.push(run);
+                }
+                Ok(())
+            })?;
+        }
         Ok(runs)
     }
 
-    /// Check every nonterminal attempt of `run` against supervisor custody.
+    /// Check every attempt of `run` against supervisor custody.
     /// A durable exit is committed and released; a launch that provably never
-    /// reached a guardian is withdrawn; anything else is left as found.
+    /// reached a guardian is withdrawn. Terminal temporary data is retried
+    /// only after reservations are released; removal failures are reported.
     pub fn reconcile(
         &self,
         run: RunId,
@@ -365,9 +391,9 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
         let mut ids: Vec<String> = call.retry(|| {
-            let mut query = self.db.prepare(
-                "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
-            )?;
+            let mut query = self
+                .db
+                .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
@@ -384,10 +410,14 @@ impl RunStore {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
             let state = self
                 .reconcile_attempt(id, providers, call)
-                .unwrap_or_else(|error| Reconciled::Uncertain {
-                    reason: error.to_string(),
+                .unwrap_or_else(|error| {
+                    Some(Reconciled::Uncertain {
+                        reason: error.to_string(),
+                    })
                 });
-            found.push((id, state));
+            if let Some(state) = state {
+                found.push((id, state));
+            }
         }
         Ok(found)
     }
@@ -485,39 +515,138 @@ impl RunStore {
             None => Reconciled::Finished,
         })
     }
+    fn reconcile_terminal_temporary(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<Option<Reconciled>> {
+        let id = record.attempt_id;
+        let scope = Self::scope(record);
+        let path = self
+            .context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}/tmp", record.run_id));
+        let listing = match self.writer_fence_listing() {
+            Ok(listing) => listing,
+            Err(error) => {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: error.to_string(),
+                }));
+            }
+        };
+        let retained = listing
+            .reservations
+            .into_iter()
+            .find(|fence| fence.scope.run == record.run_id && fence.scope.attempt == id);
+        match retained {
+            Some(fence)
+                if fence.scope == scope
+                    && record.provider_launched == Some(false)
+                    && record.exit_evidence.is_none()
+                    && self.withdraw_prepared_writer(&fence, call)? =>
+            {
+                // Another retained reservation may name this attempt.
+                // Retry temporary cleanup on the next scan.
+                return Ok(Some(Reconciled::Withdrawn));
+            }
+            Some(fence) => {
+                return Ok(Some(Reconciled::Uncertain {
+                    reason: format!(
+                        "writer reservation retained after terminal commit: {}; chair recovery required",
+                        fence.reservation.display()
+                    ),
+                }));
+            }
+            None => {}
+        }
+        let attempt = match self
+            .attempt_dir(record.run_id, id, false)
+            .and_then(|attempt| {
+                attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
+                Ok(attempt)
+            }) {
+            Ok(attempt) => attempt,
+            Err(RunError::Filesystem(error)) if error.is_not_found() => {
+                self.set_temporary_retained(id, false, call)?;
+                return Ok(None);
+            }
+            Err(error) => {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: error.to_string(),
+                }));
+            }
+        };
+        // An unreadable reservation cannot establish absence of
+        // custody for this attempt, so leave temporary data alone.
+        if let Some(issue) = listing.issues.first() {
+            return Ok(Some(Reconciled::TemporaryRetained {
+                path,
+                reason: format!(
+                    "writer reservation unreadable at {}: {}",
+                    issue.reservation.display(),
+                    issue.reason
+                ),
+            }));
+        }
+        let remove = || -> Result<()> {
+            match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+                Err(error) if error.is_not_found() => return Ok(()),
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
+            }
+            // A read-only guardian reserves the attempt itself. Hold
+            // its exclusion lock and refuse any retained reservation.
+            let _lease = attempt.try_lock(
+                std::ffi::OsStr::new("writer.lock"),
+                provenant_supervisor::fs::LockMode::Exclusive,
+            )?;
+            match attempt.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
+                Ok(_) => return Err(RunError::Validation("attempt reservation retained")),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+            artifacts::remove_unreserved_terminal_temporary(&attempt)?;
+            Ok(())
+        };
+        Ok(Some(match remove() {
+            Ok(()) => {
+                self.set_temporary_retained(id, false, call)?;
+                Reconciled::TemporaryRemoved
+            }
+            Err(error) => Reconciled::TemporaryRetained {
+                path,
+                reason: error.to_string(),
+            },
+        }))
+    }
+
     fn reconcile_attempt(
         &self,
         id: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
-    ) -> Result<Reconciled> {
+    ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
-        let scope = Self::scope(&record);
-        match record.state {
-            AttemptState::Queued => return Ok(Reconciled::Queued),
-            AttemptState::Terminal { .. } => {
-                let retained = self
-                    .writer_fences()?
-                    .into_iter()
-                    .find(|fence| fence.scope == scope);
-                return Ok(match retained {
-                    Some(fence)
-                        if record.provider_launched == Some(false)
-                            && record.exit_evidence.is_none()
-                            && self.withdraw_prepared_writer(&fence, call)? =>
-                    {
-                        Reconciled::Withdrawn
-                    }
-                    Some(fence) => Reconciled::Uncertain {
-                        reason: format!(
-                            "writer reservation retained after terminal commit: {}; chair recovery required",
-                            fence.reservation.display()
-                        ),
-                    },
-                    None => Reconciled::Finished,
-                });
-            }
-            _ => {}
+        if matches!(record.state, AttemptState::Terminal { .. }) {
+            return self.reconcile_terminal_temporary(&record, call);
+        }
+        self.reconcile_live_attempt(&record, providers, call)
+            .map(Some)
+    }
+
+    fn reconcile_live_attempt(
+        &self,
+        record: &AttemptRecord,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<Reconciled> {
+        let id = record.attempt_id;
+        let scope = Self::scope(record);
+        if record.state == AttemptState::Queued {
+            return Ok(Reconciled::Queued);
         }
         let uncertain = |error: &dyn std::fmt::Display| Reconciled::Uncertain {
             reason: error.to_string(),
@@ -544,7 +673,7 @@ impl RunStore {
                         };
                         // The writer lock is free only when no guardian remains
                         // to settle this exit, so recovery ends the orphans.
-                        let Ok(mut recovery) = self.orphan_recovery(&record, dir()?, call) else {
+                        let Ok(mut recovery) = self.orphan_recovery(record, dir()?, call) else {
                             return Ok(still_named());
                         };
                         match recovery.end_orphans(&dir()?, ORPHAN_PATIENCE) {
@@ -552,6 +681,7 @@ impl RunStore {
                                 drop(recovery);
                                 // The exit is settled: commit it as any other.
                                 self.reconcile_attempt(id, providers, call)
+                                    .map(|state| state.unwrap_or(Reconciled::Finished))
                             }
                             Ok(report) => Ok(Reconciled::Escaped {
                                 pids: report.survivors.iter().map(|s| s.pid).collect(),
@@ -575,7 +705,7 @@ impl RunStore {
             // No launch summary: the handoff never confirmed. Only a
             // reservation that provably never spawned may be withdrawn.
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
-                self.settle_unlaunched(id, &record, call)
+                self.settle_unlaunched(id, record, call)
             }
             Err(error) => Ok(uncertain(&error)),
         }

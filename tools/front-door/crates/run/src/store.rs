@@ -544,7 +544,10 @@ impl RunStore {
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
                 if let Ok(attempt_dir) = self.attempt_dir(old.run_id, id, false) {
-                    remove_temporary_best_effort(&attempt_dir);
+                    self.set_temporary_retained(id, true, call)?;
+                    if remove_temporary_best_effort(&attempt_dir).is_ok() {
+                        let _ = self.set_temporary_retained(id, false, call);
+                    }
                 }
                 return Ok(old);
             }
@@ -577,7 +580,7 @@ impl RunStore {
         #[cfg(test)]
         crate::tests::crash_at("sealed");
         self.write(call, |tx| {
-            let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(&next)?, id.to_string(), sql_int(expected_revision)?])?;
+            let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(&next)?, id.to_string(), sql_int(expected_revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             insert_event(tx, &next)?;
@@ -596,10 +599,33 @@ impl RunStore {
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
-        remove_temporary_best_effort(&attempt_dir);
+        // Retained is committed with the terminal record, so a crash before
+        // removal leaves discoverable work. Clearing the hint is best effort.
+        if remove_temporary_best_effort(&attempt_dir).is_ok() {
+            let _ = self.set_temporary_retained(id, false, call);
+        }
         #[cfg(test)]
         crate::tests::crash_at("committed");
         Ok(next)
+    }
+
+    pub(crate) fn set_temporary_retained(
+        &self,
+        id: AttemptId,
+        retained: bool,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| {
+            tx.execute(
+                "UPDATE attempts SET tmp_retained=?1 WHERE id=?2 AND project=?3 AND terminal=1",
+                params![
+                    retained,
+                    id.to_string(),
+                    self.context.project_id.to_string()
+                ],
+            )?;
+            Ok(())
+        })
     }
 }
 fn validate_request(input: &PreparedRun) -> Result<()> {

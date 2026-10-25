@@ -17,18 +17,44 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
     Ok(dir)
 }
 
-pub(crate) fn remove_temporary_best_effort(attempt: &Directory) {
-    let _ = remove_entry_tree(attempt, OsStr::new("tmp"));
+pub(crate) fn remove_temporary_best_effort(
+    attempt: &Directory,
+) -> provenant_supervisor::fs::Result<()> {
+    remove_entry_tree(attempt, OsStr::new("tmp"), TemporaryLocks::Protected)
 }
 
-fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_supervisor::fs::Result<()> {
+/// Reconcile alone may dispose of lock-named payloads after proving the
+/// attempt terminal and unreserved. It checks worktree reservations first,
+/// then holds the attempt's writer lock, which excludes read-only guardians.
+/// It does not hold the worktree writer lock during deletion.
+/// The exception is rooted at the literal tmp entry, never the attempt itself.
+pub(crate) fn remove_unreserved_terminal_temporary(
+    attempt: &Directory,
+) -> provenant_supervisor::fs::Result<()> {
+    remove_entry_tree(attempt, OsStr::new("tmp"), TemporaryLocks::Disposable)
+}
+
+#[derive(Clone, Copy)]
+enum TemporaryLocks {
+    Protected,
+    Disposable,
+}
+
+fn remove_entry_tree(
+    parent: &Directory,
+    name: &OsStr,
+    locks: TemporaryLocks,
+) -> provenant_supervisor::fs::Result<()> {
     let metadata = match parent.metadata_at(name, false) {
         Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => return Ok(()),
         Err(error) => return Err(error),
     };
     if metadata.kind != FileKind::Directory {
-        return parent.unlink(name);
+        return match locks {
+            TemporaryLocks::Protected => parent.unlink(name),
+            TemporaryLocks::Disposable => parent.unlink_payload(name),
+        };
     }
     let directory = parent.open_verified_directory(name)?;
     directory.make_writable()?;
@@ -36,9 +62,12 @@ fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_supervisor::
         .entries()?
         .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
     for entry in entries {
-        remove_entry_tree(&directory, &entry)?;
+        remove_entry_tree(&directory, &entry, locks)?;
     }
-    parent.rmdir(name)
+    match locks {
+        TemporaryLocks::Protected => parent.rmdir(name),
+        TemporaryLocks::Disposable => parent.rmdir_payload(name),
+    }
 }
 
 impl RunStore {
