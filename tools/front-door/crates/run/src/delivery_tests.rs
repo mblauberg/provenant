@@ -120,6 +120,19 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
+    // A lane that rewrites the stored destination after launch cannot steer
+    // the host's push: the destination bound at prepare wins.
+    let rewritten = WriterDeliveryRequest {
+        branch: "main".into(),
+        ..request.clone()
+    };
+    assert!(matches!(
+        deliver_once(&host, &writer, &rewritten, &attempt),
+        Err(RunError::Validation(
+            "delivery destination changed after launch"
+        ))
+    ));
+    assert!(git(&lane, &["ls-remote", "origin", "refs/heads/main"])?.is_empty());
     let receipt = deliver_once(&host, &writer, &request, &attempt)?;
     assert_eq!(receipt.head, Some(head));
     assert!(matches!(

@@ -148,9 +148,8 @@ pub fn detect(
     home: &Path,
     user: &OsStr,
     directory: &Path,
-    cwd: &Path,
 ) -> Result<String, ProviderError> {
-    detect_with_org(executor, adapter, executable, home, user, directory, cwd).map(|(key, _)| key)
+    detect_with_org(executor, adapter, executable, home, user, directory).map(|(key, _)| key)
 }
 /// The account key and, for Claude, the organisation fingerprint when exposed.
 pub fn detect_with_org(
@@ -160,8 +159,8 @@ pub fn detect_with_org(
     home: &Path,
     user: &OsStr,
     directory: &Path,
-    cwd: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
+    let cwd = Path::new(crate::claude::PROBE_CWD);
     if adapter == "agy" {
         return detect_agy(executor, executable, home, user, cwd).map(|key| (key, None));
     }
