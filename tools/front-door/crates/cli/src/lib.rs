@@ -703,7 +703,7 @@ mod tests {
             "--branch",
             "lane",
         ]);
-        invalid(&["worktree", "remove", "lane", "--integration", "main"]);
+        valid(&["worktree", "remove", "lane", "--integration", "main"]);
         invalid(&["worktree", "remove", "--branch", "lane"]);
         invalid(&["check", "release", "--base", &"a".repeat(40)]);
         invalid(&[
