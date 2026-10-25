@@ -936,7 +936,9 @@ fn a_version_one_store_gains_cancel_binding_on_reopen() -> TestResult {
     // Shape the store exactly as version 1 left it.
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("DROP TABLE cancellations; PRAGMA user_version=1;")?;
+        .execute_batch(
+            "DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
+        )?;
     let store = RunStore::open(&context, &call)?;
     let op = OperationId::parse("stop")?;
     store.bind_cancel(&op, "attempt", &call)?;
@@ -972,6 +974,23 @@ fn a_version_two_store_drops_the_unused_spacing_table() -> TestResult {
                 r.get(0)
             })?;
     assert_eq!(version, 3);
+    Ok(())
+}
+
+#[test]
+fn a_store_newer_than_version_three_is_refused() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    RunStore::open(&context, &call)?
+        .db
+        .execute_batch("PRAGMA user_version=4;")?;
+    assert!(matches!(
+        RunStore::open(&context, &call),
+        Err(RunError::Version(4))
+    ));
     Ok(())
 }
 

@@ -23,6 +23,9 @@ CREATE TABLE admission (
  active INTEGER NOT NULL CHECK(active IN (0,1)), record BLOB NOT NULL CHECK(length(record)<=1048576)
 ) STRICT;
 CREATE INDEX admission_counts ON admission(active,project,run);
+CREATE TABLE spacing (
+ id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL
+) STRICT;
 CREATE TABLE continuations (
  target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)
 ) STRICT;
