@@ -271,6 +271,78 @@ fn missing_peer_agent_is_stopped_only_when_the_last_harness_is_removed() {
 }
 
 #[test]
+fn peer_agent_recorded_under_another_home_is_reported_and_dropped() {
+    for present in [false, true] {
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let ctx = context(&clock, &cancel);
+        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        let foreign = f
+            .base
+            .join("old-home/Library/LaunchAgents/dev.provenant.peer.plist");
+        if present {
+            fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+            fs::write(&foreign, b"rendered plist\n").unwrap();
+        }
+        let mut receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+        receipt
+            .entries
+            .iter_mut()
+            .find(|entry| entry.selector == "peer-agent")
+            .unwrap()
+            .path = AbsolutePath::new(&foreign).unwrap();
+        fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
+        assert!(matches!(
+            Snapshots::capture(&f.release(), &f.targets, &LocalFs),
+            Err(InstallError::Conflict(path)) if path == foreign
+        ));
+        struct StopReporter(usize);
+        impl InstallReporter for StopReporter {
+            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+                Ok(())
+            }
+            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+                if action.selector == "peer-agent" {
+                    self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+        let mut reporter = StopReporter(0);
+        let outcome = uninstall(&f.targets, &ctx, &mut reporter).unwrap();
+        assert!(outcome.findings.iter().any(|finding| {
+            finding.rule == "relinquished_foreign_peer_agent"
+                && finding.path.to_path_buf().unwrap() == foreign
+        }));
+        assert_eq!(reporter.0, 0);
+        assert!(
+            !outcome
+                .actions
+                .iter()
+                .any(|action| action.selector == "peer-agent")
+        );
+        assert!(
+            !read_receipt(&f.targets, &LocalFs)
+                .unwrap()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.selector == "peer-agent")
+        );
+        if present {
+            assert_eq!(fs::read(&foreign).unwrap(), b"rendered plist\n");
+        } else {
+            assert!(!foreign.exists());
+        }
+    }
+}
+
+#[test]
 fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
     for state in ["unchanged", "modified", "missing"] {
         let modified = state == "modified";
