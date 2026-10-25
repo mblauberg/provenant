@@ -243,6 +243,10 @@ pub enum PeerAction {
     /// Start a fresh session on the peer from a hand-off prompt.
     SessionHandoff {
         input: Box<crate::handoff::SessionHandoff>,
+        /// The source's wait, so the peer finishes inside it. Absent from an
+        /// older source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_seconds: Option<u64>,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,7 +264,7 @@ impl PeerRequest {
         match &self.action {
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
             PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
-            PeerAction::SessionHandoff { input } => Some(input.operation_id.clone()),
+            PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
             PeerAction::Submit {
                 input: facade::SubmitInput::Submission { operation_id, .. },
             }
@@ -344,13 +348,32 @@ pub struct PeerResponse {
 pub fn decode_request(bytes: &[u8]) -> Result<PeerRequest, PeerError> {
     provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
 }
+/// Control (Cc), format (Cf: zero-width, bidi override and isolate marks) and
+/// line or paragraph separator characters, none of which belong in peer text.
+fn unprintable(c: char) -> bool {
+    c.is_control()
+        || matches!(c as u32,
+            0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2
+            | 0x180E | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x2064
+            | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD
+            | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A
+            | 0xE0001 | 0xE0020..=0xE007F)
+}
+/// `text` with unprintable characters removed, cut to `limit` characters.
+/// Peer text passes through this before it is printed.
+pub fn plain_text(text: &str, limit: usize) -> String {
+    text.chars()
+        .filter(|c| !unprintable(*c))
+        .take(limit)
+        .collect()
+}
 /// First non-empty stderr line, control characters removed, bounded.
 fn stderr_line(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| line.chars().filter(|c| !c.is_control()).take(200).collect())
+        .map(|line| plain_text(line, 200))
         .unwrap_or_default()
 }
 pub trait PeerTransport {
@@ -715,6 +738,13 @@ mod tests {
     }
 
     #[test]
+    fn plain_text_drops_format_and_separator_characters() {
+        let text = "a\u{202e}b\u{2066}c\u{200b}d\u{2028}e\u{feff}f\u{1b}g";
+        assert_eq!(plain_text(text, 100), "abcdefg");
+        assert_eq!(plain_text("abcdef", 3), "abc");
+    }
+
+    #[test]
     fn session_handoff_fits_one_frame_and_keeps_its_operation_on_a_lost_reply() {
         use crate::handoff::{
             ATTACHMENT_LIMIT, Attachment, PROMPT_HEADER, PROMPT_LIMIT, SessionHandoff,
@@ -758,13 +788,14 @@ mod tests {
             },
             action: PeerAction::SessionHandoff {
                 input: Box::new(input.clone()),
+                budget_seconds: Some(30),
             },
         };
         let frame = serde_json::to_vec(&request).unwrap();
         assert!(frame.len() < MAX_FRAME, "{} bytes", frame.len());
         let decoded = decode_request(&frame).unwrap();
         assert!(
-            matches!(&decoded.action, PeerAction::SessionHandoff { input: got } if **got == input)
+            matches!(&decoded.action, PeerAction::SessionHandoff { input: got, .. } if **got == input)
         );
         let peer = Peer {
             host,
