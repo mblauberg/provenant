@@ -30,7 +30,9 @@ its head, which recovers it with `git branch NAME HEAD` while Git still holds
 the objects.
 
 Confinement validates repository identity and refuses primary, dirty
-and live writers. An unknown writer is accepted when its lease is free and the
+and live writers. `worktree list` reports a tree whose only changes are
+ignored files as `ignored`; removal refuses it like a dirty tree, and a
+session hand-off treats it as clean. An unknown writer is accepted when its lease is free and the
 tree is clean. It reports `git_operation_in_progress` and refuses
 removal when the worktree's private Git directory contains an unfinished
 cherry-pick, revert, rebase, merge or sequencer operation, even if the index

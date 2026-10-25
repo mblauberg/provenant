@@ -9,6 +9,7 @@ pub mod codex_rollout;
 mod contract;
 pub mod cursor;
 mod dylib;
+pub mod host;
 pub mod identity;
 mod lane;
 mod launch;

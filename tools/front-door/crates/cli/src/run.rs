@@ -1195,15 +1195,17 @@ pub fn launch(
     }
     launch_on_host(session, run, edge, call, None)
 }
+/// `child` carries a lane's child launch: the inherited host context and the
+/// request `validate_child` returned, which is the only copy launched from.
 fn launch_on_host(
     session: &Session,
     run: RunId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
-    inherited: Option<&run::HostLaunchContext>,
+    child: Option<(&run::HostLaunchContext, &run::CanonicalRequest)>,
 ) -> Result<Vec<run::Started>, Fail> {
-    let host = match inherited {
-        Some(host) => host.clone(),
+    let host = match child {
+        Some((host, _)) => host.clone(),
         None => run::HostLaunchContext {
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
@@ -1223,17 +1225,25 @@ fn launch_on_host(
             fixture_state_write: false,
         },
     };
-    let submission = session.store.request(run, call)?;
+    let validated = child.map(|(_, request)| request);
+    let read;
+    let request = match validated {
+        Some(request) => request,
+        None => {
+            read = session.store.request(run, call)?;
+            &read
+        }
+    };
+    let request_digest = request.digest().map_err(run::RunError::from)?;
     let requester = session.store.run(run, call)?.actor_id;
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
         state_root: session.context.state_root.as_path().into(),
     };
-    let request = session.store.request(run, call)?;
     let holder = |attempt: &run::AttemptRecord| {
         let mut host = host.clone();
-        if let Some(writer) = submission
+        if let Some(writer) = request
             .tasks
             .iter()
             .find(|task| task.task_id == attempt.task_id)
@@ -1255,6 +1265,10 @@ fn launch_on_host(
                 .and_then(|task| task.deliver.as_ref())
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
+            sealed: Some(run::SealedTask {
+                request_digest,
+                task_id: attempt.task_id,
+            }),
         }
         .encode()
     };
@@ -1285,10 +1299,16 @@ fn launch_on_host(
                     call.clock,
                 )
             },
+            validated,
             call,
         )?);
     }
-    Ok(session.store.start(run, &registry, &holder, call)?)
+    Ok(match validated {
+        Some(request) => session
+            .store
+            .start_child(run, request, &registry, &holder, call)?,
+        None => session.store.start(run, &registry, &holder, call)?,
+    })
 }
 fn launch_unknown(started: &[run::Started]) -> Vec<String> {
     started

@@ -3,7 +3,7 @@
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
 };
-use crate::status::{parse_index_entries, parse_porcelain_v2_z};
+use crate::status::{StatusKind, parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{
     GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRuntime, execute_git_mutation,
     run_utility,
@@ -141,6 +141,9 @@ pub enum PruneScope {
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeCondition {
     Clean,
+    /// Only ignored files, such as build output, are present. Removal still
+    /// refuses it; a hand-off treats it as clean.
+    Ignored,
     Dirty,
     GitOperationInProgress,
     Unknown,
@@ -813,6 +816,11 @@ fn worktree_dirty_at(
         parse_porcelain_v2_z(&outcome.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
     Ok(if records.is_empty() {
         WorktreeCondition::Clean
+    } else if records
+        .iter()
+        .all(|record| record.kind == StatusKind::Ignored)
+    {
+        WorktreeCondition::Ignored
     } else {
         WorktreeCondition::Dirty
     })
@@ -1459,7 +1467,9 @@ fn remove_tree(
     }
     match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}
-        WorktreeCondition::Dirty => return Err(WorktreeError::Dirty),
+        WorktreeCondition::Ignored | WorktreeCondition::Dirty => {
+            return Err(WorktreeError::Dirty);
+        }
         WorktreeCondition::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }
@@ -2384,6 +2394,13 @@ mod lifecycle_tests {
             &cancellation,
         )?;
         fs::write(created.path.join("ignored.txt"), "keep me\n")?;
+        let condition = |cancellation: &CancelToken| -> Result<_, Box<dyn Error>> {
+            Ok(list(&context, cancellation)?
+                .into_iter()
+                .find(|entry| entry.path == created.path)
+                .map(|entry| entry.dirty))
+        };
+        assert_eq!(condition(&cancellation)?, Some(WorktreeCondition::Ignored));
 
         assert!(matches!(
             remove(
@@ -2401,6 +2418,8 @@ mod lifecycle_tests {
             fs::read_to_string(created.path.join("ignored.txt"))?,
             "keep me\n"
         );
+        fs::write(created.path.join("notes.txt"), "draft\n")?;
+        assert_eq!(condition(&cancellation)?, Some(WorktreeCondition::Dirty));
         Ok(())
     }
 
