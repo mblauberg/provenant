@@ -593,10 +593,26 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
+        if self.sealed_requester.is_some() {
+            self.check_held_capacity(id).map_err(|e| local(&e))?;
+        }
         let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
+        // Clone before acquiring custody: failure leaves no writer reservation.
+        let held = if self.sealed_requester.is_some() {
+            Some((
+                custody::hold(
+                    reservation.directory().try_clone().map_err(|e| local(&e))?,
+                    scope,
+                    requester,
+                ),
+                reservation.custody_metadata().map_err(|e| local(&e))?,
+            ))
+        } else {
+            None
+        };
         let writer = plan.confinement.as_mut().and_then(|c| c.writer.as_mut());
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
@@ -706,8 +722,8 @@ impl RunStore {
         };
         let capture = capture_plan(task);
         // Held before launch: an unconfirmed handoff may still have a guardian.
-        if self.sealed_requester.is_some() {
-            self.launched.borrow_mut().push(scope);
+        if let Some((held, custody)) = held {
+            self.hold_child(held, custody);
         }
         custody::launch(
             OwnedLaunch {

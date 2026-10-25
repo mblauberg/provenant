@@ -354,13 +354,23 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   deadline or supervisor signal cancels only this worker's children; normal
   parent completion leaves their custody intact. The host first stops every
   child it handed to a guardian, including one launched after its last scan,
-  from the scope and requester it held in memory at hand-off, never from the
-  child's record or launch summary. It then stops the accepted children that
-  never reached a guardian, from their records. A failed scan read does not
-  end the worker before that stop. The stop request itself still lands in the
-  attempt directory, which the lane can write, so the lane can pre-empt it
-  (for example with a directory named `cancel.json`) or undo it after the
-  host writes it, and keep its child running.
+  through the attempt-directory descriptor, scope and requester it held at
+  hand-off, so renaming the attempt directory cannot redirect the stop. The
+  child's record and launch summary do not decide the stop. Superseded
+  generations retain their scopes for owner checks but drop their handles.
+  At the cap of 64 held child handles, the host probes each custody lock
+  through its held directory. An exclusive non-blocking lock on the same
+  device and inode captured from the publication reservation proves guardian
+  exit and releases the handle, retaining its scope for owner checks. Busy,
+  missing, replaced or unobservable locks retain their handles. If none can
+  be released, further hand-offs are refused before custody acquisition.
+  The cap leaves descriptor headroom below macOS's common 256 soft limit;
+  lane-writable terminal records cannot authorise release. The host then stops
+  accepted children that never reached a guardian, from their records. A failed
+  scan read does not end the worker before that stop. The stop request itself
+  still lands in the attempt directory, which the lane can write, so the lane
+  can pre-empt it (for example with a directory named `cancel.json`) or undo it
+  after the host writes it, and keep its child running.
 - Git is resolved once on the host (`PROVENANT_GIT` override, otherwise the
   fixed list preferring package-manager Git), canonicalised, pinned in provider
   and MCP environments, and the only Git path lanes may execute.
