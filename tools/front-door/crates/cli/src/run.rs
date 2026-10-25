@@ -1823,7 +1823,19 @@ fn align_utf8_tail(chunk: &mut run::OutputChunk) {
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
     match remote::find(edge.roots, command.target.run) {
-        Ok(Some(placement)) => return remote::cancel(&command, &placement, edge),
+        Ok(Some(placement)) => {
+            if crate::fabric::in_lane() {
+                return reply(
+                    "cancel",
+                    Err(Fail::new(
+                        Status::Refused,
+                        "lane_coordination_refused",
+                        "coordination mutations are not allowed inside a lane",
+                    )),
+                );
+            }
+            return remote::cancel(&command, &placement, edge);
+        }
         Ok(None) => {}
         Err(fail) => return reply("cancel", Err(fail)),
     }

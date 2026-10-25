@@ -1856,6 +1856,13 @@ impl BinaryRunOwner<'_> {
                 ref target,
                 ref operation_id,
             } => {
+                if self.factory.context.in_lane
+                    && target
+                        .host
+                        .is_some_and(|host| host != self.factory.context.identity.host)
+                {
+                    return Err(FacadeError::LaneCoordinationRefused);
+                }
                 if let Some(answer) = self.remote(
                     target,
                     PeerAction::Run {
@@ -1899,6 +1906,13 @@ impl BinaryRunOwner<'_> {
                 ref prompt,
                 expected_generation,
             } => {
+                if self.factory.context.in_lane
+                    && target
+                        .host
+                        .is_some_and(|host| host != self.factory.context.identity.host)
+                {
+                    return Err(FacadeError::LaneCoordinationRefused);
+                }
                 if let Some(answer) = self.remote(
                     target,
                     PeerAction::Run {
@@ -2155,9 +2169,7 @@ impl Factory {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         use provenant_fabric_runtime::coordination::input::ValidateInput;
-        use provenant_fabric_runtime::graph::{
-            FileJournal, GraphDocument, GraphJournal, GraphRun, GraphStatus,
-        };
+        use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphJournal};
         input
             .validate_input(provenant_core::WaitTransport::Cli)
             .map_err(|_| FacadeError::InvalidInput)?;
@@ -2199,6 +2211,17 @@ impl Factory {
                 .graph_id
                 .as_str(),
         };
+        if matches!(input, GraphInput::Status { .. }) {
+            let checkpoint = FileJournal::read_checkpoint(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                &provenant_supervisor::fs::LocalFs,
+            )
+            .map_err(|_| FacadeError::StateCorrupt)?
+            .ok_or(FacadeError::NotFound)?;
+            return Ok(graph_snapshot(checkpoint));
+        }
         let mut journal = FileJournal::open(
             &self.context.roots.state,
             self.context.identity.project,
@@ -2260,22 +2283,28 @@ impl Factory {
                 return Err(error);
             }
         }
-        let status = if checkpoint.cancelled {
-            GraphStatus::Cancelled
-        } else if checkpoint.nodes.iter().any(|node| {
-            matches!(
-                node.state,
-                provenant_fabric_runtime::graph::NodeState::Pending
-                    | provenant_fabric_runtime::graph::NodeState::Running
-            )
-        }) {
-            GraphStatus::Pending
-        } else {
-            GraphStatus::Complete
-        };
-        Ok(GraphRun { status, checkpoint })
+        Ok(graph_snapshot(checkpoint))
     }
 }
+
+fn graph_snapshot(
+    checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> provenant_fabric_runtime::graph::GraphRun {
+    use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
+    let status = if checkpoint.cancelled {
+        GraphStatus::Cancelled
+    } else if checkpoint
+        .nodes
+        .iter()
+        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+    {
+        GraphStatus::Pending
+    } else {
+        GraphStatus::Complete
+    };
+    GraphRun { status, checkpoint }
+}
+
 impl Factory {
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
@@ -2368,20 +2397,25 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
                 false,
             )
         }
-        Err(error) => crate::fail(
-            command,
-            provenant_records::Outcome::Error,
-            if matches!(
+        Err(error) => {
+            let (outcome, code) = if matches!(
                 error.downcast_ref::<CoordinationError>(),
                 Some(CoordinationError::LaneMutation)
             ) {
-                "lane_coordination_refused"
+                (
+                    provenant_records::Outcome::Refused,
+                    "lane_coordination_refused",
+                )
+            } else if matches!(
+                error.downcast_ref::<FacadeError>(),
+                Some(FacadeError::NotFound)
+            ) {
+                (provenant_records::Outcome::Invalid, "not_found")
             } else {
-                "graph_owner"
-            },
-            &error.to_string(),
-            globals,
-        ),
+                (provenant_records::Outcome::Error, "graph_owner")
+            };
+            crate::fail(command, outcome, code, &error.to_string(), globals)
+        }
     }
 }
 
@@ -2401,7 +2435,14 @@ impl Factory {
     ) -> Result<EventCoverage, FacadeError> {
         let ctx = &self.context;
         if ctx.in_lane {
-            return Ok(EventCoverage::default());
+            return Ok(EventCoverage {
+                unknown_hosts: std::iter::once(ctx.identity.host)
+                    .chain(ctx.config.peers.values().map(|peer| peer.host))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                more_events: false,
+            });
         }
         if ctx.identity.federation.as_ref().is_some_and(|p| {
             ctx.config

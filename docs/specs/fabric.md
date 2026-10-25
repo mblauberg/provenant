@@ -82,20 +82,24 @@ values.
 
 Each lane's provider environment and generated MCP entry pin
 `PROVENANT_AGENT_LABEL` to `lane-<AttemptId>`, giving it a separate actor and
-inbox from the chair. The
-MCP edge captures the host-set lane environment at startup. A positive
-`PROVENANT_LANE_DEPTH` or a present `PROVENANT_RUN_STATE_DIR` refuses
+inbox from the chair. The MCP edge captures the host-set lane environment at
+startup. A positive `PROVENANT_LANE_DEPTH` or a present
+`PROVENANT_RUN_STATE_DIR` refuses
 coordination mutations with `lane_coordination_refused`: mail send and
 mark-read, task changes, event notes, claims, landing leases, graph mutations
 and submission with an explicit host. The CLI coordination edge also refuses
 these mutations, landing push or reconcile, `dispatch --host` and
-`workflow session handoff` under that environment. `fabric peer` and `fabric peer-agent` refuse to start
+`workflow session handoff` under that environment. Peer-target run cancel and
+resume are also refused. `fabric peer` and `fabric peer-agent` refuse to start
 there at all, because a peer frame names its own agent. Reads and child-store
-run submit, cancel and output remain available within the existing child
-policy.
+run submit, cancel, resume and output remain available within the existing
+child policy. Graph status reads an atomic checkpoint without creating graph
+directories or acquiring the writer lock.
 
-Lane event reads do not refresh execution events into the shared store. The
-host refreshes them; lane observations can lag until that refresh.
+Lane event reads do not refresh execution events into the shared store and
+report incomplete host coverage. Host refresh never reads child stores, so a
+lane's own children's events are visible only through `fabric_run` status and
+wait.
 
 This guards the tool surface. Lanes still have direct write access to
 `fabric.sqlite3` and its companions because opening the current store for a
@@ -525,9 +529,10 @@ the requested continuation operation. Submission receipts must name the
 requested operation and placement; a peer writer must return the requested
 branch, and a read-only submission cannot return a worktree. Landing push and
 reconcile receipts must name the requested operation too.
-Human lane listings remove control,
-escape and formatting characters from peer text through the shared plain-text
-sanitiser; structured records preserve the received values.
+
+Human lane listings remove control, escape and formatting characters from peer
+text through the shared plain-text sanitiser; structured records preserve the
+received values.
 
 ## Follow-up: lane store isolation
 

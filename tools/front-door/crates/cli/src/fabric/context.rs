@@ -299,6 +299,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
         FacadeError::BaseUnreachable => (Outcome::Refused, "BASE_UNREACHABLE"),
         FacadeError::BranchExists => (Outcome::Refused, "BRANCH_EXISTS"),
         FacadeError::LaneDepth => (Outcome::Refused, "LANE_DEPTH"),
+        FacadeError::LaneCoordinationRefused => (Outcome::Refused, "lane_coordination_refused"),
         FacadeError::OwnerUnavailable => (Outcome::Refused, "UNSUPPORTED"),
         FacadeError::Cancelled => (Outcome::Error, "CANCELLED"),
         FacadeError::StateCorrupt => (Outcome::Error, "STATE_CORRUPT"),

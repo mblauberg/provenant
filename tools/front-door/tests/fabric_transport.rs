@@ -1358,6 +1358,60 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
 }
 
 #[test]
+fn lane_graph_status_does_not_create_shared_graph_store() -> Result {
+    let mut rig = TestRig::new()?;
+    assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
+    rig.env
+        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+    let output = rig.command(&["fabric", "graph", "status", "missing", "--json"])?;
+    assert_ne!(code(&output), 0);
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["error"]["code"], "not_found", "{result}");
+    assert!(!rig.state.join("fabric/graphs").exists());
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"status","id":"missing"}}}),
+        ],
+    )?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("status")?["result"];
+    assert_eq!(result["structuredContent"]["code"], "not_found", "{result}");
+    assert!(!rig.state.join("fabric/graphs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn lane_cli_cancel_refuses_peer_placement() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = next_host(identity["data"]["host"].as_str().ok_or("host")?.parse()?)?;
+    let run = "11111111111111111111111111111111";
+    let directory = rig.state.join("fabric/remote-runs");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)?;
+    std::fs::write(
+        directory.join(format!("{run}.json")),
+        serde_json::to_vec(&json!({
+            "schema_version":1, "host":host, "project":identity["data"]["federation"]["key"],
+            "operation_id":"placement", "run_id":run, "attempts":[],
+        }))?,
+    )?;
+    rig.env
+        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+    let output = rig.command(&["cancel", run, "--operation-id", "lane-cancel", "--json"])?;
+    assert_ne!(code(&output), 0);
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(
+        result["error"]["code"], "lane_coordination_refused",
+        "{result}"
+    );
+    assert_eq!(result["status"], "refused", "{result}");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Result {
     for (depth, child_store) in [(Some("1"), true), (None, true), (Some("1"), false)] {
         let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
@@ -1366,6 +1420,7 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         assert_eq!(code(&identity), 0);
         let host_identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
         let host = host_identity["data"]["host"].as_str().ok_or("host")?;
+        let peer = next_host(host.parse()?)?;
         assert_eq!(
             code(&rig.command(&["fabric", "events", "read", "--json"])?),
             0
@@ -1405,6 +1460,14 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
                 .push((provenant_run::LANE_DEPTH_ENV.into(), depth.into()));
         }
         let calls = [
+            (
+                "fabric_run",
+                json!({"op":"cancel","target":{"host":peer,"attempt":parent},"operation_id":"lane-peer-cancel"}),
+            ),
+            (
+                "fabric_run",
+                json!({"op":"resume","target":{"host":peer,"attempt":parent},"operation_id":"lane-peer-resume","prompt":"continue","expected_generation":0}),
+            ),
             (
                 "fabric_graph",
                 json!({"op":"run","document":"missing.json"}),
@@ -1453,6 +1516,9 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         frames.extend([
             json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"fabric_mail","arguments":{"op":"read","limit":10}}}),
             json!({"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"fabric_identity","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":103,"method":"tools/call","params":{"name":"fabric_events","arguments":{"op":"read","limit":10}}}),
+            json!({"jsonrpc":"2.0","id":104,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"cancel","target":{"host":host,"attempt":parent},"operation_id":"lane-local-cancel"}}}),
+            json!({"jsonrpc":"2.0","id":105,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"resume","target":{"host":host,"attempt":parent},"operation_id":"lane-local-resume","prompt":"continue","expected_generation":0}}}),
         ]);
         if depth.is_some() && child_store {
             frames.push(json!({"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"lane-child","tasks":[{"prompt":"read only","route":{"adapter":"codex","model":"gpt-6.1-sol"},"timeout_ms":1000}],"concurrency":1}}}));
@@ -1474,7 +1540,7 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
                 );
             }
         }
-        for id in [100, 102]
+        for id in [100, 102, 103]
             .into_iter()
             .chain((depth.is_some() && child_store).then_some(101))
         {
@@ -1483,6 +1549,25 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         }
         let identity = &replies.iter().find(|r| r["id"] == 102).ok_or("identity")?["result"]["structuredContent"];
         assert_eq!(identity["inbox"]["agent"], format!("lane-{parent}"));
+        let events = &replies.iter().find(|r| r["id"] == 103).ok_or("events")?["result"]["structuredContent"];
+        assert!(
+            events["unknown_hosts"]
+                .as_array()
+                .ok_or("coverage")?
+                .contains(&json!(host)),
+            "{events}"
+        );
+        // Explicit local hosts in child receipts still reach the local owner.
+        for id in [104, 105] {
+            let result = &replies
+                .iter()
+                .find(|r| r["id"] == id)
+                .ok_or("local mutation")?["result"];
+            assert_ne!(
+                result["structuredContent"]["code"], "lane_coordination_refused",
+                "{result}"
+            );
+        }
         if depth.is_some() && child_store {
             assert!(child_state.join("runs").is_dir());
         }
@@ -1553,6 +1638,7 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
                 result["error"]["code"], "lane_coordination_refused",
                 "{args:?}: {result}"
             );
+            assert_eq!(result["status"], "refused", "{args:?}: {result}");
         }
         assert!(!rig.state.join("fabric/graphs").exists());
         let output = rig.command(&["fabric", "events", "read", "--json"])?;
@@ -1561,6 +1647,14 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             0,
             "{}",
             String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let events: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert!(
+            events["data"]["unknown_hosts"]
+                .as_array()
+                .ok_or("coverage")?
+                .contains(&json!(host)),
+            "{events}"
         );
         assert_eq!(
             cursor()?,

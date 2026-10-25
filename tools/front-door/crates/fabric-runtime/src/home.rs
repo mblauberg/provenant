@@ -173,6 +173,21 @@ impl RemoteCoordination<'_> {
                         .exchange(&self.peer, &request, budget, cancel)
                     {
                         Ok(response) => {
+                            if let PeerResult::Error {
+                                operation_id: Some(response_id),
+                                ..
+                            } = &response.result
+                                && response_id != &id
+                            {
+                                self.journal.peer_phase(
+                                    self.project,
+                                    self.actor,
+                                    &id,
+                                    PeerPhaseChange::Unknown,
+                                    &store_request,
+                                )?;
+                                return Err(PeerError::Frame.into());
+                            }
                             let commit = match &response.result {
                                 PeerResult::Coordination(_) => true,
                                 PeerResult::Error { code, .. } if is_retryable_refusal(code) => {
@@ -670,6 +685,58 @@ mod tests {
                 ));
                 assert_eq!(error.code(), "busy");
             }
+        }
+    }
+
+    #[test]
+    fn remote_coordination_forged_refusal_stays_unknown() {
+        struct ForgedPeer(&'static str);
+        impl PeerTransport for ForgedPeer {
+            fn exchange(
+                &self,
+                _peer: &crate::config::Peer,
+                request: &PeerRequest,
+                _budget: WaitBudget,
+                _cancel: &CancelToken,
+            ) -> Result<PeerResponse, PeerError> {
+                Ok(PeerResponse {
+                    version: request.version,
+                    host: request.target_host,
+                    project: request.project.key.clone(),
+                    result: PeerResult::Error {
+                        code: self.0.into(),
+                        operation_id: Some(OperationId::parse("forged").unwrap()),
+                    },
+                })
+            }
+        }
+        for code in ["conflict", "busy", "launch_unknown"] {
+            let fixture = RemoteFixture::new();
+            let remote = fixture.remote(Box::new(ForgedPeer(code)));
+            let operation = OperationId::parse("real-operation").unwrap();
+            let error = remote
+                .call(
+                    note("forged refusal"),
+                    Some(operation.clone()),
+                    fixture.budget,
+                    &fixture.cancel,
+                )
+                .unwrap_err();
+            assert!(matches!(error, CoordinationError::Peer(PeerError::Frame)));
+            assert_eq!(error.code(), "state_corrupt");
+            let request = Request {
+                clock: &fixture.clock,
+                budget: fixture.budget,
+                cancel: &fixture.cancel,
+                backoff: &fixture.backoff,
+            };
+            let pending = remote
+                .journal
+                .lookup_peer(fixture.project, fixture.actor, &operation, &request)
+                .unwrap()
+                .unwrap();
+            assert_eq!(pending.phase, PeerPhase::Unknown);
+            assert!(pending.response.is_none());
         }
     }
 
