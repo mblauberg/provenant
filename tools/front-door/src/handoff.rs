@@ -1554,13 +1554,13 @@ fn admit(
         ))
     })?;
     let account =
-        account_directory(&accounts, &input.account).map_err(|labels| HandoffReceipt::Refused {
+        account_directory(&accounts, &input.account).map_err(|_| HandoffReceipt::Refused {
             code: "account_unregistered".into(),
             message: format!(
                 "{} is not a registered Claude account on this host",
                 input.account
             ),
-            accounts: labels,
+            accounts: Vec::new(),
         })?;
     let dir = operation_dir(lease_dir, &input.operation_id);
     match reserve(&dir) {
@@ -2088,10 +2088,19 @@ mod tests {
         assert!(!lease.exists());
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
         // Opted in, an unregistered account still stops before the directory.
-        let refusal = *admit(true, &input, &lease, || Ok(Vec::new())).unwrap_err();
+        let refusal = *admit(true, &input, &lease, || {
+            use provenant_providers::identity::RegisteredAccount;
+            Ok(vec![
+                RegisteredAccount::new("claude", "home", "/Users/me/.claude-home".into()).unwrap(),
+                RegisteredAccount::new("claude", "other", "/Users/me/.claude-other".into())
+                    .unwrap(),
+            ])
+        })
+        .unwrap_err();
         assert!(matches!(
             refusal,
-            HandoffReceipt::Refused { ref code, .. } if code == "account_unregistered"
+            HandoffReceipt::Refused { ref code, ref accounts, .. }
+                if code == "account_unregistered" && accounts.is_empty()
         ));
         assert!(!lease.exists());
     }

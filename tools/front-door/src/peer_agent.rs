@@ -35,6 +35,7 @@ const LOG: &str = "agent.log";
 /// Bound on one relayed request; the caller's SSH budget is shorter.
 const REQUEST: Duration = Duration::from_secs(90);
 const CONCURRENT: usize = 16;
+const REFUSING: usize = 32;
 /// Written to a connection refused at the cap. It is not a `PeerResponse`, so
 /// the caller recognises it and builds the busy reply itself; the agent never
 /// parses a request.
@@ -78,14 +79,31 @@ fn private(directory: &Path) -> bool {
     })
 }
 
-/// Read to EOF within `timeout`. Callers set the socket timeouts right after
-/// connecting: macOS refuses `setsockopt` once the peer has closed.
+/// Read to EOF within `timeout`, bounding each blocking read by the time left.
 fn read_bounded(stream: &mut UnixStream, timeout: Duration) -> Result<Vec<u8>, AgentError> {
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        match stream.read(&mut chunk) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::from(io::ErrorKind::TimedOut).into());
+        }
+        let read = match stream.set_read_timeout(Some(remaining)) {
+            Ok(()) => stream.read(&mut chunk),
+            Err(error)
+                if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput =>
+            {
+                // macOS rejects setsockopt after the peer closes. Drain any
+                // buffered reply without risking a read past the deadline.
+                stream.set_nonblocking(true)?;
+                let result = stream.read(&mut chunk);
+                stream.set_nonblocking(false)?;
+                result
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match read {
             Ok(0) => return Ok(bytes),
             Ok(count) => {
                 bytes.extend_from_slice(&chunk[..count]);
@@ -95,9 +113,6 @@ fn read_bounded(stream: &mut UnixStream, timeout: Duration) -> Result<Vec<u8>, A
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error.into()),
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::from(io::ErrorKind::TimedOut).into());
         }
     }
 }
@@ -210,17 +225,30 @@ fn relay(
 /// resets the connection, and on Linux the reset can discard the busy frame
 /// before the caller reads it. It runs on its own thread so a slow caller
 /// cannot stall the accept loop.
-fn refuse(mut stream: UnixStream) {
+fn refuse(mut stream: UnixStream, refusing: &Arc<AtomicUsize>) {
+    if refusing
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < REFUSING).then_some(count + 1)
+        })
+        .is_err()
+    {
+        // At the refusal cap, a best-effort busy frame must not stall accept.
+        if stream.set_nonblocking(true).is_ok() {
+            let _ = stream.write(BUSY);
+        }
+        return;
+    }
+    let refusing = Arc::clone(refusing);
     std::thread::spawn(move || {
         let timeout = Some(Duration::from_secs(1));
-        if stream.set_write_timeout(timeout).is_err()
-            || stream.set_read_timeout(timeout).is_err()
-            || stream.write_all(BUSY).is_err()
+        if stream.set_write_timeout(timeout).is_ok()
+            && stream.set_read_timeout(timeout).is_ok()
+            && stream.write_all(BUSY).is_ok()
         {
-            return;
+            let _ = stream.shutdown(Shutdown::Write);
+            let _ = read_bounded(&mut stream, Duration::from_secs(2));
         }
-        let _ = stream.shutdown(Shutdown::Write);
-        let _ = read_bounded(&mut stream, Duration::from_secs(2));
+        refusing.fetch_sub(1, Ordering::SeqCst);
     });
 }
 
@@ -279,6 +307,7 @@ fn serve_listener(listener: UnixListener, state: &Path) -> Result<(), AgentError
     let program = std::env::current_exe()?;
     let cwd = crate::roots::home().map_err(|error| io::Error::other(error.to_string()))?;
     let active = Arc::new(AtomicUsize::new(0));
+    let refusing = Arc::new(AtomicUsize::new(0));
     let mut failures = 0;
     loop {
         let Some((stream, _)) = accepted(listener.accept(), &mut failures, ACCEPT_PAUSE)? else {
@@ -287,7 +316,7 @@ fn serve_listener(listener: UnixListener, state: &Path) -> Result<(), AgentError
         // Over the cap the request is refused unread, with a busy frame.
         if active.fetch_add(1, Ordering::SeqCst) >= CONCURRENT {
             active.fetch_sub(1, Ordering::SeqCst);
-            refuse(stream);
+            refuse(stream, &refusing);
             continue;
         }
         let (program, state, cwd, active) = (
@@ -640,6 +669,39 @@ pub fn status(state: &Path, home: &Path) -> Status {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn read_bounded_drains_a_closed_peer() {
+        use super::*;
+        let (mut stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(b"reply\n").unwrap();
+        drop(peer);
+        assert_eq!(
+            read_bounded(&mut stream, Duration::from_millis(200)).unwrap(),
+            b"reply\n"
+        );
+    }
+
+    #[test]
+    fn read_bounded_times_out_an_idle_connection_within_its_deadline() {
+        use super::*;
+        let (mut stream, _held) = UnixStream::pair().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let started = Instant::now();
+        let result = read_bounded(&mut stream, Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            result,
+            Err(AgentError::Io(error))
+                if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
+        ));
+        assert!(matches!(
+            read_bounded(&mut stream, Duration::ZERO),
+            Err(AgentError::Io(error)) if error.kind() == io::ErrorKind::TimedOut
+        ));
+    }
+
+    #[test]
     fn historical_plist_recognises_current_release_golden_bytes() {
         // A plist written by the released installer, with only HOME rewritten.
         // Keep these bytes independent of render(), including the final newline.
@@ -838,6 +900,27 @@ mod tests {
             Err(AgentError::NoReply(_))
         ));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn refusal_threads_are_bounded_while_64_connections_are_held() {
+        use super::*;
+        let refusing = Arc::new(AtomicUsize::new(0));
+        let mut refused = Vec::new();
+        for _ in 0..64 {
+            let (mut client, stream) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            refuse(stream, &refusing);
+            assert!(refusing.load(Ordering::SeqCst) <= REFUSING);
+            let mut busy = [0; BUSY.len()];
+            client.read_exact(&mut busy).unwrap();
+            assert_eq!(busy, BUSY);
+            refused.push(client);
+        }
+        assert_eq!(refusing.load(Ordering::SeqCst), REFUSING);
+        drop(refused);
     }
 
     #[test]

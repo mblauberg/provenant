@@ -294,8 +294,8 @@ impl PeerRequest {
         if self.version != 1 || self.target_host != local {
             return Err(PeerError::Version);
         }
-        if self.source_host != local
-            && !config
+        if self.source_host == local
+            || !config
                 .peers
                 .values()
                 .any(|peer| peer.host == self.source_host)
@@ -538,6 +538,71 @@ mod tests {
         Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn validate_refuses_the_target_as_its_own_source() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let home = temp.path();
+        let local = HostId::from_bytes([1; 16]);
+        let remote = HostId::from_bytes([2; 16]);
+        let mut config = FabricConfig {
+            agent_label: "fixture".into(),
+            client_label: "fixture".into(),
+            ssh_executable: None,
+            home_hosts: Default::default(),
+            peers: Default::default(),
+            limits: crate::config::Limits {
+                body_bytes: 65536,
+                input_frame_bytes: 1048576,
+                json_depth: 64,
+                page_rows: 100,
+                output_lines: 500,
+                output_bytes: 65536,
+                result_bytes: 1048576,
+                lease_seconds: 3600,
+                peer_seconds: 30,
+                graph_timeout_ms: 14400000,
+                bundle_bytes: 67108864,
+            },
+        };
+        for (name, host) in [("self", local), ("fixture", remote)] {
+            config.peers.insert(
+                name.into(),
+                Peer {
+                    host,
+                    destination: name.into(),
+                    remote_executable: None,
+                    connect_timeout_seconds: 10,
+                },
+            );
+        }
+        let mut request = PeerRequest {
+            version: 1,
+            target_host: local,
+            source_host: local,
+            agent: "fixture".into(),
+            project: ProjectLocator {
+                key: CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap(),
+                common_dir: "repo/.git".into(),
+            },
+            action: PeerAction::Health,
+        };
+        assert!(matches!(
+            request.validate(local, &config, home),
+            Err(PeerError::Project)
+        ));
+        assert_eq!(
+            request.validate(local, &config, home).unwrap_err().code(),
+            "invalid_input"
+        );
+        request.source_host = remote;
+        assert!(request.validate(local, &config, home).is_ok());
+        request.source_host = HostId::from_bytes([3; 16]);
+        assert!(matches!(
+            request.validate(local, &config, home),
+            Err(PeerError::Project)
+        ));
+    }
 
     #[test]
     fn peer_responses_read_only_null_retired_members() {
