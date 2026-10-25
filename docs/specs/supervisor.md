@@ -326,7 +326,7 @@ detach-and-verify path while holding writer exclusion. Cache cleanup failures
 emit a warning after the worktree has been removed. Removal leaves other
 orphaned caches and existing cleanup tombstones for `provenant gc` to sweep.
 Cache cleanup accepts v1 owner markers when the owner path is missing, and
-retries their interrupted tombstones. Existing v1 owners are kept, reported
+`provenant gc` retries their interrupted tombstones. Existing v1 owners are kept, reported
 as foreign when outside the project, and never collected as idle.
 
 Removal and pruning hold writer exclusion, recheck reservations and worker
