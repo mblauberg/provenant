@@ -1,11 +1,8 @@
 # Fabric hosts
 
-Status: current Rust operator surface
-
 Fabric uses bounded SSH calls and host-owned state. Each host keeps its own
-provider sign-ins. The [accepted specification](../specs/fabric-hosts.md)
-records the original requirements; the [Rust Fabric design](../specs/fabric.md)
-owns the replacement boundaries.
+provider sign-ins. The [Fabric design](../specs/fabric.md#peer-hosts) owns the
+peer model and boundaries.
 
 ## Commands
 
@@ -26,8 +23,8 @@ general provider sign-in check. Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
 through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
 the fixed SSH protocol entrypoint; the hidden `fabric peer-agent` command is the
-macOS LaunchAgent that runs it in the login session (see below). Remote dispatch uses top-level
-`dispatch --host`. The Rust CLI grammar lives in
+macOS LaunchAgent that runs it in the login session (see below). Remote
+dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
@@ -125,8 +122,7 @@ entrypoint cannot also run remote doctor.
 command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 `tools/front-door/crates/fabric-runtime/src/hosts.rs` own the wire format.
 Requests bind source and target host IDs and a project locator. The transport
-bounds frames to 1 MiB and refuses identity or version mismatches. Do not send
-the retired `{protocol_version, verb, params}` envelope.
+bounds frames to 1 MiB and refuses identity or version mismatches.
 
 ## Dispatch and recovery
 
@@ -181,8 +177,7 @@ Other limits on a peer run:
 shows the operation ID, route and access controls. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and
 `reconcile`. Targets follow the
-Rust grammar `RUN[/TASK[/ATTEMPT]]`; do not reuse the retired `id@host`
-selectors or `fabric fetch` workflow.
+grammar `RUN[/TASK[/ATTEMPT]]`.
 
 The peer transport does not silently fall back to local placement. A mutation
 whose reply is lost can return `launch_unknown`; retain its operation ID and
@@ -282,5 +277,5 @@ with `provenant lanes --host workshop`.
 ## Verify targeted changes
 
 Run only fast tests for changed Rust boundaries. Full workspace suites run in
-GitHub Actions. The current owners are `provenant-fabric-runtime` and
-`provenant-fabric-mcp`; the Python and TypeScript host owners are retired.
+GitHub Actions. The owners are `provenant-fabric-runtime` and
+`provenant-fabric-mcp`.

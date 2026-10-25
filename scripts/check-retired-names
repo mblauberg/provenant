@@ -27,8 +27,7 @@ delivery-profile-scenarios
 security-evidence.json
 skills/_shared'
 hits=$(printf '%s\n' "$names" | git grep -n -I -F -f - -- . \
-  ':(exclude)docs/specs/fabric.md' \
-  ':(exclude)docs/specs/supervisor.md' ':(exclude)docs/specs/workflow.md' ':(exclude)docs/adr' \
+  ':(exclude)docs/adr' \
   ':(exclude)docs/research' ':(exclude)assets/install/legacy.toml' \
   ':(exclude)scripts' \
   ':(exclude)tools/front-door/crates/config/src/managed_tests.rs' || true)
