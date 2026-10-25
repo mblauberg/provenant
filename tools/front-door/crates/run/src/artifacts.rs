@@ -17,8 +17,10 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
     Ok(dir)
 }
 
-pub(crate) fn remove_temporary_best_effort(attempt: &Directory) {
-    let _ = remove_entry_tree(attempt, OsStr::new("tmp"));
+pub(crate) fn remove_temporary_best_effort(
+    attempt: &Directory,
+) -> provenant_supervisor::fs::Result<()> {
+    remove_entry_tree(attempt, OsStr::new("tmp"))
 }
 
 fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_supervisor::fs::Result<()> {

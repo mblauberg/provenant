@@ -1,6 +1,6 @@
 # ADR 0007 — Defer universal retention classes and typed deletion
 
-**Status:** Accepted 2026-07-13; amended 2026-07-15
+**Status:** Accepted 2026-07-13; amended 2026-07-15 and 2026-10-26
 
 ## Context
 
@@ -16,7 +16,13 @@ state.
 
 Defer universal retention classes and typed deletion until a concrete deletion
 requirement establishes the necessary protections, evidence and refusal
-behaviour. Archive-only remains the runtime behaviour until then.
+behaviour. Durable run artefacts remain retained until then.
+
+Attempt-private `tmp/` is disposable. Terminal commit attempts its removal;
+`reconcile` retries removal for terminal attempts once no reservation is
+retained. It uses the existing no-follow, identity-checked deletion primitives
+and reports leftover paths and reasons without failing reconciliation for a
+removal error. Live and non-terminal attempts keep their temporary data.
 
 ## Consequences
 

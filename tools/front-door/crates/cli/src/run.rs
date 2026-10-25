@@ -1921,6 +1921,20 @@ fn state_tag(value: &impl Serialize) -> String {
         .unwrap_or_default()
 }
 
+fn reconcile_summary(state: &run::Reconciled) -> String {
+    match state {
+        run::Reconciled::TemporaryRetained { path, reason } => format!(
+            "temporary_retained {}: {}",
+            plain_text(&path.to_string_lossy(), usize::MAX),
+            plain_text(reason, usize::MAX)
+        ),
+        run::Reconciled::Uncertain { reason } => {
+            format!("uncertain: {}", plain_text(reason, usize::MAX))
+        }
+        _ => state_tag(state),
+    }
+}
+
 /// Continue one terminal attempt with new input as a new single-task run on
 /// the same route and access.
 pub fn resume(command: Resume, edge: &Edge<'_>) -> Reply {
@@ -2070,7 +2084,7 @@ fn reconcile_inner(
                 ) {
                     *fenced = true;
                 }
-                human.push_str(&format!("{run}/{id} {}\n", state_tag(state)));
+                human.push_str(&format!("{run}/{id} {}\n", reconcile_summary(state)));
                 json!({ "attempt_id": id, "found": state })
             })
             .collect();
@@ -2334,6 +2348,19 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+
+    #[test]
+    fn reconcile_reports_leftover_paths_and_reasons_without_terminal_controls() {
+        let state = run::Reconciled::TemporaryRetained {
+            path: PathBuf::from("/state/runs/run/attempts/attempt/tmp"),
+            reason: "permission denied\n\x1b[31mretry later\x1b[0m".into(),
+        };
+        let rendered = reconcile_summary(&state);
+        assert!(rendered.contains("/state/runs/run/attempts/attempt/tmp"));
+        assert!(rendered.contains("permission denied"));
+        assert!(rendered.contains("retry later"));
+        assert!(!rendered.chars().any(char::is_control));
+    }
 
     #[test]
     fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {

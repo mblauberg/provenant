@@ -33,7 +33,7 @@ pub struct Resume {
     pub prompt: String,
     pub created_at: WallTime,
 }
-/// What reconcile found for one nonterminal attempt.
+/// What reconcile found for one attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Reconciled {
@@ -43,6 +43,11 @@ pub enum Reconciled {
     Held,
     /// A durable exit was committed and released.
     Finished,
+    /// The attempt is terminal, but temporary data could not be removed.
+    TemporaryRetained {
+        path: std::path::PathBuf,
+        reason: String,
+    },
     /// Launch never reached a guardian; ended as rejected.
     Withdrawn,
     /// Cleanup ended with these descendants possibly alive (for example one
@@ -332,8 +337,8 @@ impl RunStore {
         self.create(&prepared, call)
     }
 
-    /// Up to `limit` runs with nonterminal work in this project, oldest
-    /// first, for a recovery scan.
+    /// Up to `limit` runs needing recovery or terminal temporary cleanup in
+    /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
         let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = call.retry(|| {
@@ -352,12 +357,39 @@ impl RunStore {
                 runs.push(fence.scope.run);
             }
         }
+        if runs.len() < limit as usize {
+            call.retry(|| {
+                let mut query = self.db.prepare(
+                    "SELECT run,id FROM attempts WHERE project=?1 AND terminal=1 ORDER BY sequence",
+                )?;
+                let mut rows = query.query([self.context.project_id.to_string()])?;
+                while runs.len() < limit as usize {
+                    let Some(row) = rows.next()? else { break };
+                    let run = RunId::parse(&row.get::<_, String>(0)?)
+                        .map_err(|_| RunError::Validation("run index ID"))?;
+                    if runs.contains(&run) {
+                        continue;
+                    }
+                    let id = AttemptId::parse(&row.get::<_, String>(1)?)
+                        .map_err(|_| RunError::Validation("attempt index ID"))?;
+                    let remaining = self.attempt_dir(run, id, false).and_then(|dir| {
+                        Ok(dir.metadata_at(std::ffi::OsStr::new("tmp"), false)?)
+                    });
+                    // Unreadable or unsafe paths need a reported reason too.
+                    if !matches!(remaining, Err(RunError::Filesystem(ref error)) if error.is_not_found()) {
+                        runs.push(run);
+                    }
+                }
+                Ok(())
+            })?;
+        }
         Ok(runs)
     }
 
-    /// Check every nonterminal attempt of `run` against supervisor custody.
+    /// Check every attempt of `run` against supervisor custody.
     /// A durable exit is committed and released; a launch that provably never
-    /// reached a guardian is withdrawn; anything else is left as found.
+    /// reached a guardian is withdrawn. Terminal temporary data is retried
+    /// only after reservations are released; removal failures are reported.
     pub fn reconcile(
         &self,
         run: RunId,
@@ -365,9 +397,9 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
         let mut ids: Vec<String> = call.retry(|| {
-            let mut query = self.db.prepare(
-                "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
-            )?;
+            let mut query = self
+                .db
+                .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 ORDER BY sequence")?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
@@ -496,25 +528,75 @@ impl RunStore {
         match record.state {
             AttemptState::Queued => return Ok(Reconciled::Queued),
             AttemptState::Terminal { .. } => {
-                let retained = self
-                    .writer_fences()?
+                let listing = self.writer_fence_listing()?;
+                // An unreadable reservation cannot establish absence of
+                // custody for this attempt, so leave temporary data alone.
+                if let Some(issue) = listing.issues.first() {
+                    return Ok(Reconciled::Uncertain {
+                        reason: format!(
+                            "writer reservation unreadable at {}: {}",
+                            issue.reservation.display(),
+                            issue.reason
+                        ),
+                    });
+                }
+                let retained = listing
+                    .reservations
                     .into_iter()
-                    .find(|fence| fence.scope == scope);
-                return Ok(match retained {
+                    .find(|fence| fence.scope.run == record.run_id && fence.scope.attempt == id);
+                match retained {
                     Some(fence)
-                        if record.provider_launched == Some(false)
+                        if fence.scope == scope
+                            && record.provider_launched == Some(false)
                             && record.exit_evidence.is_none()
                             && self.withdraw_prepared_writer(&fence, call)? =>
                     {
-                        Reconciled::Withdrawn
+                        // Another retained reservation may name this attempt.
+                        // Retry temporary cleanup on the next scan.
+                        return Ok(Reconciled::Withdrawn);
                     }
-                    Some(fence) => Reconciled::Uncertain {
-                        reason: format!(
-                            "writer reservation retained after terminal commit: {}; chair recovery required",
-                            fence.reservation.display()
-                        ),
+                    Some(fence) => {
+                        return Ok(Reconciled::Uncertain {
+                            reason: format!(
+                                "writer reservation retained after terminal commit: {}; chair recovery required",
+                                fence.reservation.display()
+                            ),
+                        });
+                    }
+                    None => {}
+                }
+                let path = self
+                    .context
+                    .state_root
+                    .as_path()
+                    .join(format!("runs/{}/attempts/{id}/tmp", record.run_id));
+                let remove = || -> Result<()> {
+                    let attempt = self.attempt_dir(record.run_id, id, false)?;
+                    match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+                        Err(error) if error.is_not_found() => return Ok(()),
+                        Err(error) => return Err(error.into()),
+                        Ok(_) => {}
+                    }
+                    // A read-only guardian reserves the attempt itself. Hold
+                    // its exclusion lock and refuse any retained reservation.
+                    let _lease = attempt.try_lock(
+                        std::ffi::OsStr::new("writer.lock"),
+                        provenant_supervisor::fs::LockMode::Exclusive,
+                    )?;
+                    match attempt.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
+                        Ok(_) => return Err(RunError::Validation("attempt reservation retained")),
+                        Err(error) if error.is_not_found() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    artifacts::remove_temporary_best_effort(&attempt)?;
+                    Ok(())
+                };
+                return Ok(match remove() {
+                    Ok(()) => Reconciled::Finished,
+                    Err(error) => Reconciled::TemporaryRetained {
+                        path,
+                        reason: error.to_string(),
                     },
-                    None => Reconciled::Finished,
                 });
             }
             _ => {}

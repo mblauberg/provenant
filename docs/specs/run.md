@@ -55,7 +55,7 @@ and `provenant help <verb>` lists the flags.
 | `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. |
 | `cancel` | Target `RUN[/TASK[/ATTEMPT]]` with a required `--operation-id`, optional `--reason` and `--wait`. It returns requested, already terminal or unobservable, plus custody. Accepted cancellation does not prove exit. |
 | `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
-| `reconcile` | Settles open runs (all, or `--id`, repeatable) and reports uncertain custody. It never replays an uncertain launch. |
+| `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. It never replays an uncertain launch. |
 
 Route and access inputs on `dispatch`:
 
@@ -116,8 +116,15 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
 The supervisor file names inside an attempt directory are the run and
 supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
 Structured events live in SQLite, and provider parsing uses the live stream, not
-a second copy. Only `scratch/` is deleted at settlement; history and transcripts
-stay retained, and no retention or clean command exists.
+a second copy. Empty generated `scratch/` is deleted at settlement; unknown
+contents, history and transcripts stay retained. Terminal commit also attempts
+best-effort removal of attempt-private `tmp/`. `reconcile` includes terminal
+attempts and retries only when no reservation remains, using directory-relative,
+no-follow, identity-checked traversal. Symlinks are unlinked rather than followed.
+It reports a leftover `tmp/` path and the removal error without failing the
+whole reconcile. Non-terminal attempts keep their temporary data. Default scans
+prioritise non-terminal work, then retained reservations and terminal attempts
+with leftover `tmp/`. No general retention or clean command exists.
 
 Nested submission uses a dedicated store under the submitting attempt, selected
 by `PROVENANT_RUN_STATE_DIR`, while identity and config stay on the original
