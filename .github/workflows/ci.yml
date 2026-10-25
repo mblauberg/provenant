@@ -230,8 +230,10 @@ jobs:
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
+        # One thread keeps these writer fixtures serial, as the separate
+        # cargo test invocations did.
         run: >-
-          cargo nextest run --profile ci --locked --test worktrees
+          cargo nextest run --profile ci --locked --test worktrees --test-threads 1
           -E 'test(=lane_prepare_isolates_nested_state)
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
           | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
