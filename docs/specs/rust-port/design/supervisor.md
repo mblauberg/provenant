@@ -305,14 +305,35 @@ clock supplies timestamps; no locale or Python-start-string emulation remains.
 ### Permission policy
 
 Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)`, explicit
-read roots, network policy and named capabilities. Hold verified path anchors;
+read and write roots and a network level. Hold verified path anchors;
 reject traversal, symlinked state/lock leaves, credential roots and broad home
 or tmp grants. Writers may change their linked tree, private Git index/HEAD/COMMIT_EDITMSG/AUTO_MERGE/merge state/ORIG_HEAD,
 objects, exactly their branch/ref lock/reflog and the common `packed-refs.lock`. Keep `.git`, `commondir`,
 `gitdir`, `config.worktree`, `objects/info`, other refs, provider configuration
-and protected instructions immutable. The task's network policy never blocks the
-selected provider's own API endpoints, which its profile permits. Read-only execution uses declared reads
-and private scratch. Browser/Postgres IPC is explicitly granted.
+and protected instructions immutable. Network is a level: `provider` (the
+profile's API endpoints only, the read-only default), `local` (adds localhost
+bind, inbound and outbound plus the Postgres socket) or `open` (adds any
+outbound, the writer default). Real projects build, test and fetch packages, so
+writers get network by default rather than per named grant. Read-only execution
+uses declared reads and private scratch.
+
+Lanes run the user's own toolchains in place, because private copies broke
+real builds (rustup shims need the real `RUSTUP_HOME`; pnpm needs its store and
+symlinks). `~/.cargo` and `~/.rustup` are readable, with `CARGO_HOME` and
+`RUSTUP_HOME` pointing at them and `RUSTUP_AUTO_INSTALL=0`. Shared stores are
+writable in place without census or anchors: `~/.cargo/registry`,
+`~/.cargo/git`, Cargo's package and global cache lock files,
+`~/Library/pnpm`, `~/Library/Caches/pnpm`, `~/.npm` and `~/.cache/node`. A
+lane can therefore poison a shared package cache; that risk is accepted for
+working builds. Executables stay immutable: `~/.cargo/bin` and
+`~/.rustup/toolchains` are read and exec only. Homebrew prefixes are readable
+except `var/` (service data). `--write-root` adds project paths outside the
+worktree, such as a repository's `.agent-run` lock directory; roots must be
+uncensused, noncredential and clear of Git directories, secrets, scratch,
+private state and protected roots. Whatever else a profile grants, reads and
+writes are denied last for `~/.ssh`, `~/.aws`, `~/.kube`, `~/.secrets`,
+`~/Monero`, `~/Archives/git-preservation` and Cargo's `credentials` files.
+Cargo's `config.toml` stays readable because Cargo refuses an unreadable one.
 
 Writer setup also derives exactly
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>` from the canonical
@@ -329,10 +350,11 @@ belong to the effective user and have mode 0700, including existing directories;
 setup refuses mismatches without changing their owner or mode. Compilation
 rechecks the held cache's owner and mode. The cache gets read/write authority,
 with the same overlap and hard-link checks as provider state. No parent
-`Caches` or sibling cache grant is added. Child-created symlinks are denied
-with Seatbelt's `file-write-create`/`SYMLINK` filter, alongside `file-link`.
+`Caches` or sibling cache grant is added. Hard links stay denied (`file-link`).
+Symlink creation is allowed where a lane may write, since package managers
+need it, except in provider state and private state, which the host reads back.
 Nested provider setup and launch run in the parent guardian's host-side worker,
-using each child's own grants. Parent profiles need no symlink exception. The
+using each child's own grants. The
 holder's provider-exit callback joins that worker before descendant cleanup;
 errors become warnings and never provider stop reasons. Host-launched child
 guardians are siblings of the provider and retain their own custody; they do
@@ -340,10 +362,8 @@ not enter its descendant sparing registry. The host holder forwards explicit
 parent stop requests to its own accepted child scopes. See execution-route.md
 for the queued submission path.
 
-Shell-capable Claude writers use the same Rust recipe as Codex: immutable
-`~/.cargo/bin`, `~/.cargo/registry`, `~/.rustup/toolchains` and
-`~/.rustup/settings.toml`, with `CARGO_TARGET_DIR` inside the exact lane cache and
-`CARGO_HOME` in attempt scratch (registry linked read-only). Host Cargo configuration and credentials receive no grant.
+Shell-capable Claude writers use the same Rust recipe as Codex, with
+`CARGO_TARGET_DIR` inside the exact lane cache.
 On macOS with CLT installed, the recipe selects
 `/Library/Developer/CommandLineTools` with `DEVELOPER_DIR` and its macOS SDK
 with `SDKROOT`. That one installation is readable; only its `usr/bin` subtree
@@ -404,8 +424,8 @@ fails prelaunch as `ConfinementUnavailable`, never silently broadens access.
 Linux fake-provider tests do not establish real-provider confinement: a retained
 profile needs an enforcing backend and fixtures or its mode is refused.
 `ConfinementBackend` has `probe` and `compile`; macOS SBPL is one backend
-module. Provider-profile policy is typed data (roots, network, capabilities
-and runtime exceptions), not branches in a monolithic compiler. A new backend
+module. Provider-profile policy is typed data (roots, tool writes, network
+level and runtime exceptions), not branches in a monolithic compiler. A new backend
 implements this trait in one module without changing provider lifecycle code.
 
 Confinement also owns bounded disclosure scanning (10,000 files/64 MiB) and one

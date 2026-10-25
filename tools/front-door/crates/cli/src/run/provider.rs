@@ -176,6 +176,7 @@ fn prepare_with(
                 assets,
             },
             writer.as_ref(),
+            &task.access,
             adapter,
         )
         .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
@@ -330,6 +331,7 @@ fn prepare_with(
                 assets,
             },
             writer.as_ref(),
+            &task.access,
             adapter.id(),
         )
         .and_then(|request| match writer.as_ref() {
@@ -812,6 +814,7 @@ fn confinement_request(
     project_id: ProjectId,
     roots: ConfinementRoots<'_>,
     writer: Option<&run::WriterLaunch>,
+    access: &run::LaneAccess,
     adapter: &str,
 ) -> Result<PlanRequest, String> {
     let mode = match writer {
@@ -834,6 +837,7 @@ fn confinement_request(
             private_state: Some(grant(roots.private_state)),
             read_roots: std::iter::once(grant(roots.assets))
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
+                .chain(access.read_roots.iter().map(|path| grant(path)))
                 .collect(),
             protected_roots: vec![PathGrant {
                 path: roots.cwd.join("AGENTS.md"),
@@ -846,8 +850,8 @@ fn confinement_request(
                 _ => None,
             },
             include_continuation: false,
-            network: Vec::new(),
-            capabilities: Vec::new(),
+            write_roots: access.write_roots.iter().map(|path| grant(path)).collect(),
+            network: access.network(writer.is_some()),
             nested_confinement: false,
         },
         codex: CodexPolicy::Clean,
@@ -1111,6 +1115,7 @@ pub fn writer_fixture_plan(
             assets,
         },
         Some(writer),
+        &run::LaneAccess::default(),
         "codex",
     )?;
     ConfinedPlan::new(request).map_err(|error| error.to_string())
@@ -1233,6 +1238,7 @@ mod tests {
                 assets,
             },
             None,
+            &run::LaneAccess::default(),
             "codex",
         )?;
         assert!(request.permissions.read_roots.contains(&PathGrant {

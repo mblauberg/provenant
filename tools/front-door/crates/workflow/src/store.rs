@@ -13,6 +13,8 @@ use thiserror::Error;
 pub enum StoreError {
     #[error("malformed receipt")]
     Malformed(#[source] receipt::ReceiptError),
+    #[error("invalid receipt candidate")]
+    InvalidCandidate(#[source] receipt::ReceiptError),
     #[error("unsupported receipt version")]
     Version,
     #[error("receipt exceeds 64 KiB or 256 review references")]
@@ -87,6 +89,15 @@ impl From<receipt::ReceiptError> for StoreError {
             receipt::ReceiptError::Limit
             | receipt::ReceiptError::Decode(DecodeError::TooLarge { .. }) => Self::Limit,
             error => Self::Malformed(error),
+        }
+    }
+}
+impl StoreError {
+    /// Maps an error in the caller's candidate; stored data uses `From`.
+    fn candidate(error: receipt::ReceiptError) -> Self {
+        match Self::from(error) {
+            Self::Malformed(error) => Self::InvalidCandidate(error),
+            other => other,
         }
     }
 }
@@ -213,7 +224,7 @@ impl ReceiptStore {
         if candidate.subject() != context.subject {
             return Err(StoreError::StaleSubject);
         }
-        receipt::validate(candidate)?;
+        receipt::validate(candidate).map_err(StoreError::candidate)?;
         risk::validate(
             candidate.risk(),
             context.risk_policy,
@@ -237,9 +248,9 @@ impl ReceiptStore {
                 provenant_records::workflow::RecordError::RevisionOverflow => {
                     StoreError::RevisionOverflow
                 }
-                error => receipt::ReceiptError::from(error).into(),
+                error => StoreError::candidate(error.into()),
             })?;
-        let bytes = receipt::canonical(&committed)?;
+        let bytes = receipt::canonical(&committed).map_err(StoreError::candidate)?;
         // Cancellation/deadline boundary: finish staging, replacement and sync
         // after this check, even if a cancellation subsequently arrives.
         check_wait(budget, cancel, clock)?;
