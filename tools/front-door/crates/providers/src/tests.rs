@@ -589,7 +589,9 @@ pub(super) fn read_only_plan(
     root: &str,
     authentication: Option<&str>,
 ) -> provenant_confinement::ConfinedPlan {
-    use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
+    use provenant_confinement::permissions::{
+        AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions,
+    };
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
     let grant = |path: &str| PathGrant {
@@ -611,8 +613,8 @@ pub(super) fn read_only_plan(
             secret_roots: vec![],
             selected_authentication: authentication.map(Into::into),
             include_continuation: false,
-            network: vec![],
-            capabilities: vec![],
+            write_roots: vec![],
+            network: NetworkAccess::Provider,
             nested_confinement: false,
         },
     })
@@ -725,6 +727,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             "codex" => &[
                 "CARGO_HOME",
                 "RUSTUP_HOME",
+                "RUSTUP_AUTO_INSTALL",
                 "CARGO_TARGET_DIR",
                 "GIT_CONFIG_GLOBAL",
                 "GIT_CONFIG_NOSYSTEM",
@@ -839,7 +842,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             _ => {}
         }
         // The package is the CLI's own install directory, never a shared
-        // prefix whose etc/ and var/ would become readable.
+        // prefix whose var/ would become readable.
         let shared = PrepareInput {
             executable: std::path::Path::new("/opt/homebrew/bin/provider"),
             ..fixture_input(&route, &confined, &prompt, repo, token)
@@ -852,9 +855,20 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         // Host-detected Homebrew Node toolchain directories (launch::node_tools).
         let homebrew_node = |path: &Path| {
             ["/opt/homebrew", "/usr/local"].iter().any(|prefix| {
-                ["bin", "Cellar", "opt", "lib"]
-                    .iter()
-                    .any(|name| path == Path::new(prefix).join(name))
+                [
+                    "bin",
+                    "sbin",
+                    "Cellar",
+                    "opt",
+                    "lib",
+                    "libexec",
+                    "etc",
+                    "share",
+                    "include",
+                    "Frameworks",
+                ]
+                .iter()
+                .any(|name| path == Path::new(prefix).join(name))
             })
         };
         assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
@@ -1405,7 +1419,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
 }
 
 #[test]
-fn codex_read_only_toolchain_uses_private_build_and_existing_registry() {
+fn codex_read_only_toolchain_uses_private_build_and_shared_cargo_home() {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let plan = read_only_plan("/fixture", Some("login"));
@@ -1421,19 +1435,43 @@ fn codex_read_only_toolchain_uses_private_build_and_existing_registry() {
         .unwrap();
     let env = |key: &str| spec.env.iter().find(|(k, _)| k == key).unwrap().1.clone();
     assert_eq!(env("CARGO_TARGET_DIR"), "/fixture/scratch/target");
-    assert_eq!(env("CARGO_HOME"), "/fixture/scratch/cargo-home");
+    assert_eq!(env("CARGO_HOME"), "/fixture/home/.cargo");
     assert_eq!(env("RUSTUP_HOME"), "/fixture/home/.rustup");
+    assert_eq!(env("RUSTUP_AUTO_INSTALL"), "0");
+    let paths = |grants: &[provenant_confinement::permissions::PathGrant]| {
+        grants
+            .iter()
+            .map(|g| g.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let reads = paths(&spec.profile.spec.runtime_reads);
+    let writes = paths(&spec.profile.spec.tool_writes);
+    for dir in ["/fixture/home/.cargo", "/fixture/home/.rustup"] {
+        assert!(reads.iter().any(|path| path == dir), "{dir}");
+    }
+    // The shared registry, Git checkouts and package cache locks are
+    // writable; installed binaries and toolchains are not.
+    for path in [
+        "/fixture/home/.cargo/registry",
+        "/fixture/home/.cargo/git",
+        "/fixture/home/.cargo/.package-cache",
+        "/fixture/home/.cargo/.global-cache",
+    ] {
+        assert!(writes.iter().any(|write| write == path), "{path}");
+    }
+    assert!(!writes.iter().any(|path| path.contains("/bin")
+        || path.contains(".rustup")
+        || path.contains("credentials")));
+    assert!(
+        !spec
+            .setup
+            .iter()
+            .any(|step| matches!(step, crate::launch::SetupStep::Symlink { link, .. } if link.starts_with("/fixture/scratch/cargo-home")))
+    );
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
     ] {
-        assert!(
-            spec.profile
-                .spec
-                .runtime_reads
-                .iter()
-                .any(|g| g.path == std::path::Path::new(dir))
-        );
         assert!(
             spec.profile
                 .spec
@@ -1442,11 +1480,6 @@ fn codex_read_only_toolchain_uses_private_build_and_existing_registry() {
                 .any(|g| g.path == std::path::Path::new(dir))
         );
     }
-    assert!(spec.setup.contains(&crate::launch::SetupStep::Symlink {
-        link: "/fixture/scratch/cargo-home/registry".into(),
-        target: "/fixture/home/.cargo/registry".into(),
-    }));
-    assert!(!spec.profile.spec.runtime_reads.iter().any(|g| g.path.ends_with(".cargo") || g.path.to_string_lossy().contains("credentials")));
 }
 
 #[test]
@@ -1876,7 +1909,7 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
         ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
-        ("CARGO_HOME", "/fixture/scratch/cargo-home"),
+        ("CARGO_HOME", "/fixture/home/.cargo"),
         (
             "CARGO_TARGET_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
@@ -1904,12 +1937,16 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             "{path}"
         );
     }
-    // The existing registry is linked read-only into scratch Cargo home, and the
-    // user's Cargo configuration and credentials are not granted.
-    assert!(launch.setup.contains(&crate::launch::SetupStep::Symlink {
-        link: "/fixture/scratch/cargo-home/registry".into(),
-        target: "/fixture/home/.cargo/registry".into(),
-    }));
+    // The shared registry is writable in place; the compiler hard-denies
+    // Cargo credentials.
+    assert!(
+        launch
+            .profile
+            .spec
+            .tool_writes
+            .iter()
+            .any(|g| g.path == Path::new("/fixture/home/.cargo/registry"))
+    );
     // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
     // wrapper that sets it, and its directory is executable.
     assert!(launch.setup.iter().any(|step| matches!(
@@ -1924,9 +1961,24 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
             .iter()
             .any(|g| g.path == Path::new("/fixture/scratch/bin"))
     );
-    assert!(launch.profile.spec.runtime_reads.iter().all(|grant| {
-        !grant.path.ends_with(".cargo") && !grant.path.to_string_lossy().contains("credentials")
-    }));
+    // Runtime roots are readable; no grant names a credentials file, and the
+    // compiler hard-denies Cargo credentials inside them.
+    assert!(
+        launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|grant| grant.path == Path::new("/fixture/home/.cargo"))
+    );
+    assert!(
+        launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .all(|grant| !grant.path.to_string_lossy().contains("credentials"))
+    );
     assert!(launch.profile.spec.state_writes.iter().all(|grant| {
         !grant.path.starts_with("/fixture/home/.cargo")
             && !grant.path.starts_with("/fixture/home/.rustup")
@@ -2049,26 +2101,38 @@ fn rust_tools_exec_repository_scripts_in_the_working_directory() {
 }
 
 #[test]
-fn homebrew_node_tools_grant_toolchain_directories_but_not_etc_or_var() {
-    let prefix = std::path::Path::new("/opt/homebrew");
+fn homebrew_node_tools_grant_the_prefix_but_not_var() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let prefix = temp.path();
+    for name in ["bin", "Cellar", "etc", "var"] {
+        std::fs::create_dir(prefix.join(name))?;
+    }
     let (mut reads, mut exec) = (Vec::new(), Vec::new());
     let mut env = vec![(
         std::ffi::OsString::from("PATH"),
         std::ffi::OsString::from("/usr/bin:/bin"),
     )];
     crate::launch::homebrew_tools(prefix, &mut reads, &mut exec, &mut env);
-    let paths: Vec<_> = reads.iter().map(|grant| grant.path.clone()).collect();
-    assert_eq!(
-        paths,
-        ["bin", "Cellar", "opt", "lib"].map(|name| prefix.join(name))
-    );
-    assert_eq!(reads, exec);
-    assert!(
-        !paths
+    let paths = |grants: &[provenant_confinement::permissions::PathGrant]| {
+        grants
             .iter()
-            .any(|path| path.ends_with("etc") || path.ends_with("var"))
+            .map(|grant| grant.path.clone())
+            .collect::<Vec<_>>()
+    };
+    // etc/ holds OpenSSL's configuration; var/ holds service data.
+    assert_eq!(
+        paths(&reads),
+        ["bin", "Cellar", "etc"].map(|name| prefix.join(name))
     );
-    assert_eq!(env[0].1, "/usr/bin:/bin:/opt/homebrew/bin");
+    assert_eq!(
+        paths(&exec),
+        ["bin", "Cellar"].map(|name| prefix.join(name))
+    );
+    assert_eq!(
+        env[0].1,
+        std::ffi::OsString::from(format!("/usr/bin:/bin:{}", prefix.join("bin").display()))
+    );
+    Ok(())
 }
 
 #[test]

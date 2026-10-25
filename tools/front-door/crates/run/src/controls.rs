@@ -217,6 +217,7 @@ impl RunStore {
                     deliver: task.deliver.clone(),
                     provider_timeout_seconds: task.provider_timeout_seconds,
                     delivery_id: prior.delivery_id,
+                    access: task.access.clone(),
                 }],
                 concurrency: 1,
                 parent: Some(input.prior),

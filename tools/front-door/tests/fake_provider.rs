@@ -160,7 +160,9 @@ fn suite() -> Result {
     rig.assert_legacy_unchanged()
 }
 fn account_placement() -> Result {
-    use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, PlanPermissions};
+    use provenant_confinement::permissions::{
+        AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions,
+    };
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_providers::{
         Adapter, PrepareInput, Prompt, SetupStep, Stdin,
@@ -217,8 +219,8 @@ fn account_placement() -> Result {
                 secret_roots: vec![],
                 selected_authentication: Some("login".into()),
                 include_continuation: false,
-                network: vec![],
-                capabilities: vec![],
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
                 nested_confinement: false,
             },
         })?;

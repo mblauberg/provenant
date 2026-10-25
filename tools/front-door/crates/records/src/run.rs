@@ -67,6 +67,49 @@ pub struct TaskRequest {
     pub deliver: Option<WriterDeliveryRequest>,
     pub provider_timeout_seconds: u64,
     pub delivery_id: Option<DeliveryId>,
+    /// Dispatch-time access beyond the mode's defaults.
+    #[serde(default, skip_serializing_if = "LaneAccess::is_default")]
+    pub access: LaneAccess,
+}
+
+/// Network reach for a lane's provider and the tools it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAccess {
+    /// Only the provider's own recorded API endpoints.
+    Provider,
+    /// Provider endpoints plus localhost services: TCP and Postgres sockets.
+    Local,
+    /// Any outbound host plus localhost services.
+    Open,
+}
+
+/// Access a dispatch adds to its mode's defaults, sealed in the authority
+/// digest. Paths are canonical directories checked at the submission edge.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneAccess {
+    /// Explicit network reach; absent takes the mode default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkAccess>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_roots: Vec<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_roots: Vec<std::path::PathBuf>,
+}
+impl LaneAccess {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+    /// Writers build and test, so they default to open network; read-only
+    /// lanes reach only their provider.
+    pub fn network(&self, writer: bool) -> NetworkAccess {
+        self.network.unwrap_or(if writer {
+            NetworkAccess::Open
+        } else {
+            NetworkAccess::Provider
+        })
+    }
 }
 
 /// Canonical repository and linked worktree selected at the submission edge.

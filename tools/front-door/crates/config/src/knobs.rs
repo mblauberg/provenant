@@ -4,7 +4,7 @@
 use crate::{ConfigError, Profile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::OnceLock};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 const REGISTRY: &str = include_str!("../../../../../config/harness-knobs.json");
@@ -17,10 +17,18 @@ struct Registry {
     knobs: BTreeMap<String, Spec>,
     presets: BTreeMap<String, Preset>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    Bool,
+    StringList,
+    Enum,
+    Int,
+}
 #[derive(Deserialize)]
 struct Spec {
     #[serde(rename = "type")]
-    kind: String,
+    kind: Kind,
     #[serde(default)]
     nullable: bool,
     min: Option<i64>,
@@ -74,13 +82,13 @@ impl<D> crate::ResolvedConfig<D> {
         let registry = registry()?;
         let mut knobs = self.knobs.clone();
         if let Some(class) = class {
-            apply_class(&registry, self.profile, &mut knobs, class);
+            apply_class(registry, self.profile, &mut knobs, class);
         }
         for entry in overrides {
             let (name, text) = entry
                 .split_once('=')
                 .ok_or_else(|| invalid(entry, "expected_name_value"))?;
-            let spec = spec(&registry, name)?;
+            let spec = spec(registry, name)?;
             let value = parse_cli(spec, text).map_err(|rule| invalid(name, rule))?;
             check(spec, &value).map_err(|rule| invalid(name, rule))?;
             knobs.insert(
@@ -106,7 +114,7 @@ impl<D> crate::ResolvedConfig<D> {
     /// A user `[knobs]` override still wins. An unlisted class changes nothing.
     pub fn apply_task_class(&mut self, class: &str) -> Result<(), ConfigError> {
         let registry = registry()?;
-        apply_class(&registry, self.profile, &mut self.knobs, class);
+        apply_class(registry, self.profile, &mut self.knobs, class);
         Ok(())
     }
 }
@@ -131,8 +139,13 @@ fn apply_class(
     }
 }
 
-fn registry() -> Result<Registry, ConfigError> {
-    serde_json::from_str(REGISTRY).map_err(|_| ConfigError::KnobRegistry)
+/// Parsed once; the embedded text is immutable.
+fn registry() -> Result<&'static Registry, ConfigError> {
+    static PARSED: OnceLock<Option<Registry>> = OnceLock::new();
+    PARSED
+        .get_or_init(|| serde_json::from_str(REGISTRY).ok())
+        .as_ref()
+        .ok_or(ConfigError::KnobRegistry)
 }
 fn profile_name(profile: Profile) -> &'static str {
     profile.as_str()
@@ -178,8 +191,8 @@ fn distance(a: &str, b: &str) -> usize {
 /// Check a value against the knob's type, range, enum values and nullability.
 fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
     match value {
-        Value::Bool(_) if spec.kind == "bool" => Ok(()),
-        Value::Array(items) if spec.kind == "string_list" => {
+        Value::Bool(_) if spec.kind == Kind::Bool => Ok(()),
+        Value::Array(items) if spec.kind == Kind::StringList => {
             if items.len() <= 128
                 && items.iter().all(|v| {
                     v.as_str().is_some_and(|s| {
@@ -194,12 +207,12 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
         }
         Value::Null if spec.nullable => Ok(()),
         Value::Null => Err("not_nullable"),
-        Value::String(text) if spec.kind == "enum" => spec
+        Value::String(text) if spec.kind == Kind::Enum => spec
             .values
             .contains(text)
             .then_some(())
             .ok_or("unknown_value"),
-        Value::Number(number) if spec.kind == "int" => {
+        Value::Number(number) if spec.kind == Kind::Int => {
             let n = number.as_i64().ok_or("type")?;
             if spec.min.is_some_and(|min| n < min) || spec.max.is_some_and(|max| n > max) {
                 Err("outside_allowed_range")
@@ -228,10 +241,10 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
     if text == NULL {
         return Ok(Value::Null);
     }
-    if matches!(spec.kind.as_str(), "bool" | "string_list") {
+    if matches!(spec.kind, Kind::Bool | Kind::StringList) {
         return serde_json::from_str(text).map_err(|_| "type");
     }
-    if spec.kind == "int" {
+    if spec.kind == Kind::Int {
         return text.parse::<i64>().map(Value::from).map_err(|_| "type");
     }
     Ok(Value::from(text))
@@ -297,7 +310,7 @@ fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
             doc["profile"] = toml_edit::value(name);
         }
         KnobEdit::Set { name, value } => {
-            let spec = spec(&registry, name)?;
+            let spec = spec(registry, name)?;
             let value = parse_cli(spec, value).map_err(|rule| invalid(name, rule))?;
             check(spec, &value).map_err(|rule| invalid(name, rule))?;
             let item = match &value {
@@ -334,7 +347,7 @@ fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
             }
         }
         KnobEdit::Unset(name) => {
-            spec(&registry, name)?;
+            spec(registry, name)?;
             if let Some(item) = doc.get_mut("knobs") {
                 let knobs = item
                     .as_table_like_mut()

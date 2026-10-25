@@ -538,6 +538,7 @@ fn prepare(
     }
     let mut runtime_reads = vec![subtree(package)];
     let mut tool_exec_roots = Vec::new();
+    let mut tool_writes = Vec::new();
     if shell {
         env.extend([
             ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
@@ -552,10 +553,17 @@ fn prepare(
             access,
             &mut runtime_reads,
             &mut tool_exec_roots,
+            &mut tool_writes,
             &mut env,
             &mut setup,
         );
-        crate::launch::node_tools(&mut runtime_reads, &mut tool_exec_roots, &mut env);
+        crate::launch::node_tools(
+            input.home,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut tool_writes,
+            &mut env,
+        );
     }
     let mut spec = LaunchSpec {
         argv,
@@ -573,6 +581,7 @@ fn prepare(
                 allow_process_fork: true,
                 deny_keychain_access: shell,
                 tool_exec_roots,
+                tool_writes,
                 // Never the user's .claude.json, which can hold MCP secrets.
                 runtime_reads,
                 state_writes: if shell {

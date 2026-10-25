@@ -193,10 +193,13 @@ pub struct Access {
     /// Extra directory the lane may read (repeatable)
     #[arg(long)]
     pub read_root: Vec<PathBuf>,
-    /// Allow network access
-    #[arg(long, value_enum, default_value = "off")]
-    pub network: Switch,
-    /// Grant a named capability (repeatable)
+    /// Extra directory the lane may write, outside Git metadata (repeatable)
+    #[arg(long)]
+    pub write_root: Vec<PathBuf>,
+    /// Network access [default: on for worktree-write, off for read-only]
+    #[arg(long, value_enum)]
+    pub network: Option<Switch>,
+    /// Grant a named capability: postgres (repeatable)
     #[arg(long)]
     pub capability: Vec<String>,
 }
