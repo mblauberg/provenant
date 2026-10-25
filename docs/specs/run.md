@@ -72,7 +72,7 @@ Route and access inputs on `dispatch`:
   range 1 to 14400. This is the provider budget, distinct from a reader wait.
 - Manifest: strict JSON `{schema_version:1,tasks:[...]}` with 1 to 64 tasks,
   unique task IDs (1 to 64 ASCII letters, digits or `._-`, starting
-  alphanumeric), `--concurrency` 1 to 8 (default 4). Overlapping writer scopes
+  alphanumeric), `--concurrency` 1 to 8 (default the `lanes.max_concurrency` knob, 8). Overlapping writer scopes
   reject before launch; a task-local refusal does not suppress valid siblings.
 
 ### Waits

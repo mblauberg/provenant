@@ -11,7 +11,8 @@ records the one-pass rewrite.
 The package and binary `provenant` stay at `tools/front-door/`, with library
 packages `provenant-<name>` under `tools/front-door/crates/<name>/`. The
 binary is the only executable. Share versions and features through
-`[workspace.dependencies]` and commit one `Cargo.lock`. A change to a crate's
+`[workspace.dependencies]` and commit one `Cargo.lock`. The table lists the allowed maximum for each
+crate; a crate's `Cargo.toml` may declare fewer. A change to a crate's
 responsibility or edges lands in this table in the same PR.
 
 | Crate | Owns | Allowed internal dependencies |

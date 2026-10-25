@@ -13,9 +13,10 @@ This document grants no merge, install or release authority.
 
 ## Purpose and ownership
 
-`tools/front-door/crates/workflow` is `#![forbid(unsafe_code)]`. It depends on
-core, records, config, confinement and supervisor's safe filesystem API, plus
-serde, serde_json, thiserror, regex and sha2. It holds no SQLite, process
+`tools/front-door/crates/workflow` is `#![forbid(unsafe_code)]`. Its internal
+dependencies are core, records and supervisor's safe filesystem API (the
+[workspace table](rust-workspace.md#crate-layering) lists the allowed maximum),
+plus serde, serde_json, thiserror and regex. It holds no SQLite, process
 runner, scheduler or MCP tool.
 
 | Module | Responsibility |

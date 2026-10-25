@@ -66,7 +66,7 @@ provenant
   telemetry stats | trace
   quota show | display | tick
   worktree create | list | remove
-  workflow review | receipt (show | save) | session (save | show)
+  workflow review | receipt (show | save) | session (save | show | handoff)
   check config | install | harness | release | writing
   hook claude (pre-tool-use | pre-compact | compact | chair-prompt | chair-start)
   hook git pre-push
@@ -119,8 +119,8 @@ replies and concurrent duplicates, including resume.
 | Leaf | Grammar | Notes |
 | --- | --- | --- |
 | `dispatch` | One of `--prompt-file PATH`, `--prompt-stdin` or `--manifest PATH`; required `--operation-id ID`; route and access flags below; `--task-id`, `--delivery-id`, `--provider-timeout SECONDS`, `--concurrency N`, `--knob NAME=VALUE`, `--deliver-remote`, `--deliver-branch`, `--open-pr`, `--host`, `--branch`, `--base`, `--wait SECONDS` | Input is at most 1 MiB. A single prompt needs a route; a manifest conflicts with `--task-id`, `--delivery-id`, the route and access flags and `--provider-timeout`, which are per-task fields. A manifest holds 1 to 64 unique tasks as strict `{schema_version:1,tasks:[…]}` JSON; `--concurrency` is 1 to 8. Acceptance returns IDs, the exact route, state and artifact references after commit. |
-| `lanes` | `[--id TARGET]… [--all] [--state STATE]… [--since DURATION_OR_RFC3339] [--limit N] [--cursor TOKEN] [--wait SECONDS [--condition any\|all]]` | At most 100 IDs, limit 1 to 100 (default 50). `--all` conflicts with `--id`, `--cursor` conflicts with `--wait`, and `--condition` needs `--wait`. With no selector it lists the current agent's lanes in the project, excluding the caller and its ancestors. |
-| `output` | `ATTEMPT [--part result\|prompt\|stderr\|events] [--offset N \| --tail N] [--max-bytes N]` | Part defaults to result, offset to 0 and max bytes to 65536. The reply carries the next offset, EOF, encoding and completeness, so every unread byte stays reachable. Prompt reads need dispatch-equivalent project authority. |
+| `lanes` | `[--id TARGET]… [--host HOST] [--all] [--state STATE]… [--since DURATION_OR_RFC3339] [--limit N] [--cursor TOKEN] [--wait SECONDS [--condition any\|all]]` | At most 100 IDs, limit 1 to 100 (default 50). `--all` conflicts with `--id`, `--cursor` conflicts with `--wait`, and `--condition` needs `--wait`. `--host` lists a configured peer's own lanes by label or host ID and conflicts with `--id`, `--wait` and `--cursor`. `--state` and `--since` filter the listing (since is a duration such as `24h` or an RFC3339 time, applied to queue time) and conflict with `--wait`. With no selector it lists the current agent's lanes in the project, excluding the caller and its ancestors. |
+| `output` | `ATTEMPT [--part result\|prompt\|stderr\|events] [--offset N \| --tail N] [--max-bytes N]` | Part defaults to result, offset to 0 and max bytes to 65536 (1 to 65536). `--tail N` reads the last N lines (1 to 500) and conflicts with `--offset`. The reply carries the next offset, EOF, encoding and completeness, so every unread byte stays reachable. Prompt reads need dispatch-equivalent project authority. |
 | `cancel` | `TARGET --operation-id ID [--reason TEXT] [--wait SECONDS]` | Reason is at most 256 bytes. The reply states requested, already terminal or unobservable, with the custody observation. Acknowledgement is not process exit. There is no sibling or chair cancellation. |
 | `resume` | `ATTEMPT --operation-id ID (--prompt-file PATH \| --prompt-stdin) [--wait SECONDS]` | Creates a new immutable attempt with the exact retained provider handle, route and access. It refuses `UNSUPPORTED` when the adapter has no enabled resume recipe, the attempt has no recorded handle or a writer is active, and it refuses an attempt already continued, naming the newer one. A new route or a fresh turn is a new `dispatch`. |
 | `reconcile` | `[--id RUN]…` | Asks run to recover queued and orphaned work idempotently for the selected runs, or the project's recoverable runs, and reports repaired, unchanged and refused items. At most 100 IDs. It takes no operation ID or wait. `--abandon-uncertain` is in the grammar but is not available in this build. |
@@ -167,16 +167,18 @@ final head and open a pull request after verifying it.
 | `route` | `list [--adapter] [--pool]`; `resolve` with route flags; `set POOL MODEL [--weight 0..100] [--effort] [--efforts]`; `remove POOL MODEL`; `reset POOL`; `pacing PROVIDER pace\|spend\|max` | `list` and `resolve` are pure previews. The others edit pool overrides in `config.toml`. |
 | `quota` | `show [--adapter]`; `display [--headline auto\|5h\|weekly] [--icon most_constrained\|ACCOUNT]`; `tick [--adapter] [--trigger timer\|panel\|manual\|wake\|power] [--power ac\|battery\|low]` | `show` never refreshes. `display` with no options changes nothing. `tick` defaults to manual and ac, and the quota menu bar app calls it. |
 | `chair switch` | `[--to ACCOUNT] [--dry-run] [--session-id ID]` | Checkpoints and continues under an allowed registered Claude account. A real run needs the session ID, from `CLAUDE_SESSION_ID` when the flag is absent. |
-| `bench` | `mine [--limit]`; `verify TASK`; `run --route ROUTE[@effort] [--split search\|acceptance\|held-out] [--limit]` | Limits are 1 to 100. |
+| `bench` | `mine [--limit]`; `verify TASK`; `run --route ROUTE[@effort] [--split search\|acceptance\|held-out] [--limit]` | `--route` is required, `--split` defaults to acceptance (held-out is never the default) and limits are 1 to 100. |
 | `telemetry` | `stats [--usage] [--since] [--until] [--run-id] [--detail]`; `trace [--out FILE] [--since] [--run RUN]` | Semantics in [telemetry](telemetry.md). |
-| `worktree` | `create BRANCH [--base REV]`; `list`; `remove NAME [--discard]`; `remove --merged [--integration REF] [--branch NAME]… [--since OID]` | Semantics in [supervisor](supervisor.md#worktrees). |
+| `worktree` | `create BRANCH [--base REV]`; `list`; `remove NAME [--discard]`; `remove --merged --integration REF (--branch NAME… \| --since OID)` | Semantics in [supervisor](supervisor.md#worktrees). |
 | `fabric …` | Fabric's own clap subtree, mounted unchanged | Leaves and requests are in [fabric](fabric.md#cli-and-mcp-surfaces). The CLI supplies only the global options, envelope, exits and help entries. `fabric mcp [--client claude\|codex\|cursor\|agy\|opencode]` serves MCP on stdio. |
-| `workflow …` | Workflow's own clap subtree, mounted unchanged | `review --request FILE\|-`, `receipt show\|save` and `session save\|show`; see [workflow](workflow.md#cli-and-hooks). |
+| `workflow …` | Workflow's own clap subtree, mounted unchanged | `review --request FILE\|-`, `receipt show\|save`, `session save\|show` and `session handoff`; see [workflow](workflow.md#cli-and-hooks). |
+| `workflow session handoff` | `--to HOST --account LABEL [--note TEXT]… [--attach PATH]… [--prompt-file PATH] [--no-checkpoint] [--provider claude] [--model MODEL] [--wip \| --allow-dirty] [--dry-run] [--no-launch] [--session-id ID]` | Hands the chair or task session to a fresh Claude session on a peer host. `--wip` conflicts with `--allow-dirty`, attachments total at most 512 KiB and `--provider` accepts only `claude`. The target host must enable `fabric.accept_handoff`. |
 | `check` | `config`, `install [--source ABS]`, `harness`, `release [--base OID --head OID]` and `writing PATHS… [--rules general\|academic\|legal]` | Each takes `--limit N` (1 to 100, default 50) and `--cursor TOKEN`. |
 | `internal supervise` | hidden | Launch handshake for run's scheduler and attempt guardian. Takes zero or five private descriptor numbers; `--json` refused. |
 
 `worktree remove` takes either a `NAME` or `--merged`, never both, and `--discard`
-only with a `NAME`. It has no remote deletion and no force.
+only with a `NAME`. `--merged` requires `--integration` (a branch or remote-tracking
+ref such as `origin/main`) and exactly one of `--branch` (repeatable) or `--since`. It has no remote deletion and no force.
 
 ### Results, exits and size limits
 

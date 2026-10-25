@@ -4,16 +4,14 @@
 
 `provenant-telemetry` reduces run's terminal attempt records with the bundled
 price table. It reports supervised usage, API-equivalent cost estimates, route
-outcomes, attempt timing, route comparison, cost per accepted delivery and
-measurement coverage. It owns no store, writer lock, background collection or
+outcomes, route comparison and measurement coverage. It owns no store, writer lock, background collection or
 provider operation, so a report failure cannot signal a provider or change a
 published outcome.
 
 The reader is the user improving the harness and evaluating configurations,
 efficiency, performance and cost-effectiveness. That needs per-route outcomes,
-time, usage, cost and cost per accepted delivery, not raw OTel streams or a
-second store. Every report reduces run's terminal attempt records and
-workflow's acceptance facts on demand. The command edge also keeps a bounded
+usage and cost, not raw OTel streams or a second store. Every report reduces
+run's terminal attempt records on demand. The command edge also keeps a bounded
 local demand log; the reducer stays pure.
 
 The [cross-cutting decisions](README.md#cross-cutting-decisions) bind state
@@ -23,12 +21,11 @@ root, command envelope and exit codes.
 
 | Area | Owns | Delegates |
 |---|---|---|
-| Telemetry | Reducer, report shape, price schema, trace export, demand counter record kinds | Records, admission, terminal publication (run); acceptance evidence (workflow) |
+| Telemetry | Reducer, report shape, price schema, trace export, demand counter record kinds | Records, admission, terminal publication (run) |
 | [Run](run.md) | Durable attempt facts and the `AttemptReader` | Nothing to telemetry; there is no run to telemetry dependency |
 | [CLI](cli.md) | clap grammar, root and project selection, rendering, composing run, workflow and telemetry | Reduction |
 | [State](state.md) | Loading the bundled price asset | Price schema validation |
 | [Routing](routing.md) | Account eligibility, quota windows, reset semantics, probes | Reading the resolved label from run's fact |
-| [Workflow](workflow.md) | Acceptance evidence behind `acceptance(ProjectId, DeliveryId)` | Joining it to attempts |
 
 Telemetry depends only on `core`, `records` and `config`. CLI composes the
 crates. Core supplies IDs and timestamps; providers normalise usage; run owns
@@ -53,32 +50,31 @@ flag.
 
 ### Report
 
-The JSON result uses the CLI envelope and its 1 MiB cap. `data` holds the
-selected scope and interval, the price table identity and review date, usage
-and cost totals, comparison groups, outcomes and coverage. `--detail` adds
-daily groups. Human output shows at most 12 rows per section (200 with
-detail), with omitted counts and `-` for missing values. JSON never truncates
-silently: an oversized report returns the CLI's bounded error with advice to
-narrow the interval.
+The JSON result uses the CLI envelope and its 1 MiB cap. `data` holds
+`scope`, the `window`, the price table identity and review date (`prices`),
+`totals`, `routes`, `latest_task_outcomes` and `coverage`. `--detail` adds
+`daily_accounts`, the same totals grouped by UTC day and route. Human output is
+one line: the attempt count and the cost, or "at least" the known lower bound
+when any cost is unknown. JSON never truncates silently: an oversized report
+returns the CLI's bounded error with advice to narrow the interval.
 
-Groups key on the exact resolved (adapter, model, effort, account label). Each
-carries attempts, tasks, retries, exact outcome counts, success, partial and
-failure rates in basis points, wall time, admission wait and provider time
-(sum, p50, p90 and missing counts), per-category usage, cost, and the accepted
-columns. Conventions:
+Routes key on the exact resolved (provider, model, effort, account label),
+with missing values last. Every totals block (overall, per route and per day)
+carries the attempt count, per-category token usage as known and missing
+counts, cost, and exact outcome counts. `latest_task_outcomes` counts the
+highest-numbered selected terminal attempt per task. Conventions:
 
-- Success is `succeeded`, partial is `input_required`, failure is every other
-  outcome. Exact counts stay so readers can regroup.
-- A retry is a selected attempt whose attempt number is above 1, counted once
-  in its own group.
-- Percentiles are nearest-rank over known values. Sums add known values only;
-  `missing` counts the rest. Missing data never means zero.
-- Money is a six-place decimal string, rates are integer basis points and
-  durations are milliseconds.
+- Outcome counts are exact, one per terminal state, so readers can derive
+  success and failure rates.
+- Sums add known values only; `missing` counts the rest. Missing data never
+  means zero.
+- Money is a six-place decimal string with the integer microdollar value.
+  `cost.complete` is null when any attempt's cost is unknown;
+  `known_lower_bound` and `missing_attempts` are always present.
 
 Coverage states `scope = supervised_terminal_attempts`, the selected attempt
-count and missing usage, category, price, account, timing and receipt counts.
-CLI adds the active count from run's snapshot. Unsupervised interactive
+count and the counts missing usage, per-category usage, price and account.
+Unsupervised interactive
 sessions, other hosts and account-level consumption are outside coverage;
 quota snapshots carry the latter.
 
@@ -88,24 +84,10 @@ state. An existing unreadable, corrupt or incompatible store is an error.
 ### Run input
 
 Telemetry reads only through run's `AttemptReader`; it never opens the
-database, crawls `runs/` or reads output paths. CLI collects at most 100,001
-facts and returns `TooLarge` beyond 100,000. Reduction is bounded to 100,000
-attempts, 10,000 groups and 1 MiB of group-key bytes, checked before
+database, crawls `runs/` or reads output paths. Reduction is bounded to
+100,000 attempts, 10,000 groups and 1 MiB of group-key bytes, checked before
 insertion; a bound returns `TooLarge`, never partial totals. Accumulators are
-fixed numeric values and one `u64` per attempt per duration for percentiles.
-
-### Accepted deliveries
-
-CLI collects the distinct (project, delivery) pairs in the selected facts (at
-most 10,000) and calls workflow's `acceptance` reader for each. A missing
-receipt counts in `missing_receipts`; a corrupt one is an error. A group's
-`accepted.cost` sums its selected attempts carrying an accepted delivery,
-including failed retries and reviews. `deliveries` counts distinct deliveries
-and per-delivery values divide once at output. `attempt_wall_ms` is attempt
-time, not elapsed delivery time. Pending, abandoned and receipt-less spend is
-`unaccepted_cost`. Attempts without a delivery ID stay out of these columns,
-and only attempts inside the window count, so widen it to cover whole
-deliveries. Telemetry never opens receipts or writes delivery rows.
+fixed numeric values.
 
 ### Trace export
 
@@ -141,8 +123,7 @@ A complete estimate is null if any included attempt lacks required usage or a
 positive-count rate; the known-cost lower bound and the missing-cost count are
 reported separately. Verified-free routes cost exactly zero even with missing
 usage. Zero tokens need no rate. An unpriced subscription is not free. Cost is
-an API-equivalent estimate, not a bill, and cost per accepted delivery is null
-when the cost is.
+an API-equivalent estimate, not a bill.
 
 ### Local demand counters
 
@@ -188,10 +169,11 @@ against the current time and never reads staleness as zero usage.
 
 Exit codes follow the CLI contract. A successful report exits 0, including
 partial coverage in `data`. Invalid arguments, malformed input and unsupported
-record versions exit 2. Setup, I/O or contention exits 3. Typed errors are
-`TooLarge`, `InvalidFact`, `InvalidWindow`, `InvalidPrice` and `Overflow`; CLI
-maps invalid facts, windows and prices to 2 and overflow and size refusals to
-1. Run read errors keep their own version and I/O classification. No
+record versions exit 2. Setup, I/O or contention exits 3. Typed reducer errors
+are `TooLarge`, `InvalidFact`, `InvalidWindow`, `InvalidPrice` and `Overflow`;
+`stats` maps every one of them to an invalid result (exit 2). An unreadable or
+invalid bundled price file is a setup error (exit 3). Run read errors keep
+their own version and I/O classification. No
 successful totals accompany a failed reduction. Stats does not wait for
 attempts. Diagnostics are bounded, redacted stderr.
 
@@ -205,7 +187,10 @@ makes a count approximate and never fails the command.
 | SQLite ledger, writer lock, `record_attempt`, ingest and sources commands | Duplicated run's durable facts and had no product reader. |
 | Importing or deleting the previous ledger | The binary never opens it; a second history invites double counting. |
 | Transcript and receipt discovery, OTel ingest, export and collector | No reader for raw collection (about 0.5 GB a day); run's records serve the comparison. |
-| Delivery telemetry writes and a delivery report | Workflow keeps acceptance evidence; the read-only join replaces them. |
+| Delivery telemetry writes and a delivery report | Workflow keeps acceptance evidence; telemetry does not read it. |
+| Accepted and unaccepted cost, cost per accepted delivery, `missing_receipts` | Needs a join from attempts to workflow's acceptance reader that was never built; the report has no delivery columns. |
+| Wall, admission-wait and provider timing with p50 and p90 percentiles | Attempt facts feed no timing columns into the reducer; the trace export carries attempt timing instead. |
+| Retry and task counts, success, partial and failure rates in basis points | Outcome counts and `latest_task_outcomes` let a reader derive them. |
 | Changes and retro reports | No product reader; the route comparison is the product view. |
 | Cross-host summaries, top-level `stats` and `retro` aliases, read-time refresh | Stats is local and read-only. |
 | Weekly quota history and ledger fallback | Routing owns any window history; costs never reconstruct it. |
@@ -215,13 +200,12 @@ makes a count approximate and never fails the command.
 
 ## Verification
 
-- `crates/telemetry/src/tests.rs` covers grouping, percentiles, accepted
-  columns, the attempt, group and key bounds, overflow and exact rounding, and
+- `crates/telemetry/src/tests.rs` covers grouping, the attempt, group and key bounds, overflow and exact rounding, and
   missingness against unknown prices and usage.
 - `tools/front-door/tests/usage.rs` covers the demand log: record kinds,
   rotation, torn lines and isolation through `PROVENANT_USAGE_STATE_DIR`.
 - `tools/front-door/tests/quota.rs` covers `quota show`, `display` and `tick`.
 - Evaluations of two configurations run both arms through run, then read
   `telemetry stats --since START --json` once for the project and window.
-  Quality comes from the evaluate skill's graders, not telemetry; quality per
-  hour is unavailable while `wall_ms.missing` is nonzero.
+  Quality comes from the evaluate skill's graders, not telemetry, and the
+  report carries no timing, so elapsed time comes from the trace export.
