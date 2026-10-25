@@ -205,14 +205,23 @@ fn relay(
 }
 
 /// Refuse a connection at the cap with the busy frame. Best effort: a caller
-/// that has already gone away needs no reply.
+/// that has already gone away needs no reply. The request is then read and
+/// discarded, briefly and within the frame bound: closing with unread data
+/// resets the connection, and on Linux the reset can discard the busy frame
+/// before the caller reads it. It runs on its own thread so a slow caller
+/// cannot stall the accept loop.
 fn refuse(mut stream: UnixStream) {
-    if stream
-        .set_write_timeout(Some(Duration::from_secs(1)))
-        .is_ok()
-    {
-        let _ = stream.write_all(BUSY);
-    }
+    std::thread::spawn(move || {
+        let timeout = Some(Duration::from_secs(1));
+        if stream.set_write_timeout(timeout).is_err()
+            || stream.set_read_timeout(timeout).is_err()
+            || stream.write_all(BUSY).is_err()
+        {
+            return;
+        }
+        let _ = stream.shutdown(Shutdown::Write);
+        let _ = read_bounded(&mut stream, Duration::from_secs(2));
+    });
 }
 
 /// Count consecutive `accept` failures: pause and carry on, then give up once
