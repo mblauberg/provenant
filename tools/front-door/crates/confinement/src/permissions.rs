@@ -3644,6 +3644,14 @@ mod tests {
         // Package managers link into node_modules; a link grants nothing,
         // since the sandbox checks the resolved path.
         let new_link = linked.path().join("new-link");
+        // A build script built into a declared write root (a shared
+        // CARGO_TARGET_DIR) runs; the sandbox checks the exec of the file.
+        let build_script = project_locks.join("build-script-main");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&build_script, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(&build_script, std::fs::Permissions::from_mode(0o755))?;
+        }
         for (name, outcome) in [
             (
                 "tool store write",
@@ -3653,6 +3661,7 @@ mod tests {
                 "write root",
                 run(&executables[0], &[&project_locks.join("lock")]),
             ),
+            ("write root exec", run(&build_script, &[])),
             (
                 "new symlink in worktree",
                 run(
