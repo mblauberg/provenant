@@ -53,6 +53,47 @@ fn model_selector_keeps_the_entire_provider_path() -> Result<(), RoutingError> {
     Ok(())
 }
 #[test]
+fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    let wire = r#"{"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"allow_free":false,"fallback":{"kind":"none"}}"#;
+    let query: RouteRequest = serde_json::from_str(wire)?;
+    assert_eq!(serde_json::to_string(&query)?, wire);
+    assert_eq!(
+        query.choice,
+        RouteChoice::NamedRoute(RouteName::parse("review.v1-_2")?)
+    );
+    let longest = "x".repeat(64);
+    assert_eq!(RouteName::parse(&longest)?.as_str(), longest);
+    for text in ["", "bad name", "bad/name", "bad\n", "é", &"x".repeat(65)] {
+        assert!(matches!(
+            RouteName::parse(text),
+            Err(RoutingError::InvalidValue)
+        ));
+        let wire = serde_json::json!({"kind": "named_route", "value": text});
+        let error = serde_json::from_value::<RouteChoice>(wire)
+            .err()
+            .ok_or("invalid name accepted")?;
+        assert!(
+            error
+                .to_string()
+                .contains(&RoutingError::InvalidValue.to_string())
+        );
+    }
+    for value in [
+        serde_json::json!({"name": "review"}),
+        serde_json::json!(12),
+        serde_json::Value::Null,
+    ] {
+        assert!(
+            serde_json::from_value::<RouteChoice>(serde_json::json!({
+                "kind": "named_route", "value": value
+            }))
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn exact_unknown_is_retained_but_never_upgraded_or_activated()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
@@ -100,7 +141,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     };
     let context = context(&catalogue, &config, now()?);
     let mut query = RouteRequest {
-        choice: RouteChoice::NamedRoute("review".into()),
+        choice: RouteChoice::NamedRoute(RouteName::parse("review")?),
         effort: None,
         confidential: false,
         allow_free: false,
@@ -114,7 +155,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
         resolve(&query, &context),
         Err(RoutingError::UnsupportedEffort)
     ));
-    query.choice = RouteChoice::NamedRoute("typo".into());
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("typo")?);
     assert!(matches!(
         resolve(&query, &context),
         Err(RoutingError::UnknownRoute)
@@ -403,7 +444,7 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         ctx.access = &access;
         ctx.quota = &quota;
         let mut query = request("codex/gpt-6-luna")?;
-        query.choice = RouteChoice::NamedRoute("trial".into());
+        query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
         query.effort = Some(case.effort.into());
         query.confidential = true;
 
@@ -617,7 +658,7 @@ fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
     let config = RoutingConfig::default();
     let ctx = context(&catalogue, &config, now()?);
     let mut query = request("codex/gpt-6-luna")?;
-    query.choice = RouteChoice::NamedRoute("free-check".into());
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("free-check")?);
     query.confidential = true;
     match resolve(&query, &ctx).unwrap_err() {
         RoutingError::NoEligiblePoolMember { exclusions } => {
@@ -695,6 +736,98 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
     );
     Ok(())
 }
+#[test]
+fn candidate_errors_and_fallback_effort_match_request_fixtures()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue.pools.insert(
+        "fixture-effort".into(),
+        vec![RoutePoolMember {
+            model: ModelId::parse("codex/gpt-6.1-sol")?,
+            weight: 1,
+            effort: Some("high".into()),
+            efforts: vec!["high".into()],
+            free: false,
+        }],
+    );
+    let config = RoutingConfig {
+        routes: BTreeMap::from([(
+            "review".into(),
+            NamedRoute {
+                model: ModelId::parse("codex/gpt-6.1-sol")?,
+                effort: Some("ultra".into()),
+            },
+        )]),
+        ..RoutingConfig::default()
+    };
+    let context = context(&catalogue, &config, now()?);
+    let fixtures = [
+        (
+            r#"{"choice":{"kind":"model","value":"invented/id"},"effort":"bad effort"}"#,
+            Err(RoutingError::UnknownAdapter),
+        ),
+        (
+            r#"{"choice":{"kind":"model","value":"codex/unlisted"},"effort":"high"}"#,
+            Err(RoutingError::UnsupportedEffort),
+        ),
+        (
+            r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":"bad effort"}"#,
+            Err(RoutingError::UnsupportedEffort),
+        ),
+        (
+            r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":null,"fallback":{"kind":"models","models":["invented/id"]}}"#,
+            Err(RoutingError::UnknownAdapter),
+        ),
+        (
+            r#"{"choice":{"kind":"named_route","value":"review"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
+            Err(RoutingError::UnsupportedEffort),
+        ),
+        (
+            r#"{"choice":{"kind":"named_route","value":"review"},"effort":"high","fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
+            Ok(Some("high")),
+        ),
+        (
+            r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
+            Ok(None),
+        ),
+        (
+            r#"{"choice":{"kind":"named_route","value":"fixture-effort"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
+            Ok(Some("high")),
+        ),
+    ];
+    for (wire, expected) in fixtures {
+        let query = serde_json::from_str(wire)?;
+        let actual = resolve(&query, &context)
+            .map(|route| {
+                for alternative in route.alternatives.as_slice() {
+                    assert_eq!(alternative.effort, route.effort, "{wire}");
+                }
+                route.effort
+            })
+            .map_err(|error| error.to_string());
+        let expected = expected
+            .map(|effort| effort.map(str::to_owned))
+            .map_err(|error| error.to_string());
+        assert_eq!(actual, expected, "{wire}");
+    }
+    let context = RoutingContext {
+        registry: &[],
+        ..context
+    };
+    let query: RouteRequest = serde_json::from_str(
+        r#"{"choice":{"kind":"named_route","value":"fixture-effort"},"effort":null}"#,
+    )?;
+    assert!(matches!(
+        resolve(&query, &context),
+        Err(RoutingError::UnknownAdapter)
+    ));
+    assert!(matches!(
+        list(&RouteListQuery::default(), &context),
+        Err(RoutingError::UnknownAdapter)
+    ));
+    Ok(())
+}
+
 #[test]
 fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
@@ -1244,6 +1377,33 @@ fn exhausted_refusal_lapses_after_every_full_window_resets()
 }
 
 #[test]
+fn context_validation_precedes_filtering_and_candidate_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [availability(), availability()];
+    let mut context = context(&catalogue, &config, now()?);
+    context.availability = &records;
+    let query = request("invented/id")?;
+    for result in [
+        list(&RouteListQuery::default(), &context).map(|_| ()),
+        resolve(&query, &context).map(|_| ()),
+        resolve_with_seed(&query, &context, "operation", 0).map(|_| ()),
+        resolve_for_account(&query, &context, None).map(|_| ()),
+        resolve_for_account(&query, &context, Some("not-registered")).map(|_| ()),
+    ] {
+        assert!(matches!(result, Err(RoutingError::Availability)));
+    }
+    for account in ["unknown", "", "bad account", &"x".repeat(65)] {
+        assert!(matches!(
+            resolve_for_account(&query, &context, Some(account)),
+            Err(RoutingError::InvalidValue)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn distinct_accounts_of_one_adapter_are_valid_resolution_inputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
@@ -1355,7 +1515,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
         selected.alternatives.as_slice()[0].account_key.as_deref(),
         Some("other-provider")
     );
-    query.choice = RouteChoice::NamedRoute("identity-test".into());
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("identity-test")?);
     query.fallback = Fallback::None;
     let selected = resolve_for_account(&query, &context, Some("second-account"))?;
     assert_eq!(selected.adapter, "codex");
