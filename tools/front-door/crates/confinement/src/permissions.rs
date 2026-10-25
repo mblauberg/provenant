@@ -1625,11 +1625,16 @@ fn verify_shared_writes(
 
 /// Credential and preservation paths no lane may read or write, whatever
 /// else its profile grants. Rendered last so they override every allow.
+/// `Library/Keychains` stays out: Agy reads its login keychain through an
+/// exact authentication grant.
 #[cfg(target_os = "macos")]
-fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 8] {
+fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 11] {
     [
         (".ssh", PathScope::Subtree),
         (".aws", PathScope::Subtree),
+        (".azure", PathScope::Subtree),
+        (".gnupg", PathScope::Subtree),
+        (".config/gh", PathScope::Subtree),
         (".kube", PathScope::Subtree),
         (".secrets", PathScope::Subtree),
         ("Monero", PathScope::Subtree),
@@ -2148,10 +2153,25 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
 
 pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), PermissionError> {
     grant.validate()?;
-    if is_credential_root(&grant.path) {
+    if is_credential_root(&grant.path) || encloses_credential_root(grant) {
         return Err(PermissionError::CredentialRoot);
     }
     Ok(())
+}
+
+/// A subtree ending where a nested credential root begins (`~/.config`,
+/// `~/Library`, `~/Archives`) would expose that root, so it is refused too.
+/// Single-component roots sit directly under a home, which is a broad root.
+fn encloses_credential_root(grant: &PathGrant) -> bool {
+    grant.scope == PathScope::Subtree
+        && [
+            ".config",
+            "Library",
+            "Library/Application Support",
+            "Archives",
+        ]
+        .iter()
+        .any(|tail| grant.path.ends_with(tail))
 }
 
 /// Validates a grant that confers only read and exec. It is the one place the
@@ -2159,7 +2179,7 @@ pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), Perm
 /// roots and private state keep the strict credential-root check.
 pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), PermissionError> {
     grant.validate()?;
-    if is_codex_standalone_package(&grant.path) {
+    if is_codex_standalone_package(&grant.path) && !encloses_credential_root(grant) {
         return Ok(());
     }
     validate_noncredential_grant(grant)
@@ -2487,6 +2507,44 @@ mod tests {
                 scope: PathScope::Subtree,
             };
             assert!(grant.validate().is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn grants_enclosing_a_credential_root_are_refused() {
+        let grant = |path: &str, scope| PathGrant {
+            path: PathBuf::from(path),
+            scope,
+        };
+        for path in [
+            "/Users/alice/.config",
+            "/Users/alice/Library",
+            "/Users/alice/Library/Application Support",
+            "/Users/alice/Archives",
+        ] {
+            for validate in [validate_read_exec_grant, validate_noncredential_grant] {
+                assert!(
+                    matches!(
+                        validate(&grant(path, PathScope::Subtree)),
+                        Err(PermissionError::CredentialRoot)
+                    ),
+                    "{path}"
+                );
+            }
+            // An exact grant exposes the directory entry, not what it holds.
+            assert!(validate_read_exec_grant(&grant(path, PathScope::Exact)).is_ok());
+        }
+        for path in [
+            "/Users/alice/.config/cursor",
+            "/Users/alice/.config/opencode",
+            "/Users/alice/Library/pnpm",
+            "/Users/alice/Library/Caches/pnpm",
+            "/Library/Developer/CommandLineTools",
+        ] {
+            assert!(
+                validate_read_exec_grant(&grant(path, PathScope::Subtree)).is_ok(),
+                "{path}"
+            );
         }
     }
 
@@ -3778,6 +3836,9 @@ mod tests {
             "(deny file-read* (subpath \"/Users/fixture/Monero\"))",
             "(deny file-write* (subpath \"/Users/fixture/Archives/git-preservation\"))",
             "(deny file-read* (literal \"/Users/fixture/.cargo/credentials.toml\"))",
+            "(deny file-read* (subpath \"/Users/fixture/.gnupg\"))",
+            "(deny file-read* (subpath \"/Users/fixture/.azure\"))",
+            "(deny file-read* (subpath \"/Users/fixture/.config/gh\"))",
         ] {
             assert!(
                 provider.find(denied).expect(denied) > last_allow,
