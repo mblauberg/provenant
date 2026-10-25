@@ -205,7 +205,7 @@ satisfied as the run grammar states. Two shorthands recur:
 | `config show` | `config show [--task-class NAME]` | config `load` → `ResolvedConfig` | Optional task-class preset; secrets redacted. |
 | `config set` | `config set NAME VALUE` | config `edit_config` | `NAME` is `profile` or a registry knob; `null` clears a nullable knob. Unknown knobs list close matches. Prints the config read back. |
 | `config unset` | `config unset KNOB` | config `edit_config` | Removes the `[knobs]` override. |
-| `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. State's grammar stands. |
+| `install` | `install --source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | config `plan_install(Release, Targets, …)`, then `install(plan, …)` | At least one harness; hooks default off. `--source` is a staged release. Dry-run writes nothing. On macOS, an install for the account's home and default state root then writes and restarts the `dev.provenant.peer` LaunchAgent and reports it as `peer_agent`. State's grammar stands. |
 | `uninstall` | `uninstall --harness NAME…` | config `uninstall` | At least one harness; unchanged owned entries only. |
 | `route list` | `route list [--adapter ADAPTER] [--pool POOL]` | routing `RouteListQuery { adapter, pool }` | Unpaged bounded catalogue; no probe. |
 | `route resolve` | `route resolve ROUTE` | routing `RouteRequest` with a read-only `RoutingContext` | Pure; no admission or state write. |
@@ -742,8 +742,11 @@ A custom remote bin directory is not resolved by this diagnostic. Do not silentl
 results when a remote host cannot answer.
 
 Registration reads the same status. A negative login bit refuses with a message that
-names the step (log in once interactively, or unlock the login keychain over SSH)
-rather than reporting an unknown identity; a locked keychain reports the same bit.
+names the step (log in once interactively, unlock the login keychain over SSH, or
+on a macOS peer install the login-session peer agent) rather than reporting an
+unknown identity; a locked keychain reports the same bit. Doctor also reports
+that agent as `peer_agent`: `running`, `stopped`, `not_installed` or
+`unsupported` off macOS; reports from older builds omit it.
 
 Doctor runs `claude auth status --json`, never a prompt. It emits only identity
 labels and typed states: `signed_in`, `signed_out`,
