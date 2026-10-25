@@ -7,7 +7,7 @@ description: "Use to coordinate bounded work across agents, research lanes or in
 
 ## Quickstart
 
-One surface per action: Fabric MCP tools for submit, graph, status, resume, cancel, output, claim and landing; the CLI only for `provenant lanes` (list and wait) and `provenant route list`. A terminal without MCP cancels with `provenant cancel`.
+One surface per action. Fabric MCP tools cover submit, graph, status, resume, cancel, claim, landing leases and bounded stdout or stderr reads (`fabric_output`). The CLI covers the rest: `provenant lanes` (list and wait), `provenant route list`, `provenant output` (events, tail, result, prompt), `provenant reconcile` and `provenant fabric landing push|reconcile`. A terminal without MCP cancels with `provenant cancel`.
 
 1. [Native first](references/routing-and-tiers.md#native-first): use native subagents for your own provider when the native tool supports the work. Claude callers use native Claude subagents; Claude models remain in the route pools for non-Claude chairs. Use Fabric for other providers, detached work and sandboxed worktree writers.
 2. Call `fabric_submit` with its `submission` operation; each task has one route choice. Use `provenant route list --adapter <id>` to inspect model ids, pool membership and cached availability.
@@ -18,13 +18,13 @@ One surface per action: Fabric MCP tools for submit, graph, status, resume, canc
    same branch-derived string. Before submission, [confirm the connection's
    project](references/fabric-identity.md), then acquire and verify an advisory
    `fabric_claim` `acquire` (`scope` names the issue or path set, with an
-   `operation_id`); keep its generation/token proof, renew it while work
+   `operation_id` and `lease_ms`); keep its generation/token proof, renew it while work
    continues and release it when finished. Do not submit against a conflicting live claim; submission does not
    enforce claims. One supervisor writer lease excludes a second writer;
    terminal Git sequencer state fails the lane. If custody is lost, keep the
    worktree reserved and follow [chair recovery](../../docs/worktrees.md#writer-custody-recovery).
 5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
-6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation and copy its `Route:` provenance line. Read retained events with `fabric_output`'s `read` operation, `part: events` and its byte offset.
+6. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_run`'s `status` operation. Read retained events with `provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
 7. For a question, call `fabric_run` with its `resume` operation and the answer in `prompt`, targeting `target: { attempt: ATTEMPT }` and providing `expected_generation` and `operation_id`.
 8. Use `fabric_run`'s `cancel` operation with an explicit target and operation ID to stop a run; use `fabric_output`'s `read` operation with a target, part, offset and byte limit for a bounded slice.
 
@@ -55,7 +55,7 @@ One surface per action: Fabric MCP tools for submit, graph, status, resume, canc
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
   it, and call `fabric_landing` `acquire` with the integration
-  reference, expected remote OID, candidate OID and operation ID. See the
+  reference, expected remote OID, candidate OID, `lease_ms` and operation ID. See the
   [landing lease runbook](../../docs/runbooks/landing-lease.md). Verify pinned
   candidate and integration OIDs through Rust confinement before merging. Do
   not infer a protected-tip release from an advisory claim. Renew or release
