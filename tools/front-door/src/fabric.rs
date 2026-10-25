@@ -896,14 +896,20 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                     seconds: ctx.config.limits.peer_seconds,
                 };
                 return match transport.exchange(peer, &request, budget, &cancel)?.result {
-                    PeerResult::Push(value) => Ok(value),
-                    PeerResult::Error {
-                        code,
-                        operation_id: Some(operation_id),
-                    } if code == "launch_unknown" => {
-                        Err(PeerError::Unknown { operation_id }.into())
+                    PeerResult::Push(value) if value.id == recovery_id => Ok(value),
+                    PeerResult::Error { code, operation_id } => {
+                        if operation_id.as_ref().is_some_and(|id| id != &recovery_id) {
+                            return Err(PeerError::Frame.into());
+                        }
+                        if code == "launch_unknown" {
+                            Err(PeerError::Unknown {
+                                operation_id: recovery_id.clone(),
+                            }
+                            .into())
+                        } else {
+                            Err(PeerError::Refused { code }.into())
+                        }
                     }
-                    PeerResult::Error { code, .. } => Err(PeerError::Refused { code }.into()),
                     _ => Err(PeerError::Frame.into()),
                 };
             }
@@ -969,6 +975,8 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                 Some(CoordinationError::LaneMutation)
             ) {
                 "lane_coordination_refused"
+            } else if matches!(error.downcast_ref::<PeerError>(), Some(PeerError::Frame)) {
+                "state_corrupt"
             } else {
                 "landing_refused"
             },
@@ -1398,7 +1406,7 @@ impl BinaryRunOwner<'_> {
                 return Err(FacadeError::OwnerUnavailable);
             }
             let input = SubmitInput::Submission {
-                operation_id,
+                operation_id: operation_id.clone(),
                 tasks,
                 concurrency,
                 knobs,
@@ -1406,7 +1414,10 @@ impl BinaryRunOwner<'_> {
             };
             return match self.peer(host, PeerAction::Submit { input }, budget, cancel)? {
                 PeerResult::Submitted(receipt)
-                    if receipt.targets.iter().all(|t| t.host == Some(host)) =>
+                    if receipt.operation_id == operation_id
+                        && receipt.worktree.is_none()
+                        && !receipt.targets.is_empty()
+                        && receipt.targets.iter().all(|t| t.host == Some(host)) =>
                 {
                     Ok(receipt)
                 }
@@ -1854,7 +1865,12 @@ impl BinaryRunOwner<'_> {
                     cancel,
                 )? {
                     return match answer {
-                        PeerResult::Run(value) => Ok(*value),
+                        PeerResult::Run(value)
+                            if matches!(&*value, RunResult::Cancel { attempt }
+                                if attempt.attempt_id == target.attempt) =>
+                        {
+                            Ok(*value)
+                        }
                         _ => Err(FacadeError::StateCorrupt),
                     };
                 }
@@ -1892,7 +1908,12 @@ impl BinaryRunOwner<'_> {
                     cancel,
                 )? {
                     return match answer {
-                        PeerResult::Run(value) => Ok(*value),
+                        PeerResult::Run(value)
+                            if matches!(&*value, RunResult::Resume { attempt }
+                                if attempt.operation_id == *operation_id) =>
+                        {
+                            Ok(*value)
+                        }
                         _ => Err(FacadeError::StateCorrupt),
                     };
                 }

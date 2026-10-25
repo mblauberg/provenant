@@ -998,7 +998,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
 
     response.result = provenant_fabric_runtime::hosts::PeerResult::Run(Box::new(
         provenant_fabric_runtime::runs::RunResult::Status {
-            attempt: status_record,
+            attempt: status_record.clone(),
         },
     ));
     std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
@@ -1042,6 +1042,181 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         }
     }
 
+    // A well-formed run reply must also match the requested operation and target.
+    use provenant_fabric_runtime::{hosts::PeerResult, runs::RunResult};
+    let mut other_attempt = status_record.clone();
+    other_attempt.attempt_id = attempts[1];
+    let mut resumed = other_attempt.clone();
+    resumed.operation_id = OperationId::parse("local-resume")?;
+    for (op, result, expected) in [
+        (
+            "cancel",
+            RunResult::Cancel {
+                attempt: other_attempt,
+            },
+            Some("state_corrupt"),
+        ),
+        (
+            "cancel",
+            RunResult::Status {
+                attempt: status_record.clone(),
+            },
+            Some("state_corrupt"),
+        ),
+        (
+            "cancel",
+            RunResult::Cancel {
+                attempt: status_record.clone(),
+            },
+            None,
+        ),
+        (
+            "resume",
+            RunResult::Status {
+                attempt: resumed.clone(),
+            },
+            Some("state_corrupt"),
+        ),
+        (
+            "resume",
+            RunResult::Resume {
+                attempt: status_record.clone(),
+            },
+            Some("state_corrupt"),
+        ),
+        ("resume", RunResult::Resume { attempt: resumed }, None),
+    ] {
+        response.result = PeerResult::Run(Box::new(result));
+        std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+        let mut arguments = json!({"op":op,"operation_id":format!("local-{op}"),"target":{"host":remote_host.to_string(),"attempt":attempt.to_string()}});
+        if op == "resume" {
+            arguments["prompt"] = json!("continue");
+            arguments["expected_generation"] = json!(0);
+        }
+        let replies = mcp(
+            &rig,
+            &[
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":arguments}}),
+            ],
+        )?;
+        let result = &replies.iter().find(|r| r["id"] == 1).ok_or("run reply")?["result"];
+        if let Some(expected) = expected {
+            assert_eq!(
+                result["structuredContent"]["code"], expected,
+                "{op}: {result}"
+            );
+        } else {
+            assert_ne!(result["isError"], true, "{op}: {result}");
+        }
+    }
+
+    use provenant_fabric_runtime::{
+        coordination::facade::AttemptTarget,
+        runs::{PeerWorktree, SubmissionReceipt},
+    };
+    let receipt = SubmissionReceipt {
+        operation_id: OperationId::parse("verified-submit")?,
+        targets: vec![AttemptTarget {
+            host: Some(remote_host),
+            attempt,
+        }],
+        worktree: None,
+    };
+    let mut wrong_id = receipt.clone();
+    wrong_id.operation_id = OperationId::parse("unrelated")?;
+    let mut unexpected_writer = receipt.clone();
+    unexpected_writer.worktree = Some(PeerWorktree {
+        path: "peer/worktree".into(),
+        branch: "peer/writer".into(),
+    });
+    let mut empty = receipt.clone();
+    empty.targets.clear();
+    for (returned, corrupt) in [
+        (wrong_id, true),
+        (unexpected_writer, true),
+        (empty, true),
+        (receipt, false),
+    ] {
+        response.result = PeerResult::Submitted(returned);
+        std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+        let replies = mcp(
+            &rig,
+            &[
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"verified-submit","host":remote_host.to_string(),"tasks":[{"prompt":"fixture","route":{"model":"codex/gpt-6-luna"},"timeout_ms":1000}]}}}),
+            ],
+        )?;
+        let result = &replies
+            .iter()
+            .find(|r| r["id"] == 1)
+            .ok_or("submit reply")?["result"];
+        if corrupt {
+            assert_eq!(text_error_code(result), "state_corrupt", "{result}");
+        } else {
+            assert_ne!(result["isError"], true, "{result}");
+        }
+    }
+
+    // Return valid status records after admission, so a wrong-branch receipt
+    // cannot pass this test by failing an unrelated later status request.
+    let status_path = rig.root.join("ssh-status.json");
+    response.result = PeerResult::RunStatuses(vec![status_record.clone()]);
+    std::fs::write(&status_path, serde_json::to_vec(&response)?)?;
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in *'\"action\":\"run_statuses\"'*) cat '{}' ;; *) cat '{}' ;; esac\n",
+            status_path.display(),
+            response_path.display(),
+        ),
+    )?;
+    let prompt = rig.root.join("verified-prompt.txt");
+    std::fs::write(&prompt, "fixture")?;
+    for (branch, expected) in [
+        ("peer/unrelated", Some("STATE_CORRUPT")),
+        ("peer/expected", None),
+    ] {
+        response.result = PeerResult::Submitted(SubmissionReceipt {
+            operation_id: OperationId::parse("verified-dispatch")?,
+            targets: vec![AttemptTarget {
+                host: Some(remote_host),
+                attempt,
+            }],
+            worktree: Some(PeerWorktree {
+                path: "peer/worktree".into(),
+                branch: branch.into(),
+            }),
+        });
+        std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+        let (status, result) = json_command(
+            &rig,
+            &[
+                "dispatch",
+                "--host",
+                "fixture",
+                "--mode",
+                "worktree-write",
+                "--branch",
+                "peer/expected",
+                "--base",
+                "origin/main",
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                "verified-dispatch",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+                "--json",
+            ],
+        )?;
+        if let Some(expected) = expected {
+            assert_ne!(status, 0, "{result}");
+            assert_eq!(result["error"]["code"], expected, "{result}");
+        } else {
+            assert_eq!(status, 0, "{result}");
+            assert_eq!(result["data"]["worktree"]["branch"], "peer/expected");
+        }
+    }
+
     let event_limit = {
         let store = provenant_run::RunStore::open(&context, &call)?;
         let events = store.events(0, 64, None, &call)?;
@@ -1077,6 +1252,108 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         usize::from(event_limit)
     );
     assert_eq!(run_events["result"]["data"]["truncated"], false);
+
+    // Landing uses the frozen local ID for uncertainty and rejects IDs from
+    // another request, including successful receipts and generic refusals.
+    let config_path = rig.state.join("config.toml");
+    let mut config = std::fs::read_to_string(&config_path)?;
+    config.push_str(&format!(
+        "\n[domains.fabric.home_hosts]\n'{}'='{}'\n",
+        identity["data"]["federation"]["key"]
+            .as_str()
+            .ok_or("project key")?,
+        remote_host
+    ));
+    std::fs::write(config_path, config)?;
+    rig.env.push((
+        "PROVENANT_LANDING_TOKEN".into(),
+        "00000000000000000000000000000000".into(),
+    ));
+    let push = provenant_fabric_store::PushOperation {
+        header: provenant_records::RecordHeader::V1,
+        id: OperationId::parse("landing-local")?,
+        digest: Digest::from_bytes([1; 32]),
+        request: provenant_fabric_store::PushRequest {
+            header: provenant_records::RecordHeader::V1,
+            project,
+            claim: provenant_core::ClaimId::from_bytes([44; 16]),
+            actor,
+            generation: 1,
+            reference: "refs/heads/main".into(),
+            expected: provenant_core::GitOid::parse("1111111111111111111111111111111111111111")?,
+            candidate: provenant_core::GitOid::parse("2222222222222222222222222222222222222222")?,
+            remote: "origin".into(),
+        },
+        phase: provenant_fabric_store::PushPhase::Committed,
+        observed_remote: None,
+        updated_at: clock.wall_now()?,
+    };
+    let mut wrong_push = push.clone();
+    wrong_push.id = OperationId::parse("unrelated")?;
+    let replies = [
+        (PeerResult::Push(push), None),
+        (PeerResult::Push(wrong_push), Some("state_corrupt")),
+        (
+            PeerResult::Error {
+                code: "launch_unknown".into(),
+                operation_id: Some(OperationId::parse("unrelated")?),
+            },
+            Some("state_corrupt"),
+        ),
+        (
+            PeerResult::Error {
+                code: "stale_fence".into(),
+                operation_id: Some(OperationId::parse("unrelated")?),
+            },
+            Some("state_corrupt"),
+        ),
+        (
+            PeerResult::Error {
+                code: "launch_unknown".into(),
+                operation_id: Some(OperationId::parse("landing-local")?),
+            },
+            Some("launch_unknown"),
+        ),
+        (
+            PeerResult::Error {
+                code: "launch_unknown".into(),
+                operation_id: None,
+            },
+            Some("launch_unknown"),
+        ),
+    ];
+    for (reply, expected) in replies {
+        response.result = reply;
+        std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+        for op in ["push", "reconcile"] {
+            let (status, result) = json_command(
+                &rig,
+                &[
+                    "fabric",
+                    "landing",
+                    op,
+                    "--reference",
+                    "refs/heads/main",
+                    "--id",
+                    &provenant_core::ClaimId::from_bytes([44; 16]).to_string(),
+                    "--generation",
+                    "1",
+                    "--operation-id",
+                    "landing-local",
+                    "--json",
+                ],
+            )?;
+            if let Some(expected) = expected {
+                assert_ne!(status, 0, "{op}: {result}");
+                assert_eq!(result["error"]["code"], expected, "{op}: {result}");
+                if expected == "launch_unknown" {
+                    assert_eq!(result["data"]["operation_id"], "landing-local");
+                }
+            } else {
+                assert_eq!(status, 0, "{op}: {result}");
+            }
+        }
+    }
     rig.assert_legacy_unchanged()
 }
 

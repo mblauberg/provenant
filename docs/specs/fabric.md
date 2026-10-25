@@ -520,7 +520,12 @@ Fabric does not own these wire forms.
 Peer errors use the locally frozen request's operation ID. A supplied peer ID
 must match it; generic refusals may omit the ID. A mismatch is a protocol error
 (`state_corrupt`). A remote status snapshot must name the requested attempt,
-as must each record returned to a wait. Human lane listings remove control,
+as must each record returned to a wait or cancel. A resume receipt must name
+the requested continuation operation. Submission receipts must name the
+requested operation and placement; a peer writer must return the requested
+branch, and a read-only submission cannot return a worktree. Landing push and
+reconcile receipts must name the requested operation too.
+Human lane listings remove control,
 escape and formatting characters from peer text through the shared plain-text
 sanitiser; structured records preserve the received values.
 

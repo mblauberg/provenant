@@ -237,10 +237,16 @@ impl RemoteCoordination<'_> {
         };
         match response.result {
             PeerResult::Coordination(value) => Ok(value),
-            PeerResult::Error {
-                code,
-                operation_id: Some(operation_id),
-            } if code == "launch_unknown" => Err(PeerError::Unknown { operation_id }.into()),
+            PeerResult::Error { code, operation_id }
+                if code == "launch_unknown"
+                    || operation_id
+                        .as_ref()
+                        .is_some_and(|id| Some(id) != request.operation().as_ref()) =>
+            {
+                // Uncertain mutations returned above with their locally frozen
+                // ID. A read cannot have an uncertain launch or any operation ID.
+                Err(PeerError::Frame.into())
+            }
             PeerResult::Error { code, .. } => Err(PeerError::Refused { code }.into()),
             _ => Err(PeerError::Frame.into()),
         }
@@ -602,6 +608,68 @@ mod tests {
         match result {
             CoordinationResult::Events(EventsResult::Noted { seq }) => seq,
             _ => panic!("expected a noted event receipt"),
+        }
+    }
+
+    #[test]
+    fn remote_coordination_read_rejects_forged_operation_errors() {
+        struct ErrorPeer {
+            code: String,
+            operation_id: Option<OperationId>,
+        }
+        impl PeerTransport for ErrorPeer {
+            fn exchange(
+                &self,
+                _peer: &crate::config::Peer,
+                request: &PeerRequest,
+                _budget: WaitBudget,
+                _cancel: &CancelToken,
+            ) -> Result<PeerResponse, PeerError> {
+                assert!(request.operation().is_none());
+                Ok(PeerResponse {
+                    version: request.version,
+                    host: request.target_host,
+                    project: request.project.key.clone(),
+                    result: PeerResult::Error {
+                        code: self.code.clone(),
+                        operation_id: self.operation_id.clone(),
+                    },
+                })
+            }
+        }
+        for (code, id, corrupt) in [
+            ("launch_unknown", Some("forged"), true),
+            ("launch_unknown", None, true),
+            ("busy", Some("forged"), true),
+            ("busy", None, false),
+        ] {
+            let fixture = RemoteFixture::new();
+            let remote = fixture.remote(Box::new(ErrorPeer {
+                code: code.into(),
+                operation_id: id.map(|id| OperationId::parse(id).unwrap()),
+            }));
+            let error = remote
+                .call(
+                    CoordinationInput::Events(EventsInput::Read {
+                        after: None,
+                        limit: 1,
+                        wait_ms: None,
+                    }),
+                    None,
+                    fixture.budget,
+                    &fixture.cancel,
+                )
+                .unwrap_err();
+            if corrupt {
+                assert!(matches!(error, CoordinationError::Peer(PeerError::Frame)));
+                assert_eq!(error.code(), "state_corrupt");
+            } else {
+                assert!(matches!(
+                    error,
+                    CoordinationError::Peer(PeerError::Refused { .. })
+                ));
+                assert_eq!(error.code(), "busy");
+            }
         }
     }
 
