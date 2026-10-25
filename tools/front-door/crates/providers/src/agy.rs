@@ -19,8 +19,9 @@ const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 /// sidecars or knowledge: its state lives and dies in the private home. Its
 /// sign-in is in the login keychain, so the private home links only that one
 /// file, read-only. Headless mode auto-denies every tool permission it cannot
-/// prompt for; writers add `--mode accept-edits`, which approves file edits
-/// only, so commands stay denied. Its own sandbox cannot nest inside ours.
+/// prompt for, so writers auto-approve tools: our confinement profile, not
+/// agy's prompts, bounds what a writer can do. Its own sandbox cannot nest
+/// inside ours.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -50,7 +51,7 @@ fn prepare(
     .map(OsString::from)
     .to_vec();
     if access == Access::WorktreeWrite {
-        argv.extend(["--mode".into(), "accept-edits".into()]);
+        argv.push("--dangerously-skip-permissions".into());
     }
     if session == Session::Resume {
         let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
