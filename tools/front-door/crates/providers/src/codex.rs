@@ -10,6 +10,21 @@ use serde::Deserialize;
 use std::ffi::OsString;
 
 pub struct Codex;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &Codex,
+    quota_source: Some(&Codex),
+    display_name: "Codex",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "codex",
+        timer_seconds: 900,
+        panel_seconds: 300,
+        probe_seconds: 10,
+        low_power: true,
+        solo: false,
+    },
+};
+
 crate::adapter!(Codex, "codex", prepare);
 /// The exec JSON stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;

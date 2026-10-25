@@ -46,6 +46,14 @@ pub fn cursor_account(token: &str) -> Option<String> {
     Some(format!("cursor-{}", digest(&claims.sub)?))
 }
 
+/// Agy's usage log identifies its Google sign-in without opening a token store.
+pub fn agy_fingerprint(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let (_, tail) = text.rsplit_once("OAuth: authenticated successfully as ")?;
+    let email = tail.split_whitespace().next().filter(|s| s.contains('@'))?;
+    Some(format!("google-{}", fingerprint(email)?.get(..12)?))
+}
+
 pub fn base64url(s: &str) -> Option<Vec<u8>> {
     let (mut bits, mut count) = (0u32, 0u32);
     let mut bytes = Vec::new();

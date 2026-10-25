@@ -12,6 +12,21 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::Duration;
 pub struct Claude;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &Claude,
+    quota_source: Some(&Claude),
+    display_name: "Claude",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "claude",
+        timer_seconds: 300,
+        panel_seconds: 120,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    },
+};
+
 crate::adapter!(Claude, "claude", prepare);
 const MODEL_ON_WIRE: bool = true;
 

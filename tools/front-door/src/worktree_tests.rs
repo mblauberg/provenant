@@ -1,4 +1,4 @@
-#[path = "mod.rs"]
+#[path = "../tests/support/mod.rs"]
 pub(super) mod support;
 use provenant_core::Clock;
 use provenant_supervisor::exec::{ExecOutcome, Executor};

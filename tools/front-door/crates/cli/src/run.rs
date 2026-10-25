@@ -11,7 +11,7 @@ use provenant_core::{
 };
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
-use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice};
+use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::{clock::SystemClock, custody::ExitObservation, fs::entropy_128};
 use serde::{Deserialize, Serialize};
@@ -352,9 +352,10 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         run::RequestedRoute::Model {
             model: id, effort, ..
         } => (RouteChoice::Model(model(id)?), effort.clone()),
-        run::RequestedRoute::Named { name, effort } => {
-            (RouteChoice::NamedRoute(name.clone()), effort.clone())
-        }
+        run::RequestedRoute::Named { name, effort } => (
+            RouteChoice::NamedRoute(RouteName::parse(name).map_err(|error| error.to_string())?),
+            effort.clone(),
+        ),
     };
     let fallback = if task.fallback.is_empty() {
         Fallback::None

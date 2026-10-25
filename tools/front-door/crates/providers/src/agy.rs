@@ -6,6 +6,21 @@ use provenant_confinement::permissions::{
 use serde::Deserialize;
 use std::ffi::OsString;
 pub struct Agy;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &Agy,
+    quota_source: Some(&Agy),
+    display_name: "Agy",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "agy",
+        timer_seconds: 1200,
+        panel_seconds: 900,
+        probe_seconds: 30,
+        low_power: false,
+        solo: true,
+    },
+};
+
 crate::adapter!(Agy, "agy", prepare);
 const MODEL_ON_WIRE: bool = true;
 
@@ -19,8 +34,9 @@ const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 /// sidecars or knowledge: its state lives and dies in the private home. Its
 /// sign-in is in the login keychain, so the private home links only that one
 /// file, read-only. Headless mode auto-denies every tool permission it cannot
-/// prompt for; writers add `--mode accept-edits`, which approves file edits
-/// only, so commands stay denied. Its own sandbox cannot nest inside ours.
+/// prompt for, so writers auto-approve tools: our confinement profile, not
+/// agy's prompts, bounds what a writer can do. Its own sandbox cannot nest
+/// inside ours.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -28,7 +44,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    // Agy has no signed-in identity source: a registered account is unsupported.
+    // Agy's keychain sign-in cannot be selected through a registered directory.
     if plan.selected_authentication.as_deref() != Some("keychain") || input.account.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
@@ -50,7 +66,7 @@ fn prepare(
     .map(OsString::from)
     .to_vec();
     if access == Access::WorktreeWrite {
-        argv.extend(["--mode".into(), "accept-edits".into()]);
+        argv.push("--dangerously-skip-permissions".into());
     }
     if session == Session::Resume {
         let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;

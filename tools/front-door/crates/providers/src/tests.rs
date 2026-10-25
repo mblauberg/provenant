@@ -1628,13 +1628,13 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
         let plan = fixture_access_plan(access, Some("keychain"), false);
         let spec = agy::Agy.prepare(fixture_input(&route, &plan, &prompt, cwd, None))?;
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
-        // Headless mode auto-denies commands; only writers approve file edits.
-        assert_eq!(argv.iter().any(|arg| arg == "accept-edits"), edits);
-        assert!(
-            !argv
-                .iter()
-                .any(|arg| arg == "--dangerously-skip-permissions" || arg == "--sandbox")
+        // Headless mode auto-denies tools; only writers auto-approve them.
+        assert_eq!(
+            argv.iter()
+                .any(|arg| arg == "--dangerously-skip-permissions"),
+            edits
         );
+        assert!(!argv.iter().any(|arg| arg == "--sandbox"));
         assert_eq!(spec.stdin, Stdin::Null);
         let home = spec
             .env
