@@ -325,7 +325,7 @@ cannot be written, exit 2 with a bounded stderr block reason as Claude's
 blocking-error fallback; recorded fixtures must verify both paths. Allow emits
 nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
 “Pattern and group process control is refused; targeted `kill [-SIGNAL] PID`
-with literal positive PIDs is allowed. Use `provenant cancel TARGET` for owned
+with literal PIDs above 1 is allowed. Use `provenant cancel TARGET` for owned
 work.” Transport failures name the bounded-input error without echoing input.
 Confinement/custody remain authoritative even when a hook is absent.
 

@@ -10,7 +10,7 @@ pub enum RefusalReason {
     Unparseable,
 }
 
-pub const DENY_REASON: &str = "Pattern and group process control is refused; targeted `kill [-SIGNAL] PID` with literal positive PIDs is allowed. Use `provenant cancel TARGET` for owned work.";
+pub const DENY_REASON: &str = "Pattern and group process control is refused; targeted `kill [-SIGNAL] PID` with literal PIDs above 1 is allowed. Use `provenant cancel TARGET` for owned work.";
 
 impl RefusalReason {
     pub const fn message(self) -> &'static str {
@@ -50,7 +50,7 @@ impl ShellRefusal {
 /// in command position is refused, as is incomplete or overdeep syntax. When an
 /// interpreter reads commands from stdin, as in `echo kill 1 | sh`, any
 /// process-control word in the line is refused. `kill` with an optional
-/// signal and literal positive PIDs is allowed, as are `kill -0` probes. Scripts, aliases, functions and other languages are not interpreted.
+/// signal and literal PIDs above 1 is allowed, as are `kill -0` probes. Scripts, aliases, functions and other languages are not interpreted.
 pub fn check(command: &str) -> Result<(), ShellRefusal> {
     inspect(command, 0).map(drop)
 }
@@ -217,7 +217,7 @@ enum Position {
     Argument,
     /// The name after `function`; the body follows in command position.
     Name,
-    /// After a literal `kill`: an optional signal, then literal positive PIDs.
+    /// After a literal `kill`: an optional signal, then literal PIDs above 1.
     Kill,
     /// The value of `kill -s` or `-n`.
     KillSignal,

@@ -10,7 +10,7 @@ false report. Paste the first section into every lane and reviewer brief.
   server in a shared checkout. Before trusting a review, check no suite ran;
   cancel and redispatch a lane that started one.
 - Pattern and group process control (`pkill`, `killall`, `kill` of non-literal
-  or non-positive PIDs) is refused; `kill [-SIGNAL] PID` is allowed. Use
+  or PIDs below 2) is refused; `kill [-SIGNAL] PID` is allowed. Use
   `provenant cancel TARGET` for owned work. The optional Bash hook is `provenant hook claude pre-tool-use`;
   confinement and owned process handles enforce the underlying policy. The
   same hook denies bare `git stash`, `git reset --hard`, `git clean -f`,
