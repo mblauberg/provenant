@@ -544,7 +544,6 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
     let names: &[&str] = match (path, name) {
         (_, "condition") => &["wait"],
         (_, "concurrency") => &["manifest"],
-        (_, "abandon_uncertain") => &["id"],
         ("provenant check release", "base") => &["head"],
         ("provenant check release", "head") => &["base"],
         ("provenant worktree remove", "merged") => &["integration", "remove_scope"],
@@ -756,7 +755,6 @@ mod tests {
     fn paging_recovery_and_removal_require_explicit_scopes() {
         invalid(&["lanes", "--condition", "all"]);
         invalid(&["lanes", "--wait", "1", "--cursor", "next"]);
-        invalid(&["reconcile", "--abandon-uncertain"]);
         invalid(&["worktree", "remove", "--merged", "--integration", "main"]);
         valid(&[
             "worktree",
@@ -934,21 +932,6 @@ mod tests {
                 .arguments
                 .iter()
                 .any(|arg| arg.name == "wait" && arg.bounds == Some((1, 14400)))
-        }));
-        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "reconcile", "--json"])
-        else {
-            panic!("reconcile help")
-        };
-        assert!(!text.contains("--abandon-uncertain"));
-        let reconcile = catalog
-            .commands
-            .iter()
-            .find(|command| command.command == "provenant reconcile");
-        assert!(reconcile.is_some_and(|command| {
-            !command
-                .arguments
-                .iter()
-                .any(|arg| arg.name == "abandon_uncertain")
         }));
     }
     #[cfg(unix)]

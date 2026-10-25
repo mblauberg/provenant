@@ -1982,13 +1982,6 @@ fn reconcile_inner(
     edge: &Edge<'_>,
     fenced: &mut bool,
 ) -> Result<(Value, String), Fail> {
-    if command.abandon_uncertain {
-        return Err(Fail::new(
-            Status::Refused,
-            "UNSUPPORTED",
-            "abandoning uncertain custody is not available in this build",
-        ));
-    }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let session = open(edge, &request(&clock, &cancel)?)?;
