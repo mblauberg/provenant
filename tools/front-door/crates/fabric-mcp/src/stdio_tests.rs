@@ -113,7 +113,7 @@ fn worker_retries_service_open_on_later_jobs_after_transient_failures() {
     assert!(
         replies
             .iter()
-            .any(|frame| { frame["result"]["structuredContent"]["state"] == "ready" })
+            .any(|frame| { frame["result"]["structuredContent"]["hosts"]["state"] == "ready" })
     );
     assert!(matches!(server.finish(), Ok(())));
 }

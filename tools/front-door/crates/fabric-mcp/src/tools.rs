@@ -472,7 +472,18 @@ impl ToolCall {
             Self::Submit(input) => call!(facade, submit, input),
             Self::Run(input) => call!(facade, run, input),
             Self::Output(input) => call!(facade, output, input),
-            Self::Hosts(input) => call!(facade, hosts, input),
+            Self::Hosts(input) => {
+                #[derive(Serialize)]
+                struct Hosts<T> {
+                    hosts: T,
+                }
+                response(
+                    tool_name,
+                    Hosts {
+                        hosts: service.facade.hosts(input, budget, cancel)?,
+                    },
+                )
+            }
             Self::Graph(input) => call!(facade, graph, input),
         };
         service.limit_response(result, mutation, output)

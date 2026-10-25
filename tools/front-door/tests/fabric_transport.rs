@@ -79,8 +79,12 @@ fn next_host(host: provenant_core::HostId) -> Result<provenant_core::HostId> {
 
 #[test]
 fn hosts_probe_only_the_requested_page() -> Result {
-    let mut rig = TestRig::new()?;
+    let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
     let identity = federated_identity(&mut rig)?;
+    let cli = rig.command(&["fabric", "host", "list", "--json"])?;
+    assert_eq!(code(&cli), 0);
+    let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
+    assert_eq!(cli["data"].as_array().ok_or("CLI host list")?.len(), 1);
     let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
     let project_key = identity["data"]["federation"]["key"]
         .as_str()
@@ -127,15 +131,25 @@ fn hosts_probe_only_the_requested_page() -> Result {
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
                 "name":"fabric_hosts","arguments":{"op":"list","after":local.to_string(),"limit":1}
             }}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"fabric_hosts","arguments":{"after":second.to_string(),"limit":1}
+            }}),
         ],
     )?;
     let hosts = &replies
         .iter()
         .find(|reply| reply["id"] == 1)
-        .ok_or("hosts")?["result"]["structuredContent"];
+        .ok_or("hosts")?["result"]["structuredContent"]["hosts"];
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true);
+    assert_eq!(
+        replies
+            .iter()
+            .find(|reply| reply["id"] == 2)
+            .ok_or("empty hosts")?["result"]["structuredContent"],
+        json!({"hosts":[]})
+    );
     let calls = std::fs::read_to_string(calls)?;
     let calls = calls
         .lines()
