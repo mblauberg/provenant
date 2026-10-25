@@ -353,6 +353,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
                 provider_timeout_seconds: 60,
                 delivery_id: None,
                 deliver: None,
+                access: Default::default(),
             }],
             concurrency: 1,
             parent: None,
@@ -491,6 +492,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let pools = vec!["opencode-free".to_owned()];
     assert!(matches!(
         provenant_quota::Admission {
+            policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: now,
             records: std::slice::from_ref(&quota_record),
             pools: &pools,

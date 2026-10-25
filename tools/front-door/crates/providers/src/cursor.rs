@@ -7,6 +7,21 @@ use provenant_confinement::permissions::{
 };
 use serde::Deserialize;
 pub struct Cursor;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &Cursor,
+    quota_source: Some(&Cursor),
+    display_name: "Cursor",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "cursor",
+        timer_seconds: 1800,
+        panel_seconds: 600,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    },
+};
+
 crate::adapter!(Cursor, "cursor", prepare);
 // The stream reports a display name (including Auto), not an exact model id.
 const MODEL_ON_WIRE: bool = false;

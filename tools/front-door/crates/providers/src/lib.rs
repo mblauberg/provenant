@@ -25,31 +25,25 @@ use provenant_quota::QuotaSource;
 pub struct Registration {
     pub adapter: &'static dyn Adapter,
     pub quota_source: Option<&'static dyn QuotaSource>,
+    pub display_name: &'static str,
+    pub quota: provenant_quota::QuotaPolicy,
 }
 
 /// One registry for execution and quota.
 pub static REGISTRY: &[Registration] = &[
-    Registration {
-        adapter: &codex::Codex,
-        quota_source: Some(&codex::Codex),
-    },
-    Registration {
-        adapter: &claude::Claude,
-        quota_source: Some(&claude::Claude),
-    },
-    Registration {
-        adapter: &cursor::Cursor,
-        quota_source: Some(&cursor::Cursor),
-    },
-    Registration {
-        adapter: &agy::Agy,
-        quota_source: Some(&agy::Agy),
-    },
-    Registration {
-        adapter: &opencode::OpenCode,
-        quota_source: Some(&opencode::OpenCode),
-    },
+    codex::REGISTRATION,
+    claude::REGISTRATION,
+    cursor::REGISTRATION,
+    agy::REGISTRATION,
+    opencode::REGISTRATION,
 ];
+
+pub fn quota_policies(registry: &[Registration]) -> Vec<provenant_quota::QuotaPolicy> {
+    registry
+        .iter()
+        .map(|registration| registration.quota)
+        .collect()
+}
 
 // Shared mechanics; each adapter supplies its own `prepare` builder.
 macro_rules! adapter {

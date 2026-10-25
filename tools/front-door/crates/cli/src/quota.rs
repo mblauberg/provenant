@@ -413,6 +413,7 @@ fn execute(
         .as_second();
     let path = roots.state.as_path().join("quota/report.json");
     let report_path = path.to_str().ok_or(EdgeError::Path)?.to_owned();
+    let policies = provenant_providers::quota_policies(registry);
     let configured = effects.accounts()?;
     let detected = detections(registry, &configured);
     let query = QuotaQuery {
@@ -422,6 +423,7 @@ fn execute(
         let mut records = read_cache(roots)?;
         add_configured(&mut records, &configured);
         return Ok(schedule::report(
+            &policies,
             &records,
             &detected,
             &query,
@@ -445,7 +447,9 @@ fn execute(
     let plan = {
         let _lock = lock()?;
         let mut records = read_records(&dir)?;
-        let plan = schedule::plan_tick_with_settings(&records, &detected, &tick, now, &settings)?;
+        let plan = schedule::plan_tick_with_settings(
+            &policies, &records, &detected, &tick, now, &settings,
+        )?;
         for drop in &plan.drops {
             write_intent(&dir, drop, &mut records)?;
         }
@@ -472,6 +476,7 @@ fn execute(
                 })
                 .cloned();
             let intent = match schedule::reserve(
+                &policies,
                 current.as_ref(),
                 account,
                 at,
@@ -539,6 +544,7 @@ fn execute(
         .as_timestamp()
         .as_second();
     let report = schedule::report(
+        &policies,
         &records,
         &detected,
         &QuotaQuery { adapter: None },
@@ -559,6 +565,7 @@ fn execute(
     )?)?;
     // Publish all accounts even when the caller requests a filtered projection.
     Ok(schedule::report(
+        &policies,
         &records,
         &detected,
         &query,

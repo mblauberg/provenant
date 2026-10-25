@@ -570,6 +570,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                         provider_timeout_seconds: 60,
                         delivery_id: None,
                         deliver: None,
+                        access: Default::default(),
                     })
                     .collect(),
                 concurrency: 1,

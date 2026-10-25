@@ -82,7 +82,7 @@ mod tests {
     use crate::tests::{call, clock, context, input};
     use provenant_confinement::{
         CodexPolicy, ExtensionPolicy, UtilityBudget, UtilityRuntime,
-        permissions::{AccessMode, PathGrant, PathScope, PlanPermissions},
+        permissions::{AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions},
     };
     use provenant_core::{CancelToken, RootInputs};
     use provenant_supervisor::{
@@ -173,8 +173,8 @@ mod tests {
                 secret_roots: vec![],
                 selected_authentication: None,
                 include_continuation: false,
-                network: vec![],
-                capabilities: vec![],
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
                 nested_confinement: false,
             },
         };

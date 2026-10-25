@@ -1,8 +1,11 @@
 use crate::{Catalogue, ModelId, RoutingError};
 use provenant_providers::{AvailabilityRecord, VerifiedLineage};
 use provenant_quota::QuotaSnapshot;
-use provenant_records::{ResolvedRoute, RouteExclusionReason, RouteReadiness};
+use provenant_records::RouteExclusionReason;
+#[cfg(test)]
+use provenant_records::{ResolvedRoute, RouteReadiness};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 /// Cached provider availability, independent of launch permissions.
@@ -137,12 +140,14 @@ impl FamilyFact {
 
 /// A snapshot can only be built by resolving against current, validated inputs;
 /// deserialized ResolvedRoute projections cannot assert fresh availability.
-pub struct RoutingSnapshot<'a> {
+#[cfg(test)]
+pub(crate) struct RoutingSnapshot<'a> {
     catalogue_revision: String,
     now_unix_seconds: i64,
     routes: Vec<ResolvedRoute>,
     families: &'a [FamilyFact],
 }
+#[cfg(test)]
 impl<'a> RoutingSnapshot<'a> {
     pub fn new(
         requests: &[crate::RouteRequest],
@@ -166,17 +171,20 @@ impl<'a> RoutingSnapshot<'a> {
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReviewDemand {
+#[cfg(test)]
+pub(crate) struct ReviewDemand {
     pub family_slots: BTreeMap<String, u64>,
 }
 #[derive(Debug, Serialize)]
-pub struct ReviewAvailability {
+#[cfg(test)]
+pub(crate) struct ReviewAvailability {
     catalogue_revision: String,
     expires_unix_seconds: Option<i64>,
     families: BTreeMap<String, u64>,
     blockers: Vec<ReviewBlocker>,
     satisfied: bool,
 }
+#[cfg(test)]
 impl ReviewAvailability {
     pub fn satisfied(&self) -> bool {
         self.satisfied
@@ -184,7 +192,8 @@ impl ReviewAvailability {
 }
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReviewBlocker {
+#[cfg(test)]
+pub(crate) enum ReviewBlocker {
     Route {
         adapter: String,
         model: String,
@@ -199,7 +208,8 @@ pub enum ReviewBlocker {
         available: u64,
     },
 }
-pub fn review_availability(
+#[cfg(test)]
+pub(crate) fn review_availability(
     snapshot: &RoutingSnapshot<'_>,
     demand: &ReviewDemand,
 ) -> Result<ReviewAvailability, RoutingError> {

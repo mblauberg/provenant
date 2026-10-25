@@ -3,7 +3,7 @@ mod claude;
 mod opencode;
 
 use provenant_core::Roots;
-use provenant_providers::identity::{base64url, codex_account, cursor_account};
+use provenant_providers::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
     QuotaError, QuotaProbePlan,
@@ -319,7 +319,7 @@ impl QuotaEffects for LiveQuota {
             "claude" => self.claude(account, previous, deadline, &mut details)?,
             "codex" => self.codex(account, deadline)?,
             "cursor" => self.cursor(account, deadline)?,
-            "agy" => self.agy(account, previous, deadline, &mut details)?,
+            "agy" => self.agy(account, deadline, &mut details)?,
             "opencode" => {
                 details.note = Some("Local estimate, this machine only; calibrated Go caps, other hosts not counted".into());
                 opencode::capture(&account.identity_dir, &account.options, now(), deadline)?
@@ -350,7 +350,7 @@ impl LiveQuota {
             Some(("CODEX_HOME", &account.identity_dir)),
             Some(input.as_bytes()),
             deadline,
-            10,
+            provenant_providers::codex::REGISTRATION.quota.probe_seconds,
         )?;
         if out.stdout.truncated || out.stdout.read_failed {
             return Err(ProbeFailure::Malformed);
@@ -417,7 +417,6 @@ impl LiveQuota {
     fn agy(
         &self,
         account: &Account,
-        previous: Option<&AccountRecord>,
         deadline: i64,
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
@@ -436,42 +435,21 @@ impl LiveQuota {
             ],
             None,
             deadline,
-            30,
+            provenant_providers::agy::REGISTRATION.quota.probe_seconds,
         )?;
         if payload.get("status").and_then(Value::as_str) != Some("SUCCESS") {
             return Err(ProbeFailure::Auth);
         }
-        let actual = read(&log).ok().and_then(|b| agy_fingerprint(&b));
-        let expected = account
-            .options
-            .get("fingerprint")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                previous
-                    .and_then(|p| p.snapshot.as_ref())
-                    .and_then(|s| s.details.as_ref())
-                    .and_then(|d| d.fingerprint.as_deref())
-            })
-            .or_else(|| {
-                account
-                    .scope
-                    .label
-                    .starts_with("google-")
-                    .then_some(account.scope.label.as_str())
-            });
-        if expected.is_some_and(|e| Some(e) != actual.as_deref()) {
+        let actual = read(&log)
+            .ok()
+            .and_then(|b| agy_fingerprint(&b))
+            .ok_or(ProbeFailure::Auth)?;
+        if account.scope.account_key != format!("agy-{actual}") {
             return Err(ProbeFailure::Auth);
         }
-        let actual = actual.ok_or(ProbeFailure::Auth)?;
         details.fingerprint = Some(actual);
         Ok(payload)
     }
-}
-fn agy_fingerprint(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let (_, tail) = text.rsplit_once("OAuth: authenticated successfully as ")?;
-    let email = tail.split_whitespace().next().filter(|s| s.contains('@'))?;
-    Some(format!("google-{}", fingerprint(email, 12)))
 }
 /// Explicit Claude registrations only. No auth stores, identity probes or
 /// implicit default directory discovery are involved in chair switching.

@@ -152,13 +152,17 @@ pub(crate) fn base_env(
     ]
 }
 
-/// Immutable Rust tools and writable build output use the same bounded
-/// recipe for every shell-capable writer. Host Cargo credentials are excluded.
+/// Rust tools for every shell-capable lane. Cargo uses the user's own Cargo
+/// home, so cached crates build offline and new ones download into the shared
+/// registry. Installed binaries and rustup toolchains stay read-only, and a
+/// missing toolchain fails clearly instead of installing. Build output stays
+/// in the lane's own cache. The compiler hard-denies Cargo credentials.
 pub(crate) fn rust_tools(
     input: &PrepareInput<'_>,
     access: Access,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
+    tool_writes: &mut Vec<PathGrant>,
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
@@ -172,28 +176,36 @@ pub(crate) fn rust_tools(
             &authority.cargo_cache().path
         }
     };
-    // Cargo home is attempt scratch in both modes, so the host can link the
-    // existing registry cache (read-only) into it. Build output lives in `cache`.
-    let cargo_home = input.confined.permissions().scratch.path.join("cargo-home");
     let target = cache.join("target");
     // The host prepares the writer cache itself under custody. Cargo
-    // creates target/ and cargo-home/ after launch, so anchor the cache.
+    // creates target/ after launch, so anchor the cache.
     tool_exec_roots.push(subtree(if access == Access::ReadOnly {
         &target
     } else {
         cache
     }));
-    for directory in [cargo.join("bin"), rustup.join("toolchains")] {
-        runtime_reads.push(subtree(&directory));
-        tool_exec_roots.push(subtree(directory));
-    }
-    runtime_reads.extend([
-        subtree(cargo.join("registry")),
-        exact(rustup.join("settings.toml")),
+    runtime_reads.extend([subtree(&cargo), subtree(&rustup)]);
+    tool_exec_roots.extend([
+        subtree(cargo.join("bin")),
+        subtree(rustup.join("toolchains")),
     ]);
+    tool_writes.extend([subtree(cargo.join("registry")), subtree(cargo.join("git"))]);
+    // Cargo's package cache locks and its SQLite download tracker.
+    tool_writes.extend(
+        [
+            ".package-cache",
+            ".package-cache-mutate",
+            ".global-cache",
+            ".global-cache-journal",
+            ".global-cache-wal",
+            ".global-cache-shm",
+        ]
+        .map(|name| exact(cargo.join(name))),
+    );
     env.extend([
-        ("CARGO_HOME".into(), cargo_home.clone().into_os_string()),
+        ("CARGO_HOME".into(), cargo.into_os_string()),
         ("RUSTUP_HOME".into(), rustup.into_os_string()),
+        ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
         ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
     ]);
     // Cargo's system LibreSSL loads its public default configuration at start.
@@ -216,46 +228,71 @@ pub(crate) fn rust_tools(
     if access == Access::ReadOnly {
         setup.push(SetupStep::CreateDir(target));
     }
-    setup.extend([
-        SetupStep::CreateDir(cargo_home.clone()),
-        SetupStep::Symlink {
-            link: cargo_home.join("registry"),
-            target: cargo.join("registry"),
-        },
-    ]);
     // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
     // Children inherit this profile, so exec stays confined; read and write
     // grants and the protected and credential denials are unchanged.
     tool_exec_roots.push(subtree(input.cwd));
 }
 
-/// A Homebrew Node toolchain (node, npm, pnpm through corepack) for every
-/// shell-capable lane. The prefix's `bin`, `Cellar`, `opt` and `lib` become
-/// readable and executable, and its `bin` joins the end of `PATH`. Its `etc/`
-/// and `var/` stay unreadable, and nothing under the prefix becomes writable.
+/// A Homebrew Node toolchain (node, npm, pnpm, corepack) for every
+/// shell-capable lane. The shared pnpm store, pnpm's metadata cache, npm's
+/// cache and corepack's cache are writable, so installs reuse and fill them.
 pub(crate) fn node_tools(
+    home: &Path,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
+    tool_writes: &mut Vec<PathGrant>,
     env: &mut [(OsString, OsString)],
 ) {
     for prefix in ["/opt/homebrew", "/usr/local"].map(Path::new) {
         if prefix.join("bin/node").exists() {
             homebrew_tools(prefix, runtime_reads, tool_exec_roots, env);
+            tool_writes.extend(
+                ["Library/pnpm", "Library/Caches/pnpm", ".npm", ".cache/node"]
+                    .map(|relative| subtree(home.join(relative))),
+            );
             return;
         }
     }
 }
 
+/// The prefix is readable, including `etc/` (OpenSSL configuration and CA
+/// certificates), and its programs executable. `var/` stays unreadable: it
+/// holds service data such as Postgres clusters. Nothing in it is writable.
 pub(crate) fn homebrew_tools(
     prefix: &Path,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
     env: &mut [(OsString, OsString)],
 ) {
-    for directory in ["bin", "Cellar", "opt", "lib"].map(|name| prefix.join(name)) {
-        runtime_reads.push(subtree(&directory));
-        tool_exec_roots.push(subtree(directory));
-    }
+    let present = |names: &[&str]| -> Vec<PathBuf> {
+        names
+            .iter()
+            .map(|name| prefix.join(name))
+            .filter(|directory| directory.is_dir())
+            .collect()
+    };
+    runtime_reads.extend(
+        present(&[
+            "bin",
+            "sbin",
+            "Cellar",
+            "opt",
+            "lib",
+            "libexec",
+            "etc",
+            "share",
+            "include",
+            "Frameworks",
+        ])
+        .into_iter()
+        .map(subtree),
+    );
+    tool_exec_roots.extend(
+        present(&["bin", "sbin", "Cellar", "opt", "lib", "libexec"])
+            .into_iter()
+            .map(subtree),
+    );
     if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH") {
         path.push(":");
         path.push(prefix.join("bin"));
@@ -266,7 +303,7 @@ pub(crate) fn homebrew_tools(
 /// executable's directory. A `bin/` directly under a hidden home tool tree
 /// (`~/.cargo/bin`, `~/.local/bin`) grants only that `bin/`, never the tree
 /// (`credentials.toml`, `share/`). A shared prefix (`/opt/homebrew`, `/usr/local`,
-/// `/usr`) is refused: its `etc/` and `var/` must never become readable.
+/// `/usr`) is refused: its `var/` must never become readable.
 pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
     let package = match executable.parent() {
         Some(bin) if bin.file_name() == Some("bin".as_ref()) => {

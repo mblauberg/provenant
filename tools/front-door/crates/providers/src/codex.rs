@@ -10,6 +10,21 @@ use serde::Deserialize;
 use std::ffi::OsString;
 
 pub struct Codex;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &Codex,
+    quota_source: Some(&Codex),
+    display_name: "Codex",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "codex",
+        timer_seconds: 900,
+        panel_seconds: 300,
+        probe_seconds: 10,
+        low_power: true,
+        solo: false,
+    },
+};
+
 crate::adapter!(Codex, "codex", prepare);
 /// The exec JSON stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
@@ -71,7 +86,7 @@ fn prepare(
     // Codex runs helpers from its own package (code-mode host, bundled `rg`
     // and `zsh`), and its shell tool runs system programs. System directories
     // are readable through the runtime baseline; exec roots add exec, not
-    // reads. No shared install prefix: its etc/ and var/ stay unreadable.
+    // reads. No shared install prefix: its var/ stays unreadable.
     let package = package_root(input.executable)?;
     let mut tool_exec_roots = vec![
         subtree("/bin"),
@@ -80,6 +95,7 @@ fn prepare(
         subtree(package),
     ];
     let mut runtime_reads = vec![subtree(package)];
+    let mut tool_writes = Vec::new();
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
@@ -94,10 +110,17 @@ fn prepare(
         access,
         &mut runtime_reads,
         &mut tool_exec_roots,
+        &mut tool_writes,
         &mut env,
         &mut setup,
     );
-    crate::launch::node_tools(&mut runtime_reads, &mut tool_exec_roots, &mut env);
+    crate::launch::node_tools(
+        input.home,
+        &mut runtime_reads,
+        &mut tool_exec_roots,
+        &mut tool_writes,
+        &mut env,
+    );
     // Git may inspect global config even for status. Keep host hooks,
     // includes and credential helpers outside the lane's environment.
     env.extend([
@@ -125,6 +148,7 @@ fn prepare(
                     in_place_writes: vec![exact(&credential)],
                 }],
                 tool_exec_roots,
+                tool_writes,
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,

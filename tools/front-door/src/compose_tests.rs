@@ -215,15 +215,15 @@ pub(crate) fn provider() -> Result {
             PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").ok_or("CARGO_TARGET_DIR missing")?);
         let cargo = PathBuf::from(std::env::var_os("CARGO_HOME").ok_or("CARGO_HOME missing")?);
         let cache = target.parent().ok_or("cache")?;
-        // Cargo home is attempt scratch; only the target directory is the shared lane cache.
-        assert!(
-            cargo.ends_with("cargo-home")
-                && cargo.components().any(|part| part.as_os_str() == "scratch")
-        );
+        // Cargo home is the user's: its shared registry is writable, its
+        // root and installed binaries are not.
+        assert_eq!(cargo, home.join(".cargo"));
         fs::create_dir_all(&target)?;
-        fs::create_dir_all(&cargo)?;
         fs::write(target.join("compose-target"), b"target")?;
-        fs::write(cargo.join("compose-home"), b"cargo")?;
+        fs::write(cargo.join("registry/compose-home"), b"cargo")?;
+        fs::write(home.join(".npm/compose"), b"npm")?;
+        denied(&cargo.join("compose-home"))?;
+        denied(&cargo.join("bin/compose"))?;
         fs::write(
             state.join("compose-cache"),
             cache.as_os_str().as_encoded_bytes(),
@@ -235,7 +235,6 @@ pub(crate) fn provider() -> Result {
             ".gemini/config/mcp_config.json",
             ".cursor/extensions/compose",
             ".codex/config.toml",
-            ".npm/compose",
         ] {
             denied(&home.join(name))?;
         }

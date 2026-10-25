@@ -476,9 +476,9 @@ fn classify(error: &Error) -> (Outcome, &'static str) {
         Error::Store(S::Conflict { .. } | S::StaleSubject | S::Expired) => {
             (Outcome::Refused, "CONFLICT")
         }
-        Error::Store(S::Malformed(_) | S::Version | S::Limit | S::Risk(_)) => {
-            (Outcome::Invalid, "INVALID")
-        }
+        Error::Store(
+            S::Malformed(_) | S::InvalidCandidate(_) | S::Version | S::Limit | S::Risk(_),
+        ) => (Outcome::Invalid, "INVALID"),
         Error::Store(S::Cancelled) => (Outcome::Cancelled, "CANCELLED"),
         Error::Store(S::Deadline | S::Contention) => (Outcome::Timeout, "TIMEOUT"),
         Error::Session(provenant_workflow::session::SessionError::TooLarge) => {

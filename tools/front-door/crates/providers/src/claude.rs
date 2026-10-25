@@ -12,6 +12,21 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::Duration;
 pub struct Claude;
+
+pub const REGISTRATION: crate::Registration = crate::Registration {
+    adapter: &Claude,
+    quota_source: Some(&Claude),
+    display_name: "Claude",
+    quota: provenant_quota::QuotaPolicy {
+        adapter: "claude",
+        timer_seconds: 300,
+        panel_seconds: 120,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    },
+};
+
 crate::adapter!(Claude, "claude", prepare);
 const MODEL_ON_WIRE: bool = true;
 
@@ -523,6 +538,7 @@ fn prepare(
     }
     let mut runtime_reads = vec![subtree(package)];
     let mut tool_exec_roots = Vec::new();
+    let mut tool_writes = Vec::new();
     if shell {
         env.extend([
             ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
@@ -537,10 +553,17 @@ fn prepare(
             access,
             &mut runtime_reads,
             &mut tool_exec_roots,
+            &mut tool_writes,
             &mut env,
             &mut setup,
         );
-        crate::launch::node_tools(&mut runtime_reads, &mut tool_exec_roots, &mut env);
+        crate::launch::node_tools(
+            input.home,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut tool_writes,
+            &mut env,
+        );
     }
     let mut spec = LaunchSpec {
         argv,
@@ -558,6 +581,7 @@ fn prepare(
                 allow_process_fork: true,
                 deny_keychain_access: shell,
                 tool_exec_roots,
+                tool_writes,
                 // Never the user's .claude.json, which can hold MCP secrets.
                 runtime_reads,
                 state_writes: if shell {

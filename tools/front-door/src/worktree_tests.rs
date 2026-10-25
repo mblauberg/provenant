@@ -1,4 +1,4 @@
-#[path = "mod.rs"]
+#[path = "../tests/support/mod.rs"]
 pub(super) mod support;
 use provenant_core::Clock;
 use provenant_supervisor::exec::{ExecOutcome, Executor};
@@ -730,6 +730,7 @@ fn writer_run(
                 provider_timeout_seconds: 20,
                 delivery_id: None,
                 deliver: None,
+                access: Default::default(),
             }],
             concurrency: 1,
             parent: None,
@@ -1547,9 +1548,12 @@ fn lane_prepare_isolates_nested_state() -> Result {
         fs::create_dir_all(home.join(path))?;
     }
     fs::write(home.join(".rustup/settings.toml"), b"fixture settings")?;
-    for secret in ["credentials.toml", "credentials", "config.toml"] {
+    for secret in ["credentials.toml", "credentials"] {
         fs::write(home.join(".cargo").join(secret), b"synthetic credential")?;
     }
+    // Cargo fails when its user config exists but is unreadable, so lanes
+    // read it; registry tokens belong in the denied credentials files.
+    fs::write(home.join(".cargo/config.toml"), b"[net]\nretry = 1\n")?;
     fs::create_dir_all(home.join("Library/Keychains"))?;
     fs::write(
         home.join("Library/Keychains/login.keychain-db"),
@@ -2200,7 +2204,7 @@ fn verify_lane_profile(
         let argv = ["/bin/sh", "-c", concat!(
             "if /usr/bin/security help >/dev/null 2>&1; then exit 11; fi; ",
             "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
-            "for f in credentials.toml credentials config.toml; do ",
+            "for f in credentials.toml credentials; do ",
             "if /bin/cat \"$HOME/.cargo/$f\" >/dev/null 2>&1; then exit 13; fi; done; ",
             "if GIT_CONFIG_GLOBAL=/nonexistent/gitconfig git config --global --list >/dev/null 2>&1; then :; else exit 14; fi; ",
             "git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe && ",
@@ -2356,7 +2360,7 @@ fn verify_lane_profile(
     };
     let reason = reason.as_deref().unwrap_or_default();
     // Host setup links the registered credential. The parent's profile has
-    // no symlink-create exception or cross-provider credential read.
+    // no cross-provider credential read.
     assert!(!reason.contains("setup failed"), "{reason}");
     if launch.route.provider.as_deref() == Some("codex") {
         let candidates = child.join(format!(
