@@ -162,14 +162,17 @@ guessed. Routing owns eligibility and run records the resolved label.
 
 Registration and quota probes run in a fresh 0700 `probe-<id>` directory under
 the host state root; directories left by owners that died are swept.
+A probe directory that cannot be created is reported as a host state fault,
+not an identity change.
 
 - Claude: the first 16 hex digits of SHA-256 over the trimmed, lowercase email.
   A rotating `~/.claude` is identified by that fingerprint, not its directory.
 - Codex hashes `tokens.account_id`; Cursor hashes the subject claim of its
   access token. Neither fingerprints token text. Keys carry `codex-` and
   `cursor-` prefixes.
-- Agy has no signed-in identity source, so it is not given an inferred one.
-  Agy stays unavailable rather than inheriting a shared `default` cooldown.
+- Agy fingerprints the signed-in Google email from its probe log, with an
+  `agy-google-` prefix. An undetectable identity stays unavailable rather than
+  inheriting a shared `default` cooldown.
 - Quota capture checks identity before and after the probe and refuses a
   changed attribution.
 - Registrations live in `config.toml` under

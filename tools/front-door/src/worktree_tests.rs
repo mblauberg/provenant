@@ -1640,6 +1640,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
     let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
     let mut accounts = String::new();
     let mut claude_key = String::new();
+    let probe_root = tempfile::tempdir()?;
     for (adapter, label, directory) in [
         ("codex", "default", home.join(".codex")),
         ("claude", "fixture", home.join(".claude-fixture")),
@@ -1651,6 +1652,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             &home,
             "fixture".as_ref(),
             &directory,
+            probe_root.path(),
         )?;
         if adapter == "claude" {
             claude_key.clone_from(&key);
