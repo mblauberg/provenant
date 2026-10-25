@@ -420,7 +420,8 @@ pub struct ManualInclude {
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
-    /// Called under the install lock after the exact-match recheck, before unlink.
+    /// Called under the install lock after rechecking an exact match or absence,
+    /// before unlinking or forgetting an already missing managed peer agent.
     fn before_remove(&mut self, _action: &Action) -> std::io::Result<()> {
         Ok(())
     }
@@ -632,11 +633,9 @@ fn desired(
         let path = peer_agent_plist(targets.roots.state.as_path()).ok_or(
             InstallError::InvalidConfig("peer agent requires the default state root"),
         )?;
-        if path
-            != targets
-                .home
-                .join("Library/LaunchAgents/dev.provenant.peer.plist")
-        {
+        let home = provenant_supervisor::fs::canonicalize(&targets.home)
+            .unwrap_or_else(|_| targets.home.clone());
+        if path != home.join("Library/LaunchAgents/dev.provenant.peer.plist") {
             return Err(InstallError::Conflict(path));
         }
         insert(
@@ -2193,11 +2192,12 @@ pub fn uninstall(
     // Older installers wrote this fixed plist without recording it. The
     // process edge recognises its exact historical rendering, never its label
     // alone. Unknown bytes still become a preserved-and-reported finding.
+    let recorded_peer_agent = receipt
+        .entries
+        .iter()
+        .any(|entry| entry.selector == "peer-agent");
     if selected == registered
-        && !receipt
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "peer-agent")
+        && !recorded_peer_agent
         && let Some(desired) = &targets.peer_agent
         && let Some(path) = peer_agent_plist(state_root)
     {
@@ -2275,24 +2275,30 @@ pub fn uninstall(
             continue;
         }
         let before = snapshot(&path, fs)?;
-        if let Some(current) = &before {
-            if matches_owned(&current.value, &entry.expected) {
-                actions.push(Action {
-                    path: entry.path.clone(),
-                    disposition: Disposition::Remove,
-                    selector: entry.selector.clone(),
-                    before: Some(entry.expected.clone()),
-                    after: None,
-                    identity: identity(&before),
-                    edits: Vec::new(),
-                });
-                removals.push((path, before));
-            } else {
-                findings.push(InstallFinding {
-                    rule: "relinquished_modified_entry".into(),
-                    path: entry.path.clone(),
-                });
-            }
+        // A deleted plist can still have a loaded service. Keep its stop in the
+        // same locked, retryable removal path as an unchanged recorded plist.
+        if before.is_none() && (entry.selector != "peer-agent" || !recorded_peer_agent) {
+            continue;
+        }
+        if before
+            .as_ref()
+            .is_none_or(|current| matches_owned(&current.value, &entry.expected))
+        {
+            actions.push(Action {
+                path: entry.path.clone(),
+                disposition: Disposition::Remove,
+                selector: entry.selector.clone(),
+                before: before.as_ref().map(|_| entry.expected.clone()),
+                after: None,
+                identity: identity(&before),
+                edits: Vec::new(),
+            });
+            removals.push((path, before));
+        } else {
+            findings.push(InstallFinding {
+                rule: "relinquished_modified_entry".into(),
+                path: entry.path.clone(),
+            });
         }
     }
 
@@ -2365,7 +2371,11 @@ pub fn uninstall(
                     .before_remove(&actions[index])
                     .map_err(InstallError::Preview)?;
                 recheck(path, before, fs, state_root)?;
-                remove_entry(path, fs, state_root)
+                if before.is_some() {
+                    remove_entry(path, fs, state_root)
+                } else {
+                    Ok(())
+                }
             }
         })();
         if let Err(source) = result {

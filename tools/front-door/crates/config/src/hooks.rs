@@ -109,14 +109,32 @@ pub(crate) fn set(
     selector: &str,
     value: Option<&Value>,
 ) -> Result<Vec<u8>, InstallError> {
-    match path(bytes, selector)? {
-        Some(path) => splice::set(
-            bytes,
-            &path.iter().map(String::as_str).collect::<Vec<_>>(),
-            value,
-        ),
-        None => Ok(bytes.to_vec()),
+    let Some(path) = path(bytes, selector)? else {
+        return Ok(bytes.to_vec());
+    };
+    let path = path.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut out = splice::set(bytes, &path, value)?;
+    if value.is_none() {
+        let group_path = &path[..3];
+        if let Some(Value::Object(group)) = splice::get(&out, group_path)?
+            && group
+                .keys()
+                .all(|key| matches!(key.as_str(), "matcher" | "hooks"))
+            && group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
+            out = splice::set(&out, group_path, None)?;
+            let event_path = &path[..2];
+            if let Some(Value::Array(groups)) = splice::get(&out, event_path)?
+                && groups.is_empty()
+            {
+                out = splice::set(&out, event_path, None)?;
+            }
+        }
     }
+    Ok(out)
 }
 /// Replace exact manifest leaves in place, then append only missing registry
 /// registrations. Old `remove` entries are handled by the legacy cleaner.

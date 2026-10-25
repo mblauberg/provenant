@@ -591,8 +591,9 @@ pub fn previous_plist(
     Ok(historical_plist(&bytes, program, state))
 }
 
-/// The managed-file owner calls this only for an exact plist match, under its
-/// install lock. A missing service needs no bootout; a failure keeps the plist.
+/// The managed-file owner calls this for an exact plist match or a missing
+/// recorded plist, under its install lock. A missing service needs no bootout;
+/// a failure keeps the receipt for retry.
 pub fn stop(home: &Path) -> Result<(), AgentError> {
     stop_with(home, launchctl)
 }
@@ -766,7 +767,9 @@ mod tests {
     #[test]
     fn uninstall_boots_out_a_loaded_agent_and_reports_failure() {
         use super::*;
-        let home = Path::new("/home/test");
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        assert!(!plist(home).exists());
         let mut calls = Vec::new();
         stop_with(home, |args, cwd| {
             assert_eq!(cwd, home);

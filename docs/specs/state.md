@@ -294,8 +294,9 @@ config is never serialised or logged. Config files must be regular; a
 symlinked config refuses with its path. `~/.claude.json` has a 16 MiB bound
 and other configs 1 MiB. Quit Claude Code before installing, because it
 rewrites its file while running. Identity and bytes are rechecked immediately
-before publication. Links are inspected with `readlink` and never opened
-through the old target.
+before publication. A harness write between that recheck and publication is
+lost, so quit the harness before installing. Links are inspected with
+`readlink` and never opened through the old target.
 
 `--adopt-existing` covers only an occupied destination selector or the stable
 regular executable, pinning its identity and digest. It never authorises
