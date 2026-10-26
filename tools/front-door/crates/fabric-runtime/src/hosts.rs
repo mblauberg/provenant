@@ -56,7 +56,7 @@ pub enum PeerError {
     Unknown { operation_id: OperationId },
     #[error("peer request was cancelled")]
     Cancelled,
-    #[error("invalid peer frame")]
+    #[error("malformed peer frame")]
     Frame,
     #[error("peer refused the operation: {code}")]
     Refused { code: String },
@@ -1039,6 +1039,11 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn protocol_two_frame_errors_use_a_distinct_diagnostic() {
+        assert_eq!(PeerError::Frame.to_string(), "malformed peer frame");
     }
 
     #[test]
