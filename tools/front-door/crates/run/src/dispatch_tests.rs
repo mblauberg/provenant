@@ -1169,6 +1169,38 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
     Ok(())
 }
 
+/// Gives the first task oversized tool grants and its sibling none.
+struct FirstOversized {
+    first: TaskId,
+    oversized: Confined,
+    ordinary: Confined,
+}
+impl Providers for FirstOversized {
+    fn prepare(
+        &self,
+        task: &TaskRequest,
+        prompt: &str,
+        paths: &LaunchPaths,
+        resume: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        let provider = if task.task_id == self.first {
+            &self.oversized
+        } else {
+            &self.ordinary
+        };
+        provider.prepare(task, prompt, paths, resume)
+    }
+    fn decode(
+        &self,
+        route: &RouteRecord,
+        output: &[u8],
+        exit: &ExitObservation,
+        path: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        self.ordinary.decode(route, output, exit, path)
+    }
+}
+
 #[test]
 fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -1176,22 +1208,42 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     let call = call(&clock, &cancel);
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
-    let prepared = input();
+    let prepared = two_tasks(2);
     store.create(&prepared, &call)?;
     let id = prepared.attempts[0].attempt_id;
-    let provider = Confined {
-        writer: false,
-        tool_writes: (0..128)
-            .map(|i| PathGrant {
-                path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
-                scope: PathScope::Subtree,
-            })
-            .collect(),
+    let sibling = prepared.attempts[1].attempt_id;
+    let provider = FirstOversized {
+        first: prepared.attempts[0].task_id,
+        oversized: Confined {
+            writer: false,
+            tool_writes: (0..128)
+                .map(|i| PathGrant {
+                    path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
+                    scope: PathScope::Subtree,
+                })
+                .collect(),
+        },
+        ordinary: Confined {
+            writer: false,
+            tool_writes: vec![],
+        },
     };
+    let held = RefCell::new(Vec::new());
+    let holder = |record: &AttemptRecord, _| {
+        held.borrow_mut().push(record.attempt_id);
+        Err(RunError::Validation("fixture holder"))
+    };
+    let started = store.start(prepared.run_id, &provider, &holder, &call)?;
     assert!(matches!(
-        store.start(prepared.run_id, &provider, &|_, _| unreachable!("oversized grants must be refused before handoff"), &call)?.as_slice(),
-        [Started::Refused { attempt, kind: RefusalKind::Preparation, .. }] if *attempt == id
+        started.as_slice(),
+        [
+            Started::Refused { attempt: first, kind: RefusalKind::Preparation, reason },
+            Started::Refused { attempt: second, reason: later, .. },
+        ] if *first == id && reason.contains("256 KiB")
+            && *second == sibling && later.contains("fixture holder")
     ));
+    // The oversized attempt never reached handoff; its sibling did.
+    assert_eq!(*held.borrow(), [sibling]);
     drop(store);
     let store = RunStore::open(&context, &call)?;
     let record = store.record(id, &call)?;
@@ -1203,6 +1255,12 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
         }
     ));
     assert!(record.write_grants.is_empty());
+    let attempt = store.attempt_dir(prepared.run_id, id, false)?;
+    assert!(
+        attempt
+            .metadata_at(std::ffi::OsStr::new("scratch"), false)
+            .is_err_and(|e| e.is_not_found())
+    );
     assert!(
         store
             .start(prepared.run_id, &provider, &|_, _| unreachable!(), &call)?
