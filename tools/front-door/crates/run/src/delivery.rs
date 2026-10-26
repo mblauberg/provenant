@@ -119,7 +119,7 @@ impl HostDeliveryContext {
     ) -> Result<Self> {
         validate(request)?;
         self.host_environment(writer)
-            .map_err(|error| prepare_error("credential helper", error))?;
+            .map_err(|error| prepare_error("environment", error))?;
         let stage = Stage::Prepare;
         let git = self.executable("git", writer)?;
         let gh = if request.open_pr {
@@ -338,7 +338,7 @@ impl HostDeliveryContext {
             .map(|(_, v)| OsString::from_vec(v.clone()))
             .ok_or_else(|| {
                 prepare_error(
-                    "credential helper",
+                    "gh executable",
                     format!("{tool} is unavailable: PATH is unset"),
                 )
             })?;
@@ -349,12 +349,7 @@ impl HostDeliveryContext {
             .find(|p| {
                 !p.starts_with(&writer.worktree) && provenant_supervisor::sys::is_executable(p)
             })
-            .ok_or_else(|| {
-                prepare_error(
-                    "credential helper",
-                    format!("{tool} is unavailable on PATH"),
-                )
-            })
+            .ok_or_else(|| prepare_error("gh executable", format!("{tool} is unavailable on PATH")))
     }
     fn command(&self, cwd: &Path, tool: &str, args: &[&str], stage: Stage) -> Result<String> {
         let failure = |reason: String| {
@@ -414,15 +409,22 @@ impl HostDeliveryContext {
             .chain(git_options.iter().chain(args).map(OsString::from))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        let mut redactor = Redactor::new(
-            self.environment
-                .iter()
-                .filter(|(key, value)| {
-                    matches!(key.as_slice(), b"GH_TOKEN" | b"GITHUB_TOKEN") && !value.is_empty()
-                })
-                .map(|(_, value)| value.clone()),
-        )
-        .map_err(|_| failure("diagnostic redaction unavailable".into()))?;
+        let mut redactor = if stage == Stage::Prepare {
+            Some(
+                Redactor::new(
+                    self.environment
+                        .iter()
+                        .filter(|(key, value)| {
+                            matches!(key.as_slice(), b"GH_TOKEN" | b"GITHUB_TOKEN")
+                                && !value.is_empty()
+                        })
+                        .map(|(_, value)| value.clone()),
+                )
+                .map_err(|_| failure("diagnostic redaction unavailable".into()))?,
+            )
+        } else {
+            None
+        };
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
         options.env = Some(&environment);
         options.stdin = Some(b"");
@@ -432,14 +434,15 @@ impl HostDeliveryContext {
         } else {
             StreamPolicy::Discard
         };
-        options.stderr_filter = Some(&mut redactor);
+        options.stderr_filter = redactor
+            .as_mut()
+            .map(|redactor| redactor as &mut dyn provenant_supervisor::exec::CaptureFilter);
         let output = executor
             .execute(options)
             .map_err(|error| failure(format!("{}: {error}", executable.display())))?;
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)
-            && output.stdout.bytes.is_empty()
-            && output.stderr.bytes.is_empty();
+            && output.stdout.bytes.is_empty();
         if (output.termination != Termination::Exit(0) && !absent_helpers)
             || output.timed_out
             || output.stdout.truncated
@@ -617,10 +620,11 @@ fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
         .unwrap_or(path.as_os_str())
         .to_string_lossy();
     let helper = host_path(path, writer).map_err(|error| {
-        prepare_error(
-            "credential helper",
-            format!("{name}: {error} ({})", path.display()),
-        )
+        let detail = match error {
+            RunError::Validation("inside the writer worktree") => "inside the writer worktree",
+            _ => "not found",
+        };
+        prepare_error("credential helper", format!("{name}: {detail}"))
     })?;
     if !helper.is_file() || !provenant_supervisor::sys::is_executable(&helper) {
         return Err(prepare_error(
@@ -640,17 +644,15 @@ fn host_path(path: &Path, writer: &WriterRequest) -> Result<PathBuf> {
     let canonical = match std::fs::canonicalize(&path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path.parent().ok_or(RunError::Delivery(Stage::Prepare))?;
+            let parent = path.parent().ok_or(RunError::Validation("not found"))?;
             std::fs::canonicalize(parent)
-                .map_err(|_| RunError::Delivery(Stage::Prepare))?
-                .join(path.file_name().ok_or(RunError::Delivery(Stage::Prepare))?)
+                .map_err(|_| RunError::Validation("not found"))?
+                .join(path.file_name().ok_or(RunError::Validation("not found"))?)
         }
-        Err(_) => return Err(RunError::Delivery(Stage::Prepare)),
+        Err(_) => return Err(RunError::Validation("not found")),
     };
     if canonical.starts_with(&writer.worktree) {
-        return Err(RunError::Validation(
-            "delivery helper or configuration is inside the writer worktree",
-        ));
+        return Err(RunError::Validation("inside the writer worktree"));
     }
     Ok(canonical)
 }
