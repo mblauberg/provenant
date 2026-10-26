@@ -338,6 +338,31 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
 }
 
 #[test]
+fn prepare_refuses_remote_urls_with_embedded_credentials()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    for url in [
+        "https://user:hunter2@example.invalid/repo.git",
+        "https://hunter2@example.invalid/repo.git",
+        "ssh://user:hunter2@example.invalid/repo.git",
+        "https://example.invalid/repo.git?token=hunter2",
+        "https://example.invalid/repo.git#hunter2",
+    ] {
+        fixture.git(&["remote", "set-url", "origin", url])?;
+        let reason = fixture
+            .prepare()
+            .expect_err("credential-bearing URL")
+            .to_string();
+        assert_eq!(
+            reason,
+            "host writer delivery failed at Prepare (remote URL): embedded credentials, query or fragment refused",
+            "{url}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn prepare_labels_environment_path_failures() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
     let mut fixture = PrepareFixture::new()?;

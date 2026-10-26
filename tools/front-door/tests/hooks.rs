@@ -130,6 +130,32 @@ fn bash_guard_rules_deny_with_a_remedy_and_follow_config() -> Result {
     Ok(())
 }
 #[test]
+fn unreadable_guard_config_keeps_the_default_rules_on() -> Result {
+    let rig = TestRig::new()?;
+    let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
+    input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
+    input["tool_input"]["command"] = "git stash".into();
+    fs::create_dir_all(&rig.state)?;
+    for config in [
+        "schema_version = 1\n[domains.guard]\ndeny = 'sleep-poll'\n",
+        "schema_version = 1\n[domains.guard\n",
+    ] {
+        fs::write(rig.state.join("config.toml"), config)?;
+        let output = rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "claude", "pre-tool-use"],
+            Some(&serde_json::to_vec(&input)?),
+        )?;
+        assert_eq!(code(&output), 0);
+        let deny: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(
+            deny["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{config}"
+        );
+    }
+    Ok(())
+}
+#[test]
 fn denial_write_failure_uses_recorded_exit_two_fallback() -> Result {
     let rig = TestRig::new()?;
     // Duplicate the read-only stdin pipe onto stdout. The binary starts
