@@ -1306,7 +1306,7 @@ fn main() -> Result<()> {
         let entry = json!({
             "id": id,
             "fixture": file,
-            "sha256": Sha256::digest(redacted.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "sha256": provenant_core::hex(&Sha256::digest(redacted.as_bytes())),
             "kind": "live_recording",
             "source": {"kind": "live_confined_run", "recorder": "crates/providers/examples/record.rs"},
             "cli_version": version,

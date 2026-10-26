@@ -176,6 +176,13 @@ impl run::Providers for Registry<'_> {
         check_writer_disk(&config.gc, roots.state.as_path(), &writer.worktree, home)
     }
 
+    fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
+        REGISTRY
+            .iter()
+            .find(|entry| Some(entry.adapter.id()) == route.provider.as_deref())?
+            .adapter
+            .failure_diagnostic(stderr)
+    }
     fn prepare(
         &self,
         task: &run::TaskRequest,

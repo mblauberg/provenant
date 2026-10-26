@@ -25,5 +25,4 @@ never turn transport diversity into an independence claim.
 ## Consequences
 
 Multi-family pipes remain usable while assurance fails closed on unresolved
-lineage. The Rust routing owner replaces the retired slug-inference fields and
-allowlists; the [routing design](../specs/routing.md) owns the evidence contract.
+lineage. The [routing design](../specs/routing.md) owns the evidence contract.

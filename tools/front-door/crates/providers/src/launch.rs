@@ -430,7 +430,7 @@ pub(crate) fn subtree(path: impl Into<PathBuf>) -> PathGrant {
 pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex = provenant_core::hex(&bytes);
     format!(
         "{}-{}-{}-{}-{}",
         &hex[0..8],

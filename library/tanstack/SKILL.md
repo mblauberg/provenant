@@ -3,26 +3,17 @@ name: tanstack
 description: "Use for TanStack Query v5, Router, Table v9 and react-virtual: keys, queryOptions, staleTime, mutations, loaders, search params, useTable, virtualised rows. Not for local UI state, render speed (react-performance) or backend caches."
 ---
 
-# TanStack Query v5, Router, Table and Virtual
+# TanStack Query, Router, Table, Virtual
 
 This skill targets `@tanstack/react-query` 5.10x, so confirm the installed
 version first. Project conventions win over this file.
 
 ## API newer than most training data
 
-- **Imperative calls have moved.** Query 5.10x deprecates `fetchQuery`,
-  `prefetchQuery`, `ensureQueryData` and their infinite-query versions, ahead
-  of removal in the next major. The replacements are `queryClient.query(opts)`
-  and `queryClient.infiniteQuery(opts)`:
-  - fetch becomes `query(opts)`;
-  - prefetch becomes `query(opts).catch(noop)`, because a prefetch must not
-    throw;
-  - ensure becomes `query({ ...opts, staleTime: 'static' })`.
-
-  Write the new form in new code. Flag old call sites for migration rather
-  than rewriting them inside an unrelated change. If unsure, grep `@deprecated`
-  in the installed `query-core` type declarations. Older docs still show
-  `ensureQueryData`.
+- **Imperative calls:** Query 5.10x deprecates fetch/prefetch/ensure methods.
+  Read [migration mappings](references/imperative-queries.md) before writing
+  calls. Use the new form in new code; flag existing sites rather than
+  migrating them inside unrelated changes. Prefetch must never throw.
 - **`staleTime: 'static'` overrides invalidation.** If any active observer of
   a query uses it, `invalidateQueries` and `refetchQueries` skip that query.
   Keep it to one-off imperative calls, and never put it on a hook whose data a
@@ -41,27 +32,19 @@ version first. Project conventions win over this file.
 - **Failed requests that resolve:** `fetch` resolves on 4xx and 5xx responses.
   The `queryFn` must throw for them, and should forward `signal` so requests
   can be cancelled.
-- **Status flags:**
-  - `isPending` means no data yet;
-  - `isFetching` means a request is running;
-  - `isLoading` means both.
-
-  Keep cached data on screen during a background refetch. When a list
-  changes key (new sort or filter), use `placeholderData: keepPreviousData`.
-- **Freshness:** the default `staleTime` of 0 refetches on every mount and
-  focus. Set it from how fast the data actually changes. Switching off focus
-  refetching to hide a bad value is the wrong fix.
-- **Tracked results:** destructure only the fields you read. Rest-spreading the
-  result, or listing the whole result object as a dependency, breaks property
-  tracking.
+- **Status:** `isPending` means no data; `isFetching` means a running request;
+  `isLoading` means both. Keep cached data during refetches; list key changes
+  use `placeholderData: keepPreviousData`.
+- **Freshness:** choose `staleTime` from data freshness needs. Its default 0
+  refetches on mount/focus; never disable focus refetching to hide a bad value.
+- **Tracked results:** destructure only fields read; never rest-spread results
+  or use the whole result as a dependency.
 - **Optimistic updates:** show the mutation's `variables` before editing the
   cache; money is never optimistic. Cache edits need cancel, snapshot,
   rollback and settled invalidation: see
   [references/mutations.md](references/mutations.md).
-- **Mutation aftermath:**
-  - Invalidate the narrowest key prefix that covers the change.
-  - Write the response straight into the cache only when its shape is exactly
-    the cached shape.
+- **Mutation aftermath:** invalidate the narrowest covering key prefix.
+  Cache responses only with exactly the cached shape.
 - **Query data is not component state:** do not copy it into `useState`.
   Derive during render or use `select`.
 - **`skipToken`:** it disables a query with type safety, but `refetch()`
@@ -72,13 +55,12 @@ version first. Project conventions win over this file.
 
 ## Router loaders and tables
 
-Loaders await `queryClient.query({ ...opts, staleTime: 'static' })` and the
-component calls `useSuspenseQuery(opts)` with the same factory. See
-[references/router.md](references/router.md).
+Loaders and components share a query factory. Read
+[router integration](references/router.md) before loader work.
 
 Table and virtual rules to always apply:
 
-- Table is headless. Keep the project's markup and feed it from `useTable`.
+- Preserve project markup; feed headless tables through `useTable`.
 - Server-driven tables set `manualSorting`, `manualFiltering` and
   `manualPagination`, and hold that state in the query key, never only in the
   table. Pass `getRowId` with the record's stable id.
@@ -88,10 +70,7 @@ Table and virtual rules to always apply:
 
 ## Verification
 
-- Table tests render the component and assert on rows, header sort state and
-  selection, not on `table` internals.
-- Tests get a fresh `QueryClient` with `retry: false` and go through the public
-  hook or component.
-- `@tanstack/eslint-plugin-query` provides `exhaustive-deps`,
-  `stable-query-client`, `no-rest-destructuring`, `no-unstable-deps` and
-  `prefer-query-options`. Suggest it where it is missing; don't add it unasked.
+Test public hooks/components with a fresh `QueryClient` and `retry: false`.
+Table assertions cover rendered rows, header sort and selection, never internals.
+Suggest missing Query ESLint rules; never add them unasked. See
+[verification](references/verification.md).

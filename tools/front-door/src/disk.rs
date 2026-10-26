@@ -308,7 +308,7 @@ mod tests {
             }
             Ok(result)
         }
-        let rig = crate::worktree_tests::repository()?;
+        let rig = crate::worktree_tests::repository()?.without_state()?;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
         inputs.state_dir = Some(rig.state.clone());
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;

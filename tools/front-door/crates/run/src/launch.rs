@@ -85,6 +85,10 @@ pub trait Providers {
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String>;
+    /// A recognised diagnostic from the sealed stderr of a failed provider.
+    fn failure_diagnostic(&self, _route: &RouteRecord, _stderr: &[u8]) -> Option<String> {
+        None
+    }
     /// Decode the sealed stdout capture of a provider that exited.
     fn decode(
         &self,

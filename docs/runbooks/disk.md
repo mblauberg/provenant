@@ -41,7 +41,7 @@ companions of an existing store while reading its live index.
    aggregate's `count` records the number of inventory rows it represents.
    Temporary directories, caches and worktrees keep their individual paths.
 
-4. Preview cleanup with `provenant gc --json`; apply it with
+4. Preview cleanup with `provenant gc --dry-run --json`; apply it with
    `provenant gc --apply --json`. In addition to lane caches, GC removes clean
    merged worktrees using fetched upstream ancestry. Projects can declare
    regenerable directory names and keep paths in `[gc.projects.PROJECT_ID]`.

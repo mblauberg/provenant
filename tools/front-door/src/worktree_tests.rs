@@ -236,11 +236,6 @@ pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
 
 pub(super) fn repository() -> Result<TestRig> {
     let rig = TestRig::new()?;
-    std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(&rig.state)?;
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='1B'\n",
-    )?;
     git(&rig, &["config", "user.name", "Fixture"])?;
     git(&rig, &["config", "user.email", "fixture@example.invalid"])?;
     git(&rig, &["checkout", "-q", "-b", "main"])?;

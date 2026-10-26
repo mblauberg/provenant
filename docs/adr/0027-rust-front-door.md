@@ -30,8 +30,7 @@ contracts owned by those external tools.
 
 Release identity covers the workspace sources, manifests, lockfile and assets.
 The config crate stamps and installs digest-addressed releases. Current state
-lives under the new state root; legacy roots are not written. The bounded
-read-only legacy import is separate from live storage ownership.
+lives under the canonical state root; legacy roots are not written.
 
 ## Consequences
 

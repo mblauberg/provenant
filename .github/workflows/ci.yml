@@ -146,8 +146,8 @@ jobs:
             cargo check --locked -p "$crate" --features fixture
             cargo check --locked -p "$crate" --all-targets --features fixture
           done
-          cargo check --locked -p provenant-config --features test-support
-          cargo check --locked -p provenant-config --all-targets --features test-support
+          cargo check --locked -p provenant-config
+          cargo check --locked -p provenant-config --all-targets
           cargo check --locked -p provenant-providers --features recording
           cargo check --locked -p provenant-providers --all-targets --features recording
       - name: Lint

@@ -3175,3 +3175,169 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
     cleanup.disarm();
     Ok(())
 }
+
+/// Seed one queued attempt with `prompt` in the owner store, optionally
+/// cancelled so it carries two events. Returns the attempt and its events.
+fn seed_attempt(
+    rig: &mut TestRig,
+    prompt: &str,
+    cancel_it: bool,
+) -> Result<(
+    provenant_core::AttemptId,
+    Vec<provenant_records::run::RunEvent>,
+)> {
+    use provenant_core::{
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
+        TaskId, WaitBudget,
+    };
+    use provenant_os::clock::SystemClock;
+    use provenant_records::{
+        CanonicalV1,
+        run::{CanonicalRequest, RequestedRoute, TaskRequest},
+    };
+
+    let identity = federated_identity(rig)?;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let actor = ActorId::parse(identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?)?;
+    let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
+    roots.state_dir = Some(rig.state.clone());
+    let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let context = provenant_run::ExecutionContext {
+        state_root: state,
+        project_id: project,
+        actor_id: actor,
+        read_prompts: false,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    let task_id = TaskId::from_bytes([92; 16]);
+    let attempt_id = AttemptId::from_bytes([91; 16]);
+    store.create(
+        &provenant_run::PreparedRun {
+            run_id: RunId::from_bytes([96; 16]),
+            operation_id: OperationId::parse("page-seed")?,
+            created_at: clock.wall_now()?,
+            request: CanonicalRequest {
+                schema_version: 1,
+                tasks: vec![TaskRequest {
+                    base: None,
+                    base_ref: None,
+                    writer: None,
+                    profile: provenant_records::run::HarnessProfile::default(),
+                    task_id,
+                    prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
+                    route: RequestedRoute::Model {
+                        provider: "fixture".into(),
+                        model: "fixture".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    authority_digest: Digest::from_bytes([94; 32]),
+                    provider_timeout_seconds: 60,
+                    delivery_id: None,
+                    deliver: None,
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                parent: None,
+                lane_depth: Some(1),
+                parent_attempt: None,
+            },
+            attempts: vec![provenant_run::NewAttempt {
+                attempt_id,
+                task_id,
+                prompt: prompt.into(),
+            }],
+        },
+        &call,
+    )?;
+    if cancel_it {
+        store.cancel(attempt_id, "page fixture", &call)?;
+    }
+    let events = store.events(0, 64, Some(attempt_id), &call)?;
+    Ok((attempt_id, events))
+}
+
+fn read_output(
+    rig: &TestRig,
+    attempt: provenant_core::AttemptId,
+    part: &str,
+    offset: u64,
+    max_bytes: u64,
+) -> Result<Value> {
+    let replies = mcp(
+        rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_output","arguments":{"op":"read","target":{"attempt":attempt.to_string()},"part":part,"offset":offset,"max_bytes":max_bytes}}}),
+        ],
+    )?;
+    Ok(replies
+        .into_iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("output reply")?["result"]
+        .clone())
+}
+
+#[test]
+fn trimmed_event_page_continues_from_the_last_kept_event() -> Result {
+    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let (attempt, events) = seed_attempt(&mut rig, "prompt", true)?;
+    assert_eq!(events.len(), 2);
+    let first_only = serde_json::to_vec(&events[..1])?.len() as u64;
+    let both = serde_json::to_vec(&events)?.len() as u64;
+    // The separator byte means two events need more than twice one.
+    assert!(both > first_only + 1);
+
+    // Room for the first event only: the page is trimmed, not exhausted.
+    let page = read_output(&rig, attempt, "events", 0, both - 1)?;
+    assert_ne!(page["isError"], true, "{page}");
+    let page = &page["structuredContent"];
+    assert_eq!(page["eof"], false);
+    assert_eq!(page["next_offset"], events[0].sequence);
+    let kept: Vec<Value> = serde_json::from_str(page["bytes"]["data"].as_str().ok_or("bytes")?)?;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["sequence"], events[0].sequence);
+
+    // The next read starts after the kept event and returns the rest.
+    let rest = read_output(&rig, attempt, "events", events[0].sequence, 65536)?;
+    let rest = &rest["structuredContent"];
+    assert_eq!(rest["eof"], true);
+    assert_eq!(rest["next_offset"], events[1].sequence);
+    let rest: Vec<Value> = serde_json::from_str(rest["bytes"]["data"].as_str().ok_or("bytes")?)?;
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0]["sequence"], events[1].sequence);
+
+    // A limit below one event refuses rather than returning an empty page.
+    let refused = read_output(&rig, attempt, "events", 0, first_only - 1)?;
+    assert_eq!(refused["isError"], true);
+    assert_eq!(text_error_code(&refused), "output_too_large");
+    Ok(())
+}
+
+#[test]
+fn output_page_ending_inside_a_character_stops_before_it() -> Result {
+    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    // 'a' is one byte and the sun is three, so two bytes split the sun.
+    let (attempt, _) = seed_attempt(&mut rig, "a\u{2600}b", false)?;
+    let page = read_output(&rig, attempt, "prompt", 0, 2)?;
+    assert_ne!(page["isError"], true, "{page}");
+    let page = &page["structuredContent"];
+    assert_eq!(page["bytes"]["encoding"], "utf8");
+    assert_eq!(page["bytes"]["data"], "a");
+    assert_eq!(page["next_offset"], 1);
+    assert_eq!(page["eof"], false);
+
+    let next = read_output(&rig, attempt, "prompt", 1, 3)?;
+    let next = &next["structuredContent"];
+    assert_eq!(next["bytes"]["encoding"], "utf8");
+    assert_eq!(next["bytes"]["data"], "\u{2600}");
+    assert_eq!(next["next_offset"], 4);
+    Ok(())
+}

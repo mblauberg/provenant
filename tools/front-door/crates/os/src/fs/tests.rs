@@ -372,7 +372,7 @@ fn competing_noreplace_publishers_have_exactly_one_winner() {
     assert_eq!(names(&dir).len(), 2);
 }
 #[test]
-fn exchange_replace_and_cross_directory_operations_are_atomic_primitives() {
+fn replace_and_cross_directory_operations_are_atomic_primitives() {
     let temp = tempfile::tempdir().unwrap();
     let root = Directory::open_anchor(temp.path()).unwrap();
     root.mkdir(OsStr::new("child"), 0o500).unwrap();
@@ -388,13 +388,9 @@ fn exchange_replace_and_cross_directory_operations_are_atomic_primitives() {
         .unwrap()
         .write_all(b"B")
         .unwrap();
-    root.exchange(OsStr::new("a"), &child, OsStr::new("b"))
-        .unwrap();
-    assert_eq!(root.read_bounded(OsStr::new("a"), 1).unwrap(), b"B");
-    assert_eq!(child.read_bounded(OsStr::new("b"), 1).unwrap(), b"A");
     root.replace(OsStr::new("a"), &child, OsStr::new("b"))
         .unwrap();
-    assert_eq!(child.read_bounded(OsStr::new("b"), 1).unwrap(), b"B");
+    assert_eq!(child.read_bounded(OsStr::new("b"), 1).unwrap(), b"A");
     assert!(root.open_read(OsStr::new("a")).unwrap_err().is_not_found());
     child.unlink(OsStr::new("b")).unwrap();
     root.rmdir(OsStr::new("child")).unwrap();
@@ -1355,7 +1351,6 @@ fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
         dir.replace(OsStr::new("replacement"), &dir, name),
         dir.replace(name, &dir, OsStr::new("other")),
         dir.rename_noreplace(name, &dir, OsStr::new("other")),
-        dir.exchange(OsStr::new("replacement"), &dir, name),
         dir.symlink(Path::new("replacement"), name),
     ] {
         assert!(matches!(result, Err(FsError::ReservedLockName { .. })));

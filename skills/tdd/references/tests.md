@@ -68,7 +68,24 @@ assert_eq!(retrieved.name, "Alice");
 
 ## Independent oracles and weakening
 
-Rules and the list of gaming moves: see "Existing tests" in `SKILL.md`.
+Expected values come from the spec, never from running the code under test.
+Rejection tests assert the specific error variant or code, not just `is_err()`.
+If a test contradicts the spec, stop and report the conflict with evidence;
+do not edit the test or production code to resolve an unsettled contract.
+
+Agents copy the tests beside them. In a file you touch, rewrite or delete a
+rigid test on the behaviour you are changing rather than adding another like
+it. When a change meant to preserve behaviour fails a test, first establish
+whether the public contract still holds. If it does, the test pinned an
+incidental detail: rewrite it to pin behaviour or delete it; never bend
+production code around it. If it does not, the change is a regression. Never
+weaken, skip or delete a test to make a real behaviour change pass. Gaming
+includes replacing a specific error with `is_err()`, an exact count with an
+at-least check, deriving expectations from implementation output, or
+special-casing a test input in production code. Report every test you remove
+with its reason. A characterisation test that pins current, possibly wrong
+behaviour is temporary: replace it with an intended-behaviour test once the
+change lands.
 
 ```rust
 // Spec: a denied checkout returns PermissionDenied; a valid checkout creates
@@ -169,3 +186,48 @@ and [ch. 13](https://abseil.io/resources/swe-book/html/ch13.html);
 Vladimir Khorikov, *Unit Testing Principles, Practices, and Patterns*;
 [Testing Library guiding principles](https://testing-library.com/docs/guiding-principles/);
 [Practical mutation testing at scale](https://research.google/pubs/practical-mutation-testing-at-scale-a-view-from-google/).
+
+## Exclusions and evidence
+
+
+Write no test, and give this evidence instead, for:
+
+- **Prose, non-contractual copy and unconsumed configuration:** the diff and
+  review. A required disclosure, an accessible name or a documented error
+  message is a contract and keeps its test.
+- **Appearance, layout and motion:** a rendered capture or recording, judged by
+  a person or a visual diff; never class, style or DOM-structure assertions.
+- **A behaviour-preserving refactor:** the existing suite staying green where
+  it covers the change; otherwise the characterisation evidence `refactor`
+  requires.
+- **What types, a schema, a parser or a linter already guarantee:** that check,
+  plus one boundary test proving the real path applies it.
+- **Trivial delegation or wiring with no decision in it:** the caller's test.
+- **A case an existing test already covers, here or at a lower layer:** that
+  test. Test a shared unit once where it is owned, not again through each
+  consumer.
+- **An exploratory probe or debugging script:** nothing; delete it before
+  handoff.
+- **A test that would fail only on a deliberate rewording, restyle or
+  reordering:** nothing.
+
+Money, authorisation, privacy and data-integrity changes always earn a test.
+Not being able to imagine a defect is never an exemption; the exemption is a
+named existing test or check that already catches it.
+
+
+## Advance gate
+
+
+Before the next behaviour confirm: public observable contract; a named defect
+no existing test catches; nothing incidental pinned; witnessed right-reason
+failure; minimal passing code; focused and broader checks green;
+no dirty output; resilience to internal refactoring. Under a project-deferred
+cadence, report each unwitnessed item as deferred to the gate.
+
+For a bug, reproduce the failing condition as the regression test, asserting
+the corrected behaviour rather than today's output or error text; watch it
+fail, then repair and watch it pass. If no correct seam reaches the bug, route
+to `diagnose`; do not bless a shallow test. `implement` owns independent review,
+repair loops, documentation and delivery acceptance under the tier and approved
+scope.
