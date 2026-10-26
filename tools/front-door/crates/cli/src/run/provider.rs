@@ -306,18 +306,23 @@ fn prepare_with(
         let staging = &paths.temporary;
         let scratch = staging.join(format!("candidate-{candidate}"));
         let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
-        if let Err(error) = apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging], None)
-            .and_then(|()| {
+        // Retain the handle opened while creating scratch: a parent lane can
+        // rename tmp and redirect its pathname before context is published.
+        let scratch_directory =
+            match apply_setup_directory(&[staging], &scratch).and_then(|directory| {
                 apply_setup(
                     &[SetupStep::CreateDir(private_state.clone())],
                     &[&paths.provider_state],
                     None,
-                )
-            })
-        {
-            reasons.push(skip(&label, SkipKind::Setup, error));
-            continue;
-        }
+                )?;
+                Ok(directory)
+            }) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    reasons.push(skip(&label, SkipKind::Setup, error));
+                    continue;
+                }
+            };
         let continuation = match resume {
             Some(prior) => match continuation_for(
                 prior,
@@ -338,7 +343,7 @@ fn prepare_with(
         let prompt = match &git_context {
             Some(context) => {
                 let location = context
-                    .write_to(scratch)
+                    .write_to(&scratch_directory, scratch)
                     .map_err(|error| error.to_string())?;
                 Prompt::new(format!("{location}\n{prompt_text}"))
             }
@@ -1265,11 +1270,10 @@ fn apply_setup(
             SetupStep::CreateDir(path) => {
                 let transcript_root =
                     claude_account.filter(|directory| path.starts_with(directory.join("projects")));
-                let (parent, name) = match transcript_root {
-                    Some(directory) => setup_parent(&[directory], path, true)?,
-                    None => setup_parent(roots, path, true)?,
+                match transcript_root {
+                    Some(directory) => apply_setup_directory(&[directory], path)?,
+                    None => apply_setup_directory(roots, path)?,
                 };
-                setup_directory(&parent, name)?;
             }
             SetupStep::WriteFile { path, bytes } => write_setup_file(roots, path, bytes, false)?,
             SetupStep::WriteExecutable { path, bytes } => {
@@ -1337,6 +1341,11 @@ fn write_setup_file(
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn apply_setup_directory(roots: &[&Path], path: &Path) -> Result<Directory, String> {
+    let (parent, name) = setup_parent(roots, path, true)?;
+    setup_directory(&parent, name)
 }
 
 fn setup_parent<'a>(
@@ -1595,6 +1604,7 @@ mod tests {
         }
         let task = run::TaskRequest {
             base: Some("HEAD".into()),
+            base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"fixture prompt"),
