@@ -40,5 +40,5 @@ pub fn render(
         worktree_grants.as_ref(),
         home,
     )?;
-    String::from_utf8(bytes).map_err(|_| PermissionError::InvalidPath)
+    String::from_utf8(bytes).map_err(|_| PermissionError::NonUtf8Path)
 }

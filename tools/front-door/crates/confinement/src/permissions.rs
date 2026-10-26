@@ -176,8 +176,8 @@ pub enum Availability {
 pub enum PermissionError {
     #[error("invalid read-only project write policy")]
     InvalidReadOnlyPolicy,
-    #[error("path is not an absolute, normalised path")]
-    InvalidPath,
+    #[error("path is not an absolute, normalised path: {0:?}")]
+    InvalidPath(PathBuf),
     #[error("permission root is too broad")]
     BroadRoot,
     #[error("credential root requires a selected fixture-backed mechanism")]
@@ -460,11 +460,13 @@ pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<()
     validate_absolute(home)?;
     let cache_root = home.join("Library/Caches/provenant-lane-cargo");
     if cache.parent() != Some(cache_root.as_path()) {
-        return Err(PermissionError::InvalidPath);
+        return Err(PermissionError::InvalidPath(cache.to_owned()));
     }
-    let name = cache.file_name().ok_or(PermissionError::InvalidPath)?;
+    let name = cache
+        .file_name()
+        .ok_or_else(|| PermissionError::InvalidPath(cache.to_owned()))?;
     if !name.to_str().is_some_and(is_cache_digest) {
-        return Err(PermissionError::InvalidPath);
+        return Err(PermissionError::InvalidPath(cache.to_owned()));
     }
     let Some(root) = open_cache_root(&cache_root)? else {
         return Ok(());
@@ -1599,7 +1601,7 @@ impl AnchoredDirectory {
         let canonical =
             provenant_supervisor::fs::canonicalize(path).map_err(PermissionError::Filesystem)?;
         if canonical.as_path() != path {
-            return Err(PermissionError::InvalidPath);
+            return Err(PermissionError::InvalidPath(path.to_owned()));
         }
         let directory = safe_fs
             .open_anchor(path)
@@ -1684,7 +1686,7 @@ impl Anchors<'_> {
 
     fn verify_executable(&self, grant: &PathGrant) -> Result<(), PermissionError> {
         if grant.scope != PathScope::Exact {
-            return Err(PermissionError::InvalidPath);
+            return Err(PermissionError::InvalidPath(grant.path.clone()));
         }
         match self.exact_grant_metadata(&grant.path)? {
             Some(_) => Ok(()),
@@ -1694,7 +1696,7 @@ impl Anchors<'_> {
 
     fn verify_single_link_grant(&self, grant: &PathGrant) -> Result<(), PermissionError> {
         if grant.scope != PathScope::Exact {
-            return Err(PermissionError::InvalidPath);
+            return Err(PermissionError::InvalidPath(grant.path.clone()));
         }
         match self.exact_grant_metadata(&grant.path)? {
             Some(metadata) if metadata.links == 1 => Ok(()),
@@ -1704,8 +1706,12 @@ impl Anchors<'_> {
     }
 
     fn exact_grant_metadata(&self, path: &Path) -> Result<Option<Metadata>, PermissionError> {
-        let parent = path.parent().ok_or(PermissionError::InvalidPath)?;
-        let name = path.file_name().ok_or(PermissionError::InvalidPath)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| PermissionError::InvalidPath(path.to_owned()))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| PermissionError::InvalidPath(path.to_owned()))?;
         let anchor = self
             .directories
             .iter()
@@ -2141,7 +2147,7 @@ fn compile_sbpl(
         )?;
     }
     if plan.scratch.scope != PathScope::Subtree {
-        return Err(PermissionError::InvalidPath);
+        return Err(PermissionError::InvalidPath(plan.scratch.path.clone()));
     }
     validate_noncredential_grant(&plan.scratch)?;
     anchors.verify_grant_held(&plan.scratch)?;
@@ -2855,7 +2861,7 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
     for executable in &spec.process_executables {
         validate_read_exec_grant(executable)?;
         if executable.scope != PathScope::Exact {
-            return Err(PermissionError::InvalidPath);
+            return Err(PermissionError::InvalidPath(executable.path.clone()));
         }
     }
     for grant in &spec.runtime_reads {
@@ -2869,7 +2875,7 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
                 Some(".agents" | ".claude" | ".codex")
             )
         {
-            return Err(PermissionError::InvalidPath);
+            return Err(PermissionError::InvalidPath(grant.path.clone()));
         }
     }
     for auth in &spec.authentication {
@@ -2910,7 +2916,7 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
     for root in &spec.tool_exec_roots {
         validate_read_exec_grant(root)?;
         if root.scope != PathScope::Subtree {
-            return Err(PermissionError::InvalidPath);
+            return Err(PermissionError::InvalidPath(root.path.clone()));
         }
     }
     // State may sit under a provider's home (Claude keeps transcripts beside
@@ -3050,7 +3056,7 @@ fn validate_absolute(path: &Path) -> Result<(), PermissionError> {
             )
         })
     {
-        return Err(PermissionError::InvalidPath);
+        return Err(PermissionError::InvalidPath(path.to_owned()));
     }
     Ok(())
 }
@@ -3163,8 +3169,10 @@ fn sbpl_regex_path(path: &Path) -> Result<String, PermissionError> {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
-            '"' => return Err(PermissionError::InvalidPath),
-            value if value.is_control() => return Err(PermissionError::InvalidPath),
+            '"' => return Err(PermissionError::InvalidPath(path.to_owned())),
+            value if value.is_control() => {
+                return Err(PermissionError::InvalidPath(path.to_owned()));
+            }
             '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => {
                 escaped.push('\\');
                 escaped.push(character);
@@ -3186,7 +3194,9 @@ fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            value if value.is_control() => return Err(PermissionError::InvalidPath),
+            value if value.is_control() => {
+                return Err(PermissionError::InvalidPath(path.to_owned()));
+            }
             value => escaped.push(value),
         }
     }
@@ -3201,6 +3211,21 @@ mod tests {
     use super::*;
     use provenant_supervisor::exec::SystemExecutor;
     use provenant_supervisor::fs::LocalFs;
+
+    #[test]
+    fn invalid_path_error_names_the_refused_path() {
+        for path in [
+            "/",
+            "relative/path",
+            "/opt/homebrew/bin/../Cellar/opencode-v2/2.0.32",
+        ] {
+            let error = validate_absolute(Path::new(path)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("path is not an absolute, normalised path: {path:?}")
+            );
+        }
+    }
 
     fn write_grants_fixture() -> (PlanPermissions, ProviderProfile) {
         let grant = |path: &str, scope| PathGrant {
@@ -3724,7 +3749,7 @@ mod tests {
         assert_ne!(alias, canonical);
         assert!(matches!(
             AnchoredDirectory::open_canonical(&LocalFs, &alias),
-            Err(PermissionError::InvalidPath)
+            Err(PermissionError::InvalidPath(path)) if path == alias
         ));
         assert!(AnchoredDirectory::open_canonical(&LocalFs, canonical).is_ok());
     }

@@ -170,6 +170,8 @@ fn prepare(
                 discovery_reads: input
                     .cwd
                     .ancestors()
+                    // Root-level probes would require a forbidden `/` anchor.
+                    .take_while(|parent| parent.parent().is_some())
                     .flat_map(|parent| {
                         [".agents", ".claude", ".codex"].map(|name| exact(parent.join(name)))
                     })
@@ -320,7 +322,7 @@ mod tests {
             OpenCode.stream(None).unwrap(),
         )
         .unwrap();
-        for parent in input.cwd.ancestors() {
+        for parent in input.cwd.ancestors().filter(|path| path.parent().is_some()) {
             for name in [".agents", ".claude", ".codex"] {
                 assert!(
                     spec.profile
@@ -337,6 +339,73 @@ mod tests {
                 .iter()
                 .all(|g| g.scope == provenant_confinement::permissions::PathScope::Exact)
         );
+        for name in [".agents", ".claude", ".codex"] {
+            assert!(
+                !spec
+                    .profile
+                    .spec
+                    .discovery_reads
+                    .contains(&exact(std::path::Path::new("/").join(name)))
+            );
+        }
+    }
+
+    // Anchors are real host paths; on Linux `/bin` links to `/usr/bin`, and
+    // only the macOS backend confines OpenCode.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn homebrew_launch_plan_anchors_with_default_xdg_homes() {
+        use provenant_confinement::permissions::{AnchoredDirectory, required_anchors};
+        use provenant_supervisor::fs::LocalFs;
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let prefix = root.join("opt/homebrew");
+        let package = prefix.join("Cellar/opencode-v2/2.0.32");
+        let bin = prefix.join("bin");
+        fs::create_dir_all(package.join("bin")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(package.join("bin/opencode"), "fixture").unwrap();
+        let link = bin.join("opencode");
+        std::os::unix::fs::symlink("../Cellar/opencode-v2/2.0.32/bin/opencode", &link).unwrap();
+        // Dispatch resolves the CLI before passing it to the provider.
+        let executable = link.canonicalize().unwrap();
+        let home = root.join("home");
+        fs::create_dir_all(home.join(".config/opencode")).unwrap();
+        for name in ["repo", "scratch", "state"] {
+            fs::create_dir(root.join(name)).unwrap();
+        }
+        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let cwd = root.join("repo");
+        let input = PrepareInput {
+            executable: &executable,
+            home: &home,
+            ..crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None)
+        };
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let spec = prepare(
+                &input,
+                access,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap(),
+            )
+            .unwrap();
+            for step in &spec.setup {
+                let SetupStep::CreateDir(path) = step else {
+                    panic!("unexpected setup step: {step:?}");
+                };
+                fs::create_dir_all(path).unwrap();
+            }
+            assert!(spec.profile.spec.runtime_reads.contains(&subtree(&package)));
+            for path in required_anchors(plan.permissions(), &spec.profile, None) {
+                if let Err(error) = AnchoredDirectory::open_canonical(&LocalFs, &path) {
+                    panic!("{access:?} anchor {} refused: {error}", path.display());
+                }
+            }
+        }
     }
 
     #[test]
