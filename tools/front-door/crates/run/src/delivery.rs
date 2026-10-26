@@ -118,8 +118,7 @@ impl HostDeliveryContext {
         request: &WriterDeliveryRequest,
     ) -> Result<Self> {
         validate(request)?;
-        self.host_environment(writer)
-            .map_err(|error| prepare_error("environment", error))?;
+        self.host_environment(writer)?;
         let stage = Stage::Prepare;
         let git = self.executable("git", writer)?;
         let gh = if request.open_pr {
@@ -284,8 +283,9 @@ impl HostDeliveryContext {
         for (key, value) in &mut self.environment {
             let name = std::str::from_utf8(key).unwrap_or_default();
             if name == "GIT_SSH_COMMAND" && !value.is_empty() {
-                return Err(RunError::Validation(
-                    "delivery does not support GIT_SSH_COMMAND; use host SSH config",
+                return Err(prepare_error(
+                    "environment",
+                    "GIT_SSH_COMMAND is not supported; use host SSH config",
                 ));
             }
             let path = OsString::from_vec(value.clone());
@@ -296,7 +296,7 @@ impl HostDeliveryContext {
                     .filter(|p| !p.starts_with(&writer.worktree) && !p.starts_with(&writer.project))
                     .collect();
                 *value = std::env::join_paths(paths)
-                    .map_err(|_| RunError::Delivery(Stage::Prepare))?
+                    .map_err(|_| prepare_error("environment", "PATH is invalid"))?
                     .into_vec();
             } else if matches!(
                 name,
@@ -310,7 +310,8 @@ impl HostDeliveryContext {
                     | "SSH_ASKPASS"
             ) && !value.is_empty()
             {
-                *value = host_path(Path::new(&path), writer)?
+                *value = host_path(Path::new(&path), writer)
+                    .map_err(|error| prepare_error("environment", format!("{name}: {error}")))?
                     .into_os_string()
                     .into_vec();
             }
@@ -619,13 +620,8 @@ fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
         .file_name()
         .unwrap_or(path.as_os_str())
         .to_string_lossy();
-    let helper = host_path(path, writer).map_err(|error| {
-        let detail = match error {
-            RunError::Validation("inside the writer worktree") => "inside the writer worktree",
-            _ => "not found",
-        };
-        prepare_error("credential helper", format!("{name}: {detail}"))
-    })?;
+    let helper = host_path(path, writer)
+        .map_err(|error| prepare_error("credential helper", format!("{name}: {error}")))?;
     if !helper.is_file() || !provenant_supervisor::sys::is_executable(&helper) {
         return Err(prepare_error(
             "credential helper",
@@ -635,7 +631,15 @@ fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
     Ok(())
 }
 
-fn host_path(path: &Path, writer: &WriterRequest) -> Result<PathBuf> {
+#[derive(Debug, thiserror::Error)]
+enum HostPathError {
+    #[error("not found")]
+    NotFound,
+    #[error("inside the writer worktree")]
+    InsideWorktree,
+}
+
+fn host_path(path: &Path, writer: &WriterRequest) -> std::result::Result<PathBuf, HostPathError> {
     let path = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -644,15 +648,15 @@ fn host_path(path: &Path, writer: &WriterRequest) -> Result<PathBuf> {
     let canonical = match std::fs::canonicalize(&path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path.parent().ok_or(RunError::Validation("not found"))?;
+            let parent = path.parent().ok_or(HostPathError::NotFound)?;
             std::fs::canonicalize(parent)
-                .map_err(|_| RunError::Validation("not found"))?
-                .join(path.file_name().ok_or(RunError::Validation("not found"))?)
+                .map_err(|_| HostPathError::NotFound)?
+                .join(path.file_name().ok_or(HostPathError::NotFound)?)
         }
-        Err(_) => return Err(RunError::Validation("not found")),
+        Err(_) => return Err(HostPathError::NotFound),
     };
     if canonical.starts_with(&writer.worktree) {
-        return Err(RunError::Validation("inside the writer worktree"));
+        return Err(HostPathError::InsideWorktree);
     }
     Ok(canonical)
 }

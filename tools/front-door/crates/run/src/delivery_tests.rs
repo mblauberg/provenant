@@ -89,6 +89,96 @@ impl PrepareFixture {
 }
 
 #[test]
+fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture
+        .environment
+        .push(("GIT_SSH_COMMAND".into(), "ssh -v".into()));
+    let reason = fixture
+        .prepare()
+        .expect_err("unsupported SSH command")
+        .to_string();
+    assert_eq!(
+        reason,
+        "host writer delivery failed at Prepare (environment): GIT_SSH_COMMAND is not supported; use host SSH config"
+    );
+    Ok(())
+}
+
+#[test]
+fn prepare_labels_environment_path_failures() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let mut fixture = PrepareFixture::new()?;
+    for name in ["HOME", "GH_CONFIG_DIR"] {
+        for (path, detail) in [
+            (fixture.root.join("missing/config"), "not found"),
+            (
+                fixture.writer.worktree.clone(),
+                "inside the writer worktree",
+            ),
+        ] {
+            fixture.environment.retain(|(key, _)| key != name);
+            fixture
+                .environment
+                .insert(0, (name.into(), path.into_os_string()));
+            let reason = fixture
+                .prepare()
+                .expect_err("invalid host path")
+                .to_string();
+            assert_eq!(
+                reason,
+                format!("host writer delivery failed at Prepare (environment): {name}: {detail}")
+            );
+        }
+        fixture.environment.retain(|(key, _)| key != name);
+    }
+    Ok(())
+}
+
+#[test]
+fn prepare_labels_unavailable_gh_executable() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let mut fixture = PrepareFixture::new()?;
+    fixture.request.open_pr = true;
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    let reason = fixture.prepare().expect_err("PATH is unset").to_string();
+    assert_eq!(
+        reason,
+        "host writer delivery failed at Prepare (gh executable): gh is unavailable: PATH is unset"
+    );
+    fixture.environment.push(("PATH".into(), "".into()));
+    let reason = fixture
+        .prepare()
+        .expect_err("gh is unavailable")
+        .to_string();
+    assert_eq!(
+        reason,
+        "host writer delivery failed at Prepare (gh executable): gh is unavailable on PATH"
+    );
+    Ok(())
+}
+
+#[test]
+fn prepare_labels_git_executable_inside_worktree()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let git = fixture.writer.worktree.join("git");
+    fixture.executable(&git, "#!/bin/sh\nexit 0\n")?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), git.into_os_string()));
+    let reason = fixture
+        .prepare()
+        .expect_err("unsafe git executable")
+        .to_string();
+    assert_eq!(
+        reason,
+        "host writer delivery failed at Prepare (git executable): inside the writer worktree"
+    );
+    Ok(())
+}
+
+#[test]
 fn prepare_accepts_absolute_shell_helper_outside_path()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
@@ -117,7 +207,7 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         let git = fixture.root.join("git");
         let real_git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
         fixture.executable(&git, &format!(
-            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ {}' >&2\nexit 1;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
+            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
         fixture
             .environment
             .push(("PROVENANT_GIT".into(), git.into_os_string()));
@@ -150,7 +240,7 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
     let opaque = fixture.root.join("gh;echo");
     fixture.executable(&opaque, "#!/bin/sh\nexit 0\n")?;
     for (helper, detail) in [
-        (&unavailable, "missing/gh"),
+        (&unavailable, "gh: not found"),
         (&not_executable, "not-executable"),
         (&fixture.root, "unavailable"),
         (&lane_helper, "inside the writer worktree"),
