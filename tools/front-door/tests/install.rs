@@ -2,7 +2,7 @@ mod support;
 use provenant_config::{Release, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_records::{CommandResult, Outcome, SourceInput, VersionInfo, source_digest};
-use provenant_supervisor::fs::LocalFs;
+
 use std::{
     fs, io,
     os::unix::fs::PermissionsExt,
@@ -64,7 +64,6 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
     provenant_config::package_release(
         &stage,
         &version,
-        &LocalFs,
         &FixtureSmoke(version.clone()),
         &CancelToken::new(),
     )?;
@@ -88,10 +87,10 @@ fn args(stage: &Path, dry: bool) -> Vec<std::ffi::OsString> {
 fn inspect_installed(rig: &TestRig, stage: &Path) -> Result<provenant_config::InstallInspection> {
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.environment_state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let targets =
         provenant_config::Targets::new(roots, &rig.home, &[provenant_records::Harness::Claude]);
-    let release = Release::read(stage, env!("PROVENANT_TARGET_TRIPLE"), &LocalFs)?;
+    let release = Release::read(stage, env!("PROVENANT_TARGET_TRIPLE"))?;
     let manifest = release.manifest();
     let smoke = FixtureSmoke(VersionInfo {
         source_digest: manifest.source_digest,
@@ -105,7 +104,6 @@ fn inspect_installed(rig: &TestRig, stage: &Path) -> Result<provenant_config::In
         &targets,
         Some(&release),
         env!("PROVENANT_TARGET_TRIPLE"),
-        &LocalFs,
         &smoke,
         &CancelToken::new(),
     )?)

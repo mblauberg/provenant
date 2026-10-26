@@ -407,7 +407,7 @@ fn normalise(tool: &str, value: &mut Value) {
         }
     }
     paths(value);
-    if tool == "fabric_submit" && value["op"] == "submission" {
+    if tool == "fabric_run" && value["op"] == "submit" {
         let n = value["concurrency"].as_u64().unwrap_or(0) as usize;
         if let Some(tasks) = value["tasks"].as_array_mut()
             && tasks.len() < n
@@ -691,25 +691,23 @@ fn wire_strings_carry_only_type_and_max_length() {
 fn tool_schema_size_is_bounded() {
     // Measured compact tool bytes plus 10%, rounded up.
     let bounds = [
-        ("fabric_identity", 1_526),
-        ("fabric_mail", 2_686),
-        ("fabric_task", 2_430),
-        ("fabric_events", 860),
-        ("fabric_claim", 2_404),
-        ("fabric_landing", 2_222),
-        ("fabric_submit", 2_572),
-        ("fabric_run", 1_954),
-        ("fabric_graph", 922),
-        ("fabric_output", 1_513),
-        ("fabric_hosts", 370),
+        ("fabric_context", 2_103),
+        ("fabric_mail", 2_800),
+        ("fabric_task", 2_500),
+        ("fabric_events", 1_000),
+        ("fabric_lease", 4_407),
+        ("fabric_run", 4_400),
+        ("fabric_graph", 1_000),
+        ("fabric_output", 1_600),
     ];
     assert_eq!(catalogue().len(), bounds.len());
     let mut total = 0;
     for ((name, bound), tool) in bounds.into_iter().zip(catalogue()) {
         assert_eq!(tool["name"], name);
+        assert_eq!(tool["_meta"]["io.provenant/schemaVersion"], 2);
         let size = serde_json::to_vec(tool).unwrap().len();
         assert!(size <= bound, "{name}: {size} bytes exceeds {bound}");
-        assert!(size <= 3_072, "{name}: {size} bytes exceeds hard cap");
+        assert!(size <= 4_608, "{name}: {size} bytes exceeds hard cap");
         total += size;
     }
     assert!(total <= 18 * 1024, "catalogue: {total} bytes");
@@ -743,17 +741,14 @@ fn relaxed_wire_text_still_reports_strict_invalid_paths() {
 #[test]
 fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
     let expected = [
-        "fabric_identity",
+        "fabric_context",
         "fabric_mail",
         "fabric_task",
         "fabric_events",
-        "fabric_claim",
-        "fabric_landing",
-        "fabric_submit",
+        "fabric_lease",
         "fabric_run",
         "fabric_graph",
         "fabric_output",
-        "fabric_hosts",
     ];
     let names: Vec<_> = catalogue()
         .iter()
@@ -780,13 +775,10 @@ fn output_schema_lists_only_supported_parts() {
 
     assert_eq!(
         read["properties"]["part"]["enum"],
-        json!(["stdout", "stderr"])
+        json!(["prompt", "result", "stderr", "events"])
     );
     for tool in catalogue() {
-        let supported = matches!(
-            tool["name"].as_str(),
-            Some("fabric_identity" | "fabric_submit")
-        );
+        let supported = matches!(tool["name"].as_str(), Some("fabric_context"));
         assert_eq!(tool.get("outputSchema").is_some(), supported);
         if supported {
             assert_eq!(tool["outputSchema"]["type"], "object");
@@ -796,11 +788,9 @@ fn output_schema_lists_only_supported_parts() {
 
 #[test]
 fn published_output_schemas_accept_real_runtime_records() {
-    use provenant_core::{AttemptId, HostId, OperationId, ProjectId};
-    use provenant_fabric_runtime::{
-        coordination::facade::AttemptTarget,
-        identity::{Address, CrossHostProjectKey, FederatedProject, Identity},
-        runs::{PeerWorktree, SubmissionReceipt},
+    use provenant_core::{HostId, ProjectId};
+    use provenant_fabric_runtime::identity::{
+        Address, CrossHostProjectKey, FederatedProject, Identity,
     };
     use provenant_records::AbsolutePath;
 
@@ -813,14 +803,6 @@ fn published_output_schemas_accept_real_runtime_records() {
         cwd: AbsolutePath::new(Path::new("/repo/worktree")).unwrap(),
         common_dir: AbsolutePath::new(Path::new("/repo/.git")).unwrap(),
         federation: None,
-    };
-    let mut receipt = SubmissionReceipt {
-        operation_id: OperationId::parse("schema-test").unwrap(),
-        targets: vec![AttemptTarget {
-            attempt: AttemptId::from_bytes([3; 16]),
-            host: None,
-        }],
-        worktree: None,
     };
     let output_schema = |name| {
         &catalogue()
@@ -836,23 +818,17 @@ fn published_output_schemas_accept_real_runtime_records() {
         identity: &identity,
         server_version: env!("CARGO_PKG_VERSION"),
     };
-    check("fabric_identity", serde_json::to_value(reply).unwrap());
-    check("fabric_submit", serde_json::to_value(&receipt).unwrap());
+    check("fabric_context", serde_json::to_value(reply).unwrap());
+
     identity.federation = Some(FederatedProject {
         key: CrossHostProjectKey::from_home(Path::new("/"), Path::new("/repo/.git")).unwrap(),
         project: ProjectId::from_bytes([4; 16]),
-    });
-    receipt.targets[0].host = Some(host);
-    receipt.worktree = Some(PeerWorktree {
-        path: "/repo/.worktrees/feat/schema-test".into(),
-        branch: "feat/schema-test".into(),
     });
     let reply = IdentityReply {
         identity: &identity,
         server_version: env!("CARGO_PKG_VERSION"),
     };
-    check("fabric_identity", serde_json::to_value(reply).unwrap());
-    check("fabric_submit", serde_json::to_value(&receipt).unwrap());
+    check("fabric_context", serde_json::to_value(reply).unwrap());
 }
 
 #[test]
@@ -861,20 +837,20 @@ fn submit_accepts_optional_bounded_git_base() {
 
     let schema = &catalogue()
         .iter()
-        .find(|tool| tool["name"] == "fabric_submit")
+        .find(|tool| tool["name"] == "fabric_run")
         .unwrap()["inputSchema"];
     let mut input = json!({
-        "op":"submission", "operation_id":"git-context", "tasks":[{
-            "prompt":"review", "route":{}, "timeout_ms":1000, "base":"main"
+        "op":"submit", "operation_id":"git-context", "tasks":[{
+            "prompt":"review", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1, "base":"main"
         }]
     });
     assert!(accepts(schema, schema, &input));
-    assert!(ToolCall::parse("fabric_submit", input.clone()).is_ok());
-    let SubmitInput::Submission { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
+    assert!(ToolCall::parse("fabric_run", input.clone()).is_ok());
+    let SubmitInput::Submit { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
     assert_eq!(tasks[0].base.as_deref(), Some("main"));
     input["tasks"][0]["base"] = json!("a".repeat(1025));
     assert!(!accepts(schema, schema, &input));
-    assert!(ToolCall::parse("fabric_submit", input).is_err());
+    assert!(ToolCall::parse("fabric_run", input).is_err());
 }
 
 #[test]
@@ -883,15 +859,15 @@ fn peer_worktree_requests_are_not_mcp_submit_inputs() {
 
     let schema = &catalogue()
         .iter()
-        .find(|tool| tool["name"] == "fabric_submit")
+        .find(|tool| tool["name"] == "fabric_run")
         .unwrap()["inputSchema"];
     for new_worktree in [
         json!({"base":"main","branch":"feat/peer-writer"}),
         Value::Null,
     ] {
         let input = json!({
-            "op":"submission", "operation_id":"peer-writer", "tasks":[{
-                "prompt":"work", "route":{}, "timeout_ms":1000,
+            "op":"submit", "operation_id":"peer-writer", "tasks":[{
+                "prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1,
                 "access":"worktree_write", "new_worktree":new_worktree
             }]
         });
@@ -899,7 +875,7 @@ fn peer_worktree_requests_are_not_mcp_submit_inputs() {
         assert!(serde_json::from_value::<SubmitInput>(input.clone()).is_ok());
         assert!(!accepts(schema, schema, &input));
         assert!(matches!(
-            ToolCall::parse("fabric_submit", input),
+            ToolCall::parse("fabric_run", input),
             Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].new_worktree"
         ));
     }

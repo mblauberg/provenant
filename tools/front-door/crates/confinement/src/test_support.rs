@@ -3,20 +3,16 @@ use crate::utility::{
     GitRead, UtilityBudget, UtilityError, UtilityRuntime, exec_options, run_utility,
 };
 use provenant_core::{CancelToken, GitOid};
-use provenant_supervisor::exec::{ExecOutcome, Executor, SystemExecutor, Termination};
-use provenant_supervisor::fs::{LocalFs, SafeFs};
+use provenant_os::exec::{ExecOutcome, Executor, SystemExecutor, Termination};
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) fn tempdir() -> io::Result<tempfile::TempDir> {
-    provenant_supervisor::fixture::tempdir(|root| {
-        tempfile::Builder::new().prefix(".tmp").tempdir_in(root)
-    })
+    provenant_os::fixture::tempdir(|root| tempfile::Builder::new().prefix(".tmp").tempdir_in(root))
 }
 
 pub(crate) struct Fixture {
@@ -64,8 +60,8 @@ impl Fixture {
         ] {
             run_fixture_git(&executor, &git, temp.path(), &env, &args)?;
         }
-        let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-        let runtime = UtilityRuntime::new(fs.clone(), &git, &home)?;
+
+        let runtime = UtilityRuntime::new(&git, &home)?;
         let probe_budget = UtilityBudget::bounded(Duration::from_secs(10))?;
         let repo = runtime.open_repo(&executor, &root, probe_budget, &CancelToken::new())?;
         Ok(Self {
@@ -89,11 +85,10 @@ impl Fixture {
         fs::create_dir_all(&state)?;
         let mut input = provenant_core::RootInputs::new(self.home.clone(), self.root.clone());
         input.state_dir = Some(state);
-        let roots = input.resolve(&LocalFs)?;
+        let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;
         Ok(provenant_config::bind_project(
             &roots,
             provenant_config::ProjectLocation::new(self.repo.common_git_dir())?,
-            &LocalFs,
         )?)
     }
 

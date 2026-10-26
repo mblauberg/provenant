@@ -1,5 +1,12 @@
 # Run store and bounded readers
 
+`Service` is the typed execution API shared by CLI and MCP. It owns dispatch
+validation and publication, canonical route requests, target resolution,
+status, lanes, output, cancellation, continuation and reconciliation. The
+edges supply verified identity, configuration and provider preparation, then
+render typed errors through their own output contracts. Public durations use
+seconds; the store's private timing and receipt formats remain independent.
+
 The store is `run.sqlite3` at the selected `StateRoot`, with strict v1
 records shared through `provenant_records::run`. It uses WAL, foreign keys,
 `FULL` synchronisation, bounded BUSY retries and one thread per connection.
@@ -7,7 +14,8 @@ Unknown database and record versions refuse without upgrading them.
 
 `RunStore::open` binds a verified edge `ExecutionContext`. Each call takes a
 fresh clock, wait budget and cancellation token through `Request`. Cancellation
-only ends that call. The crate has no process-launch or signalling path.
+only ends that call. Explicit run cancellation and launch go through
+supervisor custody; supervisor owns the OS mechanics.
 
 `create` reserves the operation, run and attempt records in one transaction,
 then seals canonical `request.json` and exact UTF-8 prompts through supervisor's

@@ -2,10 +2,10 @@
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Pr};
 use provenant_core::GitOid;
-use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::exec::{
+use provenant_os::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
+use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
@@ -28,7 +28,7 @@ fn execute(project: &Path, argv: &[&str], watch: bool) -> Result<ExecOutcome> {
     let output = SystemExecutor::new(1)?
         .execute(options)
         .map_err(|error| match error {
-            provenant_supervisor::exec::ExecError::Io { operation, source } => {
+            provenant_os::exec::ExecError::Io { operation, source } => {
                 format!("cannot {operation} {}: {source}", argv[0].to_string_lossy())
             }
             error => error.to_string(),
@@ -99,7 +99,7 @@ fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()>
     Ok(())
 }
 fn merge(project: &Path, number: &str, head: GitOid) -> Result<()> {
-    let git = roots::git_binary().ok_or("Git executable is unavailable")?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
     let git = git.to_str().ok_or("Git executable path is not UTF-8")?;
     let configured = execute(project, &[git, "config", "--get", "user.email"], false)?;
     let email = match configured.termination {

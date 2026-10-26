@@ -316,18 +316,17 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
 /// from the minimal valid header.
 pub fn edit_config<T>(
     roots: &provenant_core::Roots,
-    fs: &impl provenant_supervisor::fs::SafeFs,
     sections: &crate::DomainSections<T>,
     edit: impl FnOnce(&mut DocumentMut) -> Result<(), ConfigError>,
 ) -> Result<crate::ResolvedConfig<T>, ConfigError>
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
-    use provenant_supervisor::fs::{Publication, PublishMode};
+    use provenant_os::fs::PublishMode;
     use std::{ffi::OsStr, io::Cursor};
 
     let path = roots.state.as_path().join("config.toml");
-    let text = crate::loader::open(roots, fs)?
+    let text = crate::loader::open(roots)?
         .map(|reader| crate::loader::bounded_text(reader, &path))
         .transpose()?;
     crate::loader::load_with_domains(
@@ -346,7 +345,7 @@ where
     let updated = document.to_string();
     crate::loader::load_with_domains(roots, Some(Cursor::new(updated.as_bytes())), sections)?;
 
-    let state = match fs.open_anchor(roots.state.as_path()) {
+    let state = match provenant_os::fs::Directory::open_anchor(roots.state.as_path()) {
         Ok(state) => state,
         Err(error) if error.is_not_found() => {
             // Create only the state directory itself, private. Its parent must
@@ -355,27 +354,26 @@ where
             let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
                 return Err(error.into());
             };
-            let parent = fs.open_anchor(parent)?;
+            let parent = provenant_os::fs::Directory::open_anchor(parent)?;
             match parent.mkdir(name, 0o700) {
                 Ok(()) => parent.sync()?,
                 Err(error) if error.is_exists() => {}
                 Err(error) => return Err(error.into()),
             }
-            fs.open_anchor(target)?
+            provenant_os::fs::Directory::open_anchor(target)?
         }
         Err(error) => return Err(error.into()),
     };
-    match state.atomic_write(
-        OsStr::new("config.toml"),
-        ".config-",
-        updated.as_bytes(),
-        0o600,
-        PublishMode::Replace,
-    )? {
-        Publication::Durable => {}
-        Publication::VisibleDurabilityUnconfirmed { sync_error } => return Err(sync_error.into()),
-    }
-    crate::loader::read_with_domains(roots, fs, sections)
+    state
+        .atomic_write_with_permissions(
+            OsStr::new("config.toml"),
+            ".config-",
+            updated.as_bytes(),
+            0o600,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
+    crate::loader::read_with_domains(roots, sections)
 }
 
 #[cfg(test)]

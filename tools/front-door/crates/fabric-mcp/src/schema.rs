@@ -6,6 +6,9 @@ use provenant_fabric_runtime::coordination::input::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+/// Fabric tool contract, independent of the MCP transport protocol date.
+pub const SCHEMA_VERSION: u64 = 2;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolKind {
     Identity,
@@ -13,26 +16,20 @@ pub(crate) enum ToolKind {
     Task,
     Events,
     Claim,
-    Landing,
-    Submit,
     Run,
     Output,
-    Hosts,
     Graph,
 }
 
-pub(crate) const TOOL_NAMES: [(ToolKind, &str); 11] = [
-    (ToolKind::Identity, "fabric_identity"),
+pub(crate) const TOOL_NAMES: [(ToolKind, &str); 8] = [
+    (ToolKind::Identity, "fabric_context"),
     (ToolKind::Mail, "fabric_mail"),
     (ToolKind::Task, "fabric_task"),
     (ToolKind::Events, "fabric_events"),
-    (ToolKind::Claim, "fabric_claim"),
-    (ToolKind::Landing, "fabric_landing"),
-    (ToolKind::Submit, "fabric_submit"),
+    (ToolKind::Claim, "fabric_lease"),
     (ToolKind::Run, "fabric_run"),
     (ToolKind::Graph, "fabric_graph"),
     (ToolKind::Output, "fabric_output"),
-    (ToolKind::Hosts, "fabric_hosts"),
 ];
 
 pub(crate) fn tool_name(kind: ToolKind) -> &'static str {
@@ -98,12 +95,6 @@ fn tagged(tag: &str, variants: Value) -> Value {
 fn output_object(fields: Value) -> Value {
     object(fields)
 }
-fn output_attempt_target() -> Value {
-    output_object(json!({
-        "attempt":pattern("^[0-9a-f]{32}$"),
-        "host":nullable(pattern("^[0-9a-f]{32}$"))
-    }))
-}
 fn output_absolute_path() -> Value {
     output_object(json!({
         "relative_to_root":output_object(json!({
@@ -113,24 +104,23 @@ fn output_absolute_path() -> Value {
     }))
 }
 pub(crate) fn output_schema(kind: ToolKind) -> Option<Value> {
-    let any_object = json!({"type":"object"});
     let text_value = json!({"type":"string"});
     match kind {
-        ToolKind::Identity => Some(output_object(json!({
-            "project":pattern("^[0-9a-f]{32}$"),"host":pattern("^[0-9a-f]{32}$"),
-            "inbox":output_object(json!({"host":pattern("^[0-9a-f]{32}$"),"agent":text_value,"actor":pattern("^[0-9a-f]{32}$")})),
-            "client":text_value,"cwd":output_absolute_path(),"common_dir":output_absolute_path(),
-            "federation":{"anyOf":[any_object,{"type":"null"}]},"server_version":text_value
-        }))),
-        ToolKind::Submit => Some(output_object(json!({
-            "operation_id":text_value,"targets":array(output_attempt_target(),0,100),
-            "worktree?":output_object(json!({"path":text_value,"branch":text_value}))
-        }))),
+        ToolKind::Identity => Some(json!({"type":"object","anyOf":[
+            output_object(json!({
+                "project":pattern("^[0-9a-f]{32}$"),"host":pattern("^[0-9a-f]{32}$"),
+                "inbox":output_object(json!({"host":pattern("^[0-9a-f]{32}$"),"agent":text_value,"actor":pattern("^[0-9a-f]{32}$")})),
+                "client":text_value,"cwd":output_absolute_path(),"common_dir":output_absolute_path(),
+                "federation":{"anyOf":[{"type":"object"},{"type":"null"}]},"server_version":text_value
+            })),
+            output_object(json!({"hosts":{"type":"array"}}))
+        ]})),
         _ => None,
     }
 }
+
 fn proof(key: &str, landing: bool) -> Value {
-    let mut fields = json!({key: reference("Id"), "generation":integer(0,u64::MAX),"token":array(integer(0,255),16,16)});
+    let mut fields = json!({key: reference("Id"), "generation":integer(0,u64::MAX),"token":pattern("^[0-9a-f]{32}$")});
     if landing {
         fields["reference"] = text(MAX_REFERENCE_BYTES);
     }
@@ -152,23 +142,23 @@ fn definitions() -> Value {
         "TaskProof":proof("task",false),"ClaimProof":proof("id",false),"LandingProof":proof("id",true),
         "MessageRef":message_ref,
         "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(MAX_ARTIFACT_PATH_BYTES)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
-        "Route":object(json!({"adapter?":nullable(text(MAX_ROUTE_BYTES)),"model?":nullable(text(MAX_ROUTE_BYTES)),"route?":nullable(text(MAX_ROUTE_BYTES)),"role?":nullable(text(MAX_ROUTE_BYTES)),"effort?":nullable(text(MAX_ROUTE_BYTES))})),
+        "Route":tagged("kind",json!({"model":{"provider":text(MAX_ROUTE_BYTES),"model":text(MAX_ROUTE_BYTES),"effort?":nullable(text(MAX_ROUTE_BYTES))},"named":{"name":text(MAX_ROUTE_BYTES),"effort?":nullable(text(MAX_ROUTE_BYTES))}})),
         "Scope":tagged("kind",json!({"issue":{"key":text(MAX_REFERENCE_BYTES)},"paths":{"paths":array(text(MAX_ARTIFACT_PATH_BYTES),1,100)},"worktree":{"path":text(MAX_ARTIFACT_PATH_BYTES)}}))
     })
 }
 fn build_strict() -> Vec<Value> {
     let page = integer(1, 100);
-    let lease = integer(1000, 3_600_000);
-    let wait = integer(1000, crate::MAX_WAIT_MS);
+    let lease = integer(1, 3_600);
+    let wait = integer(1, crate::MAX_WAIT_SECONDS);
     let seq = integer(0, i64::MAX as u64);
     let count = integer(0, u64::MAX);
     let artifacts = array(reference("Artifact"), 0, 100);
     let mut recipients = array(reference("Id"), 1, 100);
     recipients["uniqueItems"] = json!(true);
-    let tools: [(&str, Value); TOOL_NAMES.len()] = [
+    let tools: [(&str, Value); 8] = [
         (
-            "Inspect the authenticated Fabric identity.",
-            json!({"inspect":{}}),
+            "Inspect the authenticated Fabric identity or list peer hosts.",
+            json!({"inspect":{},"hosts":{"after?":nullable(reference("Id")),"limit":page.clone()}}),
         ),
         (
             "Send and read mail with explicit cursors.",
@@ -182,7 +172,7 @@ fn build_strict() -> Vec<Value> {
             json!({
                 "create":{"objective":text(MAX_TEXT_BYTES),"note?":nullable(text(MAX_TEXT_BYTES))},
                 "list":{"state?":nullable(choices(&["open","done","cancelled"])),"after?":nullable(reference("Id")),"limit":page.clone()},
-                "claim":{"id":reference("Id"),"lease_ms":lease.clone()},
+                "claim":{"id":reference("Id"),"lease_seconds":lease.clone()},
                 "update":{"proof":reference("TaskProof"),"objective":text(MAX_TEXT_BYTES),"note?":nullable(text(MAX_TEXT_BYTES))},
                 "finish":{"proof":reference("TaskProof"),"state":choices(&["done","cancelled"])},"release":{"proof":reference("TaskProof")}
             }),
@@ -190,36 +180,26 @@ fn build_strict() -> Vec<Value> {
         (
             "Read the activity journal or append a note.",
             json!({
-                "read":{"after?":nullable(seq),"limit":page.clone(),"wait_ms?":nullable(wait.clone())},
+                "read":{"after?":nullable(seq),"limit":page.clone(),"wait_seconds?":nullable(wait.clone())},
                 "note":{"note":text(MAX_TEXT_BYTES),"dedup_key?":nullable(text(MAX_REFERENCE_BYTES))}
             }),
         ),
         (
-            "Manage advisory work claims.",
+            "Manage advisory work claims and landing leases.",
             json!({
-                "acquire":{"scope":reference("Scope"),"lease_ms":lease.clone()},"renew":{"proof":reference("ClaimProof"),"lease_ms":lease.clone()},
-                "verify":{"proof":reference("ClaimProof")},"release":{"proof":reference("ClaimProof")},"list":{"after?":nullable(reference("Id")),"limit":page.clone()}
+                "claim_acquire":{"scope":reference("Scope"),"lease_seconds":lease.clone()},"claim_renew":{"proof":reference("ClaimProof"),"lease_seconds":lease.clone()},
+                "claim_verify":{"proof":reference("ClaimProof")},"claim_release":{"proof":reference("ClaimProof")},"claim_list":{"after?":nullable(reference("Id")),"limit":page.clone()},
+                "landing_acquire":{"reference":text(MAX_REFERENCE_BYTES),"expected":reference("GitOid"),"candidate":reference("GitOid"),"lease_seconds":lease.clone()},
+                "landing_renew":{"proof":reference("LandingProof"),"lease_seconds":lease},"landing_verify":{"proof":reference("LandingProof")},"landing_release":{"proof":reference("LandingProof")},
+                "landing_wait":{"reference":text(MAX_REFERENCE_BYTES),"generation":count.clone(),"wait_seconds":wait.clone()}
             }),
         ),
         (
-            "Manage landing leases and observe a generation.",
+            "Submit, list, inspect, wait for, cancel or resume runs.",
             json!({
-                "acquire":{"reference":text(MAX_REFERENCE_BYTES),"expected":reference("GitOid"),"candidate":reference("GitOid"),"lease_ms":lease.clone()},
-                "renew":{"proof":reference("LandingProof"),"lease_ms":lease},"verify":{"proof":reference("LandingProof")},"release":{"proof":reference("LandingProof")},
-                "wait":{"reference":text(MAX_REFERENCE_BYTES),"generation":count.clone(),"wait_ms":wait.clone()}
-            }),
-        ),
-        (
-            "Submit one batch to the run service.",
-            json!({
-                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_ms":integer(1000,14_400_000),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))}
-            }),
-        ),
-        (
-            "List, inspect, wait for, cancel or resume runs.",
-            json!({
-                "list":{"after?":nullable(reference("AttemptTarget")),"limit":page.clone()},"status":{"target":reference("AttemptTarget")},
-                "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_ms":wait},
+                "submit":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
+                "list":{"after?":nullable(reference("AttemptTarget")),"limit":page},"status":{"target":reference("AttemptTarget")},
+                "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId")},
                 "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone()}
             }),
@@ -234,13 +214,9 @@ fn build_strict() -> Vec<Value> {
         (
             "Read bounded output or fetch a manifest artefact.",
             json!({
-                "read":{"target":reference("AttemptTarget"),"part":choices(&["stdout","stderr"]),"offset":count,"max_bytes":integer(1,provenant_records::run::OUTPUT_LIMIT)},
+                "read":{"target":reference("AttemptTarget"),"part":choices(&["prompt","result","stderr","events"]),"offset":count,"max_bytes":integer(1,provenant_records::run::OUTPUT_LIMIT)},
                 "fetch":{"target":reference("AttemptTarget"),"artifact":reference("Artifact"),"max_bytes":integer(1,MAX_FETCH_BYTES)}
             }),
-        ),
-        (
-            "List peer hosts and readiness observations.",
-            json!({"list":{"after?":nullable(reference("Id")),"limit":page}}),
         ),
     ];
     TOOL_NAMES
@@ -254,7 +230,6 @@ fn build_strict() -> Vec<Value> {
                     | ToolKind::Task
                     | ToolKind::Events
                     | ToolKind::Claim
-                    | ToolKind::Landing
             ) && let Some(variants) = input["oneOf"].as_array_mut()
             {
                 for variant in variants {
@@ -269,8 +244,7 @@ fn build_strict() -> Vec<Value> {
                                 Some("create" | "claim" | "update" | "finish" | "release")
                             )
                             | (ToolKind::Events, Some("note"))
-                            | (ToolKind::Claim, Some("acquire" | "renew" | "release"))
-                            | (ToolKind::Landing, Some("acquire" | "renew" | "release"))
+                            | (ToolKind::Claim, Some("claim_acquire" | "claim_renew" | "claim_release" | "landing_acquire" | "landing_renew" | "landing_release"))
                     );
                     if is_mutation {
                         variant["properties"]["operation_id"] = reference("OperationId");
@@ -290,7 +264,7 @@ fn build_strict() -> Vec<Value> {
             }
             input["type"] = json!("object");
             input["$defs"] = definitions();
-            let mut tool = json!({"name":name,"description":description,"inputSchema":input});
+            let mut tool = json!({"name":name,"description":description,"inputSchema":input,"_meta":{"io.provenant/schemaVersion":SCHEMA_VERSION}});
             if let Some(output) = output_schema(*kind) {
                 tool["outputSchema"] = output;
             }

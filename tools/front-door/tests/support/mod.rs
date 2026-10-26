@@ -1,8 +1,6 @@
 //! Isolated process fixtures; no ambient config, credentials, or product state.
 #![allow(dead_code)]
-use provenant_supervisor::exec::{
-    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor,
-};
+use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor};
 use std::{
     ffi::OsString,
     fs,
@@ -33,9 +31,7 @@ pub fn eventually(timeout: Duration, mut condition: impl FnMut() -> bool) -> boo
 static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
-    provenant_supervisor::fixture::tempdir(|root| {
-        tempfile::Builder::new().prefix(".tmp").tempdir_in(root)
-    })
+    provenant_os::fixture::tempdir(|root| tempfile::Builder::new().prefix(".tmp").tempdir_in(root))
 }
 
 fn tempdir_in(parent: &Path) -> std::io::Result<tempfile::TempDir> {
@@ -189,7 +185,7 @@ impl TestRig {
             &["init", "-q", &format!("--object-format={format}")],
             None,
         )?;
-        if output.termination != provenant_supervisor::exec::Termination::Exit(0) {
+        if output.termination != provenant_os::exec::Termination::Exit(0) {
             return Err(format!(
                 "git init failed: {}",
                 String::from_utf8_lossy(&output.stderr.bytes)
@@ -280,7 +276,7 @@ impl TestRig {
 }
 pub fn code(output: &ExecOutcome) -> i64 {
     match output.termination {
-        provenant_supervisor::exec::Termination::Exit(code) => code,
+        provenant_os::exec::Termination::Exit(code) => code,
         _ => -1,
     }
 }

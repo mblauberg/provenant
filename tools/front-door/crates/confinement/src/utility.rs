@@ -4,15 +4,12 @@ use crate::repo::{
     RepoProbeData, VerifiedRepo,
 };
 use provenant_core::{CancelToken, GitOid};
-use provenant_supervisor::exec::{
-    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination,
-};
-use provenant_supervisor::fs::{
-    FileKind, FsError, Metadata, SafeDir, SafeFs, canonicalize, effective_uid,
+use provenant_os::{
+    exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
+    fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid},
 };
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -173,6 +170,10 @@ pub enum GitRead {
         head: GitOid,
         paths: Vec<RepoPath>,
     },
+    ChangedPaths {
+        base: GitOid,
+        head: GitOid,
+    },
     DiffIndex {
         paths: Vec<RepoPath>,
     },
@@ -251,7 +252,6 @@ pub(crate) enum GitMutation {
 /// Pinned absolute utility tools and a verified private home. No environment
 /// from the parent process is inherited by a child.
 pub struct UtilityRuntime {
-    fs: Arc<dyn SafeFs>,
     git: ExecutablePin,
     home: PrivateHome,
 }
@@ -265,25 +265,19 @@ pub struct DiscoveredProject {
 impl UtilityRuntime {
     /// Closed Git reads with HOME/TMPDIR pointing at a non-directory. This
     /// requires no state or temporary-directory creation and grants no mutation.
-    pub fn read_only(fs: Arc<dyn SafeFs>, git: impl AsRef<Path>) -> Result<Self, UtilityError> {
+    pub fn read_only(git: impl AsRef<Path>) -> Result<Self, UtilityError> {
         Ok(Self {
-            git: ExecutablePin::new(fs.as_ref(), git.as_ref(), "git")?,
+            git: ExecutablePin::new(git.as_ref(), "git")?,
             home: PrivateHome {
                 path: PathBuf::from("/dev/null"),
                 identity: None,
             },
-            fs,
         })
     }
-    pub fn new(
-        fs: Arc<dyn SafeFs>,
-        git: impl AsRef<Path>,
-        home: impl AsRef<Path>,
-    ) -> Result<Self, UtilityError> {
+    pub fn new(git: impl AsRef<Path>, home: impl AsRef<Path>) -> Result<Self, UtilityError> {
         Ok(Self {
-            git: ExecutablePin::new(fs.as_ref(), git.as_ref(), "git")?,
-            home: PrivateHome::new(fs.as_ref(), home.as_ref())?,
-            fs,
+            git: ExecutablePin::new(git.as_ref(), "git")?,
+            home: PrivateHome::new(home.as_ref())?,
         })
     }
 
@@ -298,8 +292,8 @@ impl UtilityRuntime {
             return Err(UtilityError::Cancelled);
         }
         self.revalidate()?;
-        VerifiedRepo::open(self.fs.clone(), path, |repo| {
-            verify_repo_binding(self, repo)?;
+        VerifiedRepo::open(path, |repo| {
+            verify_repo_binding(repo)?;
             reject_info_attributes(repo)?;
             verify_local_git_configuration(executor, repo, self, budget, cancel)?;
             let attribute_source = empty_attribute_source(executor, repo, self, budget, cancel)?;
@@ -328,8 +322,8 @@ impl UtilityRuntime {
             return Err(UtilityError::Cancelled);
         }
         self.revalidate()?;
-        VerifiedRepo::open_mode(self.fs.clone(), path, true, |repo| {
-            verify_repo_binding(self, repo)?;
+        VerifiedRepo::open_mode(path, true, |repo| {
+            verify_repo_binding(repo)?;
             reject_info_attributes(repo)?;
             verify_local_git_configuration(executor, repo, self, budget, cancel)?;
             let attribute_source = empty_attribute_source(executor, repo, self, budget, cancel)?;
@@ -358,7 +352,7 @@ impl UtilityRuntime {
     ) -> Result<DiscoveredProject, UtilityError> {
         let cwd = canonicalize(cwd)?;
         for ancestor in cwd.ancestors() {
-            let directory = self.fs.open_anchor(ancestor)?;
+            let directory = Directory::open_anchor(ancestor)?;
             match directory.metadata_at(OsStr::new(".git"), false) {
                 Ok(_) => {
                     let repo = self.open_repo(executor, ancestor, budget, cancel)?;
@@ -386,8 +380,8 @@ impl UtilityRuntime {
     }
 
     fn revalidate(&self) -> Result<(), UtilityError> {
-        self.git.verify(self.fs.as_ref())?;
-        self.home.verify(self.fs.as_ref())?;
+        self.git.verify()?;
+        self.home.verify()?;
         Ok(())
     }
 }
@@ -402,7 +396,7 @@ struct ExecutablePin {
 }
 
 impl ExecutablePin {
-    fn new(fs: &dyn SafeFs, input: &Path, tool: &'static str) -> Result<Self, UtilityError> {
+    fn new(input: &Path, tool: &'static str) -> Result<Self, UtilityError> {
         if !input.is_absolute() || input.file_name().and_then(OsStr::to_str) != Some(tool) {
             return Err(UtilityError::InvalidExecutable { tool });
         }
@@ -410,8 +404,7 @@ impl ExecutablePin {
             .parent()
             .ok_or(UtilityError::InvalidExecutable { tool })?;
         let parent_path = canonicalize(input_parent)?;
-        let parent = fs
-            .open_anchor(&parent_path)
+        let parent = Directory::open_anchor(&parent_path)
             .map_err(|_| UtilityError::InvalidExecutable { tool })?;
         let parent_identity = parent.metadata()?;
         if parent_identity.kind != FileKind::Directory || parent_identity.mode & 0o022 != 0 {
@@ -421,7 +414,7 @@ impl ExecutablePin {
             .file_name()
             .ok_or(UtilityError::InvalidExecutable { tool })?
             .to_os_string();
-        let identity = verify_executable_at(parent.as_ref(), &name, tool)?;
+        let identity = verify_executable_at(&parent, &name, tool)?;
         Ok(Self {
             path: parent_path.join(&name),
             parent_path,
@@ -432,14 +425,13 @@ impl ExecutablePin {
         })
     }
 
-    fn verify(&self, fs: &dyn SafeFs) -> Result<(), UtilityError> {
-        let fresh = fs
-            .open_anchor(&self.parent_path)
+    fn verify(&self) -> Result<(), UtilityError> {
+        let fresh = Directory::open_anchor(&self.parent_path)
             .map_err(|_| UtilityError::ExecutableChanged { tool: self.tool })?;
         let fresh_identity = fresh
             .metadata()
             .map_err(|_| UtilityError::ExecutableChanged { tool: self.tool })?;
-        let current = verify_executable_at(fresh.as_ref(), &self.name, self.tool)?;
+        let current = verify_executable_at(&fresh, &self.name, self.tool)?;
         if !self.parent_identity.same_identity(&fresh_identity)
             || !self.identity.same_identity(&current)
             || self.identity.mode != current.mode
@@ -452,7 +444,7 @@ impl ExecutablePin {
 }
 
 fn verify_executable_at(
-    parent: &dyn SafeDir,
+    parent: &Directory,
     name: &OsStr,
     tool: &'static str,
 ) -> Result<Metadata, UtilityError> {
@@ -488,18 +480,14 @@ struct PrivateHome {
 }
 
 impl PrivateHome {
-    fn new(fs: &dyn SafeFs, input: &Path) -> Result<Self, UtilityError> {
+    fn new(input: &Path) -> Result<Self, UtilityError> {
         if !input.is_absolute() {
             return Err(UtilityError::InvalidHome);
         }
-        let initial = fs
-            .open_anchor(input)
-            .map_err(|_| UtilityError::InvalidHome)?;
+        let initial = Directory::open_anchor(input).map_err(|_| UtilityError::InvalidHome)?;
         let before = initial.metadata().map_err(|_| UtilityError::InvalidHome)?;
         let path = canonicalize(input).map_err(|_| UtilityError::InvalidHome)?;
-        let anchor = fs
-            .open_anchor(&path)
-            .map_err(|_| UtilityError::InvalidHome)?;
+        let anchor = Directory::open_anchor(&path).map_err(|_| UtilityError::InvalidHome)?;
         let identity = anchor.metadata().map_err(|_| UtilityError::InvalidHome)?;
         if identity.kind != FileKind::Directory
             || identity.uid != effective_uid()
@@ -514,13 +502,11 @@ impl PrivateHome {
         })
     }
 
-    fn verify(&self, fs: &dyn SafeFs) -> Result<(), UtilityError> {
+    fn verify(&self) -> Result<(), UtilityError> {
         let Some(expected) = self.identity else {
             return Ok(());
         };
-        let fresh = fs
-            .open_anchor(&self.path)
-            .map_err(|_| UtilityError::InvalidHome)?;
+        let fresh = Directory::open_anchor(&self.path).map_err(|_| UtilityError::InvalidHome)?;
         let identity = fresh.metadata().map_err(|_| UtilityError::InvalidHome)?;
         if identity.kind != FileKind::Directory
             || identity.uid != effective_uid()
@@ -600,9 +586,9 @@ fn execute_git(
     if cancel.is_cancelled() {
         return Err(UtilityError::Cancelled);
     }
-    runtime.home.verify(runtime.fs.as_ref())?;
+    runtime.home.verify()?;
     repo.revalidate()?;
-    verify_repo_binding(runtime, repo)?;
+    verify_repo_binding(repo)?;
     reject_info_attributes(repo)?;
     let attribute_source = repo
         .probe_data()
@@ -618,7 +604,7 @@ fn execute_git(
         env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
     }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    runtime.git.verify(runtime.fs.as_ref())?;
+    runtime.git.verify()?;
     let options = exec_options(
         &argv,
         repo.root_path(),
@@ -739,6 +725,17 @@ fn git_args(
             "--verify".into(),
             "--end-of-options".into(),
             format!("{}^{{commit}}", revision.as_str()).into(),
+        ],
+        GitRead::ChangedPaths { base, head } => vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--no-renames".into(),
+            "--name-only".into(),
+            "-z".into(),
+            base.to_string().into(),
+            head.to_string().into(),
+            "--".into(),
         ],
         GitRead::Diff { base, head, paths } => {
             let mut args = vec![
@@ -979,12 +976,11 @@ pub(crate) fn environment(
     env
 }
 
-fn verify_repo_binding(runtime: &UtilityRuntime, repo: &VerifiedRepo) -> Result<(), UtilityError> {
-    // A VerifiedRepo created with another SafeFs implementation cannot bind a
-    // different root or Git database to this Executor cwd.
-    let root = runtime.fs.open_anchor(repo.root_path())?;
-    let private = runtime.fs.open_anchor(repo.private_git_dir())?;
-    let common = runtime.fs.open_anchor(repo.common_git_dir())?;
+fn verify_repo_binding(repo: &VerifiedRepo) -> Result<(), UtilityError> {
+    // Reopening binds the held root and Git database to this Executor cwd.
+    let root = Directory::open_anchor(repo.root_path())?;
+    let private = Directory::open_anchor(repo.private_git_dir())?;
+    let common = Directory::open_anchor(repo.common_git_dir())?;
     if !root.metadata()?.same_identity(&repo.root_identity())
         || !private.metadata()?.same_identity(&repo.private_identity())
         || !common.metadata()?.same_identity(&repo.common_identity())
@@ -1133,7 +1129,7 @@ fn run_git_probe(
     cancel: &CancelToken,
     command: &[OsString],
 ) -> Result<ExecOutcome, UtilityError> {
-    runtime.git.verify(runtime.fs.as_ref())?;
+    runtime.git.verify()?;
     let mut argv = vec![
         runtime.git.path.as_os_str().to_owned(),
         OsString::from("--git-dir"),
@@ -1236,7 +1232,7 @@ pub(crate) mod tests {
         assert_eq!(oid.to_string().len(), 40);
         assert_eq!(
             fixture.repo.root_path(),
-            provenant_supervisor::fs::canonicalize(&fixture.root)?
+            provenant_os::fs::canonicalize(&fixture.root)?
         );
         assert_eq!(fixture.runtime.git_program_path(), fixture.git.as_path());
         assert!(fixture.home.is_dir());

@@ -255,10 +255,9 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
 #[test]
 fn internal_lock_deadline_is_contention_and_keeps_the_report() -> Result {
     use provenant_core::{CancelToken, Clock, WaitBudget};
-    use provenant_supervisor::{
-        clock::SystemClock,
-        fs::{Directory, LockMode},
-    };
+    use provenant_os::clock::SystemClock;
+    use provenant_os::fs::Directory;
+    use provenant_os::fs::LockMode;
     let rig = quota_rig()?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
     let before = std::fs::read(rig.state.join("quota/report.json"))?;
@@ -320,7 +319,7 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_stale_marker() -> Result {
 
 fn jiff_time() -> Result<i64> {
     use provenant_core::Clock;
-    Ok(provenant_supervisor::clock::SystemClock::new()
+    Ok(provenant_os::clock::SystemClock::new()
         .wall_now()?
         .as_timestamp()
         .as_second())
@@ -636,7 +635,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
     rig.assert_legacy_unchanged()
 }
 
-fn json(out: &provenant_supervisor::exec::ExecOutcome) -> Result<serde_json::Value> {
+fn json(out: &provenant_os::exec::ExecOutcome) -> Result<serde_json::Value> {
     Ok(serde_json::from_slice(&out.stdout.bytes)?)
 }
 

@@ -199,11 +199,7 @@ fn state_dir_registrations_drive_quota_and_chair_without_agents_config() -> Resu
     Ok(())
 }
 
-fn hook(
-    rig: &TestRig,
-    start: bool,
-    session: &str,
-) -> Result<provenant_supervisor::exec::ExecOutcome> {
+fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec::ExecOutcome> {
     rig.execute(std::path::Path::new(env!("CARGO_BIN_EXE_provenant")), &["hook", "claude", if start {"chair-start"} else {"chair-prompt"}], Some(&serde_json::to_vec(&json!({
         "hook_event_name":if start {"SessionStart"} else {"UserPromptSubmit"}, "session_id":session,"cwd":rig.project,"transcript_path":rig.root.join("transcript.jsonl"),"prompt":"PRIVATE PROMPT MUST NOT BE STORED"
     }))?))
@@ -419,18 +415,17 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
         WaitBudget,
     };
+    use provenant_os::clock::SystemClock;
     use provenant_records::CanonicalV1;
     use provenant_run as run;
-    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
 
     let rig = configured()?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let binding = provenant_config::bind_project(
         &roots,
         provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
-        &LocalFs,
     )?;
     let context = run::ExecutionContext {
         state_root: roots.state,

@@ -1,15 +1,13 @@
 //! Bounded DAG execution for Fabric graphs.
 //!
-//! `FileJournal` saves a complete canonical checkpoint with supervisor's safe
+//! `FileJournal` saves a complete canonical checkpoint with the OS layer's safe
 //! filesystem API. `AttemptOwner` is implemented by composition over run. Its
 //! key is idempotent: a repeated key observes the existing attempt instead of
 //! launching a duplicate provider process.
 
 use provenant_core::{CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits, decode_v1};
-use provenant_supervisor::fs::{
-    FsError, LockGuard, LockMode, Publication, PublishMode, SafeDir, SafeFs,
-};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -271,7 +269,7 @@ pub enum JournalError {
 /// graph writers; all filesystem access after open is descriptor-relative.
 pub struct FileJournal {
     graph_id: String,
-    directory: Box<dyn SafeDir>,
+    directory: Directory,
     execution: Option<GraphExecution>,
     _lock: LockGuard,
 }
@@ -281,7 +279,6 @@ impl FileJournal {
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
-        fs: &dyn SafeFs,
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
@@ -289,10 +286,10 @@ impl FileJournal {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
-        let root_dir = fs.open_anchor(root.as_path())?;
-        let fabric_dir = open_or_create(root_dir.as_ref(), OsStr::new("fabric"))?;
-        let graphs_dir = open_or_create(fabric_dir.as_ref(), OsStr::new("graphs"))?;
-        let graphs_dir = open_or_create(graphs_dir.as_ref(), OsStr::new(&project.to_string()))?;
+        let root_dir = Directory::open_anchor(root.as_path())?;
+        let fabric_dir = open_or_create(&root_dir, OsStr::new("fabric"))?;
+        let graphs_dir = open_or_create(&fabric_dir, OsStr::new("graphs"))?;
+        let graphs_dir = open_or_create(&graphs_dir, OsStr::new(&project.to_string()))?;
         let lock_name = format!("graph-{graph_id}.lock");
         let lock = graphs_dir.lock(
             OsStr::new(&lock_name),
@@ -301,8 +298,7 @@ impl FileJournal {
             cancel,
             clock,
         )?;
-        let execution =
-            load_checkpoint(graphs_dir.as_ref(), graph_id)?.map(|stored| stored.execution);
+        let execution = load_checkpoint(&graphs_dir, graph_id)?.map(|stored| stored.execution);
         Ok(Self {
             graph_id: graph_id.to_owned(),
             directory: graphs_dir,
@@ -321,12 +317,8 @@ impl FileJournal {
 
     /// Discover journals without creating directories. Each is read separately
     /// so a corrupt graph need not prevent another graph from advancing.
-    pub fn graph_ids(
-        root: &StateRoot,
-        project: ProjectId,
-        fs: &dyn SafeFs,
-    ) -> Result<Vec<String>, JournalError> {
-        let directory = match graph_directory(root, project, fs) {
+    pub fn graph_ids(root: &StateRoot, project: ProjectId) -> Result<Vec<String>, JournalError> {
+        let directory = match graph_directory(root, project) {
             Ok(directory) => directory,
             Err(error) if error.is_not_found() => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -351,23 +343,20 @@ impl FileJournal {
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
-        fs: &dyn SafeFs,
     ) -> Result<Option<GraphExecution>, JournalError> {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
-        let directory = graph_directory(root, project, fs)?;
-        Ok(
-            load_checkpoint(directory.as_ref(), graph_id)?.and_then(|stored| {
-                (!stored.checkpoint.cancelled
-                    && stored
-                        .checkpoint
-                        .nodes
-                        .iter()
-                        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running)))
-                .then_some(stored.execution)
-            }),
-        )
+        let directory = graph_directory(root, project)?;
+        Ok(load_checkpoint(&directory, graph_id)?.and_then(|stored| {
+            (!stored.checkpoint.cancelled
+                && stored
+                    .checkpoint
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running)))
+            .then_some(stored.execution)
+        }))
     }
 
     /// Read an atomic checkpoint snapshot without creating directories or
@@ -376,15 +365,14 @@ impl FileJournal {
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
-        fs: &dyn SafeFs,
     ) -> Result<Option<GraphCheckpoint>, JournalError> {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
-        let directory = graph_directory(root, project, fs);
+        let directory = graph_directory(root, project);
         match directory {
             Ok(directory) => {
-                Ok(load_checkpoint(directory.as_ref(), graph_id)?.map(|stored| stored.checkpoint))
+                Ok(load_checkpoint(&directory, graph_id)?.map(|stored| stored.checkpoint))
             }
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(error.into()),
@@ -398,12 +386,11 @@ impl FileJournal {
         project: ProjectId,
         graph_id: &str,
         error: Option<&str>,
-        fs: &dyn SafeFs,
     ) -> Result<(), JournalError> {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
-        let directory = graph_directory(root, project, fs)?;
+        let directory = graph_directory(root, project)?;
         let name = advance_error_name(graph_id);
         let Some(error) = error else {
             return match directory.unlink(&name) {
@@ -419,7 +406,6 @@ impl FileJournal {
             &name,
             ".graph-advance-error.",
             &error.as_bytes()[..end],
-            0o600,
             PublishMode::Replace,
         )?;
         Ok(())
@@ -430,12 +416,11 @@ impl FileJournal {
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
-        fs: &dyn SafeFs,
     ) -> Result<Option<String>, JournalError> {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
-        let directory = match graph_directory(root, project, fs) {
+        let directory = match graph_directory(root, project) {
             Ok(directory) => directory,
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -463,7 +448,7 @@ impl GraphJournal for FileJournal {
         if graph_id != self.graph_id {
             return Err(JournalError::GraphMismatch);
         }
-        Ok(load_checkpoint(self.directory.as_ref(), graph_id)?.map(|stored| stored.checkpoint))
+        Ok(load_checkpoint(&self.directory, graph_id)?.map(|stored| stored.checkpoint))
     }
 
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
@@ -486,18 +471,15 @@ impl GraphJournal for FileJournal {
         if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
             return Err(JournalError::TooLarge);
         }
-        match self.directory.atomic_write(
-            &self.checkpoint_name(),
-            ".graph-checkpoint.",
-            bytes.as_bytes(),
-            0o600,
-            PublishMode::Replace,
-        )? {
-            Publication::Durable => Ok(()),
-            Publication::VisibleDurabilityUnconfirmed { sync_error } => {
-                Err(JournalError::DurabilityUnconfirmed(sync_error))
-            }
-        }
+        self.directory
+            .atomic_write(
+                &self.checkpoint_name(),
+                ".graph-checkpoint.",
+                bytes.as_bytes(),
+                PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)
     }
 }
 
@@ -505,19 +487,15 @@ fn advance_error_name(graph_id: &str) -> OsString {
     format!("graph-{graph_id}.advance-error").into()
 }
 
-fn graph_directory(
-    root: &StateRoot,
-    project: ProjectId,
-    fs: &dyn SafeFs,
-) -> Result<Box<dyn SafeDir>, FsError> {
-    let root = fs.open_anchor(root.as_path())?;
+fn graph_directory(root: &StateRoot, project: ProjectId) -> Result<Directory, FsError> {
+    let root = Directory::open_anchor(root.as_path())?;
     let fabric = root.open_verified_directory(OsStr::new("fabric"))?;
     let graphs = fabric.open_verified_directory(OsStr::new("graphs"))?;
     graphs.open_verified_directory(OsStr::new(&project.to_string()))
 }
 
 fn load_checkpoint(
-    directory: &dyn SafeDir,
+    directory: &Directory,
     graph_id: &str,
 ) -> Result<Option<StoredCheckpoint>, JournalError> {
     let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
@@ -568,7 +546,7 @@ struct StoredCheckpoint {
     execution: GraphExecution,
 }
 
-fn open_or_create(directory: &dyn SafeDir, name: &OsStr) -> Result<Box<dyn SafeDir>, FsError> {
+fn open_or_create(directory: &Directory, name: &OsStr) -> Result<Directory, FsError> {
     match directory.open_verified_directory(name) {
         Ok(child) => Ok(child),
         Err(error) if error.is_not_found() => {
@@ -1608,7 +1586,7 @@ mod tests {
 mod file_tests {
     use super::*;
     use provenant_core::{Clock, ProjectId};
-    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
     use std::{convert::Infallible, os::unix::fs::PermissionsExt};
     struct Owner;
     impl AttemptOwner for Owner {
@@ -1640,16 +1618,16 @@ mod file_tests {
         std::fs::create_dir(base.join("state")).unwrap();
         std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700))
             .unwrap();
-        let root = StateRoot::resolve(&inputs, &LocalFs).unwrap();
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
         let project = ProjectId::from_bytes([1; 16]);
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"errors","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
-        let read = || FileJournal::read_advance_error(&root, project, "errors", &LocalFs).unwrap();
+        let read = || FileJournal::read_advance_error(&root, project, "errors").unwrap();
         assert_eq!(read(), None);
         let mut journal =
-            FileJournal::open(&root, project, "errors", &LocalFs, budget, &cancel, &clock).unwrap();
+            FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
         for directory in [base.clone(), base.join("state")] {
             journal
                 .bind(GraphExecution {
@@ -1659,9 +1637,7 @@ mod file_tests {
                 .unwrap();
         }
         // Recording takes no graph lock, so it works while the journal is held.
-        let set = |error| {
-            FileJournal::set_advance_error(&root, project, "errors", error, &LocalFs).unwrap()
-        };
+        let set = |error| FileJournal::set_advance_error(&root, project, "errors", error).unwrap();
         set(Some("first"));
         assert_eq!(read().as_deref(), Some("first"));
         set(Some("second"));
@@ -1683,22 +1659,21 @@ mod file_tests {
         std::fs::create_dir(base.join("state")).unwrap();
         std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700))
             .unwrap();
-        let root = StateRoot::resolve(&inputs, &LocalFs).unwrap();
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
         let project = ProjectId::from_bytes([1; 16]);
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"reopen","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
         assert!(
-            FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs)
+            FileJournal::read_checkpoint(&root, project, "reopen")
                 .unwrap()
                 .is_none()
         );
         assert!(!root.as_path().join("fabric/graphs").exists());
         let checkpoint = {
             let mut journal =
-                FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock)
-                    .unwrap();
+                FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
             journal
                 .bind(GraphExecution {
                     directory: base.clone(),
@@ -1710,17 +1685,17 @@ mod file_tests {
                 .checkpoint;
             // Status must remain available while the writer holds its lock.
             assert_eq!(
-                FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs).unwrap(),
+                FileJournal::read_checkpoint(&root, project, "reopen").unwrap(),
                 Some(checkpoint.clone())
             );
             checkpoint
         };
         assert_eq!(
-            FileJournal::graph_ids(&root, project, &LocalFs).unwrap(),
+            FileJournal::graph_ids(&root, project).unwrap(),
             vec!["reopen"]
         );
         assert_eq!(
-            FileJournal::pending_execution(&root, project, "reopen", &LocalFs).unwrap(),
+            FileJournal::pending_execution(&root, project, "reopen").unwrap(),
             Some(GraphExecution {
                 directory: base.clone(),
                 document: document.clone()
@@ -1728,14 +1703,13 @@ mod file_tests {
         );
         {
             let mut journal =
-                FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock)
-                    .unwrap();
+                FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
             assert_eq!(journal.load("reopen").unwrap(), Some(checkpoint));
         }
         {
             let other_project = ProjectId::from_bytes([2; 16]);
             assert!(
-                FileJournal::read_checkpoint(&root, other_project, "reopen", &LocalFs,)
+                FileJournal::read_checkpoint(&root, other_project, "reopen")
                     .unwrap()
                     .is_none()
             );
@@ -1751,12 +1725,12 @@ mod file_tests {
             .join(format!("fabric/graphs/{project}/graph-reopen.lock"));
         std::fs::remove_file(&lock).unwrap();
         assert!(
-            FileJournal::read_checkpoint(&root, project, "missing", &LocalFs)
+            FileJournal::read_checkpoint(&root, project, "missing")
                 .unwrap()
                 .is_none()
         );
         assert!(
-            FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs)
+            FileJournal::read_checkpoint(&root, project, "reopen")
                 .unwrap()
                 .is_some()
         );
@@ -1769,11 +1743,11 @@ mod file_tests {
         stored["checkpoint"]["graph_id"] = serde_json::json!("changed");
         std::fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
         assert!(matches!(
-            FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs),
+            FileJournal::read_checkpoint(&root, project, "reopen"),
             Err(JournalError::BadDigest)
         ));
         assert!(matches!(
-            FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock),
+            FileJournal::open(&root, project, "reopen", budget, &cancel, &clock),
             Err(JournalError::BadDigest)
         ));
     }

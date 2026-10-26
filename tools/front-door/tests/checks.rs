@@ -102,8 +102,9 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
         plan_install,
     };
     use provenant_core::{CancelToken, Clock, PathResolver, RootInputs, WaitBudget};
+    use provenant_os::clock::SystemClock;
     use provenant_records::{SourceInput, VersionInfo, source_digest};
-    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+
     use std::os::unix::fs::PermissionsExt;
     use std::{
         fs, io,
@@ -182,7 +183,6 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     let release = package_release(
         &source,
         &version,
-        &LocalFs,
         &FixedSmoke(version.clone()),
         &CancelToken::new(),
     )?;
@@ -190,12 +190,11 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&Resolver)?;
     let targets = Targets::new(roots, &rig.home, &[provenant_records::Harness::Codex]);
-    let snapshots = Snapshots::capture(&release, &targets, &LocalFs)?;
+    let snapshots = Snapshots::capture(&release, &targets)?;
     let plan = plan_install(release, targets, snapshots)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let context = InstallContext {
-        fs: &LocalFs,
         clock: &clock,
         budget: WaitBudget::cli(clock.mono_now(), 1)?,
         cancel: &cancel,
@@ -224,7 +223,7 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     Ok(())
 }
 
-fn json(output: &provenant_supervisor::exec::ExecOutcome) -> Result<serde_json::Value> {
+fn json(output: &provenant_os::exec::ExecOutcome) -> Result<serde_json::Value> {
     Ok(serde_json::from_slice(&output.stdout.bytes)?)
 }
 fn git(rig: &TestRig, args: &[&str]) -> Result<String> {

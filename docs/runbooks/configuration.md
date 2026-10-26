@@ -8,7 +8,7 @@ profile or a knob with `provenant config set profile economy` or
 
 Profiles are `balanced`, `economy` and `rigorous`. Override a knob for one run
 with `provenant dispatch --knob NAME=VALUE` (the terminal path; agents use
-`fabric_submit`'s `knobs`).
+`fabric_run` (`op: submit`)'s `knobs`).
 
 ## Precedence and stamps
 
@@ -26,8 +26,9 @@ default. There is no project JSON overlay or `PROVENANT_KNOB_*` environment
 layer. `config set|unset|show` read and write this file through one editor
 that validates the whole result before replacing it, and `config show` reports
 each value and its source. Dispatch accepts repeated `--knob NAME=VALUE`, and
-`fabric_submit` accepts `knobs: ["NAME=VALUE"]`; these validated overrides win
-over configuration. Each sealed task and attempt records the profile name,
+`fabric_run` (`op: submit`) accepts `knobs: ["NAME=VALUE"]`; these validated
+overrides win over configuration. Each sealed task and attempt records the
+profile name,
 effective knob values and exact dispatch overrides, and continuations keep
 that stamp.
 

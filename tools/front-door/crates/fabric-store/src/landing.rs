@@ -2,8 +2,8 @@
 //! SQLite transactions never span that transport or lock acquisition.
 use crate::{claims::*, *};
 use provenant_core::{ClaimId, Digest, DurationMicros, GitOid, OperationId};
+use provenant_os::fs::{LockGuard, LockMode};
 use provenant_records::RecordHeader;
-use provenant_supervisor::fs::{LockGuard, LockMode};
 use std::ffi::OsStr;
 
 /// Holds a safely acquired lock on a persistent private file. Store checks

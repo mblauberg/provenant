@@ -88,11 +88,7 @@ fn prepared(
 
 /// The credential mechanism each adapter's fixture plan selects.
 fn login(id: &str) -> Option<&'static str> {
-    match id {
-        "codex" | "cursor" => Some("login"),
-        "agy" => Some("keychain"),
-        _ => None,
-    }
+    provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication)
 }
 
 struct Case {

@@ -1,7 +1,6 @@
 //! One held-parent read contract for repository metadata and retained evidence.
-use provenant_supervisor::fs::{FileKind, FsError, Metadata, SafeDir};
+use provenant_os::fs::{Directory, FileKind, FsError, Metadata};
 use std::ffi::OsStr;
-use std::io::{Read, Seek, SeekFrom};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -18,19 +17,8 @@ pub(crate) enum ReadError {
     Io(#[from] std::io::Error),
 }
 
-pub(crate) fn same_metadata(left: &Metadata, right: &Metadata) -> bool {
-    left.kind == right.kind
-        && left.device == right.device
-        && left.inode == right.inode
-        && left.links == right.links
-        && left.size == right.size
-        && left.modified_ns == right.modified_ns
-        && left.mode == right.mode
-        && left.uid == right.uid
-}
-
 pub(crate) fn read_regular(
-    parent: &dyn SafeDir,
+    parent: &Directory,
     name: &OsStr,
     limit: u64,
 ) -> Result<(Vec<u8>, Metadata), ReadError> {
@@ -41,24 +29,16 @@ pub(crate) fn read_regular(
     if entry.size > limit {
         return Err(ReadError::TooLarge);
     }
-    let mut file = parent.open_read(name)?;
-    let before = file.metadata()?;
-    if !same_metadata(&entry, &before) {
-        return Err(ReadError::Changed);
-    }
-    file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    (&mut *file)
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(ReadError::TooLarge);
-    }
-    let after = file.metadata()?;
-    if !same_metadata(&before, &after)
-        || after.size != bytes.len() as u64
-        || !same_metadata(&after, &parent.metadata_at(name, false)?)
-    {
+    let bytes = parent
+        .read_stable(name, limit)
+        .map_err(|error| match error {
+            FsError::TooLarge { .. } => ReadError::TooLarge,
+            FsError::RaceRefused { .. } => ReadError::Changed,
+            FsError::ReadIo { source, .. } => ReadError::Io(source),
+            error => ReadError::Filesystem(error),
+        })?;
+    let after = parent.metadata_at(name, false)?;
+    if !entry.unchanged(&after) || after.size != bytes.len() as u64 {
         return Err(ReadError::Changed);
     }
     Ok((bytes, after))

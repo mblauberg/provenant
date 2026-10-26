@@ -1,6 +1,6 @@
 //! One bounded, user-owned TOML configuration and immutable startup snapshots.
 //!
-//! `load` accepts an already opened optional reader; `read` uses supervisor's
+//! `load` accepts an already opened optional reader; `read` uses the OS crate's
 //! no-follow filesystem boundary. CLI owns envelopes, pagination and exits:
 //! library errors retain their typed cause; CLI classifies inspected defects.
 #![forbid(unsafe_code)]
@@ -54,7 +54,7 @@ pub enum ConfigError {
     Read {
         path: PathBuf,
         #[source]
-        source: provenant_supervisor::fs::FsError,
+        source: provenant_os::fs::FsError,
     },
     #[error("config at {path} exceeds the {limit}-byte limit")]
     TooLarge { path: PathBuf, limit: u64 },
@@ -94,7 +94,7 @@ pub enum ConfigError {
     #[error("project binding lock budget is invalid")]
     ProjectBindingBudget,
     #[error(transparent)]
-    ProjectBindingFilesystem(#[from] provenant_supervisor::fs::FsError),
+    ProjectBindingFilesystem(#[from] provenant_os::fs::FsError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

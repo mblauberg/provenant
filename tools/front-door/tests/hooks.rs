@@ -316,20 +316,18 @@ fn unreadable_and_stalled_input_cannot_allow_bash() -> Result {
 
 fn publish_checkpoint(rig: &TestRig) -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
-    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+    use provenant_os::clock::SystemClock;
+
     use provenant_workflow::session::{HostSessionId, SessionStore};
     use std::os::unix::fs::PermissionsExt;
     fs::create_dir(&rig.state)?;
     fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let common = fs::canonicalize(rig.project.join(".git"))?;
-    let binding = provenant_config::bind_project(
-        &roots,
-        provenant_config::ProjectLocation::new(common)?,
-        &LocalFs,
-    )?;
+    let binding =
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(common)?)?;
     let clock = SystemClock::new();
     let store = SessionStore::new(
         roots.state,

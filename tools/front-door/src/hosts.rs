@@ -1,11 +1,11 @@
 //! Non-billable sign-in diagnostics. Captures remain bounded and in memory.
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Hosts};
-use provenant_providers::claude::{CredentialPresence, SigninStatus, signin_status};
-use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::exec::{
+use provenant_os::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
+use provenant_providers::claude::{CredentialPresence, SigninStatus, signin_status};
+use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -23,13 +23,13 @@ struct Identity {
 struct Report {
     claude: Vec<Identity>,
     /// The macOS login-session peer agent.
-    peer_agent: crate::peer_agent::Status,
+    peer_agent: provenant_fabric_runtime::peer_agent::Status,
 }
 fn executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .filter(|p| p.is_absolute())
         .map(|p| p.join(name))
-        .find(|p| provenant_supervisor::sys::is_executable(p))
+        .find(|p| provenant_os::sys::is_executable(p))
 }
 fn probe(
     argv: &[OsString],
@@ -103,7 +103,7 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
         _ => CredentialPresence::Unavailable,
     }
 }
-fn local(globals: &Globals, home: &Path) -> Result<Report, Box<dyn std::error::Error>> {
+fn local(home: &Path, state: &Path) -> Result<Report, Box<dyn std::error::Error>> {
     let mut identities = vec![("default (~/.claude)".to_owned(), home.join(".claude"))];
     for entry in fs::read_dir(home)? {
         let entry = entry?;
@@ -158,17 +158,16 @@ fn local(globals: &Globals, home: &Path) -> Result<Report, Box<dyn std::error::E
         };
         claude.push(Identity { label, signin });
     }
-    let assets = roots::product_root().unwrap_or_else(|_| home.to_path_buf());
-    let state = roots::roots(globals, &assets, home)?.state;
     Ok(Report {
         claude,
-        peer_agent: crate::peer_agent::status(state.as_path(), home),
+        peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
     })
 }
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, Box<dyn std::error::Error>> {
-    let home = roots::home()?;
+    let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)?;
+    let home = resolved.home;
     let Some(host) = host else {
-        return local(globals, &home);
+        return local(&home, resolved.roots.state.as_path());
     };
     let ssh = executable("ssh").ok_or("SSH executable is unavailable")?;
     let argv = [
@@ -233,7 +232,7 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                 .unwrap_or_else(|| "unknown".into());
             text.push_str(&format!(
                 "peer agent [{}]: {state}\n",
-                crate::peer_agent::LABEL
+                provenant_fabric_runtime::peer_agent::LABEL
             ));
             emit(
                 &CommandResult::new("hosts doctor", Outcome::Ok, report),
@@ -269,7 +268,10 @@ mod tests {
     fn doctor_report_requires_the_peer_agent() {
         let report: super::Report =
             serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped"}"#).unwrap();
-        assert_eq!(report.peer_agent, crate::peer_agent::Status::Stopped);
+        assert_eq!(
+            report.peer_agent,
+            provenant_fabric_runtime::peer_agent::Status::Stopped
+        );
         assert!(serde_json::from_str::<super::Report>(r#"{"claude":[]}"#).is_err());
     }
 }

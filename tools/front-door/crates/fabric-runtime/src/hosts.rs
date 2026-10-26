@@ -5,8 +5,8 @@ use crate::{
     identity::{CrossHostProjectKey, Identity},
 };
 use provenant_core::{ActorId, CancelToken, Clock, HostId, OperationId, WaitBudget};
-use provenant_records::{CanonicalV1, Limits};
-use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+use provenant_records::{CanonicalV1, Limits, Trace};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 2;
+pub const PROTOCOL: u64 = 3;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(
@@ -22,7 +22,7 @@ pub fn discover_ssh_executable(
 ) -> Result<std::path::PathBuf, PeerError> {
     if let Some(path) = override_path {
         if !crate::config::valid_executable_override(path)
-            || !provenant_supervisor::sys::is_executable(path)
+            || !provenant_os::sys::is_executable(path)
         {
             return Err(PeerError::Unavailable);
         }
@@ -31,7 +31,7 @@ pub fn discover_ssh_executable(
     ["/usr/bin/ssh", "/bin/ssh"]
         .into_iter()
         .map(Path::new)
-        .find(|path| provenant_supervisor::sys::is_executable(path))
+        .find(|path| provenant_os::sys::is_executable(path))
         .map(Path::to_path_buf)
         .ok_or(PeerError::Unavailable)
 }
@@ -58,22 +58,12 @@ pub enum PeerError {
     Cancelled,
     #[error("malformed peer frame")]
     Frame,
-    #[error("peer refused the operation: {code}")]
-    Refused { code: String },
+    #[error("peer refused the operation: {error}")]
+    Refused { error: facade::FacadeError },
 }
 impl PeerError {
     pub fn code(&self) -> &'static str {
-        match self {
-            Self::Version | Self::ProtocolMismatch { .. } => "peer_version",
-            Self::Project | Self::SourceHost => "invalid_input",
-            Self::Unavailable | Self::Failed(_) => "home_unavailable",
-            Self::Unknown { .. } => "launch_unknown",
-            Self::Cancelled => "cancelled",
-            Self::Frame => "state_corrupt",
-            Self::Refused { code } => {
-                crate::coordination::facade::FacadeError::from_code(code, None).code()
-            }
-        }
+        facade::FacadeError::from(self).code()
     }
 }
 
@@ -264,15 +254,45 @@ pub struct PeerRequest<A = PeerAction> {
     pub agent: String,
     pub project: ProjectLocator,
     pub action: A,
+    /// Who sent this and for which operation, for correlation on the peer.
+    #[serde(default)]
+    pub trace: Trace,
 }
 impl PeerRequest {
+    /// A request from this host: the trace names the sending host, the acting
+    /// agent and the operation the action carries, and nothing else.
+    pub fn new(
+        target_host: HostId,
+        source_host: HostId,
+        agent: String,
+        project: ProjectLocator,
+        action: PeerAction,
+    ) -> Self {
+        let mut request = Self {
+            version: 1,
+            protocol: PROTOCOL,
+            target_host,
+            source_host,
+            agent,
+            project,
+            action,
+            trace: Trace::default(),
+        };
+        request.trace = Trace {
+            host: Some(source_host),
+            actor: request.actor().ok(),
+            operation: request.operation(),
+            ..Trace::default()
+        };
+        request
+    }
     pub fn operation(&self) -> Option<OperationId> {
         match &self.action {
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
             PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
             PeerAction::Submit {
-                input: facade::SubmitInput::Submission { operation_id, .. },
+                input: facade::SubmitInput::Submit { operation_id, .. },
             }
             | PeerAction::Run {
                 input:
@@ -299,6 +319,9 @@ impl PeerRequest {
     ) -> Result<(), PeerError> {
         if self.version != 1 || self.target_host != local {
             return Err(PeerError::Version);
+        }
+        if self.trace.host.is_some_and(|host| host != self.source_host) {
+            return Err(PeerError::SourceHost);
         }
         if self.source_host == local
             || !config
@@ -341,7 +364,9 @@ pub struct PeerHealth {
 )]
 pub enum PeerResult {
     Run(Box<crate::runs::RunResult>),
-    RunStatuses(Vec<provenant_records::run::AttemptRecord>),
+    RunStatuses(
+        #[serde(with = "crate::runs::attempts_wire")] Vec<provenant_records::run::AttemptRecord>,
+    ),
     Submitted(crate::runs::SubmissionReceipt),
     Output(crate::coordination::facade::OutputResult),
     RunEvents(crate::runs::RunEventsPage),
@@ -350,8 +375,7 @@ pub enum PeerResult {
     Coordination(CoordinationResult),
     SessionHandoff(crate::handoff::HandoffReceipt),
     Error {
-        code: String,
-        operation_id: Option<OperationId>,
+        error: facade::FacadeError,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -372,18 +396,27 @@ fn baseline_protocol() -> u64 {
 pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError> {
     let request: PeerRequest<serde_json::Value> =
         provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)?;
-    Ok((request.protocol != PROTOCOL).then(|| PeerResponse {
+    Ok((request.protocol != PROTOCOL).then_some(PeerResponse {
         version: 1,
         protocol: PROTOCOL,
         host: request.target_host,
         project: request.project.key,
         result: PeerResult::Error {
-            code: "peer_version".into(),
-            operation_id: None,
+            error: facade::FacadeError::PeerVersion,
         },
     }))
 }
 pub fn decode_request(bytes: &[u8]) -> Result<PeerRequest, PeerError> {
+    provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
+}
+
+/// Recorded replies keep their protocol fence across upgrades.
+pub fn decode_recorded_response(bytes: &[u8]) -> Result<PeerResponse, PeerError> {
+    let envelope: PeerResponse<serde_json::Value> =
+        provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)?;
+    if envelope.protocol != PROTOCOL {
+        return Err(PeerError::Version);
+    }
     provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
 }
 /// Control (Cc), format (Cf: zero-width, bidi override and isolate marks) and
@@ -608,11 +641,53 @@ impl PeerTransport for SshTransport<'_> {
 mod tests {
     use super::*;
     use provenant_core::{MonoTime, TestClock, WallTime};
-    use provenant_supervisor::exec::{CapturedStream, ExecError, ExecOutcome};
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn peer_refusals_preserve_typed_errors_and_reject_unknown_codes() {
+        let error = facade::FacadeError::LaunchUnknown {
+            operation_id: OperationId::parse("typed-error-operation").unwrap(),
+        };
+        let value = serde_json::to_value(PeerResult::Error {
+            error: error.clone(),
+        })
+        .unwrap();
+        assert_eq!(value["data"]["error"]["code"], "launch_unknown");
+        assert!(matches!(
+            serde_json::from_value::<PeerResult>(value).unwrap(),
+            PeerResult::Error { error: actual, .. } if actual == error
+        ));
+        for error in [
+            serde_json::json!({"code": "unknown_error"}),
+            serde_json::json!({"code": "launch_unknown"}),
+            serde_json::json!({"code": "launch_unknown", "operation_id": "typed-error-operation", "unexpected": true}),
+        ] {
+            assert!(serde_json::from_value::<facade::FacadeError>(error).is_err());
+        }
+    }
+
+    #[test]
+    fn recorded_peer_responses_refuse_retired_protocols() {
+        let response = PeerResponse {
+            version: 1,
+            protocol: PROTOCOL - 1,
+            host: HostId::from_bytes([3; 16]),
+            project: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            result: serde_json::json!({"result": "error", "data": {"error": {"code": "busy"}}}),
+        };
+        assert!(matches!(
+            decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
+            Err(PeerError::Version)
+        ));
+    }
 
     #[test]
     fn validate_refuses_the_target_as_its_own_source() {
@@ -636,7 +711,7 @@ mod tests {
                 result_bytes: 1048576,
                 lease_seconds: 3600,
                 peer_seconds: 30,
-                graph_timeout_ms: 14400000,
+                graph_timeout_seconds: 14400,
                 bundle_bytes: 67108864,
             },
         };
@@ -656,6 +731,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: local,
             source_host: local,
+            trace: Default::default(),
             agent: "fixture".into(),
             project: ProjectLocator {
                 key: CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap(),
@@ -680,11 +756,44 @@ mod tests {
         );
         request.source_host = remote;
         assert!(request.validate(local, &config, home).is_ok());
+        // A trace that names another host than the sender is refused.
+        request.trace.host = Some(local);
+        assert!(matches!(
+            request.validate(local, &config, home),
+            Err(PeerError::SourceHost)
+        ));
+        request.trace.host = Some(remote);
+        assert!(request.validate(local, &config, home).is_ok());
         request.source_host = HostId::from_bytes([3; 16]);
         assert!(matches!(
             request.validate(local, &config, home),
             Err(PeerError::SourceHost)
         ));
+    }
+
+    #[test]
+    fn new_requests_trace_the_sender_and_the_operation() {
+        let (local, remote) = (HostId::from_bytes([1; 16]), HostId::from_bytes([2; 16]));
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(Path::new("/h"), Path::new("/h/repo/.git"))
+                .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let operation = OperationId::parse("note-once").unwrap();
+        let note: PeerAction = serde_json::from_value(serde_json::json!({
+            "action": "coordination",
+            "input": {"domain": "events", "input": {"op": "note", "note": "n", "dedup_key": null}},
+            "operation_id": "note-once",
+        }))
+        .unwrap();
+        let request = PeerRequest::new(remote, local, "worker".into(), project.clone(), note);
+        assert_eq!(request.trace.host, Some(local));
+        assert_eq!(request.trace.actor, Some(request.actor().unwrap()));
+        assert_eq!(request.trace.operation, Some(operation));
+        let health = PeerRequest::new(remote, local, "worker".into(), project, PeerAction::Health);
+        assert_eq!(health.trace.operation, None);
+        assert_eq!((health.version, health.protocol), (1, PROTOCOL));
+        assert_eq!(health.target_host, remote);
     }
 
     #[test]
@@ -864,6 +973,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project,
             action: PeerAction::Coordination {
@@ -943,6 +1053,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: HostId::from_bytes([1; 16]),
+            trace: Default::default(),
             agent: "chair".into(),
             project: ProjectLocator {
                 key: CrossHostProjectKey::from_home(
@@ -1133,6 +1244,7 @@ mod tests {
                     protocol: PROTOCOL,
                     target_host: host,
                     source_host: HostId::from_bytes([1; 16]),
+                    trace: Default::default(),
                     agent: "chair".into(),
                     project: project.clone(),
                     action: action.clone(),
@@ -1229,6 +1341,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project: ProjectLocator {
                 key: CrossHostProjectKey::from_home(
@@ -1303,6 +1416,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project,
             action: PeerAction::Health,
@@ -1356,6 +1470,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project,
             action: PeerAction::Health,

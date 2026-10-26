@@ -32,7 +32,7 @@ pub struct PreparedLaunch {
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
     pub stdin: Vec<u8>,
-    pub secret_input: Option<provenant_supervisor::exec::SecretInput>,
+    pub secret_input: Option<provenant_os::exec::SecretInput>,
     pub cwd: PathBuf,
     /// Exact provider/model/effort the invocation applies.
     pub route: RouteRecord,
@@ -138,10 +138,10 @@ fn child_access_within(
     {
         return Err(RunError::Validation("child network exceeds parent access"));
     }
-    let state = provenant_supervisor::fs::canonicalize(state_root)
-        .unwrap_or_else(|_| state_root.to_path_buf());
+    let state =
+        provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
     let resolve = |root: &PathBuf| {
-        provenant_supervisor::fs::canonicalize(root)
+        provenant_os::fs::canonicalize(root)
             .ok()
             .filter(|canonical| {
                 canonical == root
@@ -430,7 +430,7 @@ impl RunStore {
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
-            provenant_supervisor::fs::Directory,
+            provenant_os::fs::Directory,
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
@@ -456,7 +456,7 @@ impl RunStore {
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
-            provenant_supervisor::fs::Directory,
+            provenant_os::fs::Directory,
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
@@ -815,7 +815,7 @@ impl RunStore {
         requester: ActorId,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
-            provenant_supervisor::fs::Directory,
+            provenant_os::fs::Directory,
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,

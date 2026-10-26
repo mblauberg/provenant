@@ -5,7 +5,8 @@ use crate::{
     *,
 };
 use provenant_core::{AttemptId, WallTime};
-use provenant_supervisor::fs::{Directory, FileKind, LockGuard, LockMode, PayloadTree};
+use provenant_os::fs::{Directory, FileKind, LockGuard, LockMode, PayloadTree};
+use provenant_records::AttemptFile;
 use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},
@@ -13,7 +14,9 @@ use std::{
 };
 
 const DAY_MICROS: i64 = 86_400_000_000;
-const EXPIRED: &str = "provider-state-expired.json";
+const EXPIRED: &str = AttemptFile::ProviderStateExpired.name();
+const STATE: &str = AttemptFile::ProviderState.name();
+const HISTORY: &str = AttemptFile::ProviderHistory.name();
 pub const TOMBSTONE: &str = ".provider-gc-";
 
 // These are fetched or generated again by Codex at startup. Sessions and
@@ -167,14 +170,15 @@ impl RunStore {
                     Err(error) if missing_directory(&error) => return Ok(()),
                     Err(error) => return Err(error),
                 };
-                let _writer = match attempt
-                    .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
-                {
+                let _writer = match attempt.try_lock_existing(
+                    OsStr::new(AttemptFile::WriterLock.name()),
+                    LockMode::Exclusive,
+                ) {
                     Ok(lease) => Some(lease),
                     Err(error) if error.is_not_found() => None,
                     Err(error) => return Err(error.into()),
                 };
-                match attempt.metadata_at(OsStr::new("reservation.json"), false) {
+                match attempt.metadata_at(OsStr::new(AttemptFile::Reservation.name()), false) {
                     Ok(_) => return Err(RunError::Validation("attempt reservation retained")),
                     Err(error) if error.is_not_found() => {}
                     Err(error) => return Err(error.into()),
@@ -203,9 +207,7 @@ impl RunStore {
                 if matches!(
                     error,
                     RunError::Validation(_)
-                        | RunError::Filesystem(
-                            provenant_supervisor::fs::FsError::LockTimeout { .. }
-                        )
+                        | RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
                 ) {
                     report.kept.push(issue);
                 } else {
@@ -234,7 +236,7 @@ pub(crate) fn prune_caches(
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    let Some(state) = existing(attempt, "provider-state")? else {
+    let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
     };
     let candidates = candidates(&state)?;
@@ -253,11 +255,7 @@ pub(crate) fn prune_caches(
             }
             Ok(())
         })();
-        prefix_removals(
-            report,
-            first,
-            &std::path::Path::new("provider-state").join(name),
-        );
+        prefix_removals(report, first, &std::path::Path::new(STATE).join(name));
         removal?;
     }
     Ok(())
@@ -337,7 +335,7 @@ fn candidates(state: &Directory) -> Result<Vec<OsString>> {
 }
 
 fn credentials(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> Result<()> {
-    let Some(state) = existing(attempt, "provider-state")? else {
+    let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
     };
     for name in candidates(&state)? {
@@ -356,7 +354,7 @@ fn credentials(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc)
                     break;
                 }
             }
-            let prefix = std::path::Path::new("provider-state").join(&name).join(
+            let prefix = std::path::Path::new(STATE).join(&name).join(
                 std::path::Path::new(credential)
                     .parent()
                     .ok_or(RunError::UnsafePath)?,
@@ -388,13 +386,13 @@ fn expire(
     dry_run: bool,
     report: &mut ProviderStateGc,
 ) -> Result<()> {
-    retry_tombstones(attempt, &["provider-state"], dry_run, report)?;
-    let Some(state) = existing(attempt, "provider-state")? else {
+    retry_tombstones(attempt, &[STATE], dry_run, report)?;
+    let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
     };
     if !dry_run {
         seal(attempt, EXPIRED, b"{}\n", 64)?;
-        let history = subdir(attempt, OsStr::new("provider-history"), true)?;
+        let history = subdir(attempt, OsStr::new(HISTORY), true)?;
         let candidate_names = candidates(&state)?;
         // Whole candidates may already be archived by an interrupted sweep.
         let mut all_candidates = candidates(&history)?;
@@ -453,7 +451,7 @@ fn expire(
             }
         }
     }
-    dispose(attempt, OsStr::new("provider-state"), dry_run, report)
+    dispose(attempt, OsStr::new(STATE), dry_run, report)
 }
 
 fn prefix_removals(report: &mut ProviderStateGc, first: usize, prefix: &std::path::Path) {
@@ -465,7 +463,7 @@ fn prefix_removals(report: &mut ProviderStateGc, first: usize, prefix: &std::pat
 fn names(directory: &Directory) -> Result<Vec<OsString>> {
     Ok(directory
         .entries()?
-        .collect::<provenant_supervisor::fs::Result<_>>()?)
+        .collect::<provenant_os::fs::Result<_>>()?)
 }
 
 fn existing(parent: &Directory, name: &str) -> Result<Option<Directory>> {
@@ -568,7 +566,7 @@ fn remove_contents(tree: &PayloadTree, depth: usize) -> Result<()> {
     tree.make_writable()?;
     let entries = tree
         .entries()?
-        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
     for name in entries {
         if tree.metadata_at(&name)?.kind == FileKind::Directory {
             remove_contents(&tree.child(&name)?, depth + 1)?;

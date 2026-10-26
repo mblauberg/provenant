@@ -558,10 +558,10 @@ fn constraints(path: &str) -> Vec<String> {
             "since must precede until",
         ],
         "provenant resume" => &[
-            "target is a full RUN/TASK/ATTEMPT",
+            "target is an ATTEMPT ID or RUN/TASK/ATTEMPT",
             "prompt is at most 1 MiB; expected generation is 0",
         ],
-        "provenant output" => &["target is a full RUN/TASK/ATTEMPT"],
+        "provenant output" => &["target is an ATTEMPT ID or RUN/TASK/ATTEMPT"],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],
     };
@@ -648,9 +648,10 @@ mod tests {
         invalid(&["output", &attempt, "--max-bytes", "65537"]);
         invalid(&["output", &attempt, "--offset", "0", "--tail", "1"]);
         valid(&["output", &attempt, "--trace"]);
+        valid(&["telemetry", "trace", "--peers", "--run", &"11".repeat(16)]);
         invalid(&["output", &attempt, "--trace", "--part", "prompt"]);
         invalid(&["output", &attempt, "--trace", "--tail", "1"]);
-        invalid(&["output", &"11".repeat(16)]);
+        valid(&["output", &"11".repeat(16)]);
     }
     #[test]
     fn lanes_accept_repeatable_state_and_since_filters() {
@@ -661,13 +662,16 @@ mod tests {
             "running",
             "--state",
             "input_required",
+            "--state",
+            "review_required",
             "--since",
-            "24h",
+            "86400",
         ]);
         valid(&["lanes", "--since", "2026-10-25T00:00:00.000000Z"]);
         invalid(&["lanes", "--since"]);
         invalid(&["lanes", "--state", "unknown"]);
-        invalid(&["lanes", "--wait", "10", "--since", "24h"]);
+        invalid(&["lanes", "--since", "24h"]);
+        invalid(&["lanes", "--wait", "10", "--since", "86400"]);
     }
     #[test]
     fn lanes_host_lists_a_peer_without_ids_waits_or_cursors() {

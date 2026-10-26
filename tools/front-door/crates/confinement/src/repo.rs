@@ -1,16 +1,13 @@
 //! Verified Git repository and linked-worktree registration anchors.
 //!
 //! Repository paths are retained as pathname values only for Executor's child
-//! cwd. Every use reopens the path with `SafeFs` and compares it with the held
-//! descriptor identity. Git metadata is read through the held `SafeDir`s.
-use provenant_supervisor::fs::{
-    FileKind, FsError, Metadata, SafeDir, SafeFs, canonicalize, effective_uid,
-};
+//! cwd. Every use reopens the path and compares it with the held
+//! descriptor identity. Git metadata is read through the held `Directory`s.
+use provenant_os::fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid};
 use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use thiserror::Error;
 
 const GIT_MARKER: &str = ".git";
@@ -194,13 +191,12 @@ fn valid_branch(branch: &str) -> bool {
 
 /// Held, verified repository and Git common/private directories.
 pub struct VerifiedRepo {
-    fs: Arc<dyn SafeFs>,
     root_path: PathBuf,
     private_path: PathBuf,
     common_path: PathBuf,
-    root: Box<dyn SafeDir>,
-    private: Box<dyn SafeDir>,
-    common: Box<dyn SafeDir>,
+    root: Directory,
+    private: Directory,
+    common: Directory,
     root_identity: Metadata,
     private_identity: Metadata,
     common_identity: Metadata,
@@ -214,12 +210,8 @@ pub struct VerifiedRepo {
 }
 
 impl VerifiedRepo {
-    fn open_structure(
-        fs: Arc<dyn SafeFs>,
-        path: impl AsRef<Path>,
-        native_alternates: bool,
-    ) -> Result<Self, RepoError> {
-        let (root_path, root) = open_canonical_anchor(fs.as_ref(), path.as_ref(), false)?;
+    fn open_structure(path: impl AsRef<Path>, native_alternates: bool) -> Result<Self, RepoError> {
+        let (root_path, root) = open_canonical_anchor(path.as_ref(), false)?;
         let root_identity = root.metadata()?;
         if root_identity.kind != FileKind::Directory
             || root_identity.uid != effective_uid()
@@ -241,18 +233,15 @@ impl VerifiedRepo {
                 (root_path.join(GIT_MARKER), private, None)
             }
             FileKind::Regular => {
-                let bytes = read_bounded(root.as_ref(), OsStr::new(GIT_MARKER), GITFILE_LIMIT)?;
+                let bytes = read_bounded(&root, OsStr::new(GIT_MARKER), GITFILE_LIMIT)?;
                 let after_marker = root.metadata_at(OsStr::new(GIT_MARKER), false)?;
                 if !marker_identity.same_identity(&after_marker) {
                     return Err(RepoError::IdentityChanged);
                 }
                 let gitdir =
                     parse_git_path(&bytes, b"gitdir: ").ok_or(RepoError::InvalidGitMarker)?;
-                let (private_path, private) = open_canonical_anchor(
-                    fs.as_ref(),
-                    &resolve_git_path(&root_path, &gitdir)?,
-                    false,
-                )?;
+                let (private_path, private) =
+                    open_canonical_anchor(&resolve_git_path(&root_path, &gitdir)?, false)?;
                 (private_path, private, Some(bytes))
             }
             FileKind::Symlink | FileKind::Other => return Err(RepoError::InvalidGitMarker),
@@ -261,14 +250,14 @@ impl VerifiedRepo {
         verify_git_directory(private_identity, root_identity.uid)?;
 
         let commondir_bytes =
-            read_optional_bounded(private.as_ref(), OsStr::new("commondir"), GITFILE_LIMIT)?;
+            read_optional_bounded(&private, OsStr::new("commondir"), GITFILE_LIMIT)?;
         let common_candidate = if let Some(bytes) = commondir_bytes.as_deref() {
             let common = parse_git_path(bytes, b"").ok_or(RepoError::InvalidGitDirectory)?;
             resolve_git_path(&private_path, &common)?
         } else {
             private_path.clone()
         };
-        let (common_path, common) = open_canonical_anchor(fs.as_ref(), &common_candidate, false)?;
+        let (common_path, common) = open_canonical_anchor(&common_candidate, false)?;
         let common_identity = common.metadata()?;
         verify_git_directory(common_identity, root_identity.uid)?;
 
@@ -292,7 +281,7 @@ impl VerifiedRepo {
         }
 
         let gitdir_backlink_bytes =
-            read_optional_bounded(private.as_ref(), OsStr::new("gitdir"), GITFILE_LIMIT)?;
+            read_optional_bounded(&private, OsStr::new("gitdir"), GITFILE_LIMIT)?;
         if private_identity.same_identity(&common_identity) {
             if gitdir_backlink_bytes.is_some() {
                 return Err(RepoError::InvalidRegistration);
@@ -304,7 +293,7 @@ impl VerifiedRepo {
             let target = parse_git_path(backlink, b"").ok_or(RepoError::InvalidRegistration)?;
             let target_path = canonicalize(&resolve_git_path(&private_path, &target)?)?;
             let (target_parent_path, target_name) = split_parent(&target_path)?;
-            let target_parent = fs.open_anchor(&target_parent_path)?;
+            let target_parent = Directory::open_anchor(&target_parent_path)?;
             let target_identity = target_parent.metadata_at(target_name, false)?;
             if target_identity.kind != FileKind::Regular
                 || !target_identity.same_identity(&marker_identity)
@@ -315,14 +304,13 @@ impl VerifiedRepo {
         }
 
         if !native_alternates {
-            reject_alternates(private.as_ref())?;
+            reject_alternates(&private)?;
             if !private_identity.same_identity(&common_identity) {
-                reject_alternates(common.as_ref())?;
+                reject_alternates(&common)?;
             }
         }
 
         Ok(Self {
-            fs,
             root_path,
             private_path,
             common_path,
@@ -345,18 +333,16 @@ impl VerifiedRepo {
     /// Open and structurally verify the repository, then perform the supplied
     /// fixed Git safety probes before exposing it to callers.
     pub(crate) fn open<E>(
-        fs: Arc<dyn SafeFs>,
         path: impl AsRef<Path>,
         probe: impl FnOnce(&VerifiedRepo) -> Result<RepoProbeData, E>,
     ) -> Result<Self, E>
     where
         E: From<RepoError>,
     {
-        Self::open_mode(fs, path, false, probe)
+        Self::open_mode(path, false, probe)
     }
 
     pub(crate) fn open_mode<E>(
-        fs: Arc<dyn SafeFs>,
         path: impl AsRef<Path>,
         native_alternates: bool,
         probe: impl FnOnce(&VerifiedRepo) -> Result<RepoProbeData, E>,
@@ -364,7 +350,7 @@ impl VerifiedRepo {
     where
         E: From<RepoError>,
     {
-        let mut repo = Self::open_structure(fs, path, native_alternates).map_err(E::from)?;
+        let mut repo = Self::open_structure(path, native_alternates).map_err(E::from)?;
         let config_before = repo.configuration_digest().map_err(E::from)?;
         repo.probe_data = Some(probe(&repo)?);
         let config_after = repo.configuration_digest().map_err(E::from)?;
@@ -387,16 +373,16 @@ impl VerifiedRepo {
         &self.common_path
     }
 
-    pub fn root_dir(&self) -> &dyn SafeDir {
-        self.root.as_ref()
+    pub fn root_dir(&self) -> &Directory {
+        &self.root
     }
 
-    pub fn private_dir(&self) -> &dyn SafeDir {
-        self.private.as_ref()
+    pub fn private_dir(&self) -> &Directory {
+        &self.private
     }
 
-    pub fn common_dir(&self) -> &dyn SafeDir {
-        self.common.as_ref()
+    pub fn common_dir(&self) -> &Directory {
+        &self.common
     }
 
     pub fn root_identity(&self) -> Metadata {
@@ -417,7 +403,7 @@ impl VerifiedRepo {
 
     fn configuration_digest(&self) -> Result<[u8; 32], RepoError> {
         let mut digest = Sha256::new();
-        for (marker, directory) in [(b'P', &*self.private), (b'C', &*self.common)] {
+        for (marker, directory) in [(b'P', &self.private), (b'C', &self.common)] {
             for name in [OsStr::new("config"), OsStr::new("config.worktree")] {
                 digest.update([marker]);
                 digest.update(name.as_bytes());
@@ -435,8 +421,7 @@ impl VerifiedRepo {
     }
 
     pub fn revalidate(&self) -> Result<(), RepoError> {
-        let current =
-            Self::open_structure(self.fs.clone(), &self.root_path, self.native_alternates)?;
+        let current = Self::open_structure(&self.root_path, self.native_alternates)?;
         let Some(config_digest) = self.config_digest else {
             return Err(RepoError::Unprobed);
         };
@@ -469,7 +454,7 @@ impl ReadOnlyRepo {
     pub fn root_path(&self) -> &Path {
         self.0.root_path()
     }
-    pub fn root_dir(&self) -> &dyn SafeDir {
+    pub fn root_dir(&self) -> &Directory {
         self.0.root_dir()
     }
 }
@@ -499,7 +484,7 @@ pub fn verify_worktree(
     path: impl AsRef<Path>,
 ) -> Result<VerifiedWorktree, RepoError> {
     repo.revalidate()?;
-    let mut worktree = VerifiedRepo::open_structure(repo.fs.clone(), path, false)?;
+    let mut worktree = VerifiedRepo::open_structure(path, false)?;
     if repo.probe_data.is_none() || repo.config_digest.is_none() {
         return Err(RepoError::Unprobed);
     }
@@ -528,7 +513,7 @@ fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError>
     Ok(())
 }
 
-fn reject_alternates(common: &dyn SafeDir) -> Result<(), RepoError> {
+fn reject_alternates(common: &Directory) -> Result<(), RepoError> {
     let objects = match common.open_verified_directory(OsStr::new("objects")) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(()),
@@ -539,7 +524,7 @@ fn reject_alternates(common: &dyn SafeDir) -> Result<(), RepoError> {
         Err(error) if error.is_not_found() => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    match read_optional_bounded(info.as_ref(), OsStr::new("alternates"), ALTERNATES_LIMIT)? {
+    match read_optional_bounded(&info, OsStr::new("alternates"), ALTERNATES_LIMIT)? {
         Some(bytes) if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) => {
             Err(RepoError::AlternateObjects)
         }
@@ -548,7 +533,7 @@ fn reject_alternates(common: &dyn SafeDir) -> Result<(), RepoError> {
 }
 
 fn read_optional_bounded(
-    directory: &dyn SafeDir,
+    directory: &Directory,
     name: &OsStr,
     limit: u64,
 ) -> Result<Option<Vec<u8>>, RepoError> {
@@ -562,7 +547,7 @@ fn read_optional_bounded(
     }
 }
 
-fn read_bounded(directory: &dyn SafeDir, name: &OsStr, limit: u64) -> Result<Vec<u8>, RepoError> {
+fn read_bounded(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u8>, RepoError> {
     crate::stable_read::read_regular(directory, name, limit)
         .map(|(bytes, _)| bytes)
         .map_err(|error| match error {
@@ -644,18 +629,17 @@ fn split_parent(path: &Path) -> Result<(PathBuf, &OsStr), RepoError> {
 /// canonical name used by Executor for `cwd`. The final component must itself
 /// be a directory, never a symlink; intermediate aliases are resolved once.
 fn open_canonical_anchor(
-    fs: &dyn SafeFs,
     path: &Path,
     allow_parent: bool,
-) -> Result<(PathBuf, Box<dyn SafeDir>), RepoError> {
+) -> Result<(PathBuf, Directory), RepoError> {
     let candidate = normalise_absolute(path, allow_parent)?;
-    let initial = fs.open_anchor(&candidate)?;
+    let initial = Directory::open_anchor(&candidate)?;
     let before = initial.metadata()?;
     if before.kind != FileKind::Directory {
         return Err(RepoError::InvalidRoot);
     }
     let canonical = canonicalize(&candidate)?;
-    let held = fs.open_anchor(&canonical)?;
+    let held = Directory::open_anchor(&canonical)?;
     let after = held.metadata()?;
     if !before.same_identity(&after) {
         return Err(RepoError::IdentityChanged);
@@ -669,15 +653,13 @@ mod tests {
         GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData, VerifiedRepo,
         verify_worktree,
     };
-    use provenant_supervisor::fs::LocalFs;
     use std::fs;
-    use std::sync::Arc;
 
     #[test]
     fn verify_worktree_refuses_the_primary_checkout() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
-        let repo = VerifiedRepo::open(Arc::new(LocalFs), temp.path(), |_| {
+        let repo = VerifiedRepo::open(temp.path(), |_| {
             Ok::<_, RepoError>(RepoProbeData {
                 object_format: RepoObjectFormat::Sha1,
                 attribute_source: String::new(),
@@ -714,7 +696,7 @@ mod tests {
         let git = temp.path().join(".git");
         fs::create_dir(&git).unwrap();
         fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
-        let repo = VerifiedRepo::open(Arc::new(LocalFs), temp.path(), |_| {
+        let repo = VerifiedRepo::open(temp.path(), |_| {
             Ok::<_, RepoError>(RepoProbeData {
                 object_format: RepoObjectFormat::Sha1,
                 attribute_source: String::new(),

@@ -49,7 +49,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     assert_eq!(lane["state"], "rejected");
     assert_eq!(lane["account"], "unknown");
     let manifest = rig.root.join("accounts.json");
-    std::fs::write(&manifest, br#"{"schema_version":1,"tasks":[{"prompt":"fixture","model":"codex/id","account":"fixture-account"}]}"#)?;
+    std::fs::write(&manifest, br#"{"schema_version":1,"tasks":[{"prompt":"fixture","route":{"kind":"model","provider":"codex","model":"id"},"account":"fixture-account"}]}"#)?;
     let placed = rig.command(&[
         "dispatch",
         "--manifest",
@@ -217,7 +217,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     );
     let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
-    assert_eq!(value["data"]["text"], "hello");
+    assert_eq!(value["data"]["bytes"]["data"], "hello");
 
     let trace = rig.command(&["output", &attempt, "--trace", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&trace.stdout.bytes)?;

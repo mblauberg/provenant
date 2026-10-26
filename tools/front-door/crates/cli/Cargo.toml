@@ -10,6 +10,7 @@ publish = false
 fixture = ["provenant-run/fixture", "provenant-supervisor/fixture"]
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
 clap = { workspace = true }
 jiff = { workspace = true }

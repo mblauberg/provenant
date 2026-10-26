@@ -1,9 +1,10 @@
 //! Read-only classification of physical run-store contents.
 use crate::{Result, RunStore};
-use provenant_supervisor::{
+use provenant_os::{
     disk::{DiskEntry, DiskReport},
     fs::Directory,
 };
+use provenant_records::{AttemptFile, AttemptFileClass};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -139,13 +140,14 @@ fn scan_runs(
                     .and_then(|(run, attempt)| terminal.get(&(run.into(), attempt.into())))
                     .copied();
                 for part in entries(&attempt, &attempt_path, report) {
-                    let class = match part.to_str() {
-                        Some("tmp") => "attempt_tmp",
-                        Some("provider-state") => "provider_state",
-                        Some(
-                            "scratch" | "provider-history" | "quarantine" | "logs" | "stdout.log"
-                            | "stderr.log",
-                        ) => "attempt_retained",
+                    let class = match part
+                        .to_str()
+                        .and_then(AttemptFile::from_name)
+                        .map(AttemptFile::class)
+                    {
+                        Some(AttemptFileClass::Temporary) => "attempt_tmp",
+                        Some(AttemptFileClass::ProviderState) => "provider_state",
+                        Some(AttemptFileClass::Retained) => "attempt_retained",
                         _ => "other_state",
                     };
                     let part_path = attempt_path.join(&part);

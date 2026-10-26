@@ -7,16 +7,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
+provenant-os = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
-provenant-supervisor = { workspace = true }
 provenant-sqlite = { workspace = true }
 
 [dev-dependencies]
-provenant-supervisor = { workspace = true, features = ["fixture"] }
+provenant-os = { workspace = true, features = ["fixture"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

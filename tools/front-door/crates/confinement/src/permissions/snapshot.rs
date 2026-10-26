@@ -2,7 +2,7 @@
 //!
 //! Compiled only with the `snapshot` feature, on any platform. It renders what
 //! `compile_sbpl` would for a plan and profile, without anchoring or reading
-//! the filesystem, and gathers grants through the same `extend_read_grants`.
+//! the filesystem, and gathers grants through the same `GrantSet::build`.
 //! On macOS it also compiles against held anchors without the sandbox probe.
 
 use super::*;
@@ -19,7 +19,7 @@ pub fn render(
     profile: &ProviderProfile,
     home: &Path,
 ) -> Result<String, PermissionError> {
-    let worktree_grants = matches!(plan.mode, AccessMode::WorktreeWrite(_)).then(|| {
+    let worktree = matches!(plan.mode, AccessMode::WorktreeWrite(_)).then(|| {
         WorktreeWriteGrants::from_paths(
             Path::new(WORKTREE),
             Path::new(PRIVATE_GIT_DIR),
@@ -27,21 +27,8 @@ pub fn render(
             BRANCH,
         )
     });
-    let mut read_grants = plan.read_roots.clone();
-    if let Some(read_only) = &plan.read_only {
-        read_grants.extend(read_only.git_reads.iter().cloned());
-    }
-    let credential_writes =
-        extend_read_grants(&mut read_grants, plan, profile, worktree_grants.as_ref())?;
-    let bytes = render_profile(
-        plan,
-        profile,
-        &read_grants,
-        &credential_writes,
-        worktree_grants.as_ref(),
-        home,
-    )?;
-    String::from_utf8(bytes).map_err(|_| PermissionError::NonUtf8Path)
+    let grants = GrantSet::build(plan, profile, home, worktree)?;
+    super::render(&grants)
 }
 
 /// What the probed backend's `compile` returns for `plan` and `profile`

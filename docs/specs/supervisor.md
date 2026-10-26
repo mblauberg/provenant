@@ -15,8 +15,9 @@ cover consumer wiring and platform limits.
 
 ## Purpose and ownership
 
-Supervisor owns the process state machine, the syscall boundary, bounded
-execution, descriptor-relative filesystem access, locks and atomic publication.
+Supervisor owns the process state machine, provider custody and guardian
+supervision. The OS crate owns bounded utility execution, clocks,
+descriptor-relative filesystem access, locks and atomic publication.
 Confinement owns permission compilation, disclosure scanning and redaction,
 quarantine, safe Git evidence, output custody and worktree management. Neither
 owns the run registry, admission, attempts, scheduling, retries or result
@@ -24,15 +25,16 @@ semantics; those belong to run ([run](run.md)). `fabric-runtime` owns identity,
 coordination and federation routing ([fabric](fabric.md)).
 
 All first-party `unsafe` code, FFI and post-fork code live in
-`supervisor::sys`. Each block documents validity, ownership, lifetime,
-concurrency and errors, and an independent second reviewer checks every block.
-Supervisor depends on core and records only. Confinement adds config and
-supervisor's safe API, and no library imports `cli`.
+`os::sys` or supervisor's private `process_os` custody boundary. Each block
+documents validity, ownership, lifetime, concurrency and errors, and an
+independent second reviewer checks every block.
+Supervisor depends on core, records and os. Confinement adds config and
+supervisor's custody API, and no library imports `cli`.
 
 ## Read-only allocation observations
 
 `Directory::private_size_at(name)` observes one normal entry without following
-its final symlink. On macOS, supervisor calls `getattrlistat` with
+its final symlink. On macOS, os calls `getattrlistat` with
 `ATTR_CMN_RETURNED_ATTRS`, `ATTR_CMNEXT_PRIVATESIZE` in `forkattr`, and
 `FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW`. It returns an optional byte count;
 omitted attributes and unsupported filesystems return `None`, while access and
@@ -47,7 +49,7 @@ top-level `cancel` and `reconcile` own control and recovery. Fabric's landing
 lease is separate from the writer lease, and neither the landing lease nor a
 driver lease substitutes for kernel writer custody.
 
-Run composes confinement's output filter with supervisor's injected capture
+Run composes confinement's output filter with the OS crate's injected capture
 filter, so supervisor never imports confinement. Providers supply argv,
 environment, selected authentication inputs, a fixture-proven permission
 profile and bounded decoding into progress, terminal or `ProtocolRejected`
@@ -313,8 +315,18 @@ content-free error.
 and archives protected disk, index and HEAD patches, blobs and digests before
 restoring anything. Only attributable ordinary `.agents/` edits are restored
 automatically. Policy or control-file changes, concurrent edits or
-unaccountable history need review: evidence is kept, a terminal failure is
-published, and unrelated work and history are untouched. A tracked symlink at a
+unaccountable history need review: evidence is kept and a completed writer
+publishes `review_required` with its candidate head and protected paths.
+Provider failures and invalid terminal Git state remain failures. Committed
+changes are measured from the lane's start head. Protected paths that also
+differ from the merge base of the candidate and the locally observed default
+branch of the delivery remote (`origin` without automatic delivery) are
+attributed to the writer. Upstream changes are measured from the common
+ancestor of the start head and that merge base. Clean upstream changes are
+exempt; staged and disk edits, or changes that diverge from upstream, still
+require quarantine. If the remote HEAD, target ref or either merge base cannot
+be resolved, comparison uses the start head. Terminal checks do not fetch.
+Unrelated work and history are untouched. A tracked symlink at a
 protected path (mode 120000, such as `CLAUDE.md -> AGENTS.md`) is evidence whose
 bytes are the link target, read with `readlink` and checked against the
 committed blob, never followed. Protected-tip verification returns a pinned SHA,
@@ -442,7 +454,7 @@ byte-path encoding. Edge-built facts are `Serialize` only.
 | `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. A stop that finds an undecodable request, or one for another requester or an earlier generation, atomically replaces it and re-reads it, since the guardian would ignore it. A stop from a reattached handle never replaces a later generation's request. A stop from a held scope also replaces a later generation's request, which in a child directory can only be forged, and any symlink, FIFO or oversize entry, since the rename swaps the entry without following it. A directory named `cancel.json` still refuses the stop, and the lane can remove a request after it lands, so a lane can pre-empt or undo the host's stop. |
 | `QuarantineManifest`, `GitEvidence` | Evidence files are durable before the no-replace manifest, and partial capture claims no success. |
 
-Authoritative writes use held-directory `SafeFs` capabilities, exclusive 0600
+Authoritative writes use concrete held `os::fs::Directory` capabilities, exclusive 0600
 temporaries in 0700 directories, full writes, file sync, atomic rename or
 no-replace publication and a parent sync. Lock and custody leaves must be
 regular, single-link and owner-controlled. A directory writable by another live
@@ -516,7 +528,7 @@ and every harness config path before it starts children.
 
 | Where | What it proves |
 |---|---|
-| `crates/supervisor/src` unit tests and `custody_tests.rs` | State-machine transitions, natural-exit precedence, unknown identities, failed signals, stale generations, integer and size bounds, capture and discard modes, lock budgets and cancellation, both publication modes including post-rename sync failure |
+| `crates/os/src` and `crates/supervisor/src` unit tests, including `custody_tests.rs` | State-machine transitions, natural-exit precedence, unknown identities, failed signals, stale generations, integer and size bounds, capture and discard modes, lock budgets and cancellation, both publication modes including post-rename sync failure |
 | `crates/supervisor/tests/custody.rs`, `process.rs`, `publication.rs` | Fast exit before watch, inherited ignored SIGCHLD and masks, prelaunch, live and late cancellation, a silent healthy provider, stdin EOF, a terminal frame after the cap, PID reuse, a TERM-resistant provider, `setsid` grandchildren, nested owners, an unlocked-lock impostor, shared hosts, incomplete census, parent death leaving guardian and lease live, racing recoverers and late publishers, injected ENOSPC and post-link fsync with retained custody and no healthy-provider signal |
 | `crates/confinement/src` tests and `tests/fixtures/external` | Credential, config and protected reads; ref, index and gitfile redirects; hard-link, symlink and root swaps; denied IPC and network, including the peer agent socket from both lane kinds; outside writes; secret chunk splits; scratch classification and drift; quarantine failure preserving unrelated work; backend probe and compile refusal; fixed Git and `gh` argv with arbitrary operations refused |
 | `tools/front-door/tests/worktree_driver.rs`, `dispatch_provider.rs`, `fake_provider.rs` | The public worktree commands and launch, wait, cancel and recover through the built binary against isolated fake providers and temporary repositories |

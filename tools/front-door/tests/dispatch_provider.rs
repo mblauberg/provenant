@@ -46,7 +46,7 @@ fn fixture() -> Result {
         }
         assert!(std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none());
         let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
-        let token = provenant_supervisor::sys::fixture_read_secret_pipe(fd)?;
+        let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
         assert_eq!(token, b"fixture-refreshed-token");
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
@@ -229,7 +229,7 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     fs::write(
         &manifest,
         serde_json::to_vec(
-            &json!({"schema_version":1,"tasks":[{"prompt":"reply OK","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"}]}),
+            &json!({"schema_version":1,"tasks":[{"prompt":"reply OK","route":{"kind":"model","provider":"claude","model":"claude-sonnet-5-5","effort":"medium"},"account":"pro"}]}),
         )?,
     )?;
     let out = rig.command(&[
@@ -304,11 +304,10 @@ fn graph_fixture_available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
     }
-    let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let cancel = provenant_core::CancelToken::new();
     if let Err(error) = provenant_confinement::permissions::system_backend(
         &provenant_confinement::permissions::BackendContext {
-            safe_fs: &provenant_supervisor::fs::LocalFs,
             executor: &executor,
             cancel: &cancel,
             #[cfg(target_os = "macos")]
@@ -536,22 +535,24 @@ fn persisted_refusal(
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
         TaskId, WaitBudget,
     };
+    use provenant_os::clock::SystemClock;
+    use provenant_os::exec::Termination;
+    use provenant_os::fs::Directory;
     use provenant_records::{
         CanonicalV1,
         run::{CanonicalRequest, HarnessProfile, RequestedRoute, RouteRecord, TaskRequest},
     };
     use provenant_run::{ExecutionContext, NewAttempt, PreparedRun, Request, RunStore};
-    use provenant_supervisor::{
-        clock::SystemClock,
-        custody::{CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence},
-        exec::Termination,
-        fs::{Directory, LocalFs},
-    };
+    use provenant_supervisor::custody::CaptureTotals;
+    use provenant_supervisor::custody::ExitObservation;
+    use provenant_supervisor::custody::PublicationState;
+    use provenant_supervisor::custody::Scope;
+    use provenant_supervisor::custody::SettlementEvidence;
 
     let rig = TestRig::new()?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let project_id = ProjectId::from_bytes([21; 16]);
     let actor_id = ActorId::from_bytes([22; 16]);
     let execution = ExecutionContext {

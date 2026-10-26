@@ -1,4 +1,5 @@
-//! Sans-I/O provider mechanics. No processes, credential reads or mutable registry.
+//! Sans-I/O provider mechanics, apart from `quota_live`: the live quota edge
+//! that runs probes and reads credentials. No mutable registry.
 #![forbid(unsafe_code)]
 
 pub mod accounts;
@@ -16,6 +17,7 @@ mod launch;
 pub use lane::LaneRuntime;
 pub mod opencode;
 pub mod quota;
+pub mod quota_live;
 mod stream;
 pub use contract::*;
 pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin};

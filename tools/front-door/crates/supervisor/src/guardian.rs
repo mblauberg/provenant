@@ -5,13 +5,12 @@ use cleanup::{darwin_census_clear, try_writer_lease};
 
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::custody::*;
-use crate::exec::Termination;
-use crate::fs::{Directory, Publication, PublishMode};
 use crate::machine::{
     self, Budgets, DeliveryFailure, DeliveryOutcome, DeliveryReceipt, Effect, Event, Phase, State,
     Tick,
 };
 use provenant_core::{CancelToken, WallTime};
+use provenant_os::fs::{Directory, Publication, PublishMode};
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -58,12 +57,12 @@ struct LaunchMessage {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     cwd: Vec<u8>,
     stdin: Vec<u8>,
-    secret_input: Option<crate::exec::SecretInput>,
+    secret_input: Option<provenant_os::exec::SecretInput>,
     holder_context: Vec<u8>,
     capture: CapturePlan,
 }
 const LAUNCH_LIMITS: Limits = Limits {
-    max_bytes: crate::sys::handoff::MESSAGE_LIMIT as u64,
+    max_bytes: crate::process_os::handoff::MESSAGE_LIMIT as u64,
     max_members: 2 * 1024 * 1024,
     ..Limits::CONFIG
 };
@@ -73,7 +72,7 @@ pub(crate) fn handoff(
     publication: &PublicationReservation,
 ) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
-    crate::sys::provider::ensure_supported()?;
+    crate::process_os::provider::ensure_supported()?;
     if owned.command.protected_commands.len() > 128
         || owned
             .command
@@ -129,7 +128,7 @@ pub(crate) fn handoff(
         return Err(CustodyError::InvalidRecord);
     }
     let payload = serde_json::to_vec(&message).map_err(|_| CustodyError::InvalidRecord)?;
-    crate::sys::handoff::spawn(
+    crate::process_os::handoff::spawn(
         &owned.lease.directory,
         &publication.directory,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
@@ -172,12 +171,12 @@ pub struct GuardianHooks<'a> {
     pub observer: Option<&'a dyn ProcessObserver>,
     #[cfg(feature = "fixture")]
     pub exit_publisher: Option<&'a dyn ExitPublisher>,
-    pub stdout_tee: Option<&'a dyn crate::exec::NonblockingSink>,
-    pub stderr_tee: Option<&'a dyn crate::exec::NonblockingSink>,
-    pub stdout_decoder: Option<&'a dyn crate::capture::FrameDecoder>,
-    pub stderr_decoder: Option<&'a dyn crate::capture::FrameDecoder>,
-    pub stdout_filter: Option<&'a mut dyn crate::exec::CaptureFilter>,
-    pub stderr_filter: Option<&'a mut dyn crate::exec::CaptureFilter>,
+    pub stdout_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
+    pub stderr_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
+    pub stdout_decoder: Option<&'a dyn provenant_os::capture::FrameDecoder>,
+    pub stderr_decoder: Option<&'a dyn provenant_os::capture::FrameDecoder>,
+    pub stdout_filter: Option<&'a mut dyn provenant_os::exec::CaptureFilter>,
+    pub stderr_filter: Option<&'a mut dyn provenant_os::exec::CaptureFilter>,
 }
 /// The holder role: the composed terminal publisher runs inside the guardian,
 /// after durable exit and completed cleanup, while the guardian still holds
@@ -250,10 +249,10 @@ pub trait ChildRegistry {
 /// Registration alone never proves custody; sys must verify the held lock too.
 pub struct RegisteredChild {
     registration: crate::census::OwnerRegistration,
-    custody: crate::fs::FileHandle,
+    custody: provenant_os::fs::FileHandle,
 }
 impl RegisteredChild {
-    pub fn new(identity: ProcessIdentity, custody: crate::fs::FileHandle) -> Result<Self> {
+    pub fn new(identity: ProcessIdentity, custody: provenant_os::fs::FileHandle) -> Result<Self> {
         identity
             .validate()
             .map_err(|_| CustodyError::InvalidRecord)?;
@@ -266,8 +265,9 @@ impl RegisteredChild {
 /// Only `internal supervise` calls this, with descriptors inherited by handoff.
 /// It cannot read a launch specification from a public file or stdin.
 pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
-    let mut inherited = crate::sys::handoff::inherit(args)?;
-    let payload = crate::sys::handoff::receive(&mut inherited.channel, Duration::from_secs(10))?;
+    let mut inherited = crate::process_os::handoff::inherit(args)?;
+    let payload =
+        crate::process_os::handoff::receive(&mut inherited.channel, Duration::from_secs(10))?;
     let message: LaunchMessage =
         decode_v1(payload.as_slice(), LAUNCH_LIMITS).map_err(|_| CustodyError::InvalidRecord)?;
     message.capture.validate()?;
@@ -310,7 +310,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         _ => return Err(CustodyError::UnknownIdentity),
     };
     reservation.guardian = Some(guardian.clone());
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         &inherited.writer_directory,
         "reservation.json",
         &reservation,
@@ -357,22 +357,21 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         environment_names_native_bytes: env.iter().map(|(name, _)| name.as_bytes()).collect(),
         capture: message.capture,
     };
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         &inherited.attempt_directory,
         "launch.json",
         &summary,
         PublishMode::NoReplace,
     )?)?;
-    let reactor = crate::sys::provider::GuardianReactor::install()?;
+    let reactor = crate::process_os::provider::GuardianReactor::install()?;
     #[cfg(feature = "fixture")]
     let exit_publisher = hooks.exit_publisher;
     #[cfg(not(feature = "fixture"))]
     let exit_publisher = None;
     #[cfg(target_os = "macos")]
-    let writer_identity =
-        crate::fs::Metadata::from_std(inherited.writer.handoff_file().metadata()?);
+    let writer_identity = inherited.writer.metadata()?;
     // Both locks and the durable pre-spawn reservation are held before ACK.
-    crate::sys::handoff::send(
+    crate::process_os::handoff::send(
         &mut inherited.channel,
         b"custody-accepted-v1",
         Duration::from_secs(10),
@@ -422,19 +421,19 @@ struct Driver<'a> {
     attempt: Directory,
     writer_dir: Directory,
     reservation: Reservation,
-    writer: Option<crate::fs::LockGuard>,
+    writer: Option<provenant_os::fs::LockGuard>,
     #[cfg(target_os = "macos")]
-    writer_identity: crate::fs::Metadata,
-    _custody: crate::fs::LockGuard,
+    writer_identity: provenant_os::fs::Metadata,
+    _custody: provenant_os::fs::LockGuard,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
     executable_snapshot: ExecutableSnapshot,
-    reactor: crate::sys::provider::GuardianReactor,
+    reactor: crate::process_os::provider::GuardianReactor,
     observer: &'a dyn ProcessObserver,
     exit_publisher: Option<&'a dyn ExitPublisher>,
     holder: Option<&'a dyn Holder>,
     holder_context: Vec<u8>,
-    secret_input: Option<crate::exec::SecretInput>,
+    secret_input: Option<provenant_os::exec::SecretInput>,
     spared: crate::census::SparingTracker,
     tracked: std::collections::BTreeSet<ProcessIdentity>,
     history: std::collections::BTreeSet<ProcessIdentity>,
@@ -463,18 +462,20 @@ struct Events {
     terminal: std::sync::atomic::AtomicBool,
     rejected: std::sync::atomic::AtomicBool,
 }
-impl crate::capture::DecodedEventSink for Events {
+impl provenant_os::capture::DecodedEventSink for Events {
     fn try_send(
         &self,
-        event: crate::capture::FrameEvent,
-    ) -> std::result::Result<(), crate::exec::QueueLoss> {
+        event: provenant_os::capture::FrameEvent,
+    ) -> std::result::Result<(), provenant_os::exec::QueueLoss> {
         use std::sync::atomic::Ordering;
         match event {
-            crate::capture::FrameEvent::Terminal => self.terminal.store(true, Ordering::Relaxed),
-            crate::capture::FrameEvent::ProtocolRejected => {
+            provenant_os::capture::FrameEvent::Terminal => {
+                self.terminal.store(true, Ordering::Relaxed)
+            }
+            provenant_os::capture::FrameEvent::ProtocolRejected => {
                 self.rejected.store(true, Ordering::Relaxed)
             }
-            crate::capture::FrameEvent::Progress => {}
+            provenant_os::capture::FrameEvent::Progress => {}
         }
         Ok(())
     }
@@ -528,7 +529,7 @@ impl Driver<'_> {
             &self.reservation,
             PublishMode::Replace,
         )
-        .and_then(require_durable)
+        .and_then(|publication| publication.require_durable().map_err(Into::into))
         .is_err()
         {
             warn(
@@ -543,24 +544,24 @@ impl Driver<'_> {
         let out_decoder =
             hooks
                 .stdout_decoder
-                .map(|decoder| crate::capture::FrameDelivery::Provider {
+                .map(|decoder| provenant_os::capture::FrameDelivery::Provider {
                     decoder,
                     events: &out_events,
                 });
         let err_decoder =
             hooks
                 .stderr_decoder
-                .map(|decoder| crate::capture::FrameDelivery::Provider {
+                .map(|decoder| provenant_os::capture::FrameDelivery::Provider {
                     decoder,
                     events: &err_events,
                 });
-        let mut out = crate::capture::StreamCapture::new(
+        let mut out = provenant_os::capture::StreamCapture::new(
             stream_policy(plan.stdout, hooks.stdout_tee),
             out_decoder,
             hooks.stdout_filter,
         )
         .map_err(|_| CustodyError::InvalidRecord)?;
-        let mut err = crate::capture::StreamCapture::new(
+        let mut err = provenant_os::capture::StreamCapture::new(
             stream_policy(plan.stderr, hooks.stderr_tee),
             err_decoder,
             hooks.stderr_filter,
@@ -732,10 +733,7 @@ impl Driver<'_> {
                 Event::Silence
             };
             let mut tick = Tick::at(now);
-            tick.observed_exit = exit.map(|value| match value {
-                Termination::Exit(code) => machine::Termination::Exit(code),
-                Termination::Signal(sig) => machine::Termination::Signal(sig),
-            });
+            tick.observed_exit = exit;
             let (next, effects) = machine::step(state, event, tick);
             state = next;
             for effect in effects {
@@ -891,7 +889,7 @@ impl Driver<'_> {
                         .exit_publisher
                         .unwrap_or(&system_publisher)
                         .checkpoint(&self.attempt, &checkpoint)
-                        .and_then(require_durable)
+                        .and_then(|publication| publication.require_durable().map_err(Into::into))
                         .is_err()
                     {
                         warn(
@@ -949,7 +947,7 @@ impl Driver<'_> {
                     PublishMode::NoReplace,
                 )
                 .map_err(CustodyError::from)
-                .and_then(require_durable)
+                .and_then(|publication| publication.require_durable().map_err(Into::into))
                 .is_err()
             {
                 total.lost_bytes = total.lost_bytes.saturating_add(total.retained);
@@ -1101,7 +1099,7 @@ impl Driver<'_> {
                 PublishMode::Replace,
             )
             .map_err(CustodyError::from)
-            .and_then(require_durable);
+            .and_then(|publication| publication.require_durable().map_err(Into::into));
         if published.is_ok() {
             self.release(&record);
         }
@@ -1113,12 +1111,12 @@ impl Driver<'_> {
         cwd: &Path,
         input: &[u8],
         plan: CapturePlan,
-    ) -> io::Result<crate::sys::provider::ProviderGroup> {
+    ) -> io::Result<crate::process_os::provider::ProviderGroup> {
         match argv.first() {
             Some(executable) => match snapshot_executable(executable.as_os_str()) {
                 Ok(snapshot) if snapshot == self.executable_snapshot => {
-                    crate::sys::provider::ProviderGroup::spawn(
-                        crate::sys::raw_exec::SpawnSpec {
+                    crate::process_os::provider::ProviderGroup::spawn(
+                        provenant_os::sys::raw_exec::SpawnSpec {
                             argv,
                             env: Some(env),
                             cwd,
@@ -1152,7 +1150,7 @@ impl Driver<'_> {
         self.reservation.census_incomplete = false;
         self.reservation.descendants.clear();
         self.reservation.omitted_descendants = 0;
-        require_durable(write_record(
+        Publication::require_durable(write_record(
             &self.writer_dir,
             "reservation.json",
             &self.reservation,
@@ -1249,7 +1247,8 @@ impl Driver<'_> {
                     )
                 }
                 Err(error) => machine::PublicationOutcome::Pending(
-                    match filesystem_error(error).and_then(crate::fs::FsError::raw_os_error) {
+                    match filesystem_error(error).and_then(provenant_os::fs::FsError::raw_os_error)
+                    {
                         Some(libc::ENOSPC) => machine::PublicationFailure::NoSpace,
                         Some(code) => machine::PublicationFailure::IoError(code),
                         None => machine::PublicationFailure::IoError(libc::EIO),
@@ -1267,7 +1266,8 @@ impl Driver<'_> {
             match result {
                 Ok(_) => {}
                 Err(error)
-                    if filesystem_error(&error).is_some_and(crate::fs::FsError::is_exists) =>
+                    if filesystem_error(&error)
+                        .is_some_and(provenant_os::fs::FsError::is_exists) =>
                 {
                     // A recovery publisher may have won. Only identical bytes
                     // can share the durable publication; never overwrite facts.
@@ -1280,8 +1280,9 @@ impl Driver<'_> {
                     }
                 }
                 Err(error)
-                    if filesystem_error(&error).and_then(crate::fs::FsError::raw_os_error)
-                        == Some(crate::sys::errno::ENOSPC)
+                    if filesystem_error(&error)
+                        .and_then(provenant_os::fs::FsError::raw_os_error)
+                        == Some(provenant_os::sys::errno::ENOSPC)
                         && !released_reserve =>
                 {
                     match self.attempt.unlink(OsStr::new("reserve")) {
@@ -1320,7 +1321,7 @@ impl Driver<'_> {
     }
 }
 
-fn filesystem_error(error: &CustodyError) -> Option<&crate::fs::FsError> {
+fn filesystem_error(error: &CustodyError) -> Option<&provenant_os::fs::FsError> {
     match error {
         CustodyError::Filesystem(error) => Some(error),
         _ => None,
@@ -1398,21 +1399,21 @@ pub(crate) fn session_absence(reservation: &Reservation) -> RecoveryState {
 }
 
 struct ClosedTee;
-impl crate::exec::NonblockingSink for ClosedTee {
-    fn try_send(&self, _: &[u8]) -> std::result::Result<(), crate::exec::QueueLoss> {
-        Err(crate::exec::QueueLoss::Closed)
+impl provenant_os::exec::NonblockingSink for ClosedTee {
+    fn try_send(&self, _: &[u8]) -> std::result::Result<(), provenant_os::exec::QueueLoss> {
+        Err(provenant_os::exec::QueueLoss::Closed)
     }
 }
 fn stream_policy(
     mode: StreamMode,
-    sink: Option<&dyn crate::exec::NonblockingSink>,
-) -> crate::exec::StreamPolicy<'_> {
+    sink: Option<&dyn provenant_os::exec::NonblockingSink>,
+) -> provenant_os::exec::StreamPolicy<'_> {
     match mode {
-        StreamMode::Capture { limit } => crate::exec::StreamPolicy::Capture {
+        StreamMode::Capture { limit } => provenant_os::exec::StreamPolicy::Capture {
             limit: limit as usize,
         },
-        StreamMode::Discard => crate::exec::StreamPolicy::Discard,
-        StreamMode::Tee { limit } => crate::exec::StreamPolicy::Tee {
+        StreamMode::Discard => provenant_os::exec::StreamPolicy::Discard,
+        StreamMode::Tee { limit } => provenant_os::exec::StreamPolicy::Tee {
             limit: limit as usize,
             sink: sink.unwrap_or(&ClosedTee),
         },

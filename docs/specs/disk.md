@@ -9,7 +9,7 @@ settles state. SQLite may create or update only `run.sqlite3-shm` and
 
 ## Measurement
 
-The supervisor owns `Directory::private_size_at`. On macOS it calls
+The OS crate owns `Directory::private_size_at`. On macOS it calls
 `getattrlistat` with `ATTR_CMN_RETURNED_ATTRS`, extended common attribute
 `ATTR_CMNEXT_PRIVATESIZE` in `forkattr`, and
 `FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW`. A returned-attribute bitmap determines

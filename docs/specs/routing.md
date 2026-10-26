@@ -17,8 +17,8 @@ Run owns the registry, admission, attempts, retries and publication
 ([run](run.md)). Supervisor owns process custody and signalling, and
 confinement owns disclosure and access grants ([supervisor](supervisor.md)).
 These crates add no daemon, no second execution registry and no process
-spawning of their own: supervisor executes every launch, preflight and quota
-effect.
+spawning of their own: supervisor executes provider launches; os executes
+utility preflight and quota effects.
 
 ## Boundaries
 
@@ -148,7 +148,7 @@ Percentages are basis points, money is checked scaled integers, and no integer
 passes through `f64`. Clocks are injected; reset times use `jiff`, and
 ambiguous local times are rejected.
 
-Writes are typed update intents applied through supervisor's safe filesystem
+Writes are typed update intents applied through the OS crate's concrete filesystem
 API: bounded lock, re-read revision, atomic replace, file and parent fsync,
 0700 directories and 0600 files. A refresh reserves a claim with a token and
 deadline, releases the lock, runs, then commits only against the matching
@@ -277,7 +277,7 @@ reading; only the non-secret authority reference is kept.
 
 | Source | Rule |
 | --- | --- |
-| Claude `.credentials.json` in the selected config directory, otherwise the macOS Keychain item `Claude Code-credentials` (suffix from the config path hash for other directories) | Read through supervisor with memory-only capture that bypasses attempt spooling, even on error, overflow or cancel. Linked credential files are rejected. |
+| Claude `.credentials.json` in the selected config directory, otherwise the macOS Keychain item `Claude Code-credentials` (suffix from the config path hash for other directories) | Read through os with memory-only capture that bypasses attempt spooling, even on error, overflow or cancel. Linked credential files are rejected. |
 | Cursor `state.vscdb`, key `cursorAuth/accessToken` | Read-only query into memory. No copy, export or raw row in diagnostics. |
 
 Codex and Agy quota use their own CLI protocols, not auth-store reads. Claude
@@ -352,7 +352,8 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   Submission refuses a child above `lanes.max_depth` (default 2), and a state
   path that is not `children/<AttemptId>` pairs below the original root. The
   limit is recursion control, not an authority boundary.
-- `fabric_submit` from a lane only seals queued child records. A host-side worker
+- `fabric_run` (`op: submit`) from a lane only seals queued child records. A
+  host-side worker
   in the parent guardian prepares and launches them, rechecks the parent
   attempt and depth, and bounds each child by the parent's sealed task. In v1
   no lane may propose a writer or delivering child: the host holds no sealed
@@ -371,6 +372,14 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   and listing. Child storage is writable by the submitting lane, so it is not
   independent evidence against that lane: the host's view refuses a run or
   attempt it launched once its record names another owner.
+- A child may name a different adapter or account from its parent, in its own
+  `route` and `account`. That crossing is intended: a lane may hand work to
+  another provider family, such as a cross-family reviewer or a cheap utility
+  model, and the host does not bind a child to its parent's route. The child
+  gets the authentication grant of the adapter it names (Codex `login`, Cursor
+  `login` or Agy `keychain`), so a lane can reach any registered adapter's
+  login through a child's result. The host's checks above limit the child's
+  network and folder reach. They do not limit which credential it is given.
 - The guardian stops its worker on observed provider exit. Parent cancellation,
   deadline or supervisor signal cancels only this worker's children; normal
   parent completion leaves launched children's custody intact. The host first

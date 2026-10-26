@@ -1,10 +1,8 @@
 //! Small command edge for the checked-in replay bench script.
 use crate::{emit, fail, roots};
 use provenant_cli::{Bench, Globals};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::exec::{
-    ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-};
 use serde_json::Value;
 use std::{ffi::OsString, time::Duration};
 

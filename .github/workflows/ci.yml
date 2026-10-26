@@ -130,7 +130,7 @@ jobs:
           CARGO_BUILD_JOBS: "2"
         run: |
           # Separate invocations prevent workspace feature unification from hiding missing dependencies.
-          for crate in provenant-cli provenant-run provenant-supervisor; do
+          for crate in provenant-cli provenant-run provenant-supervisor provenant-os; do
             cargo check --locked -p "$crate" --features fixture
             cargo check --locked -p "$crate" --all-targets --features fixture
           done
@@ -225,7 +225,7 @@ jobs:
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: cargo nextest run --profile ci --locked -p provenant-supervisor -p provenant-confinement
+        run: cargo nextest run --profile ci --locked -p provenant-supervisor -p provenant-confinement -p provenant-os
       - name: Run dispatch confinement integration tests
         working-directory: tools/front-door
         env:

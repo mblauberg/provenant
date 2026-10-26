@@ -1,6 +1,6 @@
 //! Shared descriptor-relative workflow directory traversal.
 use provenant_core::{ProjectId, StateRoot};
-use provenant_supervisor::fs::{Directory, FsError};
+use provenant_os::fs::{Directory, FsError};
 use std::ffi::OsStr;
 
 pub(crate) fn directory(

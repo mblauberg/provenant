@@ -7,9 +7,9 @@ use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, DeliveryId, DurationMicros, ProjectId, Roots,
     UtcMicros, WaitBudget,
 };
+use provenant_os::clock::SystemClock;
 use provenant_records::{CommandError, CommandResult, Outcome, workflow::*};
 use provenant_run::{AttemptReader, ExecutionContext, Request, RunStore};
-use provenant_supervisor::clock::SystemClock;
 use provenant_workflow::{
     bind::{self, ReviewClaim},
     coverage::{self, LegBlocker, ReviewContext, Status},
@@ -263,7 +263,7 @@ fn read_input(source: &str) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
     if source == "-" {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(WAIT_SECONDS);
-        bytes = provenant_supervisor::sys::hook_io::read_stdin(REQUEST_LIMIT as usize, deadline)?;
+        bytes = provenant_os::sys::hook_io::read_stdin(REQUEST_LIMIT as usize, deadline)?;
     } else {
         std::fs::File::open(Path::new(source))?
             .take(REQUEST_LIMIT + 1)

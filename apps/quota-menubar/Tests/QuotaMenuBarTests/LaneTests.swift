@@ -40,6 +40,15 @@ final class LaneTests: XCTestCase {
         XCTAssertTrue(LaneBoard.attention(try Lane.decodePage(page([])).lanes, now: now).isEmpty)
     }
 
+    func testProtectedReviewNeedsAttention() throws {
+        let decoded = try Lane.decodePage(page([
+            row("1", "review_required", queued: "2026-10-25T09:00:00Z", finished: "2026-10-25T09:40:00Z"),
+        ])).lanes
+        let shown = LaneBoard.attention(decoded, now: now)
+        XCTAssertEqual(shown.map(\.lane.attemptID), ["att1"])
+        XCTAssertEqual(shown.map(\.kind), [.failed])
+    }
+
     func testPageCursorAndFailureEnvelope() throws {
         XCTAssertEqual(try Lane.decodePage(page([], next: "100")).next, "100")
         let failure = Data(#"{"schema_version":1,"command":"lanes","status":"error","data":null,"error":{"code":"X","message":"boom"}}"#.utf8)

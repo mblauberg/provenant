@@ -43,7 +43,8 @@ the index and working tree are clean. Run calls
 `worktrees::check_writer_terminal` before
 committing a writer's terminal result, including a result recovered by
 reconcile. Unfinished Git operations produce a failed result with the worktree
-path and reason.
+path and reason. A writer that succeeded but left edits uncommitted with no
+new commit ends `uncommitted`, and its reason names the dirty paths.
 No force removal is offered.
 
 ## Ownership and cleanup
@@ -106,7 +107,8 @@ lane cache.
 
 ## Writer dispatch
 
-Agents use `fabric_submit`; this is the terminal path for a shell without MCP.
+Agents use `fabric_run` (`op: submit`); this is the terminal path for a shell
+without MCP.
 
 ```sh
 provenant dispatch --operation-id OP --model ADAPTER/MODEL \

@@ -111,7 +111,7 @@ fn run_writer_fixture(base: &Path, socket_path: &Path) -> String {
     let store = ReceiptStore::new(root, project, delivery);
     let mut candidate_file = fs::File::open(base.join("candidate.json")).unwrap();
     let candidate = receipt::read(&mut candidate_file).unwrap();
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let valid_until = time(4_102_444_800_000_000);
     let budget = WaitBudget::cli(clock.mono_now(), 3).unwrap();
     match store.save(
@@ -211,7 +211,7 @@ fn delivery_and_session_locks_are_independent() {
     let _first_delivery = first_dir
         .lock(
             std::ffi::OsStr::new("receipt.lock"),
-            provenant_supervisor::fs::LockMode::Exclusive,
+            provenant_os::fs::LockMode::Exclusive,
             budget,
             &cancel,
             &clock,
@@ -227,7 +227,7 @@ fn delivery_and_session_locks_are_independent() {
     let _second_delivery = second_dir
         .lock(
             std::ffi::OsStr::new("receipt.lock"),
-            provenant_supervisor::fs::LockMode::Exclusive,
+            provenant_os::fs::LockMode::Exclusive,
             budget,
             &cancel,
             &clock,

@@ -1,10 +1,10 @@
 ## Breaking changes
 
 - Task classes are removed. `config show` no longer takes `--task-class`, the
-  knob registry's presets no longer carry `task_classes`, and a Fabric route
-  no longer accepts `task_class`: `fabric_submit` rejects it as invalid input,
-  and the field is gone from its schema. A route that named only a task class
-  now names no route, so give it a `route` or `model`. New dispatch profiles
+  knob registry's presets no longer carry `task_classes`, and Fabric routes
+  and submission tasks no longer accept `task_class`: `fabric_run` with
+  `op: submit` rejects it as invalid input, and the field is gone from its
+  schema. Use a tagged model or named route instead. New dispatch profiles
   record no `task_class`; old runs stay readable, including requests and
   attempts sealed with that field. Upgrade every host together (#1571).
 - The eight advisory knobs are removed from the registry, since no code read

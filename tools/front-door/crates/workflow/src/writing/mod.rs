@@ -1,5 +1,5 @@
 //! Bounded skill-owned prose rules. Findings are evidence, not filing approval.
-use provenant_supervisor::fs::FsError;
+use provenant_os::fs::FsError;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
