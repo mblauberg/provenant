@@ -722,6 +722,7 @@ fn writer_run(
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {
                 base: None,
+                base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),
                 task_id: task,
