@@ -38,7 +38,7 @@ pub(crate) enum Error {
     Permissions(#[from] provenant_confinement::permissions::PermissionError),
     #[error("{0}")]
     CacheGc(
-        provenant_confinement::permissions::CacheGcError,
+        Box<provenant_confinement::permissions::CacheGcError>,
         Vec<PathBuf>,
     ),
     #[error(transparent)]
@@ -196,6 +196,7 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
             )
         }
         Err(Error::CacheGc(error, unobserved_projects)) => {
+            let error = *error;
             let human = gc_summary(&error.report);
             let message = format!("{error}\n{human}");
             let mut result = CommandResult::new(
@@ -321,7 +322,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                 unobserved_projects,
             });
         }
-        for binding in provenant_config::list_projects(&roots, &LocalFs)? {
+        for binding in provenant_config::registered_projects(&roots, &LocalFs)? {
             let common = binding.common_dir();
             let path = if common.file_name() == Some(OsStr::new(".git")) {
                 common.parent().ok_or(Error::InvalidScope)?
@@ -366,7 +367,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         Err(WorkerState::Unknown)
     }) {
         Ok(report) => report,
-        Err(error) => return Err(Error::CacheGc(error, unobserved_projects)),
+        Err(error) => return Err(Error::CacheGc(Box::new(error), unobserved_projects)),
     };
     Ok(GcData {
         report,

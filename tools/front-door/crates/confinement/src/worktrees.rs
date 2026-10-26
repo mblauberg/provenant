@@ -650,7 +650,9 @@ fn path_digest(path: &Path) -> String {
     hex(&digest)
 }
 
-fn state_dir_name(path: &Path) -> OsString {
+/// The registry entry name for the canonical worktree `path`, below
+/// `<state>/worktrees/<project>/`.
+pub fn state_dir_name(path: &Path) -> OsString {
     path_digest(path).into()
 }
 

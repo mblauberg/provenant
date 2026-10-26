@@ -259,6 +259,14 @@ need not be repeated. Explicit `--hooks on` refuses edited Claude hooks and
 names `--hooks off` as recovery. Explicit `--hooks off` removes exact owned
 matches, relinquishes modified entries and reports them.
 
+The receipt's Git hooks directory is user-editable evidence, not authority.
+Uninstall re-derives it with Git from the recorded checkout and refuses a
+recorded launcher anywhere else. If the checkout is gone, the launcher is
+kept, relinquished and reported as `legacy_checkout_unavailable`. A checkout
+that exists but no longer resolves its hooks directory refuses an uninstall
+that removes the launcher. Uninstalling some recorded targets keeps the
+shared launcher, so it needs no hooks directory.
+
 On macOS, installation into the account's default state root also owns
 `~/Library/LaunchAgents/dev.provenant.peer.plist`. The plist participates in
 the preview, receipt and `check install`. Publication refuses symlinks at
@@ -266,9 +274,20 @@ the plist or any parent, stages with `O_NOFOLLOW | O_EXCL`, then renames.
 Its PATH starts with `/usr/bin:/bin:/usr/sbin:/sbin`, followed by the absolute
 install bin directory and existing absolute directories holding resolved
 Claude, Codex and Git executables, when known. Empty and relative entries are
-excluded. Uninstall of the last recorded target boots out the service before
-removing an exact receipt match. A modified plist and its service are kept
-and reported; failed bootout leaves the plist owned for retry.
+excluded. A Claude or Codex directory inside a project's Git worktree is
+skipped with a note and the search continues, so a project-local entry such
+as direnv's `PATH_add` cannot lend the agent its other executables. Each
+enclosing worktree is found by an ancestor `.git` file or directory and
+resolved, through `gitdir:` and `commondir`, to its common directory. It is
+a project's when its top level or common directory matches a Git-backed
+binding (`<root>/.git`), when it lies under such a project's `.worktrees/`,
+or when the worktree registry lists it. Unreadable bindings are noted and
+leave only the registry to match. Other clones, such as `~/.nvm`,
+`/opt/homebrew` or a `$HOME` kept in Git, stay eligible, and non-Git bindings
+never match. Uninstall of
+the last recorded target boots out the service before removing an exact
+receipt match. A modified plist and its service are kept and reported;
+failed bootout leaves the plist owned for retry.
 The earlier installer's unreceipted plist is recognised only when its complete
 bytes match the historical template for the validated receipt's binary path
 and state root, with mode 0600 or 0644. Upgrade replaces it with the sanitised

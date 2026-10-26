@@ -177,84 +177,59 @@ pub fn lookup_project(
     location: &ProjectLocation,
     fs: &dyn SafeFs,
 ) -> Result<Option<ProjectBinding>, ConfigError> {
-    let state = match fs.open_anchor(roots.state.as_path()) {
-        Ok(state) => state,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    verify_directory(&*state, true)?;
-    let projects = match state.open_verified_directory(OsStr::new(PROJECTS_DIR)) {
-        Ok(projects) => projects,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    verify_directory(&*projects, true)?;
-    find_binding(&*projects, location.common_dir())
+    match existing_projects(roots, fs)? {
+        Some(projects) => find_binding(&*projects, location.common_dir()),
+        None => Ok(None),
+    }
 }
 
-/// Read registered project locations without allocating identities or state.
-pub fn list_projects(roots: &Roots, fs: &dyn SafeFs) -> Result<Vec<ProjectBinding>, ConfigError> {
+/// Lookup only: every registered binding, Git-backed or not.
+pub fn registered_projects(
+    roots: &Roots,
+    fs: &dyn SafeFs,
+) -> Result<Vec<ProjectBinding>, ConfigError> {
+    match existing_projects(roots, fs)? {
+        Some(projects) => bindings(&*projects),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn existing_projects(
+    roots: &Roots,
+    fs: &dyn SafeFs,
+) -> Result<Option<Box<dyn SafeDir>>, ConfigError> {
     let state = match fs.open_anchor(roots.state.as_path()) {
         Ok(state) => state,
-        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     verify_directory(&*state, true)?;
     let projects = match state.open_verified_directory(OsStr::new(PROJECTS_DIR)) {
         Ok(projects) => projects,
-        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     verify_directory(&*projects, true)?;
-    read_bindings(&*projects)
+    Ok(Some(projects))
 }
 
 fn find_binding(
     projects: &dyn SafeDir,
     target: &Path,
 ) -> Result<Option<ProjectBinding>, ConfigError> {
-    let mut count = 0;
     let mut found = None;
-    for entry in projects.entries()? {
-        let entry = entry?;
-        if entry == OsStr::new(BINDING_LOCK) {
-            continue;
-        }
-        count += 1;
-        if count > MAX_PROJECTS {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
-        let name = entry.to_str().ok_or(ConfigError::InvalidProjectBinding)?;
-        let project = name
-            .parse::<ProjectId>()
-            .map_err(|_| ConfigError::InvalidProjectBinding)?;
-        let directory = projects.open_verified_directory(&entry)?;
-        verify_directory(&*directory, true)?;
-        let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
-        let bytes = read_record(&*directory, OsStr::new(RECORD), &entry, RECORD_LIMIT)?;
-        let record: ProjectBindingRecord =
-            serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
-        if record.schema_version != 1 || record.project != project {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
-        let common_dir = decode_location(&record.canonical_common_dir)?;
-        if found
-            .as_ref()
-            .is_some_and(|binding: &ProjectBinding| binding.common_dir() == common_dir)
-        {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
-        if common_dir == target {
-            found = Some(ProjectBinding {
-                project,
-                canonical_common_dir: common_dir,
-            });
+    for binding in bindings(projects)? {
+        if binding.common_dir() == target {
+            if found.is_some() {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            found = Some(binding);
         }
     }
     Ok(found)
 }
 
-fn read_bindings(projects: &dyn SafeDir) -> Result<Vec<ProjectBinding>, ConfigError> {
+fn bindings(projects: &dyn SafeDir) -> Result<Vec<ProjectBinding>, ConfigError> {
     let mut count = 0;
     let mut found = Vec::new();
     for entry in projects.entries()? {
@@ -279,10 +254,9 @@ fn read_bindings(projects: &dyn SafeDir) -> Result<Vec<ProjectBinding>, ConfigEr
         if record.schema_version != 1 || record.project != project {
             return Err(ConfigError::InvalidProjectBinding);
         }
-        let common_dir = decode_location(&record.canonical_common_dir)?;
         found.push(ProjectBinding {
             project,
-            canonical_common_dir: common_dir,
+            canonical_common_dir: decode_location(&record.canonical_common_dir)?,
         });
     }
     Ok(found)
@@ -556,7 +530,7 @@ mod tests {
 
         assert_ne!(first.project, second.project);
         fs::set_permissions(roots.state.as_path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let listed = list_projects(&roots, &LocalFs).unwrap();
+        let listed = registered_projects(&roots, &LocalFs).unwrap();
         assert_eq!(listed.len(), 2);
         assert!(listed.contains(&first));
         assert!(listed.contains(&second));
@@ -597,7 +571,7 @@ mod tests {
         fs::set_permissions(duplicate.join(RECORD), fs::Permissions::from_mode(0o600)).unwrap();
         assert_ne!(target.project_id(), duplicate_id);
         assert_ne!(duplicated.project_id(), duplicate_id);
-        assert_eq!(list_projects(&roots, &LocalFs).unwrap().len(), 3);
+        assert_eq!(registered_projects(&roots, &LocalFs).unwrap().len(), 3);
 
         assert_eq!(
             lookup_project(

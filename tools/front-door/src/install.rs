@@ -49,8 +49,9 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
         let previous = provenant_config::installed_binary(targets, &LocalFs)
             .map_err(EdgeError::Install)?
             .unwrap_or_else(|| program.clone());
-        targets.peer_agent =
-            Some(super::peer_agent::install_plist(&program, state).map_err(EdgeError::Peer)?);
+        targets.peer_agent = Some(
+            super::peer_agent::install_plist(&program, &targets.roots).map_err(EdgeError::Peer)?,
+        );
         targets.peer_agent_previous =
             super::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;
@@ -154,6 +155,18 @@ fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targ
     targets
         .resolve_destinations(&LocalFs)
         .map_err(EdgeError::Install)?;
+    // Re-derive the legacy hooks directory rather than trust the receipt's
+    // copy, and only when uninstall removes the launcher. A checkout that is
+    // gone yields none, so uninstall reports its launcher instead.
+    targets.git_hooks_dir = match provenant_config::recorded_hook_checkout(&targets, &LocalFs)
+        .map_err(EdgeError::Install)?
+    {
+        Some(checkout) => match std::fs::metadata(&checkout) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            _ => Some(git_hooks_dir(&checkout)?),
+        },
+        None => None,
+    };
     Ok(targets)
 }
 

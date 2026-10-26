@@ -6,6 +6,7 @@ mod controls;
 mod db;
 mod delivery;
 mod disk;
+mod git_context;
 mod holder;
 mod launch;
 mod ledger;
@@ -19,6 +20,7 @@ pub use admission::{
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
 pub use delivery::HostDeliveryContext;
+pub use git_context::{GitContext, resolve_git_base};
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
@@ -72,6 +74,8 @@ pub enum RunError {
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
+    InvalidBase(String),
     #[error("run-store schema version {0} is unsupported")]
     Version(i64),
     #[error("run-store path is not private or contained")]

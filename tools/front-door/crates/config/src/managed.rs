@@ -1791,6 +1791,51 @@ pub fn installed_binary(
         .map(|receipt| Ok(receipt.bin_dir.to_path_buf()?.join("provenant")))
         .transpose()
 }
+/// Recorded legacy checkout when uninstall of `targets` removes the receipt's
+/// Git pre-push launcher, which needs every recorded target selected. The edge
+/// re-derives the hooks directory for uninstall instead of trusting the
+/// receipt's copy.
+pub fn recorded_hook_checkout(
+    targets: &Targets,
+    fs: &dyn SafeFs,
+) -> Result<Option<PathBuf>, InstallError> {
+    let Some(receipt) = read_receipt(targets, fs)? else {
+        return Ok(None);
+    };
+    let (selected, registered) = uninstall_selection(&receipt, targets)?;
+    if selected != registered
+        || !receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "git-hook:pre-push")
+    {
+        return Ok(None);
+    }
+    receipt
+        .legacy
+        .map(|legacy| Ok(legacy.checkout.to_path_buf()?))
+        .transpose()
+}
+/// The recorded targets uninstall of `targets` selects, and every recorded
+/// target. Shared entries go only when the two match.
+fn uninstall_selection(
+    receipt: &InstallReceipt,
+    targets: &Targets,
+) -> Result<(BTreeSet<TargetId>, BTreeSet<TargetId>), InstallError> {
+    let mut registered = BTreeSet::new();
+    let mut selected = BTreeSet::new();
+    for recorded in &receipt.harness_targets {
+        let id = recorded_id(recorded)?;
+        if targets.harnesses.iter().any(|target| {
+            target.harness == recorded.harness
+                && (!targets.environment_homes.contains(&target.harness) || target.id() == id)
+        }) {
+            selected.insert(id.clone());
+        }
+        registered.insert(id);
+    }
+    Ok((selected, registered))
+}
 pub(crate) fn read_receipt_inspected(
     targets: &Targets,
     fs: &dyn SafeFs,
@@ -2225,18 +2270,7 @@ pub fn uninstall(
     let Some(mut receipt) = read_receipt(targets, fs)? else {
         return not_installed(&receipt_path, reporter);
     };
-    let mut registered = BTreeSet::new();
-    let mut selected = BTreeSet::new();
-    for recorded in &receipt.harness_targets {
-        let id = recorded_id(recorded)?;
-        if targets.harnesses.iter().any(|target| {
-            target.harness == recorded.harness
-                && (!targets.environment_homes.contains(&target.harness) || target.id() == id)
-        }) {
-            selected.insert(id.clone());
-        }
-        registered.insert(id);
-    }
+    let (selected, registered) = uninstall_selection(&receipt, targets)?;
     if selected.is_empty() {
         return not_installed(&receipt_path, reporter);
     }
@@ -2294,6 +2328,21 @@ pub fn uninstall(
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
+        if entry.selector == "git-hook:pre-push" {
+            // The receipt's hooks directory is user-editable evidence. The edge
+            // re-derives it from the recorded checkout; a gone checkout leaves
+            // the launcher and reports it, and any other directory refuses.
+            let Some(directory) = &targets.git_hooks_dir else {
+                findings.push(InstallFinding {
+                    rule: "legacy_checkout_unavailable".into(),
+                    path: entry.path.clone(),
+                });
+                continue;
+            };
+            if path != directory.join("pre-push") {
+                return Err(InstallError::Conflict(path));
+            }
+        }
         if matches!(entry.expected, OwnedValue::Selector { .. }) {
             let before = snapshot(&path, fs)?;
             if let Some(before) = before {

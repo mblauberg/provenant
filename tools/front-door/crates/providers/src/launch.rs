@@ -74,6 +74,8 @@ pub struct PrepareInput<'a> {
     pub token: Option<&'a crate::claude::OauthToken>,
     /// Working directory: the worktree for writers, a read root otherwise.
     pub cwd: &'a Path,
+    /// Whether this lane received a captured Git context in its prompt.
+    pub git_context: bool,
     /// Caller-supplied randomness; Claude uses it as a fresh session id.
     pub nonce: [u8; 16],
     pub provenant: crate::LaneRuntime<'a>,

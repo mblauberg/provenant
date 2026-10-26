@@ -1123,6 +1123,17 @@
                   }
                 ]
               },
+              "base": {
+                "anyOf": [
+                  {
+                    "maxLength": 1024,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "deliver": {
                 "anyOf": [
                   {

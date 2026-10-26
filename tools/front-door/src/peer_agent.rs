@@ -6,9 +6,11 @@
 //! credential reads and the lanes it launches all run in the login session.
 //! The SSH entrypoint forwards when the agent accepts a connection and handles
 //! the request itself otherwise.
+use provenant_core::Roots;
 use provenant_fabric_runtime::hosts::MAX_FRAME;
-use provenant_supervisor::exec::{
-    ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+use provenant_supervisor::{
+    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+    fs::LocalFs,
 };
 use serde::Serialize;
 use std::{
@@ -584,15 +586,132 @@ fn sanitised_path(bin: &Path, executables: &[PathBuf]) -> Result<OsString, Agent
     std::env::join_paths(directories).map_err(|error| io::Error::other(error).into())
 }
 
-fn provider_executables(search: &OsStr) -> Vec<PathBuf> {
+/// The projects the agent works in: registered Git-backed bindings and the
+/// Provenant worktree registry. Non-Git bindings never match a worktree.
+struct Projects {
+    /// Canonical Git common directories, empty when the bindings cannot be
+    /// read.
+    common_dirs: Vec<PathBuf>,
+    /// The `<state>/worktrees/<project>` registry directories.
+    registries: Vec<PathBuf>,
+}
+
+impl Projects {
+    #[allow(clippy::print_stderr)]
+    fn registered(roots: &Roots) -> Self {
+        let common_dirs = match provenant_config::registered_projects(roots, &LocalFs) {
+            Ok(bindings) => bindings
+                .iter()
+                .map(|binding| binding.common_dir().to_path_buf())
+                .collect(),
+            Err(error) => {
+                eprintln!(
+                    "note: peer agent PATH skips only Provenant worktrees: project bindings are unreadable: {error}"
+                );
+                Vec::new()
+            }
+        };
+        let registries = fs::read_dir(roots.state.as_path().join("worktrees"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        Self {
+            common_dirs,
+            registries,
+        }
+    }
+
+    /// Whether the worktree at `top`, with Git common directory `common` when
+    /// it resolves, is a registered project or a Provenant worktree of one.
+    fn own(&self, top: &Path, common: Option<&Path>) -> bool {
+        let name = provenant_confinement::worktrees::state_dir_name(top);
+        self.common_dirs.iter().any(|dir| {
+            common == Some(dir.as_path())
+                || *dir == top.join(".git")
+                || (dir.file_name() == Some(OsStr::new(".git"))
+                    && dir
+                        .parent()
+                        .is_some_and(|root| top.starts_with(root.join(".worktrees"))))
+        }) || self
+            .registries
+            .iter()
+            .any(|registry| fs::symlink_metadata(registry.join(&name)).is_ok())
+    }
+}
+
+/// At most the first 4 KiB of `path`, as text.
+fn read_small(path: &Path) -> Option<String> {
+    let mut text = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(4096)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
+/// The canonical Git common directory of the worktree at `top`, from its
+/// `.git` directory, or its `gitdir:` file and that directory's `commondir`.
+fn common_dir(top: &Path) -> Option<PathBuf> {
+    let marker = top.join(".git");
+    let private = if marker.is_dir() {
+        marker
+    } else {
+        top.join(read_small(&marker)?.strip_prefix("gitdir: ")?.trim_end())
+    };
+    let common = match read_small(&private.join("commondir")) {
+        Some(text) => private.join(text.trim_end()),
+        None => private,
+    };
+    fs::canonicalize(common).ok()
+}
+
+/// The top level of a Git worktree holding `directory` that belongs to a
+/// project the agent works in. Worktrees are found by ancestor `.git` files or
+/// directories, and every enclosing one is checked, so a clone nested inside a
+/// project does not shelter the project's directories.
+fn project_worktree(directory: &Path, projects: &Projects) -> Option<PathBuf> {
+    let directory = fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    directory
+        .ancestors()
+        .filter(
+            |ancestor| match fs::symlink_metadata(ancestor.join(".git")) {
+                Ok(_) => true,
+                Err(error) => error.kind() != io::ErrorKind::NotFound,
+            },
+        )
+        .find(|top| projects.own(top, common_dir(top).as_deref()))
+        .map(Path::to_path_buf)
+}
+
+#[allow(clippy::print_stderr)]
+fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
     let mut executables = Vec::new();
     // Resolve only through absolute PATH directories. Never turn a relative
     // shell entry into an absolute agent search directory by canonicalising it.
+    // A project-local directory (direnv's `PATH_add`) would lend the agent
+    // everything it holds, so it is skipped and the search continues.
     for name in ["claude", "codex"] {
         if let Some(program) = std::env::split_paths(search)
             .filter(|dir| dir.is_absolute())
+            .filter(|dir| {
+                let path = dir.join(name);
+                path.is_file() && provenant_supervisor::sys::is_executable(&path)
+            })
+            .find(|dir| match project_worktree(dir, projects) {
+                Some(root) => {
+                    eprintln!(
+                        "note: peer agent PATH skips {} for {name}: inside the project worktree at {}",
+                        dir.display(),
+                        root.display()
+                    );
+                    false
+                }
+                None => true,
+            })
             .map(|dir| dir.join(name))
-            .find(|path| path.is_file() && provenant_supervisor::sys::is_executable(path))
         {
             executables.push(program);
         }
@@ -600,9 +719,10 @@ fn provider_executables(search: &OsStr) -> Vec<PathBuf> {
     executables
 }
 
-pub fn install_plist(program: &Path, state: &Path) -> Result<Vec<u8>, AgentError> {
+pub fn install_plist(program: &Path, roots: &Roots) -> Result<Vec<u8>, AgentError> {
+    let state = roots.state.as_path();
     let search = std::env::var_os("PATH").unwrap_or_default();
-    let mut executables = provider_executables(&search);
+    let mut executables = provider_executables(&search, &Projects::registered(roots));
     executables.extend(crate::roots::git_binary());
     let bin = program
         .parent()
@@ -814,13 +934,147 @@ mod tests {
             root.path().display(),
             bin.display()
         ));
-        let tools = provider_executables(&search);
+        let projects = Projects {
+            common_dirs: Vec::new(),
+            registries: Vec::new(),
+        };
+        let tools = provider_executables(&search, &projects);
         assert_eq!(tools, vec![bin.join("claude")]);
         let path = sanitised_path(Path::new("/install/bin"), &tools).unwrap();
         let entries = std::env::split_paths(&path).collect::<Vec<_>>();
         assert!(entries.contains(&bin));
         assert!(!entries.contains(&root.path().to_path_buf()));
         assert!(entries.iter().all(|entry| entry.is_absolute()));
+    }
+
+    /// A canonical temporary base, with private state roots inside it.
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
+    fn project_roots() -> (tempfile::TempDir, std::path::PathBuf, provenant_core::Roots) {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let state = base.join("state");
+        fs::create_dir_all(base.join("home")).unwrap();
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("home"));
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&LocalFs).unwrap();
+        (temp, base, roots)
+    }
+
+    #[allow(dead_code)]
+    fn bind(roots: &provenant_core::Roots, root: &std::path::Path) {
+        use super::*;
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let location = provenant_config::ProjectLocation::new(root.join(".git")).unwrap();
+        provenant_config::bind_project(roots, location, &LocalFs).unwrap();
+    }
+
+    #[allow(dead_code)]
+    fn provider(path: &std::path::Path) {
+        use super::*;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn provider_path_skips_a_registered_project_and_clones_nested_in_it() {
+        use super::*;
+        let (_temp, base, roots) = project_roots();
+        let project = base.join("project");
+        let tools = base.join("tools");
+        bind(&roots, &project);
+        fs::create_dir_all(project.join("vendor/tool/.git")).unwrap();
+        for path in [
+            project.join("bin/codex"),
+            project.join("vendor/tool/bin/claude"),
+            tools.join("codex"),
+        ] {
+            provider(&path);
+        }
+        let projects = Projects::registered(&roots);
+        assert_eq!(
+            project_worktree(&project.join("bin"), &projects),
+            Some(project.clone())
+        );
+        let search = std::env::join_paths([
+            project.join("bin"),
+            project.join("vendor/tool/bin"),
+            tools.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            provider_executables(&search, &projects),
+            vec![tools.join("codex")]
+        );
+    }
+
+    #[test]
+    fn provider_path_keeps_a_clone_that_is_not_a_registered_project() {
+        use super::*;
+        let (_temp, base, roots) = project_roots();
+        let home = base.join("home");
+        let nvm = home.join(".nvm");
+        let bin = nvm.join("versions/node/v22.0.0/bin");
+        bind(&roots, &base.join("project"));
+        fs::create_dir_all(nvm.join(".git")).unwrap();
+        fs::create_dir_all(home.join(".git")).unwrap();
+        provider(&bin.join("codex"));
+        let projects = Projects::registered(&roots);
+        assert_eq!(project_worktree(&bin, &projects), None);
+        let search = std::env::join_paths([&bin]).unwrap();
+        assert_eq!(
+            provider_executables(&search, &projects),
+            vec![bin.join("codex")]
+        );
+        let unreadable = Projects {
+            common_dirs: Vec::new(),
+            registries: Vec::new(),
+        };
+        assert_eq!(
+            provider_executables(&search, &unreadable),
+            vec![bin.join("codex")]
+        );
+    }
+
+    #[test]
+    fn provider_path_skips_a_provenant_worktree() {
+        use super::*;
+        let (_temp, base, roots) = project_roots();
+        let project = base.join("project");
+        let worktree = project.join(".worktrees/feat-x");
+        let private = project.join(".git/worktrees/feat-x");
+        bind(&roots, &project);
+        fs::create_dir_all(&private).unwrap();
+        fs::write(private.join("commondir"), b"../..\n").unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            b"gitdir: ../../.git/worktrees/feat-x\n",
+        )
+        .unwrap();
+        provider(&worktree.join("bin/claude"));
+        let projects = Projects::registered(&roots);
+        assert_eq!(common_dir(&worktree), Some(project.join(".git")));
+        assert_eq!(
+            project_worktree(&worktree.join("bin"), &projects),
+            Some(worktree.clone())
+        );
+        let search = std::env::join_paths([worktree.join("bin")]).unwrap();
+        assert!(provider_executables(&search, &projects).is_empty());
+        // Without a resolvable marker, the `.worktrees` location or a
+        // registry entry still identifies a Provenant worktree.
+        assert!(projects.own(&worktree, None));
+        let elsewhere = base.join("elsewhere");
+        assert!(!projects.own(&elsewhere, None));
+        let registry = roots.state.as_path().join("worktrees/project");
+        fs::create_dir_all(
+            registry.join(provenant_confinement::worktrees::state_dir_name(&elsewhere)),
+        )
+        .unwrap();
+        assert!(Projects::registered(&roots).own(&elsewhere, None));
     }
 
     #[test]

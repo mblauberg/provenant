@@ -47,8 +47,9 @@ const MAX_NETWORK_GRANTS: usize = 128;
 const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
 const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
+/// The retained provider state copy shares this depth limit.
 #[cfg(target_os = "macos")]
-const MAX_WRITABLE_TREE_DEPTH: usize = 128;
+const MAX_WRITABLE_TREE_DEPTH: usize = 32;
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "macos")]
@@ -2540,13 +2541,23 @@ fn render_profile(
             PathScope::Subtree,
         )?;
     }
-    // A writer may run what it builds into a configured write root (build
-    // scripts under a shared CARGO_TARGET_DIR). It can already run code it
-    // writes in the worktree, so this adds no capability.
+    // Writers run build scripts in configured write roots and fixture binaries
+    // in their own attempt tmp/candidate-N. Scratch already has a read grant.
     if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
         for root in &plan.write_roots {
             push_rule(&mut source, "allow", "process-exec", &root.path, root.scope)?;
         }
+        push_rule(
+            &mut source,
+            "allow",
+            "process-exec",
+            &plan.scratch.path,
+            PathScope::Subtree,
+        )?;
+        source.push_str(concat!(
+            "(allow signal (target children))\n",
+            "(allow file-read* (subpath \"/dev/fd\"))\n",
+        ));
     }
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
@@ -3263,9 +3274,7 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut plan, profile) = write_grants_fixture();
+    fn worktree_grants_fixture() -> WorktreeWriteGrants {
         let exact = |name: &str| PathGrant {
             path: Path::new("/fixture/git").join(name),
             scope: PathScope::Exact,
@@ -3274,7 +3283,7 @@ mod tests {
             path: path.into(),
             scope: PathScope::Subtree,
         };
-        let git = WorktreeWriteGrants {
+        WorktreeWriteGrants {
             worktree: subtree("/fixture/repo"),
             private_git_dir: subtree("/fixture/git/private"),
             common_git_dir: subtree("/fixture/git"),
@@ -3286,6 +3295,85 @@ mod tests {
             head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
             objects: subtree("/fixture/git/objects"),
             selected_ref: std::array::from_fn(|i| exact(&format!("ref-{i}"))),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writer_test_grants_stay_within_the_attempt_and_mode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut plan, profile) = write_grants_fixture();
+        let scratch = "/fixture/runs/run/attempts/own/tmp/candidate-0";
+        plan.scratch.path = scratch.into();
+        let git = worktree_grants_fixture();
+        for writer in [false, true] {
+            if writer {
+                plan.read_only = None;
+                plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
+                    git_grants_digest: [7; 32],
+                    cargo_cache: PathGrant {
+                        path: "/fixture/cache".into(),
+                        scope: PathScope::Subtree,
+                    },
+                }));
+            }
+            let rendered = String::from_utf8(render_profile(
+                &plan,
+                &profile,
+                &[],
+                &[],
+                writer.then_some(&git),
+                Path::new("/fixture/home"),
+            )?)?;
+            let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
+            assert_eq!(rendered.lines().any(|line| line == exec), writer);
+            assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
+            for outside in [
+                "/fixture/runs",
+                "/fixture/runs/run",
+                "/fixture/runs/run/attempts/own",
+                "/fixture/runs/run/attempts/own/tmp",
+                "/fixture/runs/run/attempts/own/tmp/candidate-1",
+                "/fixture/runs/run/attempts/other/tmp/candidate-0",
+            ] {
+                for operation in ["process-exec", "file-read*"] {
+                    assert!(
+                        !rendered.contains(&format!("(allow {operation} (subpath \"{outside}\"))")),
+                        "{outside}"
+                    );
+                }
+            }
+            assert!(!rendered.contains("(allow process-exec (subpath \"/fixture/private\"))"));
+            let signals: Vec<_> = rendered
+                .lines()
+                .filter(|line| line.starts_with("(allow signal"))
+                .collect();
+            assert_eq!(
+                signals,
+                if writer {
+                    vec!["(allow signal (target children))"]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                rendered.contains("(allow file-read* (subpath \"/dev/fd\"))"),
+                writer
+            );
+            assert!(!rendered.contains("(allow file-read* (subpath \"/dev\"))"));
+            assert!(!rendered.contains("(allow file-write* (subpath \"/dev/fd\"))"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut plan, profile) = write_grants_fixture();
+        let git = worktree_grants_fixture();
+        let subtree = |path: &str| PathGrant {
+            path: path.into(),
+            scope: PathScope::Subtree,
         };
         for writer in [false, true] {
             if writer {
@@ -4394,6 +4482,7 @@ mod tests {
             provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/usr/bin/perl"))?,
         ];
 
         let profile = ProviderProfile {
@@ -4542,11 +4631,25 @@ mod tests {
             "(allow process-exec (subpath \"{}\"))",
             project_locks.display()
         )));
+        // A read-only lane over the same grants, for the agent socket probe.
+        let read_only_plan = PlanPermissions {
+            mode: AccessMode::ReadOnly,
+            ..plan.clone()
+        };
+        let read_only_anchors = Anchors {
+            worktree: None,
+            ..anchors
+        };
+        let read_only_sbpl = String::from_utf8(
+            backend
+                .compile(&read_only_plan, &profile, &read_only_anchors)?
+                .profile,
+        )?;
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
             ("HOME".into(), home.into_os_string()),
-            ("PROVENANT_STATE_DIR".into(), state.into_os_string()),
+            ("PROVENANT_STATE_DIR".into(), state.clone().into_os_string()),
             ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
@@ -4568,11 +4671,11 @@ mod tests {
             );
             return Ok(());
         }
-        let run = |program: &Path, args: &[&Path]| {
+        let run_in = |sbpl: &str, program: &Path, args: &[&Path]| {
             let mut argv = vec![
                 OsString::from(SANDBOX_EXEC),
                 OsString::from("-p"),
-                OsString::from(&sbpl),
+                OsString::from(sbpl),
                 OsString::from(program.as_os_str()),
             ];
             argv.extend(args.iter().map(|path| path.as_os_str().to_owned()));
@@ -4585,6 +4688,43 @@ mod tests {
             options.reap_timeout = CLEANUP_TIMEOUT;
             executor.execute(options).expect("bounded sandbox child")
         };
+        let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
+
+        // The per-user peer agent relays to fresh `fabric peer` children in
+        // the login session, so no lane may connect to its socket. The
+        // unconfined connection proves the listener; the system DNS socket
+        // proves the confined client runs and can connect where allowed.
+        let agent = state.join("peer-agent");
+        std::fs::create_dir_all(&agent)?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let peer_socket = agent.join("peer.sock");
+        let _peer_listener = std::os::unix::net::UnixListener::bind(&peer_socket)?;
+        std::os::unix::net::UnixStream::connect(&peer_socket)?;
+        let connect = |sbpl: &str, socket: &Path| {
+            run_in(
+                sbpl,
+                &executables[6],
+                &[
+                    Path::new("-MIO::Socket::UNIX"),
+                    Path::new("-e"),
+                    Path::new("IO::Socket::UNIX->new(Peer => $ARGV[0]) or die \"connect: $!\\n\""),
+                    socket,
+                ],
+            )
+        };
+        let system_socket = Path::new("/private/var/run/mDNSResponder");
+        for (name, sbpl) in [("writer", &sbpl), ("read-only", &read_only_sbpl)] {
+            let outcome = connect(sbpl, system_socket);
+            assert!(
+                successful_probe(&outcome),
+                "{name} system socket: {:?}; {}",
+                outcome.termination,
+                String::from_utf8_lossy(&outcome.stderr.bytes)
+            );
+        }
 
         let shell_outcome = run(&executables[3], &[Path::new("-c"), Path::new("printf ok")]);
         assert!(
@@ -4658,6 +4798,29 @@ mod tests {
                 run(&executables[0], &[&project_locks.join("lock")]),
             ),
             ("write root exec", run(&build_script, &[])),
+            ("attempt tmp exec", run(&scratch_script, &[])),
+            (
+                "child signal",
+                run(
+                    &executables[3],
+                    &[
+                        Path::new("-c"),
+                        Path::new(
+                            "/bin/sleep 1 & child=$!; kill -TERM \"$child\"; result=$?; wait \"$child\"; exit \"$result\"",
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "descriptor read",
+                run(
+                    &executables[3],
+                    &[
+                        Path::new("-c"),
+                        Path::new("test \"$(printf ok | /bin/cat /dev/fd/0)\" = ok"),
+                    ],
+                ),
+            ),
             (
                 "new symlink in worktree",
                 run(
@@ -4673,8 +4836,19 @@ mod tests {
             );
         }
         let mut probes = vec![
-            ("scratch exec", run(&scratch_script, &[])),
+            ("writer peer agent socket", connect(&sbpl, &peer_socket)),
+            (
+                "read-only peer agent socket",
+                connect(&read_only_sbpl, &peer_socket),
+            ),
             ("undeclared target exec", run(&undeclared_script, &[])),
+            (
+                "parent signal probe",
+                run(
+                    &executables[3],
+                    &[Path::new("-c"), Path::new("kill -0 \"$PPID\"")],
+                ),
+            ),
             (
                 "git config write",
                 run(&executables[0], &[&common.join("config")]),

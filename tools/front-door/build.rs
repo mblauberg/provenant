@@ -115,11 +115,8 @@ impl TrackedFiles {
         if !index.status.success() {
             return Err(invalid("cannot resolve source inventory git index").into());
         }
-        let index = index
-            .stdout
-            .strip_suffix(b"\n")
-            .ok_or_else(|| invalid("git did not return an index path"))?;
-        watch(watched, PathBuf::from(std::str::from_utf8(index)?))?;
+        let index = index_path_from_output(&index.stdout)?;
+        watch(watched, index)?;
 
         let output = Command::new("git")
             .args(["ls-files", "--full-name", "-z", "--", ":/"])
@@ -819,10 +816,28 @@ fn watch(paths: &mut BTreeSet<PathBuf>, path: PathBuf) -> BuildResult<()> {
     if fs::symlink_metadata(&path).is_err() {
         return Ok(());
     }
+    if fs::metadata(&path).is_err() {
+        return Ok(());
+    }
     path.to_str()
         .ok_or_else(|| invalid("Cargo rerun path is not UTF-8"))?;
     paths.insert(path);
     Ok(())
+}
+
+fn index_path_from_output(output: &[u8]) -> BuildResult<PathBuf> {
+    let line = output
+        .strip_suffix(b"\n")
+        .ok_or_else(|| invalid("git did not return an index path"))?;
+    if line.contains(&b'\n') || line.contains(&b'\r') {
+        return Err(invalid("git returned more than one index path line").into());
+    }
+    let path = PathBuf::from(std::str::from_utf8(line)?);
+    if !path.is_absolute() {
+        return Err(invalid("git returned a non-absolute index path").into());
+    }
+    // A fresh repository has no index yet; watch() skips missing paths.
+    Ok(path)
 }
 
 fn emit_path_instruction(kind: &str, path: &Path) -> io::Result<()> {
@@ -859,13 +874,43 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use super::{
         BuildResult, Inputs, TrackedFiles, collect_external_tree, collect_member_inputs,
-        discover_members, invalid, parse_toml, source_digest,
+        discover_members, index_path_from_output, invalid, parse_toml, source_digest, watch,
     };
     use provenant_records::{SourceDigest, SourceInput};
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+
+    #[test]
+    fn dangling_untracked_symlink_is_not_watched() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let link = temporary.path().join("rustfmt.toml");
+        std::os::unix::fs::symlink("missing-target", &link)?;
+        let mut watched = BTreeSet::new();
+
+        watch(&mut watched, link.clone())?;
+
+        assert!(!watched.contains(&link));
+        Ok(())
+    }
+
+    #[test]
+    fn git_index_output_requires_one_absolute_path() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let index = temporary.path().join("index");
+        fs::write(&index, b"")?;
+        let output = format!("{}\n", index.display());
+
+        assert_eq!(index_path_from_output(output.as_bytes())?, index);
+        assert!(index_path_from_output(b"--path-format=absolute\n.git/index\n").is_err());
+        assert!(index_path_from_output(b"relative/index\n").is_err());
+        assert_eq!(
+            index_path_from_output(b"/missing/index\n")?,
+            Path::new("/missing/index")
+        );
+        Ok(())
+    }
 
     #[test]
     fn untracked_and_ignored_files_do_not_change_the_source_digest() -> BuildResult<()> {

@@ -1146,6 +1146,7 @@ fn main() -> Result<()> {
             account: account.as_ref(),
             token: token.as_ref(),
             cwd,
+            git_context: false,
             nonce,
             provenant: provenant_providers::LaneRuntime {
                 executable: &args.provenant,
