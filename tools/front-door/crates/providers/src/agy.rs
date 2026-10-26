@@ -21,7 +21,7 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
     },
 };
 
-crate::adapter!(Agy, "agy", prepare);
+crate::adapter!(Agy, "agy", prepare, failure_diagnostic);
 const MODEL_ON_WIRE: bool = true;
 
 /// The CLI's own turn limit, off at zero; the supervisor's deadline is the real
@@ -218,6 +218,27 @@ struct Usage {
     input_tokens: u64,
     output_tokens: u64,
 }
+/// Only the CLI's recorded headless auto-denial is diagnostic evidence. Do not
+/// copy arbitrary stderr into results or infer completion or identity from it.
+fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
+    let stderr = std::str::from_utf8(stderr).ok()?;
+    stderr.lines().find_map(|line| {
+        let permission = line
+            .strip_prefix("jetski: no output produced \u{2014} a tool required the \"")?
+            .strip_suffix(
+                "\" permission that headless mode cannot prompt for, so it was auto-denied.",
+            )?;
+        // Bound and constrain the only provider-supplied part of the message.
+        (1..=64)
+            .contains(&permission.len())
+            .then_some(permission)
+            .filter(|name| {
+                name.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            })
+            .map(|name| format!("agy denied the \"{name}\" permission in headless mode"))
+    })
+}
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
         Event::Init {
@@ -252,6 +273,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     resets_in_seconds: resets_in(message),
                 });
             } else if result.error.is_some() || result.status != "SUCCESS" {
+                if !result.response.is_empty() {
+                    events.push(E::Text(result.response));
+                }
                 events.push(E::Error);
             } else {
                 events.push(E::Text(result.response));

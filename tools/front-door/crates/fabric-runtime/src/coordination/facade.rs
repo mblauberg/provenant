@@ -490,6 +490,11 @@ pub enum OutputResult {
     Chunk {
         target: AttemptTarget,
         part: OutputPart,
+        /// The attempt's state name, so a reader can tell a clean success
+        /// from an outcome that needs the chair.
+        state: String,
+        /// Why a terminal attempt ended as it did, when it recorded a reason.
+        reason: Option<String>,
         offset: u64,
         next_offset: u64,
         eof: bool,

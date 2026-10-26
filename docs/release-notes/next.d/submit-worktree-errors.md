@@ -13,5 +13,5 @@
   reservation, snapshot, quarantine and terminal check failures also have
   operation names. The peer's exact bare `io` failure was not reproduced;
   filesystem fault injections demonstrate the diagnostic loss (#1777).
-- The changed peer error payload uses Fabric protocol 4. Upgrade peers
-  together; protocol 3 peers are refused before action decoding.
+- The changed peer error payload uses Fabric protocol 5. Upgrade peers
+  together; protocol 4 peers are refused before action decoding.
