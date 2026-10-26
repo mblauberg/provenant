@@ -196,10 +196,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
         struct Settings {
             install: crate::InstallSettings,
         }
-        let settings: Settings = decode(table).map_err(|_| ConfigError::Schema {
-            location: site(&user_sites, "install", &user_origin, false),
-            rule: "type",
-        })?;
+        let settings: Settings = decode(table)
+            .map_err(|error| section_error(&error, "install", &user_sites, &user_origin))?;
         settings
             .install
             .validate()
@@ -221,10 +219,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
         struct Settings {
             gc: crate::GcSettings,
         }
-        let settings: Settings = decode(table).map_err(|_| ConfigError::Schema {
-            location: site(&user_sites, "gc", &user_origin, false),
-            rule: "type",
-        })?;
+        let settings: Settings = decode(table)
+            .map_err(|error| section_error(&error, "gc", &user_sites, &user_origin))?;
         settings.gc.validate().map_err(|rule| ConfigError::Schema {
             location: site(&user_sites, "gc", &user_origin, false),
             rule,
@@ -243,10 +239,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
         struct Settings {
             retention: crate::RetentionSettings,
         }
-        let settings: Settings = decode(table).map_err(|_| ConfigError::Schema {
-            location: site(&user_sites, "retention", &user_origin, false),
-            rule: "type",
-        })?;
+        let settings: Settings = decode(table)
+            .map_err(|error| section_error(&error, "retention", &user_sites, &user_origin))?;
         settings
             .retention
             .validate()
@@ -467,6 +461,40 @@ fn domain_issue(
             rule: "domain",
             source: Some(error),
         }
+    }
+}
+/// A serde-decoded section's failure: an unknown key reports `unknown_key` at
+/// that key, any other decode failure reports `type` at the section.
+fn section_error(
+    error: &toml_edit::de::Error,
+    section: &str,
+    sites: &BTreeMap<String, Site>,
+    origin: &Origin,
+) -> ConfigError {
+    let unknown = error
+        .message()
+        .strip_prefix("unknown field `")
+        .and_then(|rest| rest.split('`').next());
+    if let Some(field) = unknown {
+        let prefix = format!("{section}.");
+        let suffix = format!(".{field}");
+        if let Some(path) = sites
+            .keys()
+            .find(|path| path.starts_with(&prefix) && path.ends_with(&suffix))
+        {
+            return ConfigError::Schema {
+                location: site(sites, path, origin, true),
+                rule: "unknown_key",
+            };
+        }
+    }
+    ConfigError::Schema {
+        location: site(sites, section, origin, false),
+        rule: if unknown.is_some() {
+            "unknown_key"
+        } else {
+            "type"
+        },
     }
 }
 fn decode<T: DeserializeOwned>(table: Table) -> Result<T, toml_edit::de::Error> {
