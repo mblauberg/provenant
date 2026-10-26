@@ -135,6 +135,16 @@ impl TestRig {
         ] {
             fs::create_dir_all(path)?;
         }
+        fs::create_dir(&state)?;
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        // Writer fixtures must not depend on the host volume's free space.
+        fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n",
+        )?;
+        let git = fs::canonicalize(
+            provenant_os::git::git_executable().ok_or("Git executable unavailable")?,
+        )?;
         let env = [
             ("HOME", home.clone()),
             ("XDG_CONFIG_HOME", root.join("config")),
@@ -144,6 +154,7 @@ impl TestRig {
             ("CODEX_HOME", root.join("codex")),
             ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
             ("GIT_CONFIG_SYSTEM", root.join("git-system")),
+            ("PROVENANT_GIT", git.clone()),
             ("PROVENANT_STATE_DIR", state.clone()),
             ("PROVENANT_ROOT", project.clone()),
             ("TMPDIR", root.clone()),
@@ -177,9 +188,6 @@ impl TestRig {
             fs::create_dir_all(path.parent().ok_or("missing sentinel parent")?)?;
             fs::write(path, b"legacy sentinel\0unchanged")?;
         }
-        let git = std::env::var_os("PROVENANT_GIT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
         let output = rig.execute(
             &git,
             &["init", "-q", &format!("--object-format={format}")],
@@ -194,6 +202,13 @@ impl TestRig {
         }
         Ok(rig)
     }
+    /// Exercise commands whose contract requires an absent state root.
+    pub fn without_state(self) -> Result<Self> {
+        fs::remove_file(self.state.join("config.toml"))?;
+        fs::remove_dir(&self.state)?;
+        Ok(self)
+    }
+
     /// Keep this guard armed until the test's final successful assertion.
     /// The rig root includes the local state, nested child stores and loopback peers.
     /// A separate local guard drops before the rig removes its temporary directory.

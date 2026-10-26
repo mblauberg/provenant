@@ -1167,6 +1167,13 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     kind_error(provenant_run::ErrorKind::from(&error))
 }
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
+    // Dispatch policy refusals carry actionable details, including the disk
+    // volume, available bytes and floor. Do not collapse them into confinement.
+    if fail.kind == provenant_run::ErrorKind::Refused {
+        return FacadeError::DispatchRefused {
+            reason: fail.message,
+        };
+    }
     kind_error(fail.kind)
 }
 /// Translate a typed run category at the MCP edge. `ErrorKind` is the one
@@ -2654,6 +2661,10 @@ pub fn graph(
                 Some(FacadeError::NotFound)
             ) {
                 (provenant_records::Outcome::Invalid, "not_found")
+            } else if let Some(error @ FacadeError::DispatchRefused { .. }) =
+                error.downcast_ref::<FacadeError>()
+            {
+                (provenant_records::Outcome::Refused, error.code())
             } else {
                 (provenant_records::Outcome::Error, "graph_owner")
             };

@@ -61,7 +61,7 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
 }
 #[test]
 fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Result {
-    let rig = rig()?;
+    let rig = rig()?.without_state()?;
     call(&rig, &["route", "--help"], 0)?;
     let listed = call(&rig, &["route", "list", "--adapter", "opencode"], 0)?;
     assert_eq!(listed["command"], "route list");
@@ -111,7 +111,7 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     fs::create_dir_all(&selected)?;
     let project = selected.to_str().ok_or("fixture project")?;
     let initialized = rig.execute(
-        std::path::Path::new("/usr/bin/git"),
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
         &["init", "-q", project],
         None,
     )?;
@@ -337,7 +337,7 @@ fn named_routes_are_read_only_and_fail_closed() -> Result {
 }
 #[test]
 fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
-    let rig = rig()?;
+    let rig = rig()?.without_state()?;
     for args in [
         vec!["route", "resolve"],
         vec![

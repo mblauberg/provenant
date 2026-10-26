@@ -4,7 +4,7 @@ use support::{TestRig, code};
 
 #[test]
 fn disk_report_json_and_human_output_leave_missing_state_absent() -> support::Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let commit = rig.execute(
         &git,

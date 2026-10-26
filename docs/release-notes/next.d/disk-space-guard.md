@@ -7,7 +7,9 @@ paths and best-effort byte estimates, and honours dry runs. Temporary cleanup
 failures leave credential expiry and provider-cache pruning eligible to run.
 Writer dispatch and resume check the minimum available space across the
 worktree, state and lane-cache volumes against the floor, while read-only lanes
-remain available. Concurrent writers can each pass this check; it reserves no
-space. GC alerts when space stays below the floor after collection.
+remain available. Graph runs and MCP submissions report the disk refusal's
+volume, available bytes, floor and GC remedy. Concurrent writers can each pass
+this check; it reserves no space. GC alerts when space stays below the floor
+after collection.
 `gc.alert_below` can only raise the alert threshold above that floor.
 Rerun `provenant install` to update the agent.

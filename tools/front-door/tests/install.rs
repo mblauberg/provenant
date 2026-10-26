@@ -266,7 +266,7 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
 
 #[test]
 fn check_install_source_failures_keep_the_typed_outcome() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let stage = staged(&rig)?;
     let missing = rig.root.join("missing-release");
     fs::write(stage.join("release.json"), "{invalid")?;
@@ -314,7 +314,7 @@ fn install_resolves_source_through_symlinked_temp_ancestor() -> Result {
 
 #[test]
 fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let stage = staged(&rig)?;
     let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
     let dry = rig.execute_os(binary, &args(&stage, true), None)?;
@@ -590,7 +590,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
 
 #[test]
 fn retired_legacy_checkout_flag_is_rejected_without_writes() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let stage = staged(&rig)?;
     let mut install_args = args(&stage, false);
     install_args.extend([

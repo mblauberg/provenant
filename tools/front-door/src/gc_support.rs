@@ -463,9 +463,8 @@ pub(crate) fn disk_alert(
     let free = root
         .available_bytes()
         .map_err(|_| Error::GcObservation("cannot read available disk space"))?;
-    let detail = format!(
-        "low_disk: {free} bytes available, threshold {floor} bytes; run `provenant gc`"
-    );
+    let detail =
+        format!("low_disk: {free} bytes available, threshold {floor} bytes; run `provenant gc`");
     if dry_run {
         return Ok(if free < floor {
             vec![detail]
