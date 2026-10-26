@@ -193,12 +193,11 @@ and `kept[].reason` values `foreign`, `live` and `unobservable`. `kept` includes
 non-foreign entries whose writer state prevents removal. Consumers must tolerate
 reason values they do not recognise.
 
-`chair switch` quotes each handoff argument in single quotes and writes any
-apostrophe as a double-quoted `'`, which sh, bash, zsh and fish all read
-literally. It refuses a path containing a backslash (`\`), which fish treats as
-an escape inside single quotes. An executable path containing a single or
-double quote also refuses, because the hook command in the settings JSON would
-need a backslash escape.
+`chair switch` quotes each handoff argument in single quotes, and writes each
+apostrophe and backslash as a double-quoted character, which sh, bash, zsh and
+fish all read literally. The pane command is a `/bin/sh -c` script, so the
+login shell, which may be fish, parses only that one quoted argument. The hook
+command in the settings JSON uses the same quoting.
 
 `worktree remove` takes either a `NAME` or `--merged`, never both, and `--discard`
 only with a `NAME`. `--merged` requires `--integration` (a branch or remote-tracking
