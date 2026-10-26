@@ -180,13 +180,18 @@ final head and open a pull request after verifying it.
 | `bench` | `mine [--limit]`; `verify TASK`; `run --route ROUTE[@effort] [--split search\|acceptance\|held-out] [--limit]` | `--route` is required, `--split` defaults to acceptance (held-out is never the default) and limits are 1 to 100. |
 | `telemetry` | `stats [--usage] [--since] [--until] [--run-id] [--detail]`; `trace [--out FILE] [--since] [--run RUN]` | `trace --out` defaults to `provenant-trace.json` in the current directory. Semantics in [telemetry](telemetry.md). |
 | `worktree` | `create BRANCH [--base REV]`; `list`; `remove NAME [--discard]`; `remove --merged --integration REF (--branch NAME… \| --since OID)` | Semantics in [supervisor](supervisor.md#worktrees). |
-| `gc` | `[--dry-run] [--idle-days N]` | Removes lane cargo caches whose owner worktree is gone, or with no file written for N days (1 to 3650, default 7). Skips caches whose worktree has a live or unobservable writer. Reports removed paths and bytes freed; `--dry-run` deletes nothing. |
+| `gc` | `[--dry-run] [--idle-days N]` | Removes lane cargo caches whose owner worktree is gone, or with no file written for N days (1 to 3650, default 7). Idle removal takes the existing writer lock without waiting and releases it immediately after the tombstone rename. A held lock keeps the cache as live; a missing or unsafe lock, a reservation, or unverifiable registration keeps it as unobservable. Reports kept and removed paths and bytes freed; `--dry-run` deletes nothing. |
 | `disk` | `report` | Read-only storage inventory; see [disk](disk.md) for measurement limits and JSON fields. |
 | `fabric …` | Fabric's own clap subtree, mounted unchanged | Leaves and requests are in [fabric](fabric.md#cli-and-mcp-surfaces). The CLI supplies only the global options, envelope, exits and help entries. `fabric mcp [--client claude\|codex\|cursor\|agy\|opencode]` serves MCP on stdio. |
 | `workflow …` | Workflow's own clap subtree, mounted unchanged | `review --request FILE\|-`, `receipt show\|save`, `session save\|show` and `session handoff`; see [workflow](workflow.md#cli-and-hooks). |
 | `workflow session handoff` | `--to HOST --account LABEL [--note TEXT]… [--attach PATH]… [--prompt-file PATH] [--no-checkpoint] [--provider claude] [--model MODEL] [--wip \| --allow-dirty] [--dry-run] [--no-launch] [--session-id ID]` | Hands the chair or task session to a fresh Claude session on a peer host. When `--session-id` is absent, it reads `CLAUDE_CODE_SESSION_ID`, then `CLAUDE_SESSION_ID`. `--wip` conflicts with `--allow-dirty`, attachments total at most 512 KiB and `--provider` accepts only `claude`. The target host must enable `fabric.accept_handoff`. |
 | `check` | `config`, `install [--source ABS]`, `harness`, `release [--base OID --head OID]` and `writing PATHS… [--rules general\|academic\|legal]` | Each takes `--limit N` (1 to 100, default 50) and `--cursor TOKEN`. |
 | `internal supervise` | hidden | Launch handshake for run's scheduler and attempt guardian. Takes zero or five private descriptor numbers; `--json` refused. |
+
+`gc` JSON uses `removed[].reason` values `orphaned`, `idle` and `tombstone`,
+and `kept[].reason` values `foreign`, `live` and `unobservable`. `kept` includes
+non-foreign entries whose writer state prevents removal. Consumers must tolerate
+reason values they do not recognise.
 
 `chair switch` quotes each handoff argument in single quotes and writes any
 apostrophe as a double-quoted `'`, which sh, bash, zsh and fish all read

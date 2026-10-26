@@ -156,6 +156,65 @@ fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
+    let exit = ExitObservation {
+        code: Some(1),
+        ..EXIT
+    };
+    let result = |error: &str| {
+        serde_json::json!({"event":"result","result":{
+            "conversation_id":"","status":"ERROR","response":"","error":error,
+            "usage":{"input_tokens":0,"output_tokens":0}}})
+        .to_string()
+            + "\n"
+    };
+    for (message, resets_in_seconds) in [
+        (
+            "429: Individual quota reached for gemini-3.8-flash. Resets in 7h23m.",
+            Some(26_580),
+        ),
+        (
+            "Individual quota reached. Resets in 2d 5m 30s",
+            Some(173_130),
+        ),
+        ("Individual quota reached. Resets in 8d", None),
+        ("Individual quota reached. Resets in 0m", None),
+        ("INDIVIDUAL QUOTA REACHED", None),
+        // The wait comes only from the closing suffix.
+        ("Individual quota reached (Resets in 7d) for now", None),
+        ("Individual quota reached. Resets in 7h23m, try later", None),
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused, "{message}");
+        assert!(
+            events.contains(&ProviderEvent::QuotaLimited {
+                message: message.into(),
+                pool: None,
+                resets_in_seconds,
+            }),
+            "{message}"
+        );
+    }
+    // A bare 429 may be a per-minute rate limit, not a spent quota, and only an
+    // error that opens with the refusal is one.
+    for message in [
+        "429",
+        "429 Too Many Requests",
+        "RESOURCE_EXHAUSTED",
+        "429 RESOURCE_EXHAUSTED: Quota exceeded for requests per minute",
+        "upstream error",
+        r#"Invalid prompt: "quota reached. Resets in 7d""#,
+        r#"Invalid prompt: "Individual quota reached. Resets in 7d""#,
+        "tool failed: Individual quota reached while reading notes, Resets in 7d",
+        "4290: Individual quota reached. Resets in 7d",
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed, "{message}");
+        assert!(events.contains(&ProviderEvent::Error), "{message}");
+    }
+    Ok(())
+}
+#[test]
 fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dyn std::error::Error>>
 {
     let exit = ExitObservation {
@@ -764,6 +823,82 @@ pub(super) fn fixture_input<'a>(
 }
 
 #[test]
+fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<(), ProviderError> {
+    let file = Path::new("/fixture/attempt/prompt.md");
+    let prompt = Prompt::from_file(file.to_owned());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for entry in REGISTRY
+            .iter()
+            .filter(|entry| matches!(entry.adapter.id(), "cursor" | "agy"))
+        {
+            let id = entry.adapter.id();
+            let authentication = match id {
+                "cursor" => Some("login"),
+                "agy" => Some("keychain"),
+                _ => None,
+            };
+            let plan = fixture_access_plan(access, authentication, false);
+            let mut route = route(id, "fixture-model");
+            route.account_key = None;
+            let spec = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                None,
+            ))?;
+            assert_eq!(spec.argv.last(), Some(&OsString::from(prompt.text())));
+            if id == "agy" {
+                assert!(
+                    spec.argv
+                        .windows(2)
+                        .any(|pair| { pair[0] == "--add-dir" && pair[1] == "/fixture/attempt" })
+                );
+            }
+            if id == "agy" && access == Access::ReadOnly {
+                assert!(
+                    !spec
+                        .argv
+                        .iter()
+                        .any(|arg| arg == "--dangerously-skip-permissions")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderError> {
+    let prompt = Prompt::new(format!(
+        "Durable output instructions\n\n{}",
+        "é".repeat(75_000)
+    ));
+    let token = fixture_token();
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for entry in REGISTRY
+            .iter()
+            .filter(|entry| matches!(entry.adapter.id(), "claude" | "codex" | "opencode"))
+        {
+            let id = entry.adapter.id();
+            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let mut route = route(id, "fixture-model");
+            route.account_key = None;
+            let spec = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            ))?;
+            assert_eq!(spec.stdin, Stdin::Bytes(prompt.text().as_bytes().to_vec()));
+            assert!(!spec.argv.iter().any(|arg| arg == "--add-dir"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
@@ -1118,10 +1253,6 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
             );
             assert_eq!(spec.stdin, Stdin::Null);
             assert_eq!(spec.cwd, Path::new("/fixture/repo"));
-            assert_eq!(
-                spec.profile.spec.tool_exec_roots.is_empty(),
-                access == Access::ReadOnly
-            );
         }
     }
     let plan = read_only_plan("/fixture", Some("login"));
@@ -1136,6 +1267,57 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
         )),
         Err(ProviderError::PromptTooLarge)
     ));
+    Ok(())
+}
+
+#[test]
+fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "fixture-model");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("keychain"), false);
+        let spec = agy::Agy.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        assert!(spec.argv.windows(2).any(|pair| {
+            pair[0] == "--add-dir" && pair[1] == plan.permissions().scratch.path.as_os_str()
+        }));
+    }
+    Ok(())
+}
+
+#[test]
+fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("cursor", "fixture-model");
+    let payload = Path::new("/fixture/home/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4");
+    let launcher = payload.join("cursor-agent");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.executable = &launcher;
+        let spec = cursor::Cursor.prepare(input)?.profile.spec;
+        assert_eq!(
+            spec.process_executables,
+            vec![crate::launch::exact(&launcher)]
+        );
+        assert!(
+            spec.runtime_reads
+                .contains(&crate::launch::subtree(payload))
+        );
+        assert_eq!(
+            spec.tool_exec_roots,
+            ["/bin", "/usr/bin"]
+                .map(crate::launch::subtree)
+                .into_iter()
+                .chain([crate::launch::subtree(payload)])
+                .collect::<Vec<_>>()
+        );
+    }
     Ok(())
 }
 
@@ -1198,6 +1380,12 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
         };
         assert_eq!(config["permission"]["edit"], permission);
         assert_eq!(config["permission"]["bash"], permission);
+        let scratch = format!("{}/**", plan.permissions().scratch.path.display());
+        assert_eq!(
+            config["permission"]["external_directory"],
+            serde_json::json!({ scratch.clone(): "allow" })
+        );
+        assert_eq!(config["permission"]["read"][&scratch], "allow");
         assert_eq!(
             spec.profile.spec.tool_exec_roots.is_empty(),
             access == Access::ReadOnly
@@ -2297,7 +2485,8 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
             assert_eq!(outcome.status(), OutcomeStatus::Refused);
             assert!(events.contains(&ProviderEvent::QuotaLimited {
                 message: message.into(),
-                pool: Some("opencode-free".into())
+                pool: Some("opencode-free".into()),
+                resets_in_seconds: None,
             }));
         }
     }
@@ -2310,7 +2499,8 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
         assert_eq!(outcome.status(), OutcomeStatus::Refused);
         assert!(events.contains(&ProviderEvent::QuotaLimited {
             message: "provider quota message".into(),
-            pool: None
+            pool: None,
+            resets_in_seconds: None,
         }));
     }
     Ok(())

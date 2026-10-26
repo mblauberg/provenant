@@ -19,10 +19,14 @@ Cargo does not install this example.
 ```sh
 cd tools/front-door
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="$(mktemp -d)/cargo-target"
-RELEASE="$(mktemp -d)/release"
+CARGO_PARENT="$(mktemp -d)"
+export CARGO_TARGET_DIR="$CARGO_PARENT/cargo-target"
+RELEASE_PARENT="$(mktemp -d)"
+RELEASE="$RELEASE_PARENT/release"
 cargo build --release --locked --bin provenant
 cargo run --locked --example package-release -- --out "$RELEASE"
+rm -rf -- "$CARGO_PARENT"
+unset CARGO_TARGET_DIR CARGO_PARENT
 ```
 
 Host builds use a fresh target directory. Confined writers use the separate
@@ -34,15 +38,18 @@ a lane cache for a host build. `provenant worktree remove` deletes only the
 removed worktree's own cache while holding its writer lock. Other orphaned
 caches remain until `provenant gc [--dry-run] [--idle-days N]`, which also
 removes caches idle for N days (default 7) for the selected project's
-worktrees, sparing live or unobservable writers. V1 owner markers support
-orphan cleanup and foreign-owner reporting, but never idle cleanup because
-they lack device and inode identity. Existing owners outside that project are
-reported as kept (foreign). Before deletion, GC atomically renames
-each cache to a tombstone so a launching lane can create a fresh cache. Later
-sweeps retry interrupted tombstones. Entries that fail identity verification
-are quarantined under `.gc-refused-*` and kept for inspection. The owner marker
-is deleted last, and a failed sweep reports completed removals and bytes
-already freed alongside the error.
+worktrees, sparing live or unobservable writers. Idle removal takes the existing
+writer lock without waiting and releases it immediately after the tombstone
+rename. A held lock keeps the cache as live; a missing or unsafe lock, a
+reservation, or unverifiable registration keeps it as unobservable.
+V1 owner markers support orphan cleanup and foreign-owner reporting, but never
+idle cleanup because they lack device and inode identity. Existing owners
+outside that project are reported as kept (foreign). Before deletion, GC
+atomically renames each cache to a tombstone so a launching lane can create a
+fresh cache. Later sweeps retry interrupted tombstones. Entries that fail
+identity verification are quarantined under `.gc-refused-*` and kept for
+inspection. The owner marker is deleted last, and a failed sweep reports
+completed removals and bytes already freed alongside the error.
 
 The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
 workspace's `target/release/provenant` without that variable. Pass

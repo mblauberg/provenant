@@ -58,6 +58,10 @@ false report. Paste the first section into every lane and reviewer brief.
   their artifacts and evidence.
 - Before accepting a green, read the last exit code of every verify command in
   the lane's event log; any nonzero last exit voids it.
+- Rust writer lanes in this repository verify touched crates from
+  `tools/front-door` with `cargo nextest run --profile lane -p <crate>`.
+  See [writer lanes](../../../docs/runbooks/providers.md#writer-lanes) for the
+  sandbox exclusions; full suites stay in CI with the `ci` profile.
 - Targeted tests chosen from the changed test files miss dependents. Also run
   the tests that import the changed modules, and the full suite for a copy or
   contract change.

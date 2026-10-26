@@ -50,12 +50,16 @@ and `provenant help <verb>` lists the flags.
 
 | Verb | Behaviour |
 | --- | --- |
-| `dispatch` | One prompt (`--prompt-file` or `--prompt-stdin`) or `--manifest`. `--operation-id` is required and makes retries idempotent. Optional `--task-id`, `--delivery-id`, `--host` and, for delivery, `--deliver-remote`, `--deliver-branch`, `--open-pr`, `--branch` and `--base`. Detached unless `--wait` is given. It returns exact IDs, route, state and artifact paths. |
+| `dispatch` | One prompt (`--prompt-file` or `--prompt-stdin`) or `--manifest`. `--operation-id` is required and makes retries idempotent. Optional `--task-id`, `--delivery-id`, `--host`, `--base` and, for delivery, `--deliver-remote`, `--deliver-branch`, `--open-pr` and `--branch`. Detached unless `--wait` is given. It returns exact IDs, route, state and artifact paths. |
 | `lanes` | Lists lanes by `--id`, `--state`, `--since`, `--all`, `--limit` (1 to 100) and `--cursor`. With `--wait` it waits for `--condition any` (default) or `all`. Read-only otherwise; no implicit repair. |
 | `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. |
 | `cancel` | Target `RUN[/TASK[/ATTEMPT]]` with a required `--operation-id`, optional `--reason` and `--wait`. It returns requested, already terminal or unobservable, plus custody. Accepted cancellation does not prove exit. |
 | `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
 | `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. It never replays an uncertain launch. |
+
+When a terminal attempt has no requested output, local and peer reads report
+`NOT_FOUND` (facade code `not_found`, exit 2). An active attempt still
+reports `NONTERMINAL`.
 
 Route and access inputs on `dispatch`:
 
@@ -74,6 +78,34 @@ Route and access inputs on `dispatch`:
   Confinement checks the caller's authority; flags cannot grant it.
 - `--provider-timeout SECONDS`: default 3600, or 10800 for `worktree-write`,
   range 1 to 14400. This is the provider budget, distinct from a reader wait.
+- `--base REF`: the host resolves a commit before launch and captures
+  `git log BASE..HEAD` and `git diff BASE..HEAD` from the lane's selected
+  checkout. Top-level submissions reject an unresolved base as invalid input;
+  nested submissions are validated on the host before provider launch.
+  Manifest and Fabric MCP submission tasks accept optional `base`; a manifest
+  task overrides the CLI default. With `--host`, read-only dispatch resolves
+  the base in the peer's clone. Peer writers use `--base` only to create
+  their branch; they receive no context field, history files or prompt prefix.
+  Each candidate's `tmp/candidate-N/` contains `git-log.txt`, `git-diff.patch`
+  and `git-context.json`; the generated prompt names their absolute paths.
+  Each text file is capped at 1 MiB, and the JSON records the resolved base,
+  captured HEAD, truncation flags and `timed_out` (also recorded per file).
+  The host disables fsmonitor, external diff, text conversion, signature
+  display, mailmap rewriting and rename detection, and forces text diffs.
+  Protocol denial prevents fetching on all supported Git versions;
+  `GIT_NO_LAZY_FETCH` additionally suppresses lazy fetches on Git 2.44+.
+  Each Git read has a 10-second budget. A log or diff timeout preserves
+  partial output, records the timeout and still launches the lane. Reviewers
+  must report incomplete coverage for truncated or timed-out captures.
+  These files cover committed changes only and share
+  the attempt's temporary cleanup. No history files are generated without a
+  base.
+  Every adapter's OS profile grants access to attempt scratch. Claude and Agy
+  also add scratch to their tool workspace; OpenCode explicitly permits reads
+  and external-directory access to scratch. Codex bypasses its inner sandbox
+  and approvals, and Cursor disables its inner sandbox, so their tools use
+  the OS grant directly. Context files are published through the directory
+  handle retained when scratch was created.
 - Manifest: strict JSON `{schema_version:1,tasks:[...]}` with 1 to 64 tasks,
   unique optional task IDs (32 lowercase hex digits; omitted IDs are
   generated), `--concurrency` 1 to 8 (default the `lanes.max_concurrency`
@@ -105,6 +137,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
   request.json                 # immutable canonical submission and prompt digests
   attempts/<AttemptId>/
     prompt.txt                 # run-owned immutable prompt
+    prompt.md                  # full launch prompt, only for top-level argv spills
     result.md                  # run-owned sealed result, including failure
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
     provider-state/            # retained provider history; no credentials
@@ -115,6 +148,20 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
 
 The supervisor file names inside an attempt directory are the run and
 supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
+
+Launch prompts, including the durable-output preamble, are bounded to 1 MiB
+for every adapter. Claude, Codex and OpenCode receive the full launch text on
+stdin, without a spill file. Cursor and Agy receive prompts up to 64 KiB on
+argv unchanged. For larger top-level prompts, dispatch seals the full launch
+text as `prompt.md` and sends a short instruction to read that file first and
+treat its contents as the full task. The OS read grant covers that exact file;
+provider tool permissions may cover its containing directory. Nested Cursor
+and Agy attempts refuse launch prompts over 64 KiB before launch: route the
+child to a stdin adapter or shorten the prompt. Their attempt directories are
+writable by the parent lane, so a spill there could be rewritten before use.
+The submission and attempt prompt digests still cover the full submitted text
+in `prompt.txt`, never the pointer. Both files remain retained with the attempt.
+
 Structured events live in SQLite, and provider parsing uses the live stream, not
 a second copy. Writer and read-only lanes stage provider temporary files in
 `tmp/candidate-N`, with a separate directory for each fallback candidate.

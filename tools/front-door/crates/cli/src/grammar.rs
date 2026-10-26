@@ -268,8 +268,8 @@ pub struct Dispatch {
     /// New branch for a peer writer; the peer creates its worktree
     #[arg(long, requires_all = ["host", "base"])]
     pub branch: Option<String>,
-    /// Commit or remote-tracking ref the peer writer's branch starts from
-    #[arg(long, requires = "branch")]
+    /// Git base for attempt history and, with --branch, the peer writer's branch
+    #[arg(long)]
     pub base: Option<String>,
     /// Wait up to this many seconds for the lane to settle
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]

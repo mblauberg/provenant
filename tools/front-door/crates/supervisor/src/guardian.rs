@@ -60,6 +60,11 @@ struct LaunchMessage {
     holder_context: Vec<u8>,
     capture: CapturePlan,
 }
+const LAUNCH_LIMITS: Limits = Limits {
+    max_bytes: crate::sys::handoff::MESSAGE_LIMIT as u64,
+    max_members: 2 * 1024 * 1024,
+    ..Limits::CONFIG
+};
 pub(crate) fn handoff(
     owned: OwnedLaunch<'_>,
     capture: CapturePlan,
@@ -259,15 +264,8 @@ impl RegisteredChild {
 pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let mut inherited = crate::sys::handoff::inherit(args)?;
     let payload = crate::sys::handoff::receive(&mut inherited.channel, Duration::from_secs(10))?;
-    let message: LaunchMessage = decode_v1(
-        payload.as_slice(),
-        Limits {
-            max_bytes: 2 * 1024 * 1024,
-            max_members: 2 * 1024 * 1024,
-            ..Limits::CONFIG
-        },
-    )
-    .map_err(|_| CustodyError::InvalidRecord)?;
+    let message: LaunchMessage =
+        decode_v1(payload.as_slice(), LAUNCH_LIMITS).map_err(|_| CustodyError::InvalidRecord)?;
     message.capture.validate()?;
     let mut reservation: Reservation = read_record(
         &inherited.writer_directory,

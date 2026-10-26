@@ -8,7 +8,9 @@ use provenant_core::{ProjectId, WorkScope};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
-use provenant_supervisor::fs::{Directory, FileKind, FsError, PublishMode, entropy_128};
+use provenant_supervisor::fs::{
+    Directory, FileKind, FsError, PayloadTree, PublishMode, entropy_128,
+};
 use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::path::{Path, PathBuf};
 
@@ -46,6 +48,13 @@ fn prepare_with(
     locate: impl Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
 ) -> Result<run::PreparedLaunch, String> {
+    check_launch_prompt(prompt_text, paths, None)?;
+    if task.fallback.is_empty()
+        && let run::RequestedRoute::Model { model, .. } = &task.route
+        && let Some((adapter, _)) = model.split_once('/')
+    {
+        check_launch_prompt(prompt_text, paths, Some(adapter))?;
+    }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
     let fixture_token: Option<&provenant_providers::claude::OauthToken> = {
@@ -76,8 +85,12 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
-    let prompt = Prompt::new(prompt_text.to_owned());
-    prompt.check_argv().map_err(|error| error.to_string())?;
+    let git_context = task
+        .base
+        .as_deref()
+        .map(|base| run::GitContext::capture(&git, &cwd, base))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -189,6 +202,7 @@ fn prepare_with(
                 scratch: &paths.scratch,
                 private_state: &paths.provider_state,
                 assets,
+                prompt_file: None,
             },
             writer.as_ref(),
             &task.access,
@@ -300,18 +314,23 @@ fn prepare_with(
         let staging = &paths.temporary;
         let scratch = staging.join(format!("candidate-{candidate}"));
         let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
-        if let Err(error) = apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging], None)
-            .and_then(|()| {
+        // Retain the handle opened while creating scratch: a parent lane can
+        // rename tmp and redirect its pathname before context is published.
+        let scratch_directory =
+            match apply_setup_directory(&[staging], &scratch).and_then(|directory| {
                 apply_setup(
                     &[SetupStep::CreateDir(private_state.clone())],
                     &[&paths.provider_state],
                     None,
-                )
-            })
-        {
-            reasons.push(skip(&label, SkipKind::Setup, error));
-            continue;
-        }
+                )?;
+                Ok(directory)
+            }) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    reasons.push(skip(&label, SkipKind::Setup, error));
+                    continue;
+                }
+            };
         let continuation = match resume {
             Some(prior) => match continuation_for(
                 prior,
@@ -329,6 +348,22 @@ fn prepare_with(
             None => None,
         };
         let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        let text = match &git_context {
+            Some(context) => {
+                let location = context
+                    .write_to(&scratch_directory, scratch)
+                    .map_err(|error| error.to_string())?;
+                format!("{location}\n{prompt_text}")
+            }
+            None => prompt_text.to_owned(),
+        };
+        let prompt = match launch_prompt(&text, paths, state_root, adapter.id()) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                reasons.push(skip(&label, SkipKind::Refused, error));
+                continue;
+            }
+        };
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
@@ -340,6 +375,7 @@ fn prepare_with(
                 scratch,
                 private_state,
                 assets,
+                prompt_file: prompt.file(),
             },
             writer.as_ref(),
             &task.access,
@@ -398,7 +434,7 @@ fn prepare_with(
         let provider_route = adapter_route(&route);
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let spec = match adapter.prepare(PrepareInput {
+        let mut spec = match adapter.prepare(PrepareInput {
             route: &provider_route,
             confined: &plan,
             prompt: &prompt,
@@ -428,6 +464,12 @@ fn prepare_with(
                 continue;
             }
         };
+        if git_context.is_some() && adapter.id() == "claude" {
+            // Scratch is already granted by the outer profile. Claude's file
+            // tools also need it in their working directories to read context.
+            spec.argv
+                .splice(1..1, ["--add-dir".into(), scratch.as_os_str().to_owned()]);
+        }
         let transcript_account = account
             .as_ref()
             .filter(|_| adapter.id() == "claude")
@@ -540,20 +582,27 @@ fn continuation_for(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     match find_session_state(&prior_state, session) {
-        Some(retained) => copy_state(&retained, private_state)?,
+        Ok(Some(retained)) => copy_state(&retained, private_state)?,
         // These adapters retain sessions in their existing user data stores.
-        None if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
-        None => return Err("the prior attempt's retained provider state is missing".into()),
+        Ok(None) if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
+        Ok(None) => return Err("the prior attempt's retained provider state is missing".into()),
+        // An unfinished search proves nothing missing, whatever the adapter.
+        Err(SearchExhausted) => {
+            return Err(format!(
+                "the prior attempt's retained provider state exceeds {} entries",
+                RETAINED_STATE.entries
+            ));
+        }
     }
     Ok(continuation)
 }
 
 /// Bounds on retained provider state, shared by its search and its copy. A
-/// leftover process from the prior attempt may still grow the tree. Lane state
-/// nests plugin caches 14 directories deep, and the launch census refuses a
-/// private tree past 100,000 entries anyway. The byte budget is many times a
-/// long session's state while bounding what a sparse or still-growing file can
-/// make the host write.
+/// leftover process from the prior attempt may still grow the tree. The depth
+/// and entry limits match the launch census of writable trees, which would
+/// refuse a larger copy anyway, and leave room past the depth of Codex plugin
+/// caches. The byte budget is many times a long session's state while bounding
+/// what a sparse or still-growing file can make the host write.
 #[derive(Clone, Copy)]
 struct StateLimits {
     depth: u32,
@@ -583,8 +632,9 @@ fn listed(
     Ok(Some(names))
 }
 
-/// A real directory on `device`, opened without following a link. A mount
-/// point stats as the mounted root, so it is never opened.
+/// A real directory on `device`, opened without following a link. Only the
+/// stat before the open checks the device: a mount point stats as the mounted
+/// root, so it is not opened unless it is swapped in after that stat.
 fn open_local_directory(
     parent: &Directory,
     name: &std::ffi::OsStr,
@@ -601,40 +651,70 @@ fn open_local_directory(
 /// named for `session`, searched within `RETAINED_STATE`. The prior lane
 /// wrote this tree, so the path must already be canonical and every directory
 /// is opened from its parent's handle, never through a link or a mount.
-fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
-    fn holds(dir: &Directory, session: &str, depth: u32, device: u64, budget: &mut u32) -> bool {
-        let Ok(Some(names)) = listed(dir, budget) else {
-            return false;
+fn find_session_state(
+    provider_state: &Path,
+    session: &str,
+) -> Result<Option<PathBuf>, SearchExhausted> {
+    find_session_state_within(provider_state, session, RETAINED_STATE)
+}
+
+/// The session search spent its entry budget before it finished.
+#[derive(Debug, PartialEq)]
+struct SearchExhausted;
+
+fn find_session_state_within(
+    provider_state: &Path,
+    session: &str,
+    limits: StateLimits,
+) -> Result<Option<PathBuf>, SearchExhausted> {
+    fn holds(
+        dir: &Directory,
+        session: &str,
+        depth: u32,
+        device: u64,
+        budget: &mut u32,
+    ) -> Result<bool, SearchExhausted> {
+        let names = match listed(dir, budget) {
+            Ok(Some(names)) => names,
+            Ok(None) => return Err(SearchExhausted),
+            Err(_) => return Ok(false),
         };
-        names.iter().any(|name| {
-            name.to_string_lossy().contains(session)
-                || depth > 0
-                    && open_local_directory(dir, name, device)
-                        .is_some_and(|child| holds(&child, session, depth - 1, device, budget))
-        })
+        for name in names {
+            if name.to_string_lossy().contains(session) {
+                return Ok(true);
+            }
+            if depth > 0
+                && let Some(child) = open_local_directory(dir, &name, device)
+                && holds(&child, session, depth - 1, device, budget)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
-    if provenant_supervisor::fs::canonicalize(provider_state).ok()? != provider_state {
-        return None;
+    let opened = provenant_supervisor::fs::canonicalize(provider_state)
+        .ok()
+        .filter(|canonical| canonical == provider_state)
+        .and_then(|_| Directory::open_anchor(provider_state).ok())
+        .and_then(|root| Some((root.metadata().ok()?.device, root)));
+    let Some((device, root)) = opened else {
+        return Ok(None);
+    };
+    let mut budget = limits.entries;
+    let names = match listed(&root, &mut budget) {
+        Ok(Some(names)) => names,
+        Ok(None) => return Err(SearchExhausted),
+        Err(_) => return Ok(None),
+    };
+    for name in names {
+        if name.to_string_lossy().starts_with("candidate-")
+            && let Some(candidate) = open_local_directory(&root, &name, device)
+            && holds(&candidate, session, limits.depth, device, &mut budget)?
+        {
+            return Ok(Some(provider_state.join(name)));
+        }
     }
-    let root = Directory::open_anchor(provider_state).ok()?;
-    let device = root.metadata().ok()?.device;
-    let mut budget = RETAINED_STATE.entries;
-    listed(&root, &mut budget)
-        .ok()??
-        .into_iter()
-        .find(|name| {
-            name.to_string_lossy().starts_with("candidate-")
-                && open_local_directory(&root, name, device).is_some_and(|candidate| {
-                    holds(
-                        &candidate,
-                        session,
-                        RETAINED_STATE.depth,
-                        device,
-                        &mut budget,
-                    )
-                })
-        })
-        .map(|name| provider_state.join(name))
+    Ok(None)
 }
 
 /// Copy regular files and directories within `RETAINED_STATE`. Symlinks and
@@ -658,19 +738,37 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
         return Err("retained provider state is not a directory".into());
     }
     let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
-    std::fs::create_dir_all(to).map_err(|error| failed(&error))?;
-    let target = Directory::open_anchor(to).map_err(|error| failed(&error))?;
+    let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
+        return Err(failed(&"the destination has no parent directory"));
+    };
+    std::fs::create_dir_all(parent).map_err(|error| failed(&error))?;
+    let parent = Directory::open_anchor(parent).map_err(|error| failed(&error))?;
+    // Free space caps the budget, so state the filesystem cannot hold is
+    // refused before it fills the disk.
+    let bytes = limits
+        .bytes
+        .min(parent.available_bytes().map_err(|error| failed(&error))?);
     let mut budget = Budget {
         entries: limits.entries,
-        bytes: limits.bytes,
+        bytes,
         device: source.metadata().map_err(|error| failed(&error))?.device,
     };
-    copy_tree(&source, &target, limits.depth, &mut budget).map_err(|refusal| match refusal {
+    // The copy fills a fresh private sibling and is renamed into place, onto
+    // the empty destination, only once whole. Any refusal removes it.
+    let staging = provenant_supervisor::fs::temporary_name().map_err(|error| failed(&error))?;
+    parent
+        .mkdir(&staging, 0o700)
+        .map_err(|error| failed(&error))?;
+    let copied = parent
+        .open_directory(&staging)
+        .map_err(CopyRefusal::from)
+        .and_then(|target| copy_tree(&source, &target, limits.depth, &mut budget))
+        .and_then(|()| Ok(parent.replace(&staging, &parent, name)?));
+    let copied = copied.map_err(|refusal| match refusal {
         CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
-        CopyRefusal::TooLarge => format!(
-            "retained provider state exceeds its {} byte copy budget",
-            limits.bytes
-        ),
+        CopyRefusal::TooLarge => {
+            format!("retained provider state exceeds its {bytes} byte copy budget")
+        }
         CopyRefusal::TooMany => {
             format!("retained provider state exceeds {} entries", limits.entries)
         }
@@ -680,7 +778,32 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
         ),
         CopyRefusal::CrossDevice => "retained provider state crosses a filesystem boundary".into(),
         CopyRefusal::Fs(error) => failed(&error),
-    })
+    });
+    if let Err(refusal) = &copied
+        && let Err(error) = remove_staged(&parent, &staging)
+    {
+        return Err(format!("{refusal}; removing its staged copy: {error}"));
+    }
+    copied
+}
+
+/// Remove a refused copy's staging tree. The host made it fresh and private,
+/// so it may dispose of lock-named entries the copy wrote there.
+fn remove_staged(parent: &Directory, name: &std::ffi::OsStr) -> Result<(), FsError> {
+    fn remove_contents(tree: &PayloadTree) -> Result<(), FsError> {
+        for entry in tree.entries()?.collect::<Result<Vec<_>, _>>()? {
+            if tree.metadata_at(&entry)?.kind == FileKind::Directory {
+                remove_contents(&tree.child(&entry)?)?;
+                tree.rmdir(&entry)?;
+            } else {
+                tree.unlink(&entry)?;
+            }
+        }
+        Ok(())
+    }
+    let staged = parent.metadata_at(name, false)?;
+    remove_contents(&PayloadTree::claim(parent, name, &staged)?)?;
+    parent.rmdir(name)
 }
 
 /// What the rest of a copy may still spend, and the source's filesystem.
@@ -787,8 +910,8 @@ fn copy_tree(
                 if opened.links > 1 {
                     return Err(CopyRefusal::HardLink);
                 }
-                // The destination is the new attempt's fresh, empty candidate
-                // directory, so an existing entry there is refused, not replaced.
+                // The destination is the copy's fresh staging directory, so an
+                // existing entry there is refused, not replaced.
                 let mut copy = to.create_new(&name)?;
                 // Size is never trusted: read one byte past the budget, so a
                 // sparse or still-growing file is refused, not copied unbounded.
@@ -802,8 +925,6 @@ fn copy_tree(
                     source,
                 })?;
                 if copied > budget.bytes {
-                    drop(copy);
-                    let _ = to.unlink(&name);
                     return Err(CopyRefusal::TooLarge);
                 }
                 budget.bytes -= copied;
@@ -1046,12 +1167,87 @@ fn credential_authority(
     Ok(authority)
 }
 
+fn check_launch_prompt(
+    text: &str,
+    paths: &run::LaunchPaths,
+    adapter: Option<&str>,
+) -> Result<(), String> {
+    if text.len() as u64 > super::PROMPT_LIMIT {
+        return Err(
+            "invalid input: launch prompt including the preamble exceeds 1 MiB; shorten the prompt"
+                .into(),
+        );
+    }
+    if paths.lane_depth > 1
+        && matches!(adapter, Some("cursor" | "agy"))
+        && Prompt::new(text.to_owned()).check_argv().is_err()
+    {
+        return Err("invalid input: nested argv launch prompt including the preamble exceeds 64 KiB; route the child to a stdin adapter (claude, codex or opencode), or shorten the prompt".into());
+    }
+    Ok(())
+}
+
+fn launch_prompt(
+    text: &str,
+    paths: &run::LaunchPaths,
+    state_root: &Path,
+    adapter: &str,
+) -> Result<Prompt, String> {
+    check_launch_prompt(text, paths, Some(adapter))?;
+    let prompt = Prompt::new(text.to_owned());
+    if !matches!(adapter, "cursor" | "agy") || prompt.check_argv().is_ok() {
+        return Ok(prompt);
+    }
+    let attempt = paths
+        .provider_state
+        .parent()
+        .ok_or("attempt directory missing")?;
+    let relative = attempt
+        .strip_prefix(state_root)
+        .map_err(|_| "attempt directory is outside run state")?;
+    let mut directory = Directory::open_anchor(state_root).map_err(|error| error.to_string())?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("attempt directory is not normalised".into());
+        };
+        directory = directory
+            .open_verified_directory(name)
+            .map_err(|error| error.to_string())?;
+    }
+    let matches = |name: &str| -> Result<bool, String> {
+        match directory.read_bounded(name.as_ref(), text.len() as u64) {
+            Ok(bytes) => Ok(bytes == text.as_bytes()),
+            Err(error) if error.is_not_found() => Ok(false),
+            Err(FsError::TooLarge { .. }) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        }
+    };
+    let name = "prompt.md";
+    match directory.atomic_write(
+        name.as_ref(),
+        ".prompt-",
+        text.as_bytes(),
+        PublishMode::NoReplace,
+    ) {
+        Ok(provenant_supervisor::fs::Publication::Durable) => {}
+        Ok(provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { sync_error }) => {
+            return Err(sync_error.to_string());
+        }
+        Err(error) if error.is_exists() && matches(name)? => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let prompt = Prompt::from_file(attempt.join(name));
+    prompt.check_argv().map_err(|error| error.to_string())?;
+    Ok(prompt)
+}
+
 struct ConfinementRoots<'a> {
     cwd: &'a Path,
     home: &'a Path,
     scratch: &'a Path,
     private_state: &'a Path,
     assets: &'a Path,
+    prompt_file: Option<&'a Path>,
 }
 
 /// Dispatch write roots, plus host-configured shared run state for writers only.
@@ -1106,6 +1302,10 @@ fn confinement_request(
             read_roots: std::iter::once(grant(roots.assets))
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
                 .chain(access.read_roots.iter().map(|path| grant(path)))
+                .chain(roots.prompt_file.map(|path| PathGrant {
+                    path: path.to_owned(),
+                    scope: PathScope::Exact,
+                }))
                 .collect(),
             protected_roots: vec![PathGrant {
                 path: roots.cwd.join("AGENTS.md"),
@@ -1244,11 +1444,10 @@ fn apply_setup(
             SetupStep::CreateDir(path) => {
                 let transcript_root =
                     claude_account.filter(|directory| path.starts_with(directory.join("projects")));
-                let (parent, name) = match transcript_root {
-                    Some(directory) => setup_parent(&[directory], path, true)?,
-                    None => setup_parent(roots, path, true)?,
+                match transcript_root {
+                    Some(directory) => apply_setup_directory(&[directory], path)?,
+                    None => apply_setup_directory(roots, path)?,
                 };
-                setup_directory(&parent, name)?;
             }
             SetupStep::WriteFile { path, bytes } => write_setup_file(roots, path, bytes, false)?,
             SetupStep::WriteExecutable { path, bytes } => {
@@ -1316,6 +1515,11 @@ fn write_setup_file(
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn apply_setup_directory(roots: &[&Path], path: &Path) -> Result<Directory, String> {
+    let (parent, name) = setup_parent(roots, path, true)?;
+    setup_directory(&parent, name)
 }
 
 fn setup_parent<'a>(
@@ -1390,6 +1594,7 @@ pub fn writer_fixture_plan(
             scratch: &scratch,
             private_state: &paths.provider_state,
             assets,
+            prompt_file: None,
         },
         Some(writer),
         &run::LaneAccess::default(),
@@ -1424,6 +1629,184 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::Error>> {
+        Ok(run::LaunchPaths {
+            attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
+            operation_id: provenant_core::OperationId::parse("spill-prompt")?,
+            task_index: 0,
+            lane_depth: 1,
+            run_id: provenant_core::RunId::from_bytes([2; 16]),
+            deadline_unix_ms: u64::MAX,
+            scratch: attempt.join("scratch"),
+            provider_state: attempt.join("provider-state"),
+            temporary: attempt.join("tmp"),
+        })
+    }
+
+    #[test]
+    fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = canonical(temp.path())?;
+        let paths = prompt_paths(&attempt)?;
+        for entry in REGISTRY {
+            let adapter = entry.adapter.id();
+            for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
+                let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+                assert_eq!(prompt.text(), text);
+                assert!(prompt.file().is_none());
+            }
+            let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
+            let error = launch_prompt(&text, &paths, &attempt, adapter)
+                .err()
+                .ok_or("oversized launch accepted")?;
+            assert!(error.contains("1 MiB"), "{adapter}: {error}");
+        }
+        assert!(!attempt.join("prompt.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_keeps_oversized_stdin_prompts_in_memory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = canonical(temp.path())?;
+        let mut paths = prompt_paths(&attempt)?;
+        let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+        for depth in [1, 2] {
+            paths.lane_depth = depth;
+            for adapter in ["claude", "codex", "opencode"] {
+                for text in [&text, &"a".repeat(1024 * 1024)] {
+                    let prompt = launch_prompt(text, &paths, &attempt, adapter)?;
+                    assert_eq!(prompt.text(), text);
+                    assert!(prompt.file().is_none());
+                }
+            }
+        }
+        assert!(!attempt.join("prompt.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        for adapter in ["cursor", "agy"] {
+            let temp = tempfile::tempdir()?;
+            let attempt = canonical(temp.path())?;
+            let mut paths = prompt_paths(&attempt)?;
+            let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+            paths.lane_depth = 2;
+            let error = launch_prompt(&text, &paths, &attempt, adapter)
+                .err()
+                .ok_or("nested argv spill accepted")?;
+            for expected in ["invalid input", "64 KiB", "stdin adapter", "shorten"] {
+                assert!(error.contains(expected), "{error}");
+            }
+            assert!(!attempt.join("prompt.md").exists());
+
+            paths.lane_depth = 1;
+            for _ in 0..2 {
+                let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+                assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
+                assert!(prompt.text().len() < 1024);
+                assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, text);
+                assert_eq!(
+                    std::fs::metadata(attempt.join("prompt.md"))?
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            std::fs::write(attempt.join("prompt.md"), "conflicting prompt")?;
+            assert!(launch_prompt(&text, &paths, &attempt, adapter).is_err());
+            assert_eq!(
+                std::fs::read_to_string(attempt.join("prompt.md"))?,
+                "conflicting prompt"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let state = canonical(temp.path())?;
+        std::fs::create_dir_all(state.join("actual/attempt"))?;
+        std::os::unix::fs::symlink(state.join("actual"), state.join("runs"))?;
+        let paths = prompt_paths(&state.join("runs/attempt"))?;
+        assert!(launch_prompt(&"a".repeat(65_537), &paths, &state, "cursor").is_err());
+        assert!(!state.join("actual/attempt/prompt.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_refuses_invalid_input_before_account_resolution()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = canonical(temp.path())?;
+        let paths = prompt_paths(&attempt)?;
+        let full = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+        // Refuse invalid input before consulting accounts or executables.
+        for entry in REGISTRY {
+            let adapter = entry.adapter.id();
+            let requested = run::TaskRequest {
+                base: None,
+                base_ref: None,
+                task_id: provenant_core::TaskId::from_bytes([3; 16]),
+                profile: Default::default(),
+                prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
+                route: run::RequestedRoute::Model {
+                    provider: adapter.into(),
+                    model: format!("{adapter}/fixture-model"),
+                    effort: None,
+                },
+                account: None,
+                fallback: vec![],
+                authority_digest: provenant_core::Digest::from_bytes([4; 32]),
+                writer: None,
+                deliver: None,
+                provider_timeout_seconds: 20,
+                delivery_id: None,
+                access: Default::default(),
+            };
+            let oversized = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
+            let error = prepare_with(
+                &Registry::default(),
+                &requested,
+                &oversized,
+                &paths,
+                None,
+                |_| unreachable!("invalid prompt must not probe executables"),
+                None,
+            )
+            .err()
+            .ok_or("oversized launch accepted")?;
+            assert!(error.contains("1 MiB"), "{adapter}: {error}");
+            if matches!(adapter, "cursor" | "agy") {
+                let mut nested = prompt_paths(&attempt)?;
+                nested.lane_depth = 2;
+                let error = prepare_with(
+                    &Registry::default(),
+                    &requested,
+                    &full,
+                    &nested,
+                    None,
+                    |_| unreachable!("nested argv spill must not probe executables"),
+                    None,
+                )
+                .err()
+                .ok_or("nested argv launch accepted")?;
+                assert!(error.contains("invalid input"), "{error}");
+                assert!(error.contains("64 KiB"), "{error}");
+                assert!(!attempt.join("prompt.md").exists());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn detect_failure_distinguishes_probe_directory_from_unknown_identity()
@@ -1557,25 +1940,33 @@ mod tests {
         std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
         std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-        let attempt = state.join("attempt");
+        let run_id = RunId::from_bytes([2; 16]);
+        let attempt_id = AttemptId::from_bytes([1; 16]);
+        let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
         let paths = run::LaunchPaths {
-            attempt_id: AttemptId::from_bytes([1; 16]),
+            attempt_id,
             operation_id: OperationId::parse("writer-temporary")?,
             task_index: 0,
             lane_depth: 1,
-            run_id: RunId::from_bytes([2; 16]),
+            run_id,
             deadline_unix_ms: u64::MAX,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
         };
         for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-            std::fs::create_dir_all(path)?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)?;
         }
+        let prompt = "é".repeat(75_000);
         let task = run::TaskRequest {
+            base: Some("HEAD".into()),
+            base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
             profile: Default::default(),
-            prompt_digest: provenant_records::CanonicalV1::file_digest(b"fixture prompt"),
+            prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
             route: run::RequestedRoute::Model {
                 provider: "cursor".into(),
                 model: "cursor/gpt-5.3-codex-low".into(),
@@ -1602,10 +1993,46 @@ mod tests {
             project_id: Some(binding.project_id()),
             host: None,
         };
+        let call = run::Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 5)?,
+            cancel: &cancel,
+        };
+        let store = run::RunStore::open(
+            &run::ExecutionContext {
+                state_root: roots.state.clone(),
+                project_id: binding.project_id(),
+                actor_id: provenant_core::ActorId::from_bytes([5; 16]),
+                read_prompts: true,
+            },
+            &call,
+        )?;
+        store.create(
+            &run::PreparedRun {
+                run_id,
+                operation_id: paths.operation_id.clone(),
+                request: run::CanonicalRequest {
+                    schema_version: 1,
+                    tasks: vec![task.clone()],
+                    concurrency: 1,
+                    parent: None,
+                    lane_depth: Some(1),
+                    parent_attempt: None,
+                },
+                attempts: vec![run::NewAttempt {
+                    task_id: task.task_id,
+                    attempt_id,
+                    prompt: prompt.clone(),
+                }],
+                created_at: provenant_core::WallTime::from_micros(100)?,
+            },
+            &call,
+        )?;
+        let full = format!("Durable output instructions\n\n{prompt}");
         let launch = prepare_with(
             &registry,
             &task,
-            "fixture prompt",
+            &full,
             &paths,
             None,
             |adapter| {
@@ -1623,12 +2050,63 @@ mod tests {
             Some("cursor/gpt-5.3-codex-low")
         );
         assert_eq!(launch.argv[0], executable.as_os_str());
+        let scratch = paths.temporary.join("candidate-0");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.join("git-context.json"))?)?;
+        assert_eq!(metadata["base"], metadata["head"]);
+        assert_eq!(std::fs::read(scratch.join("git-diff.patch"))?, b"");
+        let pointer = launch
+            .argv
+            .last()
+            .ok_or("prompt missing")?
+            .to_str()
+            .ok_or("prompt UTF-8")?;
+        assert!(pointer.len() < 1024);
+        let spilled = attempt.join("prompt.md");
+        assert!(pointer.contains(spilled.to_str().ok_or("path UTF-8")?));
+        let spilled_text = std::fs::read_to_string(&spilled)?;
+        let location = spilled_text
+            .strip_suffix(&full)
+            .ok_or("spilled prompt lost the task text")?;
+        assert!(location.contains("Host-written Git context"));
+        assert!(location.contains(&scratch.display().to_string()));
+        assert_eq!(
+            store.record(attempt_id, &call)?.prompt.digest,
+            task.prompt_digest
+        );
+        assert_ne!(
+            task.prompt_digest,
+            provenant_records::CanonicalV1::file_digest(pointer.as_bytes())
+        );
+        assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, prompt);
         let confinement = launch.confinement.ok_or("writer confinement missing")?;
         assert!(confinement.writer.is_some());
+        assert!(
+            confinement
+                .plan
+                .permissions()
+                .read_roots
+                .contains(&PathGrant {
+                    path: spilled,
+                    scope: PathScope::Exact,
+                })
+        );
         assert_eq!(
             confinement.plan.permissions().scratch.path,
             paths.temporary.join("candidate-0")
         );
+        let mut bad_task = task;
+        bad_task.base = Some("absent-base".into());
+        let result = prepare_with(
+            &registry,
+            &bad_task,
+            "fixture prompt",
+            &paths,
+            None,
+            |_| Err("provider lookup must not happen for an invalid base".into()),
+            None,
+        );
+        assert!(matches!(result, Err(error) if error.contains("invalid Git base \"absent-base\"")));
         Ok(())
     }
 
@@ -1855,16 +2333,16 @@ mod tests {
         std::fs::create_dir_all(base.join("outside/fixture-session"))?;
         std::fs::create_dir_all(&state)?;
         std::os::unix::fs::symlink(base.join("outside"), state.join("candidate-0"))?;
-        assert_eq!(find_session_state(&state, "fixture-session"), None);
+        assert_eq!(find_session_state(&state, "fixture-session"), Ok(None));
         std::fs::create_dir_all(state.join("candidate-1/fixture-session"))?;
         assert_eq!(
             find_session_state(&state, "fixture-session"),
-            Some(state.join("candidate-1"))
+            Ok(Some(state.join("candidate-1")))
         );
         std::os::unix::fs::symlink(&state, base.join("alias"))?;
         assert_eq!(
             find_session_state(&base.join("alias"), "fixture-session"),
-            None
+            Ok(None)
         );
         assert!(copy_state(&state.join("candidate-0"), &base.join("copy")).is_err());
         std::fs::write(state.join("candidate-1/fixture-session/own"), "lane")?;
@@ -2124,6 +2602,73 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn retained_state_copy_leaves_nothing_when_refused() -> Result<(), Box<dyn std::error::Error>> {
+        const LIMIT: u64 = 1 << 20;
+        let limits = StateLimits {
+            bytes: LIMIT,
+            ..RETAINED_STATE
+        };
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(source.join("sessions.lock"))?;
+        std::fs::write(source.join("sessions.lock/rollout.jsonl"), "turn")?;
+        std::fs::write(source.join("keep"), "lane")?;
+        // A lock-named partial, which ordinary removal refuses.
+        std::fs::File::create(source.join("Cargo.lock"))?.set_len(64 * LIMIT)?;
+        // Like a launch, the destination is an empty candidate directory.
+        let state = base.join("provider-state");
+        let copied = state.join("candidate-0");
+        std::fs::create_dir_all(&copied)?;
+        assert_eq!(
+            copy_state_within(&source, &copied, limits),
+            Err(format!(
+                "retained provider state exceeds its {LIMIT} byte copy budget"
+            ))
+        );
+        let names = |path: &Path| -> std::io::Result<Vec<_>> {
+            std::fs::read_dir(path)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect()
+        };
+        assert_eq!(names(&state)?, ["candidate-0"], "no staging survives");
+        assert!(names(&copied)?.is_empty(), "no partial output survives");
+        std::fs::remove_file(source.join("Cargo.lock"))?;
+        copy_state_within(&source, &copied, limits)?;
+        assert_eq!(names(&state)?, ["candidate-0"]);
+        assert_eq!(
+            std::fs::read_to_string(copied.join("sessions.lock/rollout.jsonl"))?,
+            "turn"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_search_reports_its_spent_entry_budget() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = StateLimits {
+            entries: 4,
+            ..RETAINED_STATE
+        };
+        let temp = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(temp.path())?;
+        std::fs::create_dir_all(state.join("candidate-0/sessions"))?;
+        for name in ["1", "2", "3"] {
+            std::fs::write(state.join("candidate-0/sessions").join(name), "lane")?;
+        }
+        // An unfinished search is not a missing session.
+        assert_eq!(
+            find_session_state_within(&state, "fixture-session", limits),
+            Err(SearchExhausted)
+        );
+        std::fs::remove_file(state.join("candidate-0/sessions/3"))?;
+        assert_eq!(
+            find_session_state_within(&state, "fixture-session", limits),
+            Ok(None)
+        );
+        Ok(())
+    }
+
     // No unprivileged test can mount a filesystem inside a temporary tree, so
     // this runs the walk as if its anchor sat on another device.
     #[test]
@@ -2183,25 +2728,41 @@ mod tests {
         let assets = Path::new("/release/sha256:active");
         let home = Path::new("/home/user");
         let scratch = Path::new("/tmp/lane-scratch");
-        let private_state = Path::new("/state/attempt");
-        let request = confinement_request(
-            ProjectId::parse("0123456789abcdef0123456789abcdef")?,
-            ConfinementRoots {
-                cwd,
-                home,
-                scratch,
-                private_state,
-                assets,
-            },
-            None,
-            &run::LaneAccess::default(),
-            &Default::default(),
-            "codex",
-        )?;
-        assert!(request.permissions.read_roots.contains(&PathGrant {
-            path: assets.to_owned(),
-            scope: PathScope::Subtree,
-        }));
+        let private_state = Path::new("/state/attempt/provider-state");
+        let prompt = Path::new("/state/attempt/prompt.md");
+        for entry in REGISTRY {
+            let request = confinement_request(
+                ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+                ConfinementRoots {
+                    cwd,
+                    home,
+                    scratch,
+                    private_state,
+                    assets,
+                    prompt_file: Some(prompt),
+                },
+                None,
+                &run::LaneAccess::default(),
+                &Default::default(),
+                entry.adapter.id(),
+            )?;
+            assert!(request.permissions.read_roots.contains(&PathGrant {
+                path: assets.to_owned(),
+                scope: PathScope::Subtree,
+            }));
+            let plan = ConfinedPlan::new(request)?;
+            assert!(plan.permissions().read_roots.contains(&PathGrant {
+                path: prompt.to_owned(),
+                scope: PathScope::Exact,
+            }));
+            assert!(
+                !plan
+                    .permissions()
+                    .read_roots
+                    .iter()
+                    .any(|grant| { grant.path == prompt.parent().expect("attempt") })
+            );
+        }
         Ok(())
     }
 

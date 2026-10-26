@@ -63,7 +63,7 @@ write it once the host owner lists the directories in the state `config.toml`:
 
 ```toml
 [domains.run]
-writer_writes = ["/Users/me/proj/.agent-run/locks", "/Users/me/proj/.build/cargo-practice-wave"]
+writer_writes = ["/Users/me/proj/.agent-run/locks", "/Users/me/proj/.worktrees/feature/target"]
 ```
 
 Each entry is an absolute directory (letters, digits and `/._-` only, no `..`,
@@ -76,7 +76,7 @@ or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
 `/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
 
-Sharing a target across worktrees is the host owner's choice and can run another
+A shared Cargo target across worktrees is unsupported because it can run another
 checkout's stale test binaries; see [writer lanes](providers.md#writer-lanes).
 
 ## Routing pools

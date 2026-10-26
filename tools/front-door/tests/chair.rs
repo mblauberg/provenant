@@ -453,6 +453,8 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
             request: run::CanonicalRequest {
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    base: None,
+                    base_ref: None,
                     profile: Default::default(),
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),

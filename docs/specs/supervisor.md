@@ -213,7 +213,11 @@ home or tmp grants.
   write it.
 - **Network.** A level: `provider` (the profile's API endpoints only, the
   read-only default), `local` (adds localhost and the Postgres socket) or
-  `open` (adds any outbound, the writer default).
+  `open` (adds any outbound, the writer default). `open` adds IP peers only.
+  At every level a lane's only Unix-socket peers are the system DNS responder
+  and, from `local`, the Postgres socket. Read-only and writer lanes therefore
+  cannot connect to the peer agent's `<state>/peer-agent/peer.sock`, which
+  relays to unconfined `fabric peer` children; a native probe proves it.
 - **Toolchains.** Lanes use the user's own toolchains in place. `~/.cargo` and
   `~/.rustup` are readable with `RUSTUP_HOME` and `RUSTUP_AUTO_INSTALL=0`.
   No lane may write a store the host later runs unconfined: the Cargo registry
@@ -235,6 +239,14 @@ home or tmp grants.
   Corepack cache and a writer's `--write-root` and `domains.run.writer_writes`
   roots, which are also executable. Homebrew prefixes are readable except
   `var/`.
+- **Writer tests.** Only `worktree-write` lanes may read and execute fixtures
+  in their own attempt's `tmp/candidate-N` subtree. No parent, sibling
+  candidate, other attempt or retained provider-state directory gains exec.
+  Writers may signal their children (`signal (target children)`) and read
+  `/dev/fd/N` through a file-read grant on the `/dev/fd` subpath. Read-only
+  and other modes keep their existing grants. Hard links remain denied and
+  short Unix socket paths still require host tests. Private check homes use
+  `std::env::temp_dir()`, honouring the lane's `TMPDIR`.
 - **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
   `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
   grants.
@@ -323,6 +335,9 @@ authority over unrelated Git actors.
 | `worktree remove --merged` | Needs explicit authority, a pinned integration ref (a local branch or a remote-tracking ref such as `origin/main`) and `--branch` or `--since`. Ordinary merges are proved by ancestry. A squash needs a recorded merged PR in this repository whose head OID equals the branch tip and whose merge OID is an ancestor of the integration tip. A `gh` failure or malformed output keeps the branch unless ancestry alone proves it. The integration branch and a branch at its tip are never pruned. The branch OID is rechecked and the ref is deleted with that expected old OID. Remote deletion is not offered. |
 | `hook claude pre-tool-use` | The lane-safety guard, a row in cli's `HookSpec` table. Stdin is bounded to 1 MiB. Unreadable, malformed, oversized or timed-out input emits deny JSON with exit 0, and only a failure to write the denial exits 2. |
 
+`worktree list` never creates a writer lock; a worktree whose lock is missing
+is reported as `unknown`.
+
 For each removed worktree, removal derives its lane cache from the verified
 worktree before Git deletes it, then deletes only that cache through the
 detach-and-verify path while holding writer exclusion. Cache cleanup failures
@@ -331,6 +346,10 @@ orphaned caches and existing cleanup tombstones for `provenant gc` to sweep.
 Cache cleanup accepts v1 owner markers when the owner path is missing, and
 `provenant gc` retries their interrupted tombstones. Existing v1 owners are kept, reported
 as foreign when outside the project, and never collected as idle.
+Idle GC takes the existing writer lock without waiting, checks for reservations
+and releases the guard immediately after the tombstone rename. A held lock keeps
+the cache as live; a missing or unsafe lock, a reservation, or unverifiable
+registration keeps it as unobservable.
 
 Removal and pruning hold writer exclusion, recheck reservations and worker
 observations, and refuse live or unknown candidates. A post-merge hook passes
@@ -354,6 +373,7 @@ runs/<RunId>/
   children/{journal.lock,<ChildId>.json}
   attempts/<AttemptId>/
     prompt.txt  result.md      # run-owned, immutable once sealed
+    prompt.md                  # optional top-level argv spill, run-owned
     custody.lock
     launch.json                # redacted summary
     process.json               # replaceable observation
@@ -465,7 +485,7 @@ and every harness config path before it starts children.
 |---|---|
 | `crates/supervisor/src` unit tests and `custody_tests.rs` | State-machine transitions, natural-exit precedence, unknown identities, failed signals, stale generations, integer and size bounds, capture and discard modes, lock budgets and cancellation, both publication modes including post-rename sync failure |
 | `crates/supervisor/tests/custody.rs`, `process.rs`, `publication.rs` | Fast exit before watch, inherited ignored SIGCHLD and masks, prelaunch, live and late cancellation, a silent healthy provider, stdin EOF, a terminal frame after the cap, PID reuse, a TERM-resistant provider, `setsid` grandchildren, nested owners, an unlocked-lock impostor, shared hosts, incomplete census, parent death leaving guardian and lease live, racing recoverers and late publishers, injected ENOSPC and post-link fsync with retained custody and no healthy-provider signal |
-| `crates/confinement/src` tests and `tests/fixtures/external` | Credential, config and protected reads; ref, index and gitfile redirects; hard-link, symlink and root swaps; denied IPC and network; outside writes; secret chunk splits; scratch classification and drift; quarantine failure preserving unrelated work; backend probe and compile refusal; fixed Git and `gh` argv with arbitrary operations refused |
+| `crates/confinement/src` tests and `tests/fixtures/external` | Credential, config and protected reads; ref, index and gitfile redirects; hard-link, symlink and root swaps; denied IPC and network, including the peer agent socket from both lane kinds; outside writes; secret chunk splits; scratch classification and drift; quarantine failure preserving unrelated work; backend probe and compile refusal; fixed Git and `gh` argv with arbitrary operations refused |
 | `tools/front-door/tests/worktree_driver.rs`, `dispatch_provider.rs`, `fake_provider.rs` | The public worktree commands and launch, wait, cancel and recover through the built binary against isolated fake providers and temporary repositories |
 
 Unsafe blocks get a second reviewer. CI runs the Linux workspace tests and the
