@@ -172,7 +172,8 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
     )?;
     assert_eq!(set["command"], "route set");
     let persisted = fs::read_to_string(rig.state.join("config.toml"))?;
-    assert!(persisted.contains("[routing]"));
+    assert!(persisted.contains("[domains.routing.pools]"));
+    assert!(!persisted.contains("[routing"));
 
     let listed = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
     let member = listed["data"]["pools"]["junior"]
@@ -185,11 +186,9 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
         member["efforts"],
         serde_json::json!(["medium", "high", "xhigh"])
     );
-    assert_eq!(member["factor_basis_points"], 10_000);
-    assert_eq!(
-        member["readiness"],
-        serde_json::json!({"status": "unavailable", "reason": "unknown_availability"})
-    );
+    // Listing never probes, so it reports no readiness or pacing factor.
+    assert!(member.get("factor_basis_points").is_none());
+    assert!(member.get("readiness").is_none());
 
     let pacing = call(&rig, &["route", "pacing", "codex", "spend"], 0)?;
     assert_eq!(pacing["command"], "route pacing");
@@ -218,7 +217,7 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
     fs::write(
         rig.state.join("config.toml"),
         r#"schema_version = 1
-[routing]
+[domains.routing]
 pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high", efforts = ["high"] }] }
 "#,
     )?;
@@ -229,6 +228,19 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
         .as_str()
         .ok_or("config error")?;
     assert!(message.contains("routing") && message.contains("weight"));
+
+    // The root `[routing]` table is not a config key.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[routing.pacing]\ncodex = \"spend\"\n",
+    )?;
+    let out = rig.command(&["route", "list", "--json"])?;
+    assert_eq!(code(&out), 2);
+    let rejected: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let message = rejected["error"]["message"]
+        .as_str()
+        .ok_or("config error")?;
+    assert!(message.contains("routing"), "{message}");
     Ok(())
 }
 

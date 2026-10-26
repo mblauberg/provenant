@@ -600,7 +600,7 @@ fn hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses() -> 
     let bin = rig.root.join("ssh-bin");
     fs::create_dir(&bin)?;
     let ssh = bin.join("ssh");
-    fs::write(&ssh, b"#!/bin/sh\n[ \"$6\" = -- ] && [ \"$7\" = workshop ] && [ \"$8\" = 'exec ~/.local/bin/provenant hosts doctor --json' ] || exit 91\n[ \"$SSH_AUTH_SOCK\" = /fixture/agent.sock ] || exit 92\nprintf '{\"command\":\"hosts doctor\",\"status\":\"ok\",\"data\":{\"claude\":[{\"label\":\"pro\",\"signin\":{\"state\":\"keychain_unavailable\",\"token_validity\":\"unverified\"}}]}}'\n")?;
+    fs::write(&ssh, b"#!/bin/sh\n[ \"$6\" = -- ] && [ \"$7\" = workshop ] && [ \"$8\" = 'exec ~/.local/bin/provenant hosts doctor --json' ] || exit 91\n[ \"$SSH_AUTH_SOCK\" = /fixture/agent.sock ] || exit 92\nprintf '{\"command\":\"hosts doctor\",\"status\":\"ok\",\"data\":{\"claude\":[{\"label\":\"pro\",\"signin\":{\"state\":\"keychain_unavailable\",\"token_validity\":\"unverified\"}}],\"peer_agent\":\"stopped\"}}'\n")?;
     fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700))?;
     rig.env
         .push(("SSH_AUTH_SOCK".into(), "/fixture/agent.sock".into()));
@@ -618,11 +618,20 @@ fn hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses() -> 
         value["data"]["claude"][0]["signin"]["state"],
         "keychain_unavailable"
     );
-    fs::write(&ssh, b"#!/bin/sh\nprintf '{\"command\":\"hosts doctor\"'\n")?;
-    assert_eq!(
-        code(&rig.command(&["hosts", "doctor", "workshop", "--json"])?),
-        4
-    );
+    assert_eq!(value["data"]["peer_agent"], "stopped");
+    for reply in [
+        &b"{\"command\":\"hosts doctor\""[..],
+        b"{\"command\":\"hosts doctor\",\"status\":\"ok\",\"data\":{\"claude\":[]}}",
+    ] {
+        let mut script = b"#!/bin/sh\nprintf '".to_vec();
+        script.extend_from_slice(reply);
+        script.extend_from_slice(b"'\n");
+        fs::write(&ssh, script)?;
+        assert_eq!(
+            code(&rig.command(&["hosts", "doctor", "workshop", "--json"])?),
+            4
+        );
+    }
     assert!(!rig.state.exists());
     rig.assert_legacy_unchanged()
 }

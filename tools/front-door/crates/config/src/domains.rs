@@ -31,7 +31,6 @@ pub struct DomainSection {
     pub name: &'static str,
     pub defaults: fn(Profile) -> &'static str,
     pub validate: fn(&Table) -> Vec<SectionError>,
-    pub root_alias: bool,
 }
 impl DomainSection {
     /// Erase only the registration function, never the resolved section type.
@@ -43,21 +42,6 @@ impl DomainSection {
             name,
             defaults,
             validate: validate::<T>,
-            root_alias: false,
-        }
-    }
-
-    /// Register a section accepted both under `[domains.<name>]` and at the
-    /// root as `[<name>]`; root values override matching domain values.
-    pub const fn new_root_alias<T: DomainConfig>(
-        name: &'static str,
-        defaults: fn(Profile) -> &'static str,
-    ) -> Self {
-        Self {
-            name,
-            defaults,
-            validate: validate::<T>,
-            root_alias: true,
         }
     }
 }

@@ -326,7 +326,8 @@ Each graph attempt is bounded by `limits.graph_timeout_ms`.
   result consumes the next route. Task failure, input requirements and
   uncertain launches never fall back. After a provider launched, only read-only
   nodes may fall back. A failed writer keeps its worktree in the checkpoint for
-  the chair, and missing launch evidence counts as launched.
+  the chair. Each checkpointed attempt records whether it launched and the
+  actor that submitted it; a checkpoint missing either is refused.
 - Dependants start after their prerequisites succeed and block after one fails.
   Every tried route and its outcome stays in the checkpoint. Plan and
   checkpoint digests, a per-project per-graph lock and atomic publication make

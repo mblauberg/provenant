@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_responses_read_only_null_retired_members() {
+    fn peer_responses_refuse_retired_members() {
         use provenant_core::{MessageId, ProjectId, TaskId};
         use provenant_fabric_store::{Delivery, Message, MessageKind, Page, Task, TaskState};
         use provenant_records::RecordHeader;
@@ -642,7 +642,6 @@ mod tests {
             expires_at: None,
             created_at: now,
             updated_at: now,
-            legacy: (),
         };
         let mut response = PeerResponse {
             version: 1,
@@ -657,7 +656,7 @@ mod tests {
             })),
         };
         let task_json = serde_json::to_string(&task).unwrap();
-        let frame = old_frame(&response, &task_json, "legacy", "null");
+        let frame = serde_json::to_vec(&response).unwrap();
         let decoded =
             provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG).unwrap();
         assert!(matches!(
@@ -665,10 +664,13 @@ mod tests {
             PeerResult::Coordination(CoordinationResult::Task(TaskResult::Created { task: got }))
                 if got == task
         ));
-        let frame = old_frame(&response, &task_json, "legacy", "{}");
-        assert!(
-            provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG).is_err()
-        );
+        for value in ["null", "{}"] {
+            let frame = old_frame(&response, &task_json, "legacy", value);
+            assert!(
+                provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
+                    .is_err()
+            );
+        }
 
         let message = Message {
             header: RecordHeader::V1,
@@ -683,8 +685,6 @@ mod tests {
             reply_to: None,
             task: None,
             created_at: now,
-            legacy_output_path: (),
-            legacy: (),
         };
         let mail = MailResult::Read {
             page: Page {
@@ -698,20 +698,21 @@ mod tests {
         };
         response.result = PeerResult::Coordination(CoordinationResult::Mail(mail.clone()));
         let message_json = serde_json::to_string(&message).unwrap();
+        let frame = serde_json::to_vec(&response).unwrap();
+        let decoded =
+            provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG).unwrap();
+        assert!(matches!(
+            decoded.result,
+            PeerResult::Coordination(CoordinationResult::Mail(got)) if got == mail
+        ));
         for member in ["legacy", "legacy_output_path"] {
-            let frame = old_frame(&response, &message_json, member, "null");
-            let decoded =
-                provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
-                    .unwrap();
-            assert!(matches!(
-                decoded.result,
-                PeerResult::Coordination(CoordinationResult::Mail(got)) if got == mail
-            ));
-            let frame = old_frame(&response, &message_json, member, "{}");
-            assert!(
-                provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
-                    .is_err()
-            );
+            for value in ["null", "{}"] {
+                let frame = old_frame(&response, &message_json, member, value);
+                assert!(
+                    provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
+                        .is_err()
+                );
+            }
         }
     }
 
