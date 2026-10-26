@@ -662,11 +662,12 @@ fn prune_worktree_cache(
         }
         reason
     };
-    let _writer_guard = if reason == CacheGcReason::Idle {
-        let owner = owner.as_ref().ok_or(PermissionError::AnchorMismatch)?;
-        match writer_guard(&owner.path) {
-            Ok(guard) => Some(guard),
-            Err(state) => {
+    let (bytes, _) = measure_cache(cache.as_ref(), Path::new(name), 0)?;
+    if policy.dry_run {
+        if reason == CacheGcReason::Idle {
+            let owner = owner.as_ref().ok_or(PermissionError::AnchorMismatch)?;
+            // Probe only: a dry run never needs to hold writer exclusion.
+            if let Err(state) = writer_guard(&owner.path) {
                 report.kept.push(CacheGcEntry {
                     path: cache_root.join(name),
                     bytes: 0,
@@ -679,11 +680,6 @@ fn prune_worktree_cache(
                 return Ok(());
             }
         }
-    } else {
-        None
-    };
-    let (bytes, _) = measure_cache(cache.as_ref(), Path::new(name), 0)?;
-    if policy.dry_run {
         report.bytes_freed = report.bytes_freed.saturating_add(bytes);
     } else {
         let detached;
@@ -698,6 +694,25 @@ fn prune_worktree_cache(
                 cache_owner_fingerprint(original_owner),
                 std::process::id()
             ));
+            let idle_guard = if reason == CacheGcReason::Idle {
+                match writer_guard(&original_owner.path) {
+                    Ok(guard) => Some(guard),
+                    Err(state) => {
+                        report.kept.push(CacheGcEntry {
+                            path: cache_root.join(name),
+                            bytes: 0,
+                            reason: if state == WorkerState::Live {
+                                CacheGcReason::Live
+                            } else {
+                                CacheGcReason::Unobservable
+                            },
+                        });
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
             // Measurement may take time. Recheck the marker, owner and last
             // write immediately before detaching the cache from the lane path.
             if read_cache_owner(cache.as_ref(), Path::new(name))? != owner {
@@ -717,6 +732,8 @@ fn prune_worktree_cache(
             }
             root.rename_noreplace(name, &detached)
                 .map_err(cache_fs_error("rename to tombstone", Path::new(name)))?;
+            // The lane path is now free for a writer to create a fresh cache.
+            drop(idle_guard);
             detached.as_os_str()
         };
         let detached_cache = match verify_detached_cache(root, removal_name, &opened, &owner) {
@@ -4998,7 +5015,6 @@ mod tests {
         impl SafeDir for EventDir {
             forward! {
                 metadata() -> Result<Metadata, FsError>;
-                metadata_at(name: &OsStr, follow: bool) -> Result<Metadata, FsError>;
                 open_directory(name: &OsStr, follow: bool) -> Result<Box<dyn SafeDir>, FsError>;
                 create_new(name: &OsStr) -> Result<Box<dyn SafeFile>, FsError>;
                 mkdir(name: &OsStr, mode: u32) -> Result<(), FsError>;
@@ -5010,6 +5026,10 @@ mod tests {
                 sync() -> Result<(), FsError>;
                 atomic_write(name: &OsStr, prefix: &str, bytes: &[u8], permissions: u32, mode: PublishMode) -> Result<Publication, FsError>;
                 replace_link(name: &OsStr, target: &Path) -> Result<Publication, FsError>;
+            }
+            fn metadata_at(&self, name: &OsStr, follow: bool) -> Result<Metadata, FsError> {
+                self.notify("stat", name)?;
+                self.inner.metadata_at(name, follow)
             }
             fn open_verified_directory(&self, name: &OsStr) -> Result<Box<dyn SafeDir>, FsError> {
                 Ok(Box::new(Self {
@@ -5442,8 +5462,12 @@ mod tests {
         }
 
         #[test]
-        fn gc_idle_holds_writer_lock_across_tombstone_rename()
+        fn gc_idle_releases_writer_lock_before_tombstone_cleanup_and_writer_retries()
         -> Result<(), Box<dyn std::error::Error>> {
+            use provenant_core::{AttemptId, GitOid, RunId};
+            use provenant_supervisor::clock::SystemClock;
+            use provenant_supervisor::custody::{self, CustodyError, Scope, WriterBinding};
+            use provenant_supervisor::fs::Directory;
             use std::sync::atomic::{AtomicUsize, Ordering};
 
             let temporary = tempfile::tempdir()?;
@@ -5455,6 +5479,16 @@ mod tests {
             let observed_locks = locks.clone();
             let renames = Arc::new(AtomicUsize::new(0));
             let observed_renames = renames.clone();
+            let retried = Arc::new(AtomicUsize::new(0));
+            let observed_retried = retried.clone();
+            let binding = WriterBinding::from_verified(
+                &Directory::open_anchor(&owner)?,
+                &Directory::open_anchor(&owner)?,
+                "refs/heads/test",
+                GitOid::parse(&"a".repeat(40))?,
+            )?;
+            let writer_home = home.to_path_buf();
+            let writer_owner = owner.clone();
             let policy = CacheGcPolicy {
                 idle_before_ns: Some(i128::MAX),
                 project_owners: [owner].into(),
@@ -5464,13 +5498,37 @@ mod tests {
                 home,
                 &policy,
                 Arc::new(move |event, _| {
+                    let launch = || {
+                        let clock = SystemClock;
+                        custody::acquire_writer(
+                            Directory::open_anchor(&writer_home.join("writer-state"))?,
+                            Scope {
+                                run: RunId::from_bytes([1; 16]),
+                                attempt: AttemptId::from_bytes([2; 16]),
+                                generation: 1,
+                            },
+                            binding.clone(),
+                            WaitBudget::nonblocking(clock.mono_now()),
+                            &CancelToken::new(),
+                            &clock,
+                        )
+                    };
                     if matches!(event, "before rename" | "after rename") {
                         assert!(matches!(
                             observed_locks
                                 .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive,),
                             Err(FsError::LockTimeout { .. })
                         ));
+                        assert!(matches!(launch(), Err(CustodyError::Busy)));
                         observed_renames.fetch_add(1, Ordering::SeqCst);
+                    } else if observed_renames.load(Ordering::SeqCst) == 2
+                        && observed_retried.fetch_add(1, Ordering::SeqCst) == 0
+                    {
+                        // The first filesystem event after rename_noreplace
+                        // returns must allow the refused writer to retry.
+                        let _writer = launch().map_err(io::Error::other)?;
+                        let fresh = cache(&writer_home, &"a".repeat(64), &writer_owner)?;
+                        std::fs::write(fresh.join("artifact"), b"fresh writer output")?;
                     }
                     Ok(())
                 }),
@@ -5483,9 +5541,57 @@ mod tests {
             assert_eq!(renames.load(Ordering::SeqCst), 2);
             assert_eq!(report.removed.len(), 1);
             assert_eq!(report.removed[0].reason, CacheGcReason::Idle);
-            assert!(!path.exists());
+            assert!(retried.load(Ordering::SeqCst) > 0);
+            assert_eq!(
+                std::fs::read(path.join("artifact"))?,
+                b"fresh writer output"
+            );
+            assert!(path.join(CARGO_CACHE_OWNER).is_file());
             let _released =
                 locks.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+            Ok(())
+        }
+
+        #[test]
+        fn gc_idle_dry_run_never_holds_probe_during_measurement()
+        -> Result<(), Box<dyn std::error::Error>> {
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let owner = home.join("owner");
+            std::fs::create_dir(&owner)?;
+            let path = cache(home, &"a".repeat(64), &owner)?;
+            let locks = Arc::new(test_writer_lock(home)?);
+            let observed_locks = locks.clone();
+            let probed = Arc::new(AtomicBool::new(false));
+            let policy = CacheGcPolicy {
+                idle_before_ns: Some(i128::MAX),
+                dry_run: true,
+                project_owners: [owner].into(),
+                ..CacheGcPolicy::default()
+            };
+            let report = sweep_with_writer_guard(
+                home,
+                &policy,
+                Arc::new(move |event, _| {
+                    if event == "readdir" {
+                        let _writer = observed_locks
+                            .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map_err(io::Error::other)?;
+                    }
+                    Ok(())
+                }),
+                &mut |_| {
+                    probed.store(true, Ordering::SeqCst);
+                    locks
+                        .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                        .map_err(|_| WorkerState::Unknown)
+                },
+            )?;
+            assert!(probed.load(Ordering::SeqCst));
+            assert_eq!(report.removed.len(), 1);
+            assert!(path.join("artifact").is_file());
             Ok(())
         }
 
