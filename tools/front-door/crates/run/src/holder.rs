@@ -374,6 +374,7 @@ impl RunStore {
                         task.deliver
                             .as_ref()
                             .map_or("origin", |deliver| deliver.remote.as_str()),
+                        task.base.as_deref(),
                     )
                 });
             match check {

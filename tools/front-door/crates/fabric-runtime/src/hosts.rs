@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 3;
+pub const PROTOCOL: u64 = 4;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(

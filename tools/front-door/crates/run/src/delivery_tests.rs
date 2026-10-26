@@ -113,11 +113,12 @@ impl PrepareFixture {
         &self,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
-        self.terminal_via("origin", write)
+        self.terminal_via("origin", None, write)
     }
     fn terminal_via(
         &self,
         remote: &str,
+        base_ref: Option<&str>,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
@@ -183,7 +184,7 @@ impl PrepareFixture {
         .into_recovery()?;
         assert_eq!(recovery.observe(), RecoveryState::Absent);
         write()?;
-        let review = launch.terminal(&state, &attempt, &recovery, remote)?;
+        let review = launch.terminal(&state, &attempt, &recovery, remote, base_ref)?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
         let manifest: serde_json::Value = serde_json::from_slice(
             &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,
@@ -255,42 +256,70 @@ fn terminal_falls_back_when_delivery_target_cannot_be_resolved()
     Ok(())
 }
 
-#[test]
-fn terminal_uses_origin_head_when_the_delivery_remote_has_none()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    let fixture = PrepareFixture::new()?;
+fn merge_upstream_then_edit(
+    fixture: &PrepareFixture,
+    remote_ref: &str,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fixture.lane_git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "merge",
+        "--no-edit",
+        remote_ref,
+    ])?;
+    std::fs::write(
+        fixture.writer.worktree.join("source.txt"),
+        "writer source\n",
+    )?;
+    fixture.lane_git(&["add", "source.txt"])?;
+    fixture.commit(&fixture.writer.worktree, "Writer source")
+}
+
+fn commit_protected_on(
+    fixture: &PrepareFixture,
+    remote_ref: &str,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(fixture.writer.project.join(".github"))?;
     std::fs::write(
         fixture.writer.project.join(".github/ci.yml"),
-        "main policy\n",
+        "upstream policy\n",
     )?;
     fixture.git(&["add", ".github"])?;
     fixture.commit(&fixture.writer.project, "Upstream policy")?;
-    fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+    fixture.git(&["update-ref", remote_ref, "HEAD"])
+}
+
+#[test]
+fn terminal_uses_the_base_branch_on_a_delivery_remote_without_head()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    commit_protected_on(&fixture, "refs/remotes/fork/main")?;
+    // The delivery remote "fork" has no HEAD, but it carries the base branch.
+    let review = fixture.terminal_via("fork", Some("main"), || {
+        merge_upstream_then_edit(&fixture, "fork/main")
+    })?;
+    assert!(!review);
+    Ok(())
+}
+
+#[test]
+fn terminal_never_exempts_a_commit_reachable_only_from_another_remote()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    // origin is a fork with an unreviewed protected commit and a HEAD; the
+    // delivery remote "upstream" has neither HEAD nor the base branch.
+    commit_protected_on(&fixture, "refs/remotes/origin/main")?;
     fixture.git(&[
         "symbolic-ref",
         "refs/remotes/origin/HEAD",
         "refs/remotes/origin/main",
     ])?;
-    // The delivery remote "fork" has no HEAD; origin's does.
-    let review = fixture.terminal_via("fork", || {
-        fixture.lane_git(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "merge",
-            "--no-edit",
-            "origin/main",
-        ])?;
-        std::fs::write(
-            fixture.writer.worktree.join("source.txt"),
-            "writer source\n",
-        )?;
-        fixture.lane_git(&["add", "source.txt"])?;
-        fixture.commit(&fixture.writer.worktree, "Writer source")
+    let review = fixture.terminal_via("upstream", Some("main"), || {
+        merge_upstream_then_edit(&fixture, "origin/main")
     })?;
-    assert!(!review);
+    assert!(review);
     Ok(())
 }
 
