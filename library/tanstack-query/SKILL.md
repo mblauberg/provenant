@@ -1,16 +1,16 @@
 ---
 name: tanstack-query
-description: "Use for TanStack Query v5 code: keys, queryOptions, staleTime, mutations, invalidation, optimistic updates, router loaders. Not for local UI state, render speed (react-performance) or backend caches."
+description: "Use for TanStack Query v5, Router loaders, Table v9 and react-virtual: keys, queryOptions, staleTime, mutations, useTable, virtualised rows. Not for local UI state, render speed (react-performance) or backend caches."
 ---
 
-# TanStack Query v5
+# TanStack Query v5, Router, Table and Virtual
 
 This skill targets `@tanstack/react-query` 5.10x, so confirm the installed
 version first. Project conventions win over this file.
 
 ## API newer than most training data
 
-- **Imperative calls have moved.** Late 5.x deprecates `fetchQuery`,
+- **Imperative calls have moved.** Query 5.10x deprecates `fetchQuery`,
   `prefetchQuery`, `ensureQueryData` and their infinite-query versions, ahead
   of removal in the next major. The replacements are `queryClient.query(opts)`
   and `queryClient.infiniteQuery(opts)`:
@@ -21,11 +21,15 @@ version first. Project conventions win over this file.
 
   Write the new form in new code. Flag old call sites for migration rather
   than rewriting them inside an unrelated change. If unsure, grep `@deprecated`
-  in the installed `query-core` type declarations.
+  in the installed `query-core` type declarations. Older docs still show
+  `ensureQueryData`.
 - **`staleTime: 'static'` overrides invalidation.** If any active observer of
   a query uses it, `invalidateQueries` and `refetchQueries` skip that query.
   Keep it to one-off imperative calls, and never put it on a hook whose data a
   mutation must refresh. `Infinity` still honours invalidation.
+- **Table v9 is not v8.** `useReactTable` is now `useTable`, features go
+  through `tableFeatures()`, and `getState()` became `table.state`. Read
+  [references/table.md](references/table.md) before writing table code.
 
 ## Where agents slip
 
@@ -42,53 +46,52 @@ version first. Project conventions win over this file.
   - `isFetching` means a request is running;
   - `isLoading` means both.
 
-  Keep cached data on screen during a background refetch.
+  Keep cached data on screen during a background refetch. When a list
+  changes key (new sort or filter), use `placeholderData: keepPreviousData`.
 - **Freshness:** the default `staleTime` of 0 refetches on every mount and
   focus. Set it from how fast the data actually changes. Switching off focus
   refetching to hide a bad value is the wrong fix.
 - **Tracked results:** destructure only the fields you read. Rest-spreading the
   result, or listing the whole result object as a dependency, breaks property
   tracking.
-- **Optimistic updates:**
-  - Display the pending mutation's `variables` (or `useMutationState` from
-    another component) before touching the cache.
-  - If several views must move together and you do edit the cache, stop
-    in-flight fetches for those keys and keep the previous value. Apply the
-    change without mutating, put the saved value back if the request fails,
-    and invalidate once it settles.
-  - Have `onSettled` hand back the invalidation promise, so the mutation reads
-    as pending until the refetch lands.
-  - Money is never optimistic.
+- **Optimistic updates:** show the mutation's `variables` before editing the
+  cache; money is never optimistic. Cache edits need cancel, snapshot,
+  rollback and settled invalidation: see
+  [references/mutations.md](references/mutations.md).
 - **Mutation aftermath:**
   - Invalidate the narrowest key prefix that covers the change.
   - Write the response straight into the cache only when its shape is exactly
     the cached shape.
+- **Query data is not component state:** do not copy it into `useState`.
+  Derive during render or use `select`.
 - **`skipToken`:** it disables a query with type safety, but `refetch()`
   cannot run that query.
-- **`useSuspenseQuery`:**
-  - It has no `enabled` or `placeholderData`.
-  - A key change suspends again unless it happens inside `startTransition`.
-  - Errors hit the boundary only when no cached data exists.
+- **`useSuspenseQuery`:** no `enabled` or `placeholderData`; a key change
+  suspends again unless inside `startTransition`. Details in
+  [references/mutations.md](references/mutations.md).
 
-## TanStack Router loaders
+## Router loaders and tables
 
-Put `queryClient` in router context. In the loader, await
-`queryClient.query({ ...opts, staleTime: 'static' })` for data the route cannot
-render without. Start the rest without awaiting, using `.catch(noop)`. The
-component calls `useSuspenseQuery(opts)` with the same factory, so loader and
-component always agree on the key.
+Loaders await `queryClient.query({ ...opts, staleTime: 'static' })` and the
+component calls `useSuspenseQuery(opts)` with the same factory. See
+[references/router.md](references/router.md).
+
+Table and virtual rules to always apply:
+
+- Table is headless. Keep the project's markup and feed it from `useTable`.
+- Server-driven tables set `manualSorting`, `manualFiltering` and
+  `manualPagination`, and hold that state in the query key, never only in the
+  table. Pass `getRowId` with the record's stable id.
+- Never use `stockFeatures` in shipped code. Register only the features used.
+- Virtualise only hundreds of rendered rows. Banned: `rows.map` over the full
+  model when thousands are loaded.
 
 ## Verification
 
+- Table tests render the component and assert on rows, header sort state and
+  selection, not on `table` internals.
 - Tests get a fresh `QueryClient` with `retry: false` and go through the public
   hook or component.
 - `@tanstack/eslint-plugin-query` provides `exhaustive-deps`,
   `stable-query-client`, `no-rest-destructuring`, `no-unstable-deps` and
   `prefer-query-options`. Suggest it where it is missing; don't add it unasked.
-
-## Sources
-
-Checked 22 October 2026: tanstack.com/query/latest (QueryClient reference,
-optimistic updates, Suspense, v5 migration, ESLint plugin),
-tanstack.com/router/latest external data loading, TanStack/query GitHub
-releases, and the `@tanstack/query-core` 5.104.2 declarations and source.

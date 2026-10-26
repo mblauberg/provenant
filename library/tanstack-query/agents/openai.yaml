@@ -1,4 +1,4 @@
 interface:
   display_name: TanStack Query
-  short_description: TanStack Query v5 keys, freshness, mutations and loaders.
-  default_prompt: Use $tanstack-query for this React Query server-state task.
+  short_description: TanStack Query v5, Router loaders, Table v9 and Virtual.
+  default_prompt: Use $tanstack-query for this TanStack server-state, table or virtualisation task.
