@@ -220,6 +220,7 @@ impl F3Facade for BoundFacade<'_> {
             }
             let Some(peer) = peer else {
                 page.push(HostHealth {
+                    protocol: PROTOCOL,
                     host,
                     available: true,
                     execution: Some(
@@ -235,6 +236,7 @@ impl F3Facade for BoundFacade<'_> {
                 continue;
             };
             let mut health = HostHealth {
+                protocol: PROTOCOL,
                 host,
                 available: false,
                 execution: None,
@@ -263,17 +265,21 @@ impl F3Facade for BoundFacade<'_> {
                     executable,
                     seconds: ctx.config.limits.peer_seconds,
                 };
-                if let Ok(PeerResponse {
-                    result: PeerResult::Health(value),
-                    ..
-                }) = transport.exchange_with_cap(
+                match transport.exchange_with_cap(
                     peer,
                     &request,
                     budget,
                     cancel,
                     std::time::Duration::from_micros(cap),
                 ) {
-                    health = value;
+                    Ok(PeerResponse {
+                        result: PeerResult::Health(value),
+                        ..
+                    }) => health = value,
+                    Err(PeerError::ProtocolMismatch { peer, remote }) => {
+                        return Err(FacadeError::PeerProtocolMismatch { peer, remote });
+                    }
+                    _ => {}
                 }
             }
             page.push(health);
@@ -590,6 +596,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 ))
             }
             PeerAction::Health => PeerResult::Health(HostHealth {
+                protocol: PROTOCOL,
                 host: context.identity.host,
                 available: true,
                 execution: Some(owner.capabilities().submit),
@@ -1135,9 +1142,9 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
         RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
         RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
         RunError::Contention | RunError::Capacity => FacadeError::Busy,
-        RunError::Conflict | RunError::OperationConflict | RunError::Nonterminal => {
-            FacadeError::Conflict
-        }
+        RunError::Conflict => FacadeError::Conflict,
+        RunError::OperationConflict => FacadeError::OperationConflict,
+        RunError::Nonterminal => FacadeError::NotTerminal,
         RunError::Cancelled => FacadeError::Cancelled,
         RunError::Validation(_) | RunError::Decode(_) | RunError::ArtifactMismatch => {
             FacadeError::StateCorrupt
@@ -1154,10 +1161,13 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
         "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
         "NOT_FOUND" => FacadeError::NotFound,
-        "CONFLICT" | "OPERATION_CONFLICT" | "NONTERMINAL" => FacadeError::Conflict,
+        "CONFLICT" => FacadeError::Conflict,
+        "OPERATION_CONFLICT" => FacadeError::OperationConflict,
+        "NONTERMINAL" => FacadeError::NotTerminal,
         "CANCELLED" => FacadeError::Cancelled,
         "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
         "UNSUPPORTED" => FacadeError::ConfinementRefused,
+        "OWNER_UNAVAILABLE" => FacadeError::OwnerUnavailable,
         _ => FacadeError::Io,
     }
 }
@@ -2722,7 +2732,7 @@ mod peer_tests {
     fn resume_mapper_defers_other_codes() {
         assert!(matches!(
             super::resume_fail_error(fail("NONTERMINAL")),
-            super::FacadeError::Conflict
+            super::FacadeError::NotTerminal
         ));
         assert!(matches!(
             super::resume_fail_error(fail("NOT_FOUND")),
@@ -2731,16 +2741,38 @@ mod peer_tests {
     }
 
     #[test]
-    fn nonterminal_run_error_is_conflict() {
-        assert!(matches!(
-            super::run_error(provenant_run::RunError::Nonterminal),
-            super::FacadeError::Conflict
-        ));
+    fn run_errors_keep_distinct_facade_codes() {
+        assert_eq!(
+            super::run_error(provenant_run::RunError::Nonterminal).code(),
+            "not_terminal"
+        );
+        assert_eq!(
+            super::run_error(provenant_run::RunError::OperationConflict).code(),
+            "operation_conflict"
+        );
+        assert_eq!(
+            super::run_error(provenant_run::RunError::Conflict).code(),
+            "conflict"
+        );
+    }
+
+    #[test]
+    fn local_run_failures_keep_distinct_facade_codes() {
+        for (code, expected) in [
+            ("NONTERMINAL", "not_terminal"),
+            ("OPERATION_CONFLICT", "operation_conflict"),
+            ("CONFLICT", "conflict"),
+        ] {
+            assert_eq!(super::fail_error(fail(code)).code(), expected);
+            assert_eq!(super::resume_fail_error(fail(code)).code(), expected);
+        }
     }
 
     #[test]
     fn peer_refusal_codes_keep_their_facade_meaning() {
         for code in [
+            "not_terminal",
+            "operation_conflict",
             "stale_fence",
             "timeout",
             "state_corrupt",
@@ -2755,6 +2787,28 @@ mod peer_tests {
                 "{code}"
             );
         }
+    }
+
+    #[test]
+    fn peer_run_error_codes_round_trip_through_the_cli() -> Result<(), Box<dyn std::error::Error>> {
+        for error in [
+            super::FacadeError::NotTerminal,
+            super::FacadeError::OperationConflict,
+            super::FacadeError::OwnerUnavailable,
+        ] {
+            let expected = error.code();
+            let response = super::peer_result::<()>(Err(error), None, |()| unreachable!());
+            let bytes = serde_json::to_vec(&response)?;
+            let response: super::PeerResult = serde_json::from_slice(&bytes)?;
+            let super::PeerResult::Error { code, operation_id } = response else {
+                return Err("expected error".into());
+            };
+            assert_eq!(code, expected);
+            let decoded = super::FacadeError::from_code(&code, operation_id);
+            let (_, cli_code) = provenant_cli::fabric::facade_outcome(&decoded);
+            assert_eq!(super::fail_error(fail(cli_code)).code(), expected);
+        }
+        Ok(())
     }
 
     #[test]

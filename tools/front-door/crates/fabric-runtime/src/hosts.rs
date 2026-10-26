@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+pub const PROTOCOL: u64 = 2;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(
@@ -39,6 +40,8 @@ pub fn discover_ssh_executable(
 pub enum PeerError {
     #[error("peer protocol version or identity mismatch")]
     Version,
+    #[error("peer {peer} speaks protocol {remote}, this host speaks {PROTOCOL}; upgrade both")]
+    ProtocolMismatch { peer: String, remote: u64 },
     #[error("peer project is outside the selected home")]
     Project,
     #[error("peer source host must be a configured peer other than this host")]
@@ -61,7 +64,7 @@ pub enum PeerError {
 impl PeerError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Version => "peer_version",
+            Self::Version | Self::ProtocolMismatch { .. } => "peer_version",
             Self::Project | Self::SourceHost => "invalid_input",
             Self::Unavailable | Self::Failed(_) => "home_unavailable",
             Self::Unknown { .. } => "launch_unknown",
@@ -312,6 +315,7 @@ impl PeerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostHealth {
+    pub protocol: u64,
     pub host: HostId,
     pub available: bool,
     /// Readiness requires the run owner; config presence alone proves nothing.
@@ -398,6 +402,48 @@ pub struct SshTransport<'a> {
 }
 impl SshTransport<'_> {
     pub fn exchange_with_cap(
+        &self,
+        peer: &Peer,
+        request: &PeerRequest,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        cap: Duration,
+    ) -> Result<PeerResponse, PeerError> {
+        let started = self.clock.mono_now();
+        let cap = cap.min(Duration::from_secs(self.seconds));
+        let mut probe = request.clone();
+        probe.action = PeerAction::Health;
+        let response = self.exchange_frame(peer, &probe, budget, cancel, cap)?;
+        let PeerResult::Health(health) = &response.result else {
+            return Err(PeerError::Unavailable);
+        };
+        if health.host != peer.host {
+            return Err(PeerError::Version);
+        }
+        if health.protocol != PROTOCOL {
+            return Err(PeerError::ProtocolMismatch {
+                peer: peer.destination.clone(),
+                remote: health.protocol,
+            });
+        }
+        if matches!(request.action, PeerAction::Health) {
+            return Ok(response);
+        }
+        let elapsed = self
+            .clock
+            .mono_now()
+            .as_micros()
+            .saturating_sub(started.as_micros());
+        self.exchange_frame(
+            peer,
+            request,
+            budget,
+            cancel,
+            cap.saturating_sub(Duration::from_micros(elapsed)),
+        )
+    }
+
+    fn exchange_frame(
         &self,
         peer: &Peer,
         request: &PeerRequest,
@@ -745,14 +791,16 @@ mod tests {
                 host: request.target_host,
                 project: request.project.key.clone(),
                 result: PeerResult::Health(HostHealth {
+                    protocol: PROTOCOL,
                     host: request.target_host,
                     available: true,
                     execution: None,
                 }),
             };
+            let lose_reply = self.lose_reply && !matches!(request.action, PeerAction::Health);
             *self.request.lock().unwrap() = Some(request);
             Ok(ExecOutcome {
-                termination: Termination::Exit(if self.lose_reply { 255 } else { 0 }),
+                termination: Termination::Exit(if lose_reply { 255 } else { 0 }),
                 stdout: CapturedStream {
                     bytes: serde_json::to_vec(&response).unwrap(),
                     ..Default::default()
@@ -821,7 +869,7 @@ mod tests {
         assert!(
             matches!(transport.exchange(&peer,&request,budget,&CancelToken::new()),Err(PeerError::Unknown{operation_id}) if operation_id==operation)
         );
-        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             ssh.request.lock().unwrap().as_ref().unwrap().operation(),
             Some(operation)
@@ -831,7 +879,9 @@ mod tests {
 
     struct Canned(Mutex<Option<Result<ExecOutcome, ExecError>>>);
     impl Executor for Canned {
-        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let request = decode_request(options.stdin.unwrap()).unwrap();
+            assert!(matches!(request.action, PeerAction::Health));
             self.0.lock().unwrap().take().unwrap()
         }
     }
@@ -912,6 +962,105 @@ mod tests {
         );
         let bad = read_only_failure(Ok(outcome(0, "", false)));
         assert!(bad.to_string().contains("valid frame"), "{bad}");
+    }
+
+    #[test]
+    fn protocol_mismatch_names_both_versions_before_sending_work() {
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        for action in [
+            PeerAction::RunStatuses { targets: vec![] },
+            PeerAction::Coordination {
+                input: CoordinationInput::Events(EventsInput::Note {
+                    note: "hello".into(),
+                    dedup_key: None,
+                }),
+                operation_id: Some(OperationId::parse("note").unwrap()),
+            },
+        ] {
+            for remote in [1, PROTOCOL + 1] {
+                let response = PeerResponse {
+                    version: 1,
+                    host,
+                    project: project.key.clone(),
+                    result: PeerResult::Health(HostHealth {
+                        protocol: remote,
+                        host,
+                        available: true,
+                        execution: Some(true),
+                    }),
+                };
+                let mut reply = outcome(0, "", false);
+                reply.stdout.bytes = serde_json::to_vec(&response).unwrap();
+                let executor = Canned(Mutex::new(Some(Ok(reply))));
+                let transport = SshTransport {
+                    executor: &executor,
+                    clock: &clock,
+                    home: Path::new("/home/a"),
+                    cwd: Path::new("/home/a/repo"),
+                    executable: "/usr/bin/ssh".into(),
+                    seconds: 30,
+                };
+                let request = PeerRequest {
+                    version: 1,
+                    target_host: host,
+                    source_host: HostId::from_bytes([1; 16]),
+                    agent: "chair".into(),
+                    project: project.clone(),
+                    action: action.clone(),
+                };
+                let peer = Peer {
+                    host,
+                    destination: "workshop".into(),
+                    remote_executable: None,
+                    connect_timeout_seconds: 10,
+                };
+                let error = transport
+                    .exchange(
+                        &peer,
+                        &request,
+                        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                        &CancelToken::new(),
+                    )
+                    .unwrap_err();
+                assert_eq!(error.code(), "peer_version");
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "peer workshop speaks protocol {remote}, this host speaks {PROTOCOL}; upgrade both"
+                    )
+                );
+                assert!(executor.0.lock().unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn health_requires_a_protocol_integer() {
+        let mut health = serde_json::json!({
+            "host": HostId::from_bytes([2; 16]),
+            "available": true, "execution": true,
+        });
+        assert!(serde_json::from_value::<HostHealth>(health.clone()).is_err());
+        for protocol in [serde_json::json!(null), serde_json::json!("2")] {
+            health["protocol"] = protocol;
+            assert!(serde_json::from_value::<HostHealth>(health.clone()).is_err());
+        }
+        health["protocol"] = serde_json::json!(PROTOCOL);
+        assert_eq!(
+            serde_json::from_value::<HostHealth>(health)
+                .unwrap()
+                .protocol,
+            PROTOCOL
+        );
     }
 
     #[test]
@@ -1000,7 +1149,7 @@ mod tests {
         assert!(
             matches!(transport.exchange(&peer, &request, budget, &CancelToken::new()), Err(PeerError::Unknown { operation_id }) if operation_id == operation)
         );
-        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

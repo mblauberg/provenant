@@ -9,6 +9,16 @@ configuration, the release packager (`examples/package-release.rs`) and the
 bundled assets. Edits under a member's `tests/`, `benches/` and other `examples/`
 no longer change it.
 
+## Breaking changes
+
+- Peer health now requires integer `protocol: 2`. Calls reject any different
+  version and name both versions; upgrade peers together. There is no
+  capability negotiation or support for older peers. Facade errors now use
+  distinct `not_terminal` and `operation_conflict` codes locally and on the
+  peer wire, instead of `conflict` (#1631, #1571).
+- The CLI reports an unavailable run owner as `OWNER_UNAVAILABLE`, replacing
+  `UNSUPPORTED` so the refusal round-trips without changing its meaning.
+
 ## Behaviour changes
 
 - `provenant output` on a terminal attempt that has no requested part now

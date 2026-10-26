@@ -123,7 +123,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
             "host": first.to_string(),
             "project": project_key,
             "result": {"result":"health","data":{
-                "host":first.to_string(),"available":true,"execution":true
+                "host":first.to_string(),"available":true,"execution":true,"protocol":2
             }}
         }))?,
     )?;
@@ -165,6 +165,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true);
+    assert_eq!(hosts[0]["protocol"], 2);
     assert_eq!(
         replies
             .iter()
@@ -2091,6 +2092,122 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
         )
     })?;
     Ok((code(&output), value))
+}
+
+#[test]
+fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
+    let host = next_host(local)?;
+    let project = &identity["data"]["federation"]["key"];
+    let ssh = rig.root.join("ssh");
+    let health = rig.root.join("health.json");
+    let refusal = rig.root.join("refusal.json");
+    let calls = rig.root.join("ssh-calls");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\n\
+         case \"$request\" in *'\"action\":\"health\"'*) cat '{}' ;; *) cat '{}' ;; esac\n",
+            calls.display(),
+            health.display(),
+            refusal.display(),
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+         [domains.fabric.peers.workshop]\nhost='{host}'\ndestination='workshop'\n",
+            ssh.to_string_lossy(),
+        ),
+    )?;
+    let health_reply = |protocol| {
+        json!({
+            "version":1, "host":host.to_string(), "project":project,
+            "result":{"result":"health","data":{
+                "protocol":protocol, "host":host.to_string(), "available":true, "execution":true,
+            }},
+        })
+    };
+    let frame = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"fabric_run", "arguments":{"op":"status","target":{
+            "host":host.to_string(), "attempt":"11111111111111111111111111111111",
+        }},
+    }});
+    std::fs::write(&health, serde_json::to_vec(&health_reply(2))?)?;
+    for (wire, cli) in [
+        ("not_terminal", "NONTERMINAL"),
+        ("operation_conflict", "OPERATION_CONFLICT"),
+        ("owner_unavailable", "OWNER_UNAVAILABLE"),
+    ] {
+        std::fs::write(
+            &refusal,
+            serde_json::to_vec(&json!({
+                "version":1, "host":host.to_string(), "project":project,
+                "result":{"result":"error","data":{"code":wire,"operation_id":null}},
+            }))?,
+        )?;
+        let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
+        assert_eq!(status, 1, "{output}");
+        assert_eq!(output["error"]["code"], cli, "{output}");
+        let replies = mcp(&rig, std::slice::from_ref(&frame))?;
+        let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
+        assert_eq!(
+            result["structuredContent"]["error"]["code"], wire,
+            "{result}"
+        );
+    }
+    std::fs::write(&health, serde_json::to_vec(&health_reply(1))?)?;
+    std::fs::write(&calls, "")?;
+    let expected = "peer workshop speaks protocol 1, this host speaks 2; upgrade both";
+    let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
+    assert_eq!(status, 1, "{output}");
+    assert_eq!(output["error"]["code"], "PEER_VERSION", "{output}");
+    assert!(
+        output["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(expected)),
+        "{output}"
+    );
+    let hosts = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"fabric_hosts", "arguments":{"op":"list","limit":10},
+    }});
+    let replies = mcp(&rig, &[frame, hosts])?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
+    assert_eq!(
+        result["structuredContent"]["error"]["code"], "peer_version",
+        "{result}"
+    );
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .is_some_and(|m| m.contains(expected)),
+        "{result}"
+    );
+    let result = &replies
+        .iter()
+        .find(|r| r["id"] == 2)
+        .ok_or("MCP hosts reply")?["result"];
+    assert_eq!(
+        result["structuredContent"]["error"]["code"], "peer_version",
+        "{result}"
+    );
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .is_some_and(|m| m.contains(expected)),
+        "{result}"
+    );
+    let calls = std::fs::read_to_string(calls)?;
+    assert_eq!(calls.lines().count(), 3);
+    for call in calls.lines() {
+        let call: Value = serde_json::from_str(call)?;
+        assert_eq!(call["action"]["action"], "health");
+    }
+    rig.assert_legacy_unchanged()
 }
 
 #[test]

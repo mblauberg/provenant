@@ -128,14 +128,18 @@ command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 Requests bind source and target host IDs and a project locator. The transport
 bounds frames to 1 MiB and refuses identity or version mismatches.
 
-Hosts on either side of the legacy import's removal work together, in either
-direction, with the peer protocol still at version 1. Older releases write the
-removed `legacy` members of tasks and messages as null. Newer releases accept a
-null member, drop it on read and never write it, and refuse a non-null one.
-An older binary that already had the store open keeps working, but one that
-opens it after the upgrade finds a newer schema and fails with `state_corrupt`.
-The MCP server reopens the store for each events call, so restart MCP servers
-and running workers after upgrading.
+Health replies carry the required integer `protocol`, currently 2. Each peer
+call checks it before sending work. A difference fails the call with
+`peer_version` (`PEER_VERSION` on the CLI), for example: "peer workshop speaks
+protocol 1, this host speaks 2; upgrade both". Peers must be upgraded together.
+There is no capability negotiation or support for older peers. The framing
+envelope's `version` remains 1.
+
+Install the same release on both hosts and restart their peer agents, MCP
+servers and running workers after upgrading. `not_terminal` and
+`operation_conflict` now travel unchanged over the peer wire; the CLI reports
+`NONTERMINAL` and `OPERATION_CONFLICT`. An unavailable run owner reports
+`OWNER_UNAVAILABLE`, distinct from an operation's `UNSUPPORTED` refusal.
 
 ## Dispatch and recovery
 

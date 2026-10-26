@@ -142,8 +142,11 @@ impl RemoteCoordination<'_> {
                     let response = self
                         .transport
                         .exchange(&self.peer, &recovery, budget, cancel)
-                        .map_err(|_| PeerError::Unknown {
-                            operation_id: id.clone(),
+                        .map_err(|error| match error {
+                            PeerError::ProtocolMismatch { .. } => error,
+                            _ => PeerError::Unknown {
+                                operation_id: id.clone(),
+                            },
                         })?;
                     if !matches!(response.result, PeerResult::Coordination(_)) {
                         return Err(PeerError::Unknown { operation_id: id }.into());
@@ -232,6 +235,15 @@ impl RemoteCoordination<'_> {
                             }
                             response
                         }
+                        Err(error @ PeerError::ProtocolMismatch { .. }) => {
+                            self.journal.retry_peer(
+                                self.project,
+                                self.actor,
+                                &id,
+                                &store_request,
+                            )?;
+                            return Err(error.into());
+                        }
                         Err(_) => {
                             // Sent already recovers from the owner's receipt if this write fails.
                             let _ = self.journal.peer_phase(
@@ -278,6 +290,8 @@ fn is_definitive_refusal(code: &str) -> bool {
         "invalid_input"
             | "not_found"
             | "conflict"
+            | "not_terminal"
+            | "operation_conflict"
             | "stale_fence"
             | "peer_version"
             | "upgrade_refused"
@@ -419,7 +433,7 @@ mod tests {
     use crate::{
         coordination::{CoordinationError, EventsInput, EventsResult},
         hosts::{
-            CoordinationInput, CoordinationResult, PeerAction, PeerError, PeerRequest,
+            CoordinationInput, CoordinationResult, PROTOCOL, PeerAction, PeerError, PeerRequest,
             PeerResponse, PeerResult, PeerTransport, ProjectLocator,
         },
         identity::CrossHostProjectKey,
@@ -428,7 +442,7 @@ mod tests {
         ActorId, CancelToken, Clock, HostId, OperationId, ProjectId, RootInputs, StateRoot,
         WaitBudget,
     };
-    use provenant_fabric_store::{PeerPhase, Request, Store, ThreadWait};
+    use provenant_fabric_store::{PeerPhase, PeerPhaseChange, Request, Store, ThreadWait};
     use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
     use std::{
         os::unix::fs::PermissionsExt,
@@ -623,6 +637,60 @@ mod tests {
         match result {
             CoordinationResult::Events(EventsResult::Noted { seq }) => seq,
             _ => panic!("expected a noted event receipt"),
+        }
+    }
+
+    #[test]
+    fn remote_coordination_preserves_protocol_mismatch_on_mutation_and_recovery() {
+        struct WrongProtocol;
+        impl PeerTransport for WrongProtocol {
+            fn exchange(
+                &self,
+                peer: &crate::config::Peer,
+                _: &PeerRequest,
+                _: WaitBudget,
+                _: &CancelToken,
+            ) -> Result<PeerResponse, PeerError> {
+                Err(PeerError::ProtocolMismatch {
+                    peer: peer.destination.clone(),
+                    remote: 1,
+                })
+            }
+        }
+        let fixture = RemoteFixture::new();
+        let remote = fixture.remote(Box::new(WrongProtocol));
+        let id = OperationId::parse("wrong-protocol").unwrap();
+        for recovery in [false, false, true] {
+            if recovery {
+                remote
+                    .journal
+                    .peer_phase(
+                        fixture.project,
+                        fixture.actor,
+                        &id,
+                        PeerPhaseChange::Sent,
+                        &Request {
+                            clock: &fixture.clock,
+                            budget: fixture.budget,
+                            cancel: &fixture.cancel,
+                            backoff: &fixture.backoff,
+                        },
+                    )
+                    .unwrap();
+            }
+            let error = remote
+                .call(
+                    note("hello"),
+                    Some(id.clone()),
+                    fixture.budget,
+                    &fixture.cancel,
+                )
+                .unwrap_err();
+            assert_eq!(error.code(), "peer_version");
+            assert_eq!(
+                error.to_string(),
+                format!("peer worker speaks protocol 1, this host speaks {PROTOCOL}; upgrade both")
+            );
         }
     }
 
