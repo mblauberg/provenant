@@ -6,56 +6,6 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-/// Create a temporary directory beneath the canonical environment temporary root.
-///
-/// `create` makes the directory inside the root it is given, so callers keep
-/// `tempfile` as a dev-dependency (ADR 0028).
-pub fn tempdir<T>(create: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
-    // Canonical roots avoid macOS temp aliases while honouring the lane's writable TMPDIR.
-    create(&std::fs::canonicalize(std::env::temp_dir())?)
-}
-
-/// Create a temporary directory with room for a Unix socket path.
-///
-/// `socket_name` is the socket file name that will be joined to the returned
-/// directory. It is used only to check the path against the platform limit of
-/// 103 bytes on macOS and 107 bytes on Linux. No socket is created.
-pub fn short_tempdir<T: AsRef<Path>>(
-    socket_name: &str,
-    create: impl Fn(&Path) -> io::Result<T>,
-) -> io::Result<T> {
-    use std::{fs, os::unix::ffi::OsStrExt};
-
-    // Unix socket names need a short root; lanes may deny writes to the usual /tmp.
-    let short = fs::canonicalize("/tmp").and_then(|root| create(&root));
-    let temp = match short {
-        Ok(temp) => temp,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
-            ) =>
-        {
-            tempdir(&create)?
-        }
-        Err(error) => return Err(error),
-    };
-    let socket = temp.as_ref().join(socket_name);
-    let bytes = socket.as_os_str().as_bytes().len();
-    let capacity = if cfg!(target_os = "macos") { 104 } else { 108 };
-    if bytes >= capacity {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "fixture Unix socket path is {bytes} bytes; maximum is {}: {}",
-                capacity - 1,
-                socket.display()
-            ),
-        ));
-    }
-    Ok(temp)
-}
-
 /// A process recorded by the guardian is terminated if its owning test fails.
 /// Successful tests disarm the guard after proving normal settlement.
 pub struct ProcessCleanupGuard {
@@ -209,13 +159,13 @@ pub fn guardian_exit_status(
 ) -> io::Result<std::process::ExitStatus> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Some(status) = crate::sys::reaper::take_exit_status(pid) {
+        if let Some(status) = provenant_os::sys::reaper::take_exit_status(pid) {
             return Ok(status);
         }
         if std::time::Instant::now() >= deadline {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        crate::sys::wait_pause(std::time::Duration::from_millis(5));
+        provenant_os::sys::wait_pause(std::time::Duration::from_millis(5));
     }
 }
 
@@ -403,7 +353,7 @@ pub fn command_with_args(
 ) -> io::Result<Command> {
     let argv = argv_with_args(scenario, extra)?;
     let env = environment(root);
-    crate::sys::fixture_command(&argv, &env, root, new_session)
+    provenant_os::sys::fixture_command(&argv, &env, root, new_session)
 }
 pub fn command(scenario: &str, root: &Path) -> io::Result<Command> {
     command_with_args(scenario, &[], root, false)
@@ -411,27 +361,27 @@ pub fn command(scenario: &str, root: &Path) -> io::Result<Command> {
 
 #[cfg(feature = "fixture")]
 pub struct ReaperFixture {
-    reaper: crate::sys::reaper::Reaper,
+    reaper: provenant_os::sys::reaper::Reaper,
 }
 #[cfg(feature = "fixture")]
 impl ReaperFixture {
     pub fn new(capacity: usize) -> io::Result<Self> {
         Ok(Self {
-            reaper: crate::sys::reaper::Reaper::new_paused(capacity)?,
+            reaper: provenant_os::sys::reaper::Reaper::new_paused(capacity)?,
         })
     }
     /// Transfer a spawned fixture child into the paused reaper.
     pub fn transfer(&self, scenario: &str, extra: &[OsString], root: &Path) -> io::Result<()> {
-        crate::sys::raw_exec::verify_child_wait_policy()?;
+        provenant_os::sys::raw_exec::verify_child_wait_policy()?;
         let permit = self
             .reaper
             .reserve()
             .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
         let argv = argv_with_args(scenario, extra)?;
         let env = environment(root);
-        let child = crate::sys::raw_exec::OwnedPid::spawn(
+        let child = provenant_os::sys::raw_exec::OwnedPid::spawn(
             permit,
-            crate::sys::raw_exec::SpawnSpec {
+            provenant_os::sys::raw_exec::SpawnSpec {
                 argv: &argv,
                 env: Some(&env),
                 cwd: root,
@@ -470,7 +420,7 @@ pub fn fixture_accept(
     listener: &std::os::unix::net::UnixListener,
     timeout: std::time::Duration,
 ) -> io::Result<std::os::unix::net::UnixStream> {
-    crate::sys::fixture_accept(listener, timeout)
+    provenant_os::sys::fixture_accept(listener, timeout)
 }
 
 #[cfg(feature = "fixture")]
@@ -478,7 +428,7 @@ pub fn fixture_read_byte(
     stream: &mut std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
 ) -> io::Result<u8> {
-    crate::sys::fixture_read_byte(stream, timeout)
+    provenant_os::sys::fixture_read_byte(stream, timeout)
 }
 
 /// Temporary-root marker driven publisher faults for the guardian integration test.
@@ -517,9 +467,9 @@ impl ExitPublicationFaults {
 impl crate::ExitPublisher for ExitPublicationFaults {
     fn checkpoint(
         &self,
-        directory: &crate::fs::Directory,
+        directory: &provenant_os::fs::Directory,
         bytes: &[u8],
-    ) -> crate::custody::Result<crate::fs::Publication> {
+    ) -> crate::custody::Result<provenant_os::fs::Publication> {
         let fail = self.marker(S2_PROCESS_CHECKPOINT_ENOSPC);
         match marker_present(&fail) {
             Ok(true) => {
@@ -538,9 +488,9 @@ impl crate::ExitPublisher for ExitPublicationFaults {
                 std::ffi::OsStr::new("process.json"),
                 ".process-",
                 bytes,
-                crate::fs::PublishMode::Replace,
+                provenant_os::fs::PublishMode::Replace,
             )?),
-            Err(source) => Err(crate::fs::FsError::Io {
+            Err(source) => Err(provenant_os::fs::FsError::Io {
                 operation: "read fixture checkpoint marker",
                 path: fail,
                 source,
@@ -551,9 +501,9 @@ impl crate::ExitPublisher for ExitPublicationFaults {
 
     fn publish(
         &self,
-        directory: &crate::fs::Directory,
+        directory: &provenant_os::fs::Directory,
         bytes: &[u8],
-    ) -> crate::custody::Result<crate::fs::Publication> {
+    ) -> crate::custody::Result<provenant_os::fs::Publication> {
         let once = self.marker(S2_EXIT_PUBLICATION_ENOSPC_ONCE);
         match std::fs::remove_file(&once) {
             Ok(()) => {
@@ -573,16 +523,16 @@ impl crate::ExitPublisher for ExitPublicationFaults {
             std::ffi::OsStr::new("process-exit.json"),
             ".exit-",
             bytes,
-            crate::fs::PublishMode::NoReplace,
+            provenant_os::fs::PublishMode::NoReplace,
             &mut DirectorySyncOperations {
-                sync: |directory: &crate::fs::Directory| match marker_present(&blocked) {
+                sync: |directory: &provenant_os::fs::Directory| match marker_present(&blocked) {
                     Ok(true) => Err(injected_fs_error(
                         "fixture post-link directory sync",
                         PathBuf::from("process-exit.json"),
                         libc::ENOSPC,
                     )),
                     Ok(false) => directory.sync(),
-                    Err(source) => Err(crate::fs::FsError::Io {
+                    Err(source) => Err(provenant_os::fs::FsError::Io {
                         operation: "read fixture sync marker",
                         path: blocked.clone(),
                         source,
@@ -595,21 +545,21 @@ impl crate::ExitPublisher for ExitPublicationFaults {
 
     fn commit_reservation(
         &self,
-        directory: &crate::fs::Directory,
+        directory: &provenant_os::fs::Directory,
         bytes: &[u8],
-    ) -> crate::custody::Result<crate::fs::Publication> {
+    ) -> crate::custody::Result<provenant_os::fs::Publication> {
         let blocked = self.marker(S2_RESERVATION_SYNC_BLOCKED);
         let pending = self.marker(S2_RESERVATION_SYNC_PENDING);
         let publication = directory.atomic_write_with_faults(
             std::ffi::OsStr::new("reservation.json"),
             ".reservation-",
             bytes,
-            crate::fs::PublishMode::Replace,
+            provenant_os::fs::PublishMode::Replace,
             &mut DirectorySyncOperations {
-                sync: |directory: &crate::fs::Directory| match marker_present(&blocked) {
+                sync: |directory: &provenant_os::fs::Directory| match marker_present(&blocked) {
                     Ok(true) => {
                         std::fs::write(&pending, b"reservation visible; directory sync blocked")
-                            .map_err(|source| crate::fs::FsError::Io {
+                            .map_err(|source| provenant_os::fs::FsError::Io {
                                 operation: "write fixture reservation sync marker",
                                 path: pending.clone(),
                                 source,
@@ -621,7 +571,7 @@ impl crate::ExitPublisher for ExitPublicationFaults {
                         ))
                     }
                     Ok(false) => directory.sync(),
-                    Err(source) => Err(crate::fs::FsError::Io {
+                    Err(source) => Err(provenant_os::fs::FsError::Io {
                         operation: "read fixture reservation sync marker",
                         path: blocked.clone(),
                         source,
@@ -632,7 +582,7 @@ impl crate::ExitPublisher for ExitPublicationFaults {
         Ok(publication)
     }
 
-    fn sync_visible(&self, directory: &crate::fs::Directory) -> crate::custody::Result<()> {
+    fn sync_visible(&self, directory: &provenant_os::fs::Directory) -> crate::custody::Result<()> {
         let blocked = self.marker(S2_EXIT_PUBLICATION_SYNC_BLOCKED);
         if marker_present(&blocked)? {
             return Err(injected_fs_error(
@@ -655,40 +605,43 @@ impl crate::ExitPublisher for ExitPublicationFaults {
 struct DirectorySyncOperations<F> {
     sync: F,
 }
-impl<F: FnMut(&crate::fs::Directory) -> crate::fs::Result<()>> crate::fs::AtomicWriteOperations
-    for DirectorySyncOperations<F>
+impl<F: FnMut(&provenant_os::fs::Directory) -> provenant_os::fs::Result<()>>
+    provenant_os::fs::AtomicWriteOperations for DirectorySyncOperations<F>
 {
     fn write(
         &mut self,
-        file: &mut crate::fs::FileHandle,
+        file: &mut provenant_os::fs::FileHandle,
         bytes: &[u8],
         path: &Path,
-    ) -> crate::fs::Result<()> {
+    ) -> provenant_os::fs::Result<()> {
         file.write_all(bytes)
-            .map_err(|source| crate::fs::FsError::Io {
+            .map_err(|source| provenant_os::fs::FsError::Io {
                 operation: "write fixture staging file",
                 path: path.into(),
                 source,
             })
     }
-    fn sync_file(&mut self, file: &crate::fs::FileHandle) -> crate::fs::Result<()> {
+    fn sync_file(&mut self, file: &provenant_os::fs::FileHandle) -> provenant_os::fs::Result<()> {
         file.sync()
     }
     fn rename(
         &mut self,
-        directory: &crate::fs::Directory,
+        directory: &provenant_os::fs::Directory,
         temporary: &std::ffi::OsStr,
         name: &std::ffi::OsStr,
-        mode: crate::fs::PublishMode,
-    ) -> crate::fs::Result<()> {
+        mode: provenant_os::fs::PublishMode,
+    ) -> provenant_os::fs::Result<()> {
         match mode {
-            crate::fs::PublishMode::NoReplace => {
+            provenant_os::fs::PublishMode::NoReplace => {
                 directory.rename_noreplace(temporary, directory, name)
             }
-            crate::fs::PublishMode::Replace => directory.replace(temporary, directory, name),
+            provenant_os::fs::PublishMode::Replace => directory.replace(temporary, directory, name),
         }
     }
-    fn sync_directory(&mut self, directory: &crate::fs::Directory) -> crate::fs::Result<()> {
+    fn sync_directory(
+        &mut self,
+        directory: &provenant_os::fs::Directory,
+    ) -> provenant_os::fs::Result<()> {
         (self.sync)(directory)
     }
 }
@@ -700,8 +653,12 @@ fn marker_present(path: &Path) -> io::Result<bool> {
         Err(error) => Err(error),
     }
 }
-fn injected_fs_error(operation: &'static str, path: PathBuf, errno: i32) -> crate::fs::FsError {
-    crate::fs::FsError::Io {
+fn injected_fs_error(
+    operation: &'static str,
+    path: PathBuf,
+    errno: i32,
+) -> provenant_os::fs::FsError {
+    provenant_os::fs::FsError::Io {
         operation,
         path,
         source: io::Error::from_raw_os_error(errno),
@@ -722,11 +679,11 @@ pub fn dispatch() -> io::Result<bool> {
     match scenario {
         "inheritance-parent" | "failed-replace" => {
             use std::os::fd::AsRawFd;
-            let fd = crate::sys::fixture_parent_state()?;
+            let fd = provenant_os::sys::fixture_parent_state()?;
             let raw = fd.as_raw_fd();
             let root = std::env::current_dir()?;
             if scenario == "failed-replace" {
-                let error = crate::sys::replace_process(
+                let error = provenant_os::sys::replace_process(
                     &root.join("does-not-exist"),
                     &[],
                     &environment(&root),
@@ -734,7 +691,7 @@ pub fn dispatch() -> io::Result<bool> {
                 if error.kind() != io::ErrorKind::NotFound {
                     return Err(error);
                 }
-                crate::sys::fixture_check_inherited_state(raw, true)?;
+                provenant_os::sys::fixture_check_inherited_state(raw, true)?;
             } else {
                 let mut child = ChildGuard::new(
                     command_with_args(
@@ -758,7 +715,7 @@ pub fn dispatch() -> io::Result<bool> {
                 .and_then(|arg| arg.to_str())
                 .and_then(|arg| arg.parse::<i32>().ok())
                 .ok_or(io::ErrorKind::InvalidInput)?;
-            crate::sys::fixture_check_inherited_state(fd, false)?;
+            provenant_os::sys::fixture_check_inherited_state(fd, false)?;
         }
         "echo" => {
             io::copy(&mut io::stdin().lock(), &mut io::stdout().lock())?;
@@ -775,7 +732,7 @@ pub fn dispatch() -> io::Result<bool> {
             }
         }
         "blocked" => {
-            crate::sys::fixture_ignore_term()?;
+            provenant_os::sys::fixture_ignore_term()?;
             io::stdout().write_all(b"ready\n")?;
             let mut byte = [0];
             loop {
@@ -785,7 +742,7 @@ pub fn dispatch() -> io::Result<bool> {
             }
         }
         "socket-blocked" => {
-            crate::sys::fixture_ignore_term()?;
+            provenant_os::sys::fixture_ignore_term()?;
             let path = fixture_path(&args, 3)?;
             let mut stream = std::os::unix::net::UnixStream::connect(&path)?;
             stream.write_all(b"R")?;
@@ -811,13 +768,13 @@ pub fn dispatch() -> io::Result<bool> {
             child.detach();
         }
         "s2-setsid-descendant" => {
-            crate::sys::fixture_ignore_term()?;
+            provenant_os::sys::fixture_ignore_term()?;
             let mut ready = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
             // Connect first: the lane profile that follows denies other lookups
             // and sockets, as the production profile does.
             #[cfg(target_os = "macos")]
             if let Ok(name) = fixture_path(&args, 4) {
-                crate::sys::fixture_enter_attempt_sandbox(&name.to_string_lossy())?;
+                provenant_os::sys::fixture_enter_attempt_sandbox(&name.to_string_lossy())?;
             }
             ready.write_all(b"R")?;
             ready.write_all(std::process::id().to_string().as_bytes())?;
@@ -868,13 +825,14 @@ pub fn dispatch() -> io::Result<bool> {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .ok_or(io::ErrorKind::NotFound)?;
-            let directory = crate::fs::Directory::open_anchor(&home).map_err(io::Error::other)?;
-            let clock = crate::clock::SystemClock::new();
+            let directory =
+                provenant_os::fs::Directory::open_anchor(&home).map_err(io::Error::other)?;
+            let clock = provenant_os::clock::SystemClock::new();
             let cancel = provenant_core::CancelToken::new();
             let lock = directory
                 .lock(
                     std::ffi::OsStr::new("s2-owner.lock"),
-                    crate::fs::LockMode::Exclusive,
+                    provenant_os::fs::LockMode::Exclusive,
                     provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 5)
                         .map_err(io::Error::other)?,
                     &cancel,
@@ -966,22 +924,25 @@ pub fn dispatch() -> io::Result<bool> {
         | "wait-policy-no-wait"
         | "wait-policy-handler"
         | "wait-policy-blocked" => {
-            crate::sys::fixture_wait_policy(scenario)?;
+            provenant_os::sys::fixture_wait_policy(scenario)?;
             let marker = fixture_path(&args, 3)?;
             let argv = argv_with_args("marker", &[marker.into_os_string()])?;
             let root = std::env::current_dir()?;
             let env = environment(&root);
-            let executor = crate::exec::SystemExecutor::new(1).map_err(io::Error::other)?;
-            let mut options =
-                crate::exec::ExecOptions::new(&argv, &root, std::time::Duration::from_secs(2));
+            let executor = provenant_os::exec::SystemExecutor::new(1).map_err(io::Error::other)?;
+            let mut options = provenant_os::exec::ExecOptions::new(
+                &argv,
+                &root,
+                std::time::Duration::from_secs(2),
+            );
             options.env = Some(&env);
-            use crate::exec::Executor;
+            use provenant_os::exec::Executor;
             match executor.execute(options) {
-                Err(crate::exec::ExecError::ChildWaitPolicy(_))
+                Err(provenant_os::exec::ExecError::ChildWaitPolicy(_))
                     if matches!(scenario, "wait-policy-ignore" | "wait-policy-no-wait") => {}
                 Ok(outcome)
                     if matches!(scenario, "wait-policy-blocked" | "wait-policy-handler")
-                        && outcome.termination == crate::exec::Termination::Exit(0) => {}
+                        && outcome.termination == provenant_os::exec::Termination::Exit(0) => {}
                 _ => return Err(io::Error::other("unexpected child-wait policy result")),
             }
         }
@@ -1013,7 +974,8 @@ impl crate::census::ProcessObserver for RecordedBootObserver {
         Ok("fixture-recorded-boot-v1".into())
     }
     fn observe(&self, pid: i64) -> crate::census::ProcessObservation {
-        match crate::sys::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1") {
+        match crate::process_os::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")
+        {
             Ok(observer) => observer.observe(pid),
             Err(_) => crate::census::ProcessObservation::Unknown(
                 crate::census::ObservationIssue::Malformed,
@@ -1021,14 +983,14 @@ impl crate::census::ProcessObserver for RecordedBootObserver {
         }
     }
     fn census(&self, limit: usize) -> Result<crate::census::Census, crate::census::CensusError> {
-        crate::sys::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")?
+        crate::process_os::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")?
             .census(limit)
     }
 }
 
 /// Fixture-only injection at the boot observation seam.
 pub fn acquire_writer(
-    directory: crate::fs::Directory,
+    directory: provenant_os::fs::Directory,
     scope: crate::custody::Scope,
     budget: provenant_core::WaitBudget,
     cancel: &provenant_core::CancelToken,
@@ -1056,7 +1018,7 @@ pub fn acquire_writer(
 /// only the recorded boot identity needed in sandboxed environments.
 #[doc(hidden)]
 pub fn acquire_writer_with_binding(
-    directory: crate::fs::Directory,
+    directory: provenant_os::fs::Directory,
     scope: crate::custody::Scope,
     binding: crate::custody::WriterBinding,
     budget: provenant_core::WaitBudget,
@@ -1082,23 +1044,4 @@ pub fn advance_attempt(
     next: crate::custody::Scope,
 ) -> crate::custody::Result<()> {
     writer.advance_with(next, &RecordedBootObserver)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tempdir_uses_canonical_environment_root() -> io::Result<()> {
-        let root = std::fs::canonicalize(std::env::temp_dir())?;
-        let temp = tempdir(|root| tempfile::Builder::new().prefix("fixture-").tempdir_in(root))?;
-        assert_eq!(temp.path().parent(), Some(root.as_path()));
-        Ok(())
-    }
-
-    #[test]
-    fn short_tempdir_rejects_oversize_socket_name() {
-        let error = short_tempdir(&"s".repeat(200), |root| tempfile::tempdir_in(root)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    }
 }

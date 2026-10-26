@@ -19,7 +19,7 @@ mod writer;
 pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
 };
-pub use controls::{CancelReceipt, Reconciled, Resume};
+pub use controls::{CancelReceipt, Reconciled, Resume, UncertainReason};
 pub use delivery::HostDeliveryContext;
 pub use git_context::{GitContext, resolve_git_base};
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
@@ -38,7 +38,7 @@ pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
 pub use reader::{
     ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
-    LaneTarget, OutputChunk, RunWorkSnapshot,
+    LaneTarget, OutputChunk, RunWorkSnapshot, fact,
 };
 pub use store::{NewAttempt, PreparedRun, TerminalPublication};
 use thiserror::Error;
@@ -115,9 +115,9 @@ pub enum RunError {
     #[error("run-store call was cancelled")]
     Cancelled,
     #[error("publication is visible but not durably synced")]
-    Publication(#[source] provenant_supervisor::fs::FsError),
+    Publication(#[source] provenant_os::fs::FsError),
     #[error(transparent)]
-    Filesystem(#[from] provenant_supervisor::fs::FsError),
+    Filesystem(#[from] provenant_os::fs::FsError),
     #[error("run database operation failed")]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]

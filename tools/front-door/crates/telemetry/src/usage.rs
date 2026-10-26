@@ -1,7 +1,8 @@
 //! Local demand counters: a bounded, rotated JSON-lines log in the state root.
 //! The command edge decides what to count; this module owns the log.
 use provenant_core::{Clock, ProjectId, Roots};
-use provenant_supervisor::fs::{Directory, FsError, LockMode};
+use provenant_os::fs::{Directory, FsError, LockMode};
+use provenant_records::Trace;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -35,8 +36,16 @@ struct Event {
     outcome: Option<String>,
     duration_ms: u64,
     timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project_id: Option<ProjectId>,
+    /// Only the project, and only when attribution is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<Trace>,
+}
+
+fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
+    project_id.map(|project| Trace {
+        project: Some(project),
+        ..Trace::default()
+    })
 }
 
 fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
@@ -104,7 +113,7 @@ pub fn record_cli(
             outcome: None,
             duration_ms,
             timestamp: now.to_string(),
-            project_id,
+            trace: project_trace(project_id),
         },
         true,
     );
@@ -127,7 +136,7 @@ pub fn record_tool(
             outcome: Some(outcome.into()),
             duration_ms,
             timestamp: now.to_string(),
-            project_id,
+            trace: project_trace(project_id),
         },
         false,
     );
@@ -202,7 +211,7 @@ pub fn report(
                     .entry((event.kind.clone(), event.unit.clone(), None))
                     .or_default();
                 *calls = calls.saturating_add(1);
-                if let Some(project_id) = event.project_id {
+                if let Some(project_id) = event.trace.and_then(|trace| trace.project) {
                     let calls = units
                         .entry((event.kind, event.unit, Some(project_id)))
                         .or_default();

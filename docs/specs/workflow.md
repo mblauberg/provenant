@@ -17,7 +17,7 @@ This document grants no merge, install or release authority.
 ## Purpose and ownership
 
 `tools/front-door/crates/workflow` is `#![forbid(unsafe_code)]`. Its internal
-dependencies are core, records and supervisor's safe filesystem API (the
+dependencies are core, records and the OS crate's concrete filesystem API (the
 [workspace table](rust-workspace.md#crate-layering) lists the allowed maximum),
 plus serde, serde_json, thiserror and regex. It holds no SQLite, process
 runner, scheduler or MCP tool.
@@ -155,7 +155,7 @@ corrupt stored receipt fails closed with no repair path, and a leftover
 temporary file is ignored by the next save.
 
 Lock acquisition polls a non-blocking `flock` against a monotonic deadline
-through supervisor's safe filesystem API. No lock is held across routing
+through the OS crate's concrete filesystem API. No lock is held across routing
 probes, provider waits or GitHub reads: gather facts first, then recheck the
 subject and expiry under the lock. Time is read after the lock is taken, and
 `updated_at` is the later of the previous value and now. Workflow starts no

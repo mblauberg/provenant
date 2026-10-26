@@ -9,18 +9,17 @@ use provenant_confinement::{
     },
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::{
+use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
-    fs::{Directory, FileKind, FsError, LocalFs, SafeDir, canonicalize},
+    fs::{Directory, FileKind, FsError, canonicalize},
 };
+use provenant_records::{CommandResult, Outcome};
 use serde::Serialize;
 use std::{
     cell::RefCell,
     ffi::OsStr,
     path::{Component, Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
@@ -40,7 +39,7 @@ pub(crate) enum Error {
     Permissions(#[from] provenant_confinement::permissions::PermissionError),
     #[error("{0}")]
     CacheGc(
-        Box<provenant_confinement::permissions::CacheGcError>,
+        Box<provenant_confinement::cache::CacheGcError>,
         Vec<PathBuf>,
         Box<provenant_run::ProviderStateGc>,
         Vec<worktrees::WorktreeGcReport>,
@@ -51,9 +50,9 @@ pub(crate) enum Error {
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
     #[error(transparent)]
-    Fs(#[from] provenant_supervisor::fs::FsError),
+    Fs(#[from] provenant_os::fs::FsError),
     #[error(transparent)]
-    Exec(#[from] provenant_supervisor::exec::ExecError),
+    Exec(#[from] provenant_os::exec::ExecError),
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
@@ -223,7 +222,7 @@ fn execute(
 #[derive(Serialize, Default)]
 struct GcData {
     #[serde(flatten)]
-    report: provenant_confinement::permissions::CacheGcReport,
+    report: provenant_confinement::cache::CacheGcReport,
     idle_days: u64,
     provider_state: provenant_run::ProviderStateGc,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
@@ -320,7 +319,7 @@ fn gc_data_summary(data: &GcData) -> String {
     human
 }
 
-fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> String {
+fn gc_summary(report: &provenant_confinement::cache::CacheGcReport) -> String {
     let mut human = String::new();
     let verb = if report.dry_run {
         "would remove"
@@ -355,8 +354,8 @@ fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> Str
     human
 }
 
-fn gc_reason(reason: provenant_confinement::permissions::CacheGcReason) -> &'static str {
-    use provenant_confinement::permissions::CacheGcReason;
+fn gc_reason(reason: provenant_confinement::cache::CacheGcReason) -> &'static str {
+    use provenant_confinement::cache::CacheGcReason;
     match reason {
         CacheGcReason::Orphaned => "orphaned",
         CacheGcReason::Idle => "idle",
@@ -405,9 +404,7 @@ fn gc_project(
 }
 
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
-    use provenant_confinement::permissions::{
-        CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard,
-    };
+    use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
     use provenant_confinement::worktrees::{WorkerState, WriterState};
 
     let workspace = if command.scheduled {
@@ -425,12 +422,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
-    let config =
-        provenant_config::read_with_domains(&roots, &LocalFs, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
     if command.scheduled {
         if !config.gc.schedule {
             return Ok(GcData {
-                report: provenant_confinement::permissions::CacheGcReport {
+                report: provenant_confinement::cache::CacheGcReport {
                     dry_run: command.dry_run,
                     ..Default::default()
                 },
@@ -440,7 +436,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        for binding in provenant_config::registered_projects(&roots, &LocalFs)? {
+        for binding in provenant_config::registered_projects(&roots)? {
             project_ids.push(binding.project_id());
             let common = binding.common_dir();
             let path = if common.file_name() == Some(OsStr::new(".git")) {
@@ -658,9 +654,8 @@ pub(crate) fn with_context<T>(
         }
     }
     let utility_home = child(&state, "utility-home")?;
-    let git = provenant_supervisor::git::git_executable().ok_or(Error::GitUnavailable)?;
+    let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let runtime = UtilityRuntime::new(
-        Arc::new(LocalFs),
         canonicalize(&git)?,
         roots.state.as_path().join("utility-home"),
     )?;
@@ -671,16 +666,15 @@ pub(crate) fn with_context<T>(
     let binding = provenant_config::bind_project(
         roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
-        &LocalFs,
     )?;
     let worktrees_state = child(&state, "worktrees")?;
-    let project_state = child(worktrees_state.as_ref(), &binding.project_id().to_string())?;
+    let project_state = child(&worktrees_state, &binding.project_id().to_string())?;
     let clock = SystemClock;
     let context = WorktreeContext {
         home,
         repo: &repo,
         binding: &binding,
-        project_state: project_state.as_ref(),
+        project_state: &project_state,
         executor: &executor,
         utility: &runtime,
         workers,
@@ -694,7 +688,10 @@ pub(crate) fn with_context<T>(
     result
 }
 
-fn child(parent: &dyn SafeDir, name: &str) -> Result<Box<dyn SafeDir>, Error> {
+fn child(
+    parent: &provenant_os::fs::Directory,
+    name: &str,
+) -> Result<provenant_os::fs::Directory, Error> {
     let name = OsStr::new(name);
     match parent.mkdir(name, 0o700) {
         Ok(()) => parent.sync()?,

@@ -426,6 +426,7 @@ dependencies = [
  "provenant-fabric-mcp",
  "provenant-fabric-runtime",
  "provenant-fabric-store",
+ "provenant-os",
  "provenant-providers",
  "provenant-quota",
  "provenant-records",
@@ -452,6 +453,7 @@ dependencies = [
  "provenant-confinement",
  "provenant-core",
  "provenant-fabric-runtime",
+ "provenant-os",
  "provenant-providers",
  "provenant-quota",
  "provenant-records",
@@ -473,8 +475,8 @@ name = "provenant-config"
 version = "1.0.0"
 dependencies = [
  "provenant-core",
+ "provenant-os",
  "provenant-records",
- "provenant-supervisor",
  "serde",
  "serde_json",
  "tempfile",
@@ -488,6 +490,7 @@ version = "1.0.0"
 dependencies = [
  "provenant-config",
  "provenant-core",
+ "provenant-os",
  "provenant-records",
  "provenant-supervisor",
  "serde",
@@ -529,8 +532,8 @@ dependencies = [
  "provenant-config",
  "provenant-core",
  "provenant-fabric-store",
+ "provenant-os",
  "provenant-records",
- "provenant-supervisor",
  "serde",
  "serde_json",
  "sha2",
@@ -543,12 +546,25 @@ name = "provenant-fabric-store"
 version = "1.0.0"
 dependencies = [
  "provenant-core",
+ "provenant-os",
  "provenant-records",
  "provenant-sqlite",
- "provenant-supervisor",
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "provenant-os"
+version = "1.0.0"
+dependencies = [
+ "jiff",
+ "libc",
+ "provenant-core",
+ "provenant-os",
+ "serde",
  "tempfile",
  "thiserror",
 ]
@@ -561,9 +577,9 @@ dependencies = [
  "provenant-config",
  "provenant-confinement",
  "provenant-core",
+ "provenant-os",
  "provenant-quota",
  "provenant-records",
- "provenant-supervisor",
  "rusqlite",
  "serde",
  "serde_json",
@@ -619,6 +635,7 @@ dependencies = [
  "provenant-config",
  "provenant-confinement",
  "provenant-core",
+ "provenant-os",
  "provenant-records",
  "provenant-sqlite",
  "provenant-supervisor",
@@ -634,7 +651,7 @@ name = "provenant-sqlite"
 version = "1.0.0"
 dependencies = [
  "provenant-core",
- "provenant-supervisor",
+ "provenant-os",
  "rusqlite",
 ]
 
@@ -642,9 +659,9 @@ dependencies = [
 name = "provenant-supervisor"
 version = "1.0.0"
 dependencies = [
- "jiff",
  "libc",
  "provenant-core",
+ "provenant-os",
  "provenant-records",
  "provenant-supervisor",
  "serde",
@@ -659,8 +676,8 @@ version = "1.0.0"
 dependencies = [
  "jiff",
  "provenant-core",
+ "provenant-os",
  "provenant-records",
- "provenant-supervisor",
  "serde",
  "serde_json",
  "tempfile",
@@ -673,8 +690,8 @@ name = "provenant-workflow"
 version = "1.0.0"
 dependencies = [
  "provenant-core",
+ "provenant-os",
  "provenant-records",
- "provenant-supervisor",
  "regex",
  "serde",
  "serde_json",

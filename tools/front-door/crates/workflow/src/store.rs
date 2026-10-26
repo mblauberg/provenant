@@ -1,11 +1,11 @@
 //! Whole-receipt replacement at an expected revision. No old-state imports.
 use crate::{persistence, receipt, risk};
 use provenant_core::{CancelToken, Clock, DeliveryId, ProjectId, StateRoot, UtcMicros, WaitBudget};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode};
 use provenant_records::{
     DecodeError,
     workflow::{DeliveryReceipt, RiskPolicy, Subject, UserApproval},
 };
-use provenant_supervisor::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode};
 use std::{ffi::OsStr, io};
 use thiserror::Error;
 
@@ -274,15 +274,13 @@ impl ReceiptStore {
         // after this check, even if a cancellation subsequently arrives.
         check_wait(budget, cancel, clock)?;
         let publication = self.filesystem.atomic_write(&dir, bytes.as_bytes());
-        match publication? {
-            Publication::Durable => Ok(SavedReceipt {
-                receipt: committed,
-                clock_regression: regression,
-            }),
-            Publication::VisibleDurabilityUnconfirmed { sync_error } => {
-                Err(StoreError::Durability(cause(sync_error)))
-            }
-        }
+        publication?
+            .require_durable()
+            .map_err(|error| StoreError::Durability(cause(error)))?;
+        Ok(SavedReceipt {
+            receipt: committed,
+            clock_regression: regression,
+        })
     }
 }
 /// Why a bounded wait stopped before its publication boundary.

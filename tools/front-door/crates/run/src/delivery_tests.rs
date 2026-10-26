@@ -2,7 +2,7 @@
 use super::delivery::*;
 use super::*;
 use provenant_core::GitOid;
-use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use std::{ffi::OsString, path::Path, time::Duration};
 
 struct PrepareFixture {
@@ -63,7 +63,7 @@ impl PrepareFixture {
         Ok(fixture)
     }
     fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+        let git = provenant_os::git::git_executable().ok_or("git executable")?;
         let argv: Vec<OsString> = std::iter::once(git.into_os_string())
             .chain(args.iter().map(OsString::from))
             .collect();
@@ -86,6 +86,238 @@ impl PrepareFixture {
     fn prepare(&self) -> Result<HostDeliveryContext> {
         HostDeliveryContext::new(self.environment.clone()).prepare(&self.writer, &self.request)
     }
+    fn lane_git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut command = vec!["-C", self.writer.worktree.to_str().ok_or("lane")?];
+        command.extend_from_slice(args);
+        self.git(&command)
+    }
+    fn commit(
+        &self,
+        path: &Path,
+        message: &str,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.git(&[
+            "-C",
+            path.to_str().ok_or("commit path")?,
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            message,
+        ])
+    }
+    fn terminal(
+        &self,
+        write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
+    ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use provenant_os::fs::Directory;
+        use provenant_supervisor::custody::{RecoveryState, WriterBinding};
+        use std::ffi::OsStr;
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = self.root.join("state");
+        let attempt_path = self.root.join("attempt");
+        std::fs::create_dir(&state)?;
+        std::fs::create_dir(&attempt_path)?;
+        for path in [&state, &attempt_path, &self.root.join("home")] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        let utility = UtilityRuntime::new(
+            provenant_os::git::git_executable().ok_or("git executable")?,
+            self.root.join("home"),
+        )?;
+        let executor = SystemExecutor::new(1)?;
+        let cancel = CancelToken::new();
+        let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+        let repo = utility.open_repo(&executor, &self.writer.project, budget, &cancel)?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &self.writer.worktree)?;
+        let head = provenant_confinement::run_utility(
+            &executor,
+            GitRead::RevParseHead,
+            worktree.repo(),
+            &utility,
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(head.termination, Termination::Exit(0));
+        let base = GitOid::parse(std::str::from_utf8(&head.stdout.bytes)?.trim())?;
+        let launch = writer::WriterLaunch {
+            worktree,
+            branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
+            base,
+            custody: None,
+        };
+        let scope = provenant_supervisor::custody::Scope {
+            generation: 1,
+            ..tests::exit().scope
+        };
+        launch.snapshot(&state, &attempt, scope)?;
+        let binding = WriterBinding::from_verified(
+            launch.worktree.repo().root_dir(),
+            launch.worktree.repo().private_dir(),
+            launch.branch.as_str(),
+            base,
+        )?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let recovery = provenant_supervisor::fixture::acquire_writer_with_binding(
+            Directory::open_anchor(&state)?,
+            scope,
+            binding,
+            WaitBudget::cli(clock.mono_now(), 1)?,
+            &cancel,
+            &clock,
+        )?
+        .into_recovery()?;
+        assert_eq!(recovery.observe(), RecoveryState::Absent);
+        write()?;
+        let review = launch.terminal(&state, &attempt, &recovery, "origin")?;
+        let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,
+        )?;
+        assert_eq!(manifest["review_required"], review);
+        let terminal: writer::WriterTerminal = serde_json::from_slice(
+            &attempt.read_bounded(OsStr::new("writer-terminal.json"), RECORD_LIMIT)?,
+        )?;
+        assert_eq!(terminal.protected_paths.is_empty(), !review);
+        Ok(review)
+    }
+}
+
+#[test]
+fn terminal_ignores_protected_changes_present_at_lane_start()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+    std::fs::create_dir(fixture.writer.worktree.join(".github"))?;
+    std::fs::write(
+        fixture.writer.worktree.join(".github/ci.yml"),
+        "PR policy\n",
+    )?;
+    fixture.lane_git(&["add", ".github"])?;
+    fixture.commit(&fixture.writer.worktree, "Existing PR policy")?;
+    assert!(!fixture.terminal(|| {
+        std::fs::write(
+            fixture.writer.worktree.join("source.txt"),
+            "writer source\n",
+        )?;
+        fixture.lane_git(&["add", "source.txt"])?;
+        fixture.commit(&fixture.writer.worktree, "Writer source")
+    })?);
+    Ok(())
+}
+
+#[test]
+fn terminal_falls_back_when_delivery_target_cannot_be_resolved()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for target in ["missing_head", "dangling_head", "unrelated"] {
+        for protected in [false, true] {
+            let fixture = PrepareFixture::new()?;
+            if target != "missing_head" {
+                fixture.git(&[
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/main",
+                ])?;
+            }
+            if target == "unrelated" {
+                fixture.git(&["checkout", "--orphan", "unrelated"])?;
+                fixture.commit(&fixture.writer.project, "Unrelated target")?;
+                fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+            }
+            let review = fixture.terminal(|| {
+                let path = if protected { "AGENTS.md" } else { "source.txt" };
+                std::fs::write(fixture.writer.worktree.join(path), "writer change\n")?;
+                fixture.lane_git(&["add", path])?;
+                fixture.commit(&fixture.writer.worktree, "Writer change")
+            })?;
+            assert_eq!(review, protected, "{target}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_exempts_merged_upstream_protected_changes()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for inherited in ["none", "addition", "deletion"] {
+        for protected in [false, true] {
+            let fixture = PrepareFixture::new()?;
+            if inherited == "addition" {
+                std::fs::create_dir(fixture.writer.worktree.join(".github"))?;
+                std::fs::write(
+                    fixture.writer.worktree.join(".github/pr.yml"),
+                    "PR policy\n",
+                )?;
+                fixture.lane_git(&["add", ".github"])?;
+                fixture.commit(&fixture.writer.worktree, "Existing PR addition")?;
+            } else if inherited == "deletion" {
+                std::fs::create_dir(fixture.writer.project.join(".github"))?;
+                std::fs::write(
+                    fixture.writer.project.join(".github/old.yml"),
+                    "old policy\n",
+                )?;
+                fixture.git(&["add", ".github"])?;
+                fixture.commit(&fixture.writer.project, "Shared policy")?;
+                fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+                fixture.lane_git(&["merge", "--ff-only", "origin/main"])?;
+                fixture.lane_git(&["rm", ".github/old.yml"])?;
+                fixture.commit(&fixture.writer.worktree, "Existing PR deletion")?;
+            }
+            let review = fixture.terminal(|| {
+                std::fs::create_dir_all(fixture.writer.project.join(".github"))?;
+                std::fs::write(
+                    fixture.writer.project.join(".github/ci.yml"),
+                    "main policy\n",
+                )?;
+                fixture.git(&["add", ".github"])?;
+                fixture.commit(&fixture.writer.project, "Upstream policy")?;
+                fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+                fixture.git(&[
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/main",
+                ])?;
+                std::fs::write(
+                    fixture.writer.worktree.join("source.txt"),
+                    "writer source\n",
+                )?;
+                fixture.lane_git(&["add", "source.txt"])?;
+                fixture.commit(&fixture.writer.worktree, "Writer source")?;
+                fixture.lane_git(&[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "merge",
+                    "--no-edit",
+                    "origin/main",
+                ])?;
+                if protected {
+                    std::fs::write(
+                        fixture.writer.worktree.join(".github/ci.yml"),
+                        "writer policy\n",
+                    )?;
+                    fixture.lane_git(&["add", ".github"])?;
+                    fixture.commit(&fixture.writer.worktree, "Writer policy")?;
+                }
+                Ok(())
+            })?;
+            assert_eq!(review, protected, "{inherited}");
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -205,7 +437,7 @@ fn prepare_failures_name_step_and_bound_git_stderr()
     ] {
         let mut fixture = PrepareFixture::new()?;
         let git = fixture.root.join("git");
-        let real_git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+        let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
         fixture.executable(&git, &format!(
             "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
         fixture
@@ -280,7 +512,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     ];
     let host = HostDeliveryContext::new(environment.clone());
     let executor = SystemExecutor::new(1)?;
-    let git_executable = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+    let git_executable = provenant_os::git::git_executable().ok_or("git executable")?;
     let git =
         |cwd: &Path, args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
             let argv: Vec<OsString> = std::iter::once(git_executable.as_os_str().to_owned())

@@ -14,7 +14,7 @@ use provenant_fabric_runtime::{
     hosts::*,
     identity::Identity,
 };
-use provenant_supervisor::{clock::SystemClock, exec::SystemExecutor};
+use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
@@ -25,11 +25,11 @@ use std::{
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
-    Exec(#[from] provenant_supervisor::exec::ExecError),
+    Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
     #[error(transparent)]
-    Fs(#[from] provenant_supervisor::fs::FsError),
+    Fs(#[from] provenant_os::fs::FsError),
     #[error(transparent)]
     Identity(#[from] provenant_fabric_runtime::identity::IdentityError),
     #[error(transparent)]
@@ -262,15 +262,13 @@ impl F3Facade for BoundFacade<'_> {
             if let (Some(project), Some(executable), Some(cap)) =
                 (locator.clone(), executable.clone(), cap)
             {
-                let request = PeerRequest {
-                    version: 1,
-                    protocol: PROTOCOL,
-                    target_host: host,
-                    source_host: ctx.identity.host,
-                    agent: ctx.identity.inbox.agent.clone(),
+                let request = PeerRequest::new(
+                    host,
+                    ctx.identity.host,
+                    ctx.identity.inbox.agent.clone(),
                     project,
-                    action: PeerAction::Health,
-                };
+                    PeerAction::Health,
+                );
                 let transport = SshTransport {
                     executor: &self.factory.executor,
                     clock: &self.factory.clock,
@@ -378,7 +376,7 @@ impl stdio::Input for Stdin {
 struct Stdout;
 impl stdio::Output for Stdout {
     fn write_frame(&mut self, bytes: &[u8], deadline: Instant) -> io::Result<()> {
-        provenant_supervisor::sys::hook_io::write_stdout(bytes, deadline)
+        provenant_os::sys::hook_io::write_stdout(bytes, deadline)
     }
 }
 
@@ -491,14 +489,14 @@ pub fn peer(
         if provenant_cli::fabric::in_lane() {
             return Err(CoordinationError::LaneMutation.into());
         }
-        let bytes = provenant_supervisor::sys::hook_io::read_stdin(
+        let bytes = provenant_os::sys::hook_io::read_stdin(
             MAX_FRAME,
             Instant::now() + std::time::Duration::from_secs(30),
         )?;
         if let Some(refusal) = protocol_refusal(&bytes)? {
             let mut reply = serde_json::to_vec(&refusal)?;
             reply.push(b'\n');
-            provenant_supervisor::sys::hook_io::write_stdout(
+            provenant_os::sys::hook_io::write_stdout(
                 &reply,
                 Instant::now() + std::time::Duration::from_secs(30),
             )?;
@@ -535,7 +533,7 @@ pub fn peer(
                     provenant_fabric_runtime::peer_agent::Forward::Unreachable => None,
                 };
             if let Some(reply) = reply {
-                provenant_supervisor::sys::hook_io::write_stdout(
+                provenant_os::sys::hook_io::write_stdout(
                     &reply,
                     Instant::now() + std::time::Duration::from_secs(30),
                 )?;
@@ -544,7 +542,7 @@ pub fn peer(
         }
         let request = decode_request(&bytes)?;
         let common = request.project.resolve(&home)?;
-        if provenant_supervisor::fs::canonicalize(&common)? != common {
+        if provenant_os::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());
         }
         let cwd = if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
@@ -789,7 +787,7 @@ pub fn peer(
             return Err(PeerError::Frame.into());
         }
         bytes.push(b'\n');
-        provenant_supervisor::sys::hook_io::write_stdout(
+        provenant_os::sys::hook_io::write_stdout(
             &bytes,
             Instant::now() + std::time::Duration::from_secs(30),
         )?;
@@ -948,19 +946,17 @@ pub fn landing(
                 let executable = provenant_fabric_runtime::hosts::discover_ssh_executable(
                     ctx.config.ssh_executable.as_deref(),
                 )?;
-                let request = PeerRequest {
-                    version: 1,
-                    protocol: PROTOCOL,
-                    target_host: *host,
-                    source_host: ctx.identity.host,
-                    agent: ctx.identity.inbox.agent.clone(),
-                    project: ProjectLocator::new(&ctx.identity, &factory.home)?,
-                    action: PeerAction::LandingPush {
+                let request = PeerRequest::new(
+                    *host,
+                    ctx.identity.host,
+                    ctx.identity.inbox.agent.clone(),
+                    ProjectLocator::new(&ctx.identity, &factory.home)?,
+                    PeerAction::LandingPush {
                         proof,
                         operation_id: operation.operation_id,
                         reconcile,
                     },
-                };
+                );
                 let transport = SshTransport {
                     executor: &factory.executor,
                     clock: &factory.clock,
@@ -1115,8 +1111,8 @@ pub(crate) fn remote_base(
     timeout: std::time::Duration,
     fetch: bool,
 ) -> Result<provenant_core::GitOid, FacadeError> {
-    use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-    let git = provenant_supervisor::git::git_executable().ok_or(FacadeError::OwnerUnavailable)?;
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+    let git = provenant_os::git::git_executable().ok_or(FacadeError::OwnerUnavailable)?;
     let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter(|(key, _)| !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key)))
         .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])
@@ -2191,7 +2187,7 @@ pub(crate) fn advance_settled_graphs(
         return Ok(());
     };
     use provenant_fabric_runtime::graph::{FileJournal, advance};
-    use provenant_supervisor::fs::LocalFs;
+
     let Some(host) = &settled.launch else {
         return Ok(());
     };
@@ -2201,10 +2197,10 @@ pub(crate) fn advance_settled_graphs(
         host.configuration_root.clone(),
     )?;
     let mut first_error = None;
-    for id in FileJournal::graph_ids(&roots.state, settled.project_id, &LocalFs)? {
+    for id in FileJournal::graph_ids(&roots.state, settled.project_id)? {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let Some(execution) =
-                FileJournal::pending_execution(&roots.state, settled.project_id, &id, &LocalFs)?
+                FileJournal::pending_execution(&roots.state, settled.project_id, &id)?
             else {
                 return Ok(());
             };
@@ -2233,7 +2229,6 @@ pub(crate) fn advance_settled_graphs(
                 &roots.state,
                 settled.project_id,
                 &id,
-                &LocalFs,
                 budget,
                 &cancel,
                 &factory.clock,
@@ -2256,7 +2251,6 @@ pub(crate) fn advance_settled_graphs(
                 .err()
                 .map(|error| error.to_string())
                 .as_deref(),
-            &LocalFs,
         );
         if let Err(error) = result {
             first_error.get_or_insert(error);
@@ -2376,6 +2370,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                         Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
                         Outcome::Failed => AttemptOutcome::TaskFailed,
+                        // Uncommitted edits need the chair, so the node fails without fallback.
+                        Outcome::Uncommitted => AttemptOutcome::OtherFailure,
                         _ => AttemptOutcome::OtherFailure,
                     },
                 })
@@ -2406,12 +2402,11 @@ impl Factory {
                 } else {
                     self.cwd.join(document)
                 };
-                let path =
-                    provenant_supervisor::fs::canonicalize(&path).map_err(|_| FacadeError::Io)?;
+                let path = provenant_os::fs::canonicalize(&path).map_err(|_| FacadeError::Io)?;
                 if !path.starts_with(&self.cwd) {
                     return Err(FacadeError::ConfinementRefused);
                 }
-                let bytes = provenant_supervisor::fs::FileHandle::open_source(&path)
+                let bytes = provenant_os::fs::FileHandle::open_source(&path)
                     .and_then(|mut file| file.read_bounded(1_048_576))
                     .map_err(|_| FacadeError::Io)?;
                 let document: GraphDocument = provenant_records::decode_v1(
@@ -2441,7 +2436,6 @@ impl Factory {
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
-                &provenant_supervisor::fs::LocalFs,
             )
             .map_err(|error| {
                 use provenant_fabric_runtime::graph::JournalError;
@@ -2459,7 +2453,6 @@ impl Factory {
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
-                &provenant_supervisor::fs::LocalFs,
             )
             .map_err(|_| FacadeError::Io)?;
             return Ok(run);
@@ -2468,7 +2461,6 @@ impl Factory {
             &self.context.roots.state,
             self.context.identity.project,
             id,
-            &provenant_supervisor::fs::LocalFs,
             budget,
             cancel,
             &self.clock,
@@ -2505,7 +2497,6 @@ impl Factory {
                 self.context.identity.project,
                 id,
                 None,
-                &provenant_supervisor::fs::LocalFs,
             )
             .map_err(|_| FacadeError::Io)?;
             return Ok(run);

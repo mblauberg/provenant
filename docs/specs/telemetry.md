@@ -37,7 +37,7 @@ reader consistency and decoding limits.
 
 ```text
 provenant telemetry stats [--usage] [--since D] [--until D] [--run-id ID] [--detail] [--json]
-provenant telemetry trace [--out FILE] [--since D] [--run ID] [--json]
+provenant telemetry trace [--out FILE] [--since D] [--run ID] [--peers] [--json]
 provenant quota show | display [--headline auto|5h|weekly] [--icon ID] | tick
 ```
 
@@ -93,11 +93,20 @@ fixed numeric values.
 
 `telemetry trace` writes retained attempts as Chrome Trace Event JSON (default
 `provenant-trace.json`) for ui.perfetto.dev or chrome://tracing. It uses one
-process per task and one thread per attempt, with microsecond `ts` and `dur`,
-the outcome as the slice name and a `queued` instant event. `--run` is applied
-by the store because attempt facts carry no run ID. `--since` filters on
-`finished_at`. The export reads the same bounded reader and needs no
-collector.
+process per host and one thread per attempt, with microsecond `ts` and `dur`,
+the outcome as the slice name, a `queued` instant event and the attempt's
+`Trace` in the slice args. A fact belongs to the host in its `Trace`; one with
+no host belongs to the local host when known, else to an unknown host. A flow
+arrow joins an attempt to its `Trace.parent` when the export holds both, even
+across hosts. `--run` is applied by the store because attempt facts carry no
+run ID. `--since` filters on `finished_at`.
+
+By default the export reads only this host's store and needs no collector.
+`--peers` also reads the terminal attempts of every configured peer, however
+the run reached it (`dispatch --host` or a Fabric submission). It asks each
+peer for its newest 100 lanes, as `lanes --host` does, over the usual SSH
+transport, and names each peer by its configured label. A peer that cannot be
+read is listed under `peers` with its error and the rest of the export stands.
 
 ### Prices and arithmetic
 

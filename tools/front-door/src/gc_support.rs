@@ -2,12 +2,12 @@
 use crate::worktrees::Error;
 use provenant_confinement::worktrees::WorktreeContext;
 use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots, WaitBudget};
-use provenant_run::{AttemptState, ExecutionContext, LaneQuery, RunStore};
-use provenant_supervisor::{
+use provenant_os::{
     clock::SystemClock,
     exec::{ExecOptions, StreamPolicy, Termination},
     fs::{Directory, FileKind, LockMode, Metadata, PublishMode, entry_names},
 };
+use provenant_run::{AttemptState, ExecutionContext, LaneQuery, RunStore};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -21,7 +21,7 @@ use std::{
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
 ) -> Result<Option<(String, GitOid)>, Error> {
-    let git = provenant_supervisor::git::git_executable().ok_or(Error::GitUnavailable)?;
+    let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let environment: Vec<(OsString, OsString)> = [
         "HOME",
         "SSH_AUTH_SOCK",
@@ -253,7 +253,7 @@ impl LaneSnapshot {
 fn optional_metadata(
     root: &Directory,
     name: &OsStr,
-) -> Result<Option<Metadata>, provenant_supervisor::fs::FsError> {
+) -> Result<Option<Metadata>, provenant_os::fs::FsError> {
     match root.metadata_at(name, false) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(error) if error.is_not_found() => Ok(None),
@@ -271,7 +271,7 @@ fn same_optional_identity(before: Option<Metadata>, after: Option<Metadata>) -> 
 
 fn child_membership(
     root: &Directory,
-) -> Result<Option<(Metadata, Vec<OsString>)>, provenant_supervisor::fs::FsError> {
+) -> Result<Option<(Metadata, Vec<OsString>)>, provenant_os::fs::FsError> {
     let children = match root.open_verified_directory(OsStr::new("children")) {
         Ok(children) => children,
         Err(error) if error.is_not_found() => return Ok(None),

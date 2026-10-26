@@ -1,5 +1,5 @@
 //! Explicit trusted-path operations for append-only output and bounded reads.
-//! Lock custody uses held `SafeDir` capabilities rather than path handles.
+//! Lock custody uses held `Directory` capabilities rather than path handles.
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -58,32 +58,6 @@ pub fn read_following(path: &Path, options: ReadOptions) -> Result<Vec<u8>> {
         });
     }
     Ok(bytes)
-}
-/// Injectable initial path owner. Consumers retain their own append policy;
-/// publication reports visible-but-unsynced entries as a successful status.
-pub trait PathIo: Send + Sync {
-    fn open_append(&self, path: &Path, options: AppendOptions) -> Result<Box<dyn AppendFile>>;
-    fn read_following(&self, path: &Path, options: ReadOptions) -> Result<Vec<u8>>;
-    fn publish_marker(&self, path: &Path, bytes: &[u8]) -> Result<Publication>;
-}
-pub trait AppendFile: Read + Write + Seek + Send + Sync {
-    fn sync(&self) -> Result<()>;
-}
-impl AppendFile for FileHandle {
-    fn sync(&self) -> Result<()> {
-        FileHandle::sync(self)
-    }
-}
-impl PathIo for LocalFs {
-    fn open_append(&self, path: &Path, options: AppendOptions) -> Result<Box<dyn AppendFile>> {
-        Ok(Box::new(FileHandle::open_append(path, options)?))
-    }
-    fn read_following(&self, path: &Path, options: ReadOptions) -> Result<Vec<u8>> {
-        read_following(path, options)
-    }
-    fn publish_marker(&self, path: &Path, bytes: &[u8]) -> Result<Publication> {
-        publish_marker(path, bytes)
-    }
 }
 /// Durable replacement: exclusive temporary 0600 file, file fsync, rename, then
 /// directory fsync. The held-directory capability owns all effects.
@@ -144,7 +118,7 @@ mod tests {
         let marker = root.path().join("marker");
         symlink(&target, &marker).unwrap();
         assert!(matches!(
-            LocalFs.publish_marker(&marker, b"new").unwrap(),
+            publish_marker(&marker, b"new").unwrap(),
             Publication::Durable
         ));
         assert_eq!(std::fs::read(&target).unwrap(), b"old");

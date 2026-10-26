@@ -1,4 +1,95 @@
 use super::*;
+
+#[test]
+fn stable_read_bounds_bytes_and_retains_the_held_anchor() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("original")).unwrap();
+    std::fs::write(temp.path().join("original/file"), b"data").unwrap();
+    let directory = Directory::open_anchor(&temp.path().join("original")).unwrap();
+    std::fs::rename(temp.path().join("original"), temp.path().join("held")).unwrap();
+    std::fs::create_dir(temp.path().join("original")).unwrap();
+    std::fs::write(temp.path().join("original/file"), b"other").unwrap();
+    assert_eq!(
+        directory.read_stable(OsStr::new("file"), 4).unwrap(),
+        b"data"
+    );
+    assert!(matches!(
+        directory.read_stable(OsStr::new("file"), 3),
+        Err(FsError::TooLarge { limit: 3 })
+    ));
+    std::os::unix::fs::symlink("file", temp.path().join("held/link")).unwrap();
+    assert!(directory.read_stable(OsStr::new("link"), 4).is_err());
+    assert!(directory.read_stable(OsStr::new("../file"), 4).is_err());
+}
+
+#[test]
+fn stable_read_metadata_refuses_identity_content_and_permission_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("file"), b"data").unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let before = directory.metadata_at(OsStr::new("file"), false).unwrap();
+    assert!(before.unchanged(&before));
+    for changed in [
+        Metadata {
+            inode: before.inode + 1,
+            ..before
+        },
+        Metadata {
+            size: before.size + 1,
+            ..before
+        },
+        Metadata {
+            modified_ns: before.modified_ns + 1,
+            ..before
+        },
+        Metadata {
+            links: before.links + 1,
+            ..before
+        },
+        Metadata {
+            mode: before.mode ^ 0o100,
+            ..before
+        },
+        Metadata {
+            uid: before.uid + 1,
+            ..before
+        },
+    ] {
+        assert!(!before.unchanged(&changed));
+    }
+}
+
+#[test]
+fn bounded_read_preserves_typed_io_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("write-only");
+    let file = File::create(&path).unwrap();
+    let mut handle = FileHandle::regular(file, &path).unwrap();
+    let error = handle.read_bounded(16).unwrap_err();
+    let errno = error.raw_os_error();
+    assert!(matches!(&error, FsError::ReadIo { path: failed, .. } if failed == &path));
+    assert!(errno.is_some());
+    let source = io::Error::from(error);
+    assert_eq!(source.raw_os_error(), errno);
+}
+
+#[test]
+fn require_durable_preserves_the_original_sync_error() {
+    Publication::Durable.require_durable().unwrap();
+    let sync_error =
+        error("sync directory", Path::new("state"))(io::Error::from_raw_os_error(errno::ENOSPC));
+    let error = Publication::VisibleDurabilityUnconfirmed { sync_error }
+        .require_durable()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(errno::ENOSPC));
+    assert!(matches!(
+        error,
+        FsError::Io {
+            operation: "sync directory",
+            ..
+        }
+    ));
+}
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 #[cfg(feature = "fixture")]
@@ -382,7 +473,7 @@ impl Clock for FixedClock {
         &self,
         _deadline: provenant_core::MonoTime,
     ) -> std::result::Result<(), provenant_core::TimeError> {
-        Ok(())
+        unreachable!("fixed-time test clock never waits")
     }
 }
 
@@ -391,10 +482,10 @@ fn one_second_budget() -> WaitBudget {
 }
 
 #[test]
-fn existing_lock_observation_through_safe_dir_never_creates_a_lock() {
+fn existing_lock_observation_through_directory_never_creates_a_lock() {
     let temp = tempfile::tempdir().unwrap();
     let directory = Directory::open_anchor(temp.path()).unwrap();
-    let observed: &dyn SafeDir = &directory;
+    let observed: &Directory = &directory;
     let name = OsStr::new("writer.lock");
     assert!(
         observed
@@ -463,10 +554,10 @@ fn owner_lock_is_nonblocking_bounded_and_releases_only_when_its_guard_drops() {
 }
 
 #[test]
-fn object_safe_lock_preserves_typed_timeout_and_cancellation_errors() {
+fn concrete_lock_preserves_typed_timeout_and_cancellation_errors() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
-    let object: &dyn SafeDir = &dir;
+    let object: &Directory = &dir;
     let missing = match object.open_read(OsStr::new("missing")) {
         Err(error) => error,
         Ok(_) => panic!("opening a missing entry unexpectedly succeeded"),
@@ -1087,11 +1178,11 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
 }
 
 #[test]
-fn object_safe_atomic_write_preserves_requested_mode() {
+fn concrete_atomic_write_preserves_requested_mode() {
     let temp = tempfile::tempdir().unwrap();
-    let dir: &dyn SafeDir = &Directory::open_anchor(temp.path()).unwrap();
+    let dir: &Directory = &Directory::open_anchor(temp.path()).unwrap();
     assert!(matches!(
-        dir.atomic_write(
+        dir.atomic_write_with_permissions(
             OsStr::new("provenant"),
             ".provenant-staging.",
             b"binary bytes",
@@ -1115,13 +1206,13 @@ fn object_safe_atomic_write_preserves_requested_mode() {
 }
 
 #[test]
-fn object_safe_read_link_uses_held_directory_and_rejects_noncomponents() {
+fn concrete_read_link_uses_held_directory_and_rejects_noncomponents() {
     let temp = tempfile::tempdir().unwrap();
     let owner = Directory::open_anchor(temp.path()).unwrap();
     owner
         .symlink(Path::new("../target"), OsStr::new("managed-link"))
         .unwrap();
-    let dir: &dyn SafeDir = &owner;
+    let dir: &Directory = &owner;
     assert_eq!(
         dir.read_link(OsStr::new("managed-link")).unwrap(),
         PathBuf::from("../target")
@@ -1133,16 +1224,15 @@ fn object_safe_read_link_uses_held_directory_and_rejects_noncomponents() {
 }
 
 #[test]
-fn object_safe_consumers_can_use_real_and_mock_files() {
-    fn read_file(file: &mut dyn SafeFile) -> io::Result<Vec<u8>> {
+fn concrete_consumers_use_held_files() {
+    fn read_file(file: &mut FileHandle) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
     let temp = tempfile::tempdir().unwrap();
-    let fs: &dyn SafeFs = &LocalFs;
-    let dir = fs.open_anchor(temp.path()).unwrap();
-    dir.atomic_write(
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    dir.atomic_write_with_permissions(
         OsStr::new("file"),
         ".test.",
         b"real",
@@ -1151,50 +1241,13 @@ fn object_safe_consumers_can_use_real_and_mock_files() {
     )
     .unwrap();
     assert_eq!(
-        read_file(&mut *dir.open_read(OsStr::new("file")).unwrap()).unwrap(),
+        read_file(&mut dir.open_read(OsStr::new("file")).unwrap()).unwrap(),
         b"real"
     );
-    let mut mock = MockFile(std::io::Cursor::new(b"mock".to_vec()));
-    assert_eq!(read_file(&mut mock).unwrap(), b"mock");
     assert_eq!(
         dir.entries().unwrap().collect::<Result<Vec<_>>>().unwrap(),
         [OsString::from("file")]
     );
-}
-
-struct MockFile(io::Cursor<Vec<u8>>);
-impl Read for MockFile {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.0.read(bytes)
-    }
-}
-impl Write for MockFile {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write(bytes)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-impl Seek for MockFile {
-    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-        self.0.seek(position)
-    }
-}
-impl SafeFile for MockFile {
-    fn metadata(&self) -> Result<Metadata> {
-        Err(FsError::Io {
-            operation: "mock metadata",
-            path: PathBuf::from("<mock>"),
-            source: io::ErrorKind::Unsupported.into(),
-        })
-    }
-    fn duplicate(&self) -> Result<Box<dyn SafeFile>> {
-        Ok(Box::new(Self(self.0.clone())))
-    }
-    fn sync(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[test]
@@ -1272,11 +1325,11 @@ fn rename_errors_retain_both_paths_and_errno() {
     assert_eq!(io::Error::from(error).raw_os_error(), Some(errno::ENOENT));
 }
 #[test]
-fn boxed_filesystem_capabilities_support_threads() {
+fn filesystem_capabilities_support_threads() {
     fn check<T: Send + Sync + ?Sized>() {}
-    check::<dyn SafeFs>();
-    check::<dyn SafeDir>();
-    check::<dyn SafeFile>();
+    check::<SystemPathResolver>();
+    check::<Directory>();
+    check::<FileHandle>();
 }
 
 #[test]
@@ -1459,38 +1512,40 @@ fn root_binding_resolves_aliases_and_missing_suffix_without_creation() {
     let missing = temp.path().join("alias/fresh/state");
     let expected = std::fs::canonicalize(&real).unwrap().join("fresh/state");
     assert_eq!(
-        LocalFs.resolve_existing_ancestor(&missing).unwrap(),
+        SystemPathResolver
+            .resolve_existing_ancestor(&missing)
+            .unwrap(),
         expected
     );
     assert!(!real.join("fresh").exists());
     std::fs::write(real.join("file"), b"not a directory").unwrap();
     assert!(
-        LocalFs
+        SystemPathResolver
             .resolve_existing_ancestor(&real.join("file/state"))
             .is_err()
     );
 }
 
 #[test]
-fn trait_cross_directory_rename_preserves_open_inode_and_refuses_collision() {
+fn concrete_cross_directory_rename_preserves_open_inode_and_refuses_collision() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir(temp.path().join("source")).unwrap();
     std::fs::create_dir(temp.path().join("archive")).unwrap();
     std::fs::write(temp.path().join("source/file"), b"observed").unwrap();
     std::fs::write(temp.path().join("archive/occupied"), b"retained").unwrap();
-    let source: Box<dyn SafeDir> = LocalFs.open_anchor(&temp.path().join("source")).unwrap();
-    let archive: Box<dyn SafeDir> = LocalFs.open_anchor(&temp.path().join("archive")).unwrap();
+    let source: Directory = Directory::open_anchor(&temp.path().join("source")).unwrap();
+    let archive: Directory = Directory::open_anchor(&temp.path().join("archive")).unwrap();
     let mut writer = std::fs::OpenOptions::new()
         .append(true)
         .open(temp.path().join("source/file"))
         .unwrap();
     assert!(
         source
-            .rename_noreplace_to(OsStr::new("file"), archive.as_ref(), OsStr::new("occupied"))
+            .rename_noreplace(OsStr::new("file"), &archive, OsStr::new("occupied"))
             .is_err()
     );
     source
-        .rename_noreplace_to(OsStr::new("file"), archive.as_ref(), OsStr::new("saved"))
+        .rename_noreplace(OsStr::new("file"), &archive, OsStr::new("saved"))
         .unwrap();
     writer.write_all(b" later").unwrap();
     assert_eq!(

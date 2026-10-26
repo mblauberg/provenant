@@ -7,9 +7,7 @@ use super::{
 };
 use crate::hosts::plain_text;
 use provenant_core::{HostId, OperationId, ProjectId};
-use provenant_supervisor::exec::{
-    ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -67,7 +65,7 @@ pub fn write_owner(dir: &Path, owner: &Owner) -> io::Result<()> {
     let staged = dir.join(format!(
         ".owner.{}.{}.tmp",
         std::process::id(),
-        provenant_supervisor::fs::temporary_name()?.to_string_lossy()
+        provenant_os::fs::temporary_name()?.to_string_lossy()
     ));
     let result = write_new(&staged, &serde_json::to_vec_pretty(owner)?, 0o600)
         .and_then(|()| fs::rename(&staged, dir.join("owner.json")));

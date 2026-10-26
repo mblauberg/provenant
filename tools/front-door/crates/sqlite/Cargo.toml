@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-core = { workspace = true }
-provenant-supervisor = { workspace = true }
 rusqlite = { workspace = true }
 
 [lints]

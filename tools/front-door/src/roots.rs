@@ -1,9 +1,6 @@
 //! Read-only edge resolution. No provider, database, or legacy-content reads.
 use provenant_core::{RootInputs, Roots};
-use provenant_supervisor::exec::{
-    ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-};
-use provenant_supervisor::fs::LocalFs;
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
     fs, io,
@@ -63,7 +60,7 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
-    let git = provenant_supervisor::git::git_executable().ok_or(RootError::Checkout)?;
+    let git = provenant_os::git::git_executable().ok_or(RootError::Checkout)?;
     let argv: Vec<OsString> = [
         git.as_os_str(),
         OsStr::new("--no-pager"),
@@ -208,7 +205,7 @@ pub fn resolve(
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     Ok(Resolved {
         assets,
         home,
@@ -224,7 +221,7 @@ pub fn resolve(
 pub fn child(home: &Path, assets: &Path, state_dir: PathBuf) -> Result<Roots, RootError> {
     let mut inputs = RootInputs::new(home.to_owned(), assets.to_owned());
     inputs.state_dir = Some(state_dir);
-    Ok(inputs.resolve(&LocalFs)?)
+    Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
 }
 /// Canonical home used by root selection and home-relative Fabric identity.
 fn home() -> Result<PathBuf, RootError> {

@@ -6,12 +6,12 @@ mod opencode;
 use crate::accounts::Settings;
 use crate::host::PROBE_DIR_OPERATION;
 use crate::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
+use provenant_os::exec::{
+    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+};
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
     QuotaError, QuotaProbePlan,
-};
-use provenant_supervisor::exec::{
-    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
 use serde_json::{Value, json};
 use std::{
@@ -470,7 +470,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use provenant_supervisor::exec::ExecError;
+    use provenant_os::exec::ExecError;
 
     #[allow(dead_code)]
     fn quota(home: &Path, state: PathBuf) -> LiveQuota {

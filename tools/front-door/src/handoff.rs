@@ -27,11 +27,11 @@ use provenant_fabric_runtime::{
     },
     hosts::{PeerAction, PeerResult},
 };
-use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::{
+use provenant_os::{
     clock::SystemClock,
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
 };
+use provenant_records::{CommandResult, Outcome};
 use provenant_workflow::session::{HostSessionId, SessionStore};
 use serde_json::{Value, json};
 use std::{
@@ -91,7 +91,7 @@ fn now_unix() -> i64 {
 }
 
 fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), Refusal> {
-    let binary = provenant_supervisor::git::git_executable()
+    let binary = provenant_os::git::git_executable()
         .ok_or_else(|| Refusal::new(Outcome::Error, "GIT", "Git executable unavailable"))?;
     let environment: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(key, _)| {
@@ -1005,7 +1005,6 @@ pub(crate) fn receive(
     // A config that cannot be read counts as off.
     let accepted = provenant_config::read_with_domains(
         &target.context.roots,
-        &provenant_supervisor::fs::LocalFs,
         &provenant_cli::domains::SECTIONS,
     )
     .ok()

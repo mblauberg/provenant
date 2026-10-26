@@ -3,11 +3,10 @@ use provenant_core::{
     ActorId, AttemptId, CancelToken, Digest, MonoTime, OperationId, ProjectId, RootInputs, RunId,
     TaskId, TestClock, WaitBudget, WallTime,
 };
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
-use provenant_supervisor::{
-    custody::{CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence},
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-    fs::LocalFs,
+use provenant_supervisor::custody::{
+    CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence,
 };
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -20,7 +19,7 @@ pub(super) fn context(
     let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
     inputs.state_dir = Some(base.join("state"));
     Ok(ExecutionContext {
-        state_root: inputs.resolve(&LocalFs)?.state,
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
         project_id: ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
         read_prompts: true,
@@ -151,6 +150,74 @@ fn read_only_data_version_detects_a_new_queued_attempt() -> TestResult {
 }
 
 #[test]
+fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: temp.path().join("lane"),
+    });
+    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        remote: "origin".into(),
+        branch: "published/lane".into(),
+        open_pr: false,
+    });
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let id = input.attempts[0].attempt_id;
+    let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
+    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
+        ".github/workflows/ci.yml",
+    )?)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    artifacts::seal(
+        &attempt,
+        "writer-terminal.json",
+        &db::bytes(&writer::WriterTerminal {
+            schema_version: 1,
+            head,
+            protected_paths: vec![path.clone()],
+        })?,
+        RECORD_LIMIT,
+    )?;
+    let mut publication = publication();
+    publication.outcome = Outcome::ReviewRequired;
+    publication.reason = Some("protected changes require review".into());
+    let mut incomplete = publication.clone();
+    incomplete.complete = false;
+    assert!(matches!(
+        store.publish_terminal(id, 1, &incomplete, &exit(), &call),
+        Err(RunError::Validation(_))
+    ));
+    let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
+    assert_eq!(record.head, Some(head));
+    assert_eq!(record.protected_paths, vec![path]);
+    assert!(record.delivery.is_none());
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            ..
+        }
+    ));
+    assert_eq!(store.record(id, &call)?, record);
+    assert_eq!(
+        serde_json::to_value(&record)?["state"]["outcome"],
+        "review_required"
+    );
+    assert_eq!(
+        store.attempt(id, &call)?.terminal_state,
+        provenant_records::AttemptOutcome::ReviewRequired
+    );
+    Ok(())
+}
+
+#[test]
 fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -179,7 +246,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
 }
 #[test]
 fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
-    use provenant_supervisor::fs::LockMode;
+    use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
 
     let temp = tempfile::tempdir()?;
@@ -211,7 +278,7 @@ fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
 #[test]
 fn reopening_a_current_store_does_not_wait_for_a_writer() -> TestResult {
     use provenant_core::Clock;
-    use provenant_supervisor::clock::SystemClock;
+    use provenant_os::clock::SystemClock;
 
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -263,7 +330,7 @@ fn concurrent_first_opens_create_a_ready_store() -> TestResult {
 
 #[test]
 fn opens_refuse_unsafe_database_companions() -> TestResult {
-    use provenant_supervisor::fs::Directory;
+    use provenant_os::fs::Directory;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -703,7 +770,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
             &call
         ),
         Err(RunError::Filesystem(
-            provenant_supervisor::fs::FsError::TooLarge { .. }
+            provenant_os::fs::FsError::TooLarge { .. }
         ))
     ));
     Ok(())

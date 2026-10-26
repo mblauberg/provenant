@@ -161,13 +161,9 @@ fn config_command(
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let roots = roots::resolve(globals, Workspace::Project, Product::Required)?.roots;
         if let Some(edit) = edit {
-            provenant_config::edit_config(&roots, &provenant_supervisor::fs::LocalFs, edit)?;
+            provenant_config::edit_config(&roots, edit)?;
         }
-        let mut config = provenant_config::config_show(
-            &roots,
-            &provenant_supervisor::fs::LocalFs,
-            &provenant_cli::domains::SECTIONS,
-        )?;
+        let mut config = provenant_config::config_show(&roots, &provenant_cli::domains::SECTIONS)?;
         if let Some(class) = task_class {
             config.apply_task_class(class)?;
         }
@@ -206,12 +202,8 @@ fn config_command(
 fn account_settings(
     roots: &provenant_core::Roots,
 ) -> Result<provenant_providers::accounts::Settings, provenant_config::ConfigError> {
-    provenant_config::read_with_domains(
-        roots,
-        &provenant_supervisor::fs::LocalFs,
-        &provenant_cli::domains::SECTIONS,
-    )
-    .map(|config| config.domains.accounts)
+    provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+        .map(|config| config.domains.accounts)
 }
 /// Explicit Claude registrations only, never implicit directory discovery.
 pub(crate) fn registered_claude(
@@ -640,7 +632,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     if let Some(resolved) = usage_roots {
         provenant_telemetry::usage::record_cli(
             &resolved.roots,
-            &provenant_supervisor::clock::SystemClock,
+            &provenant_os::clock::SystemClock,
             &verb,
             status,
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),

@@ -1,7 +1,7 @@
 use super::*;
 use crate::permissions::{AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions};
 use provenant_core::{ProjectId, WorkScope};
-use provenant_supervisor::{fs::LocalFs, home::HomeError};
+use provenant_os::home::HomeError;
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -50,7 +50,7 @@ fn private_state_cannot_expose_credentials_or_alias_the_source() {
     input.permissions.private_state.as_mut().unwrap().path = root.join("alias/user-state");
     let plan = ConfinedPlan::new(input).unwrap();
     assert!(matches!(
-        plan.agy_home().unwrap().prepare(&LocalFs),
+        plan.agy_home().unwrap().prepare(),
         Err(HomeError::UnsafeEntry)
     ));
     assert!(!root.join("user-state/agy-home").exists());
@@ -117,7 +117,7 @@ fn plan_and_private_home_round_trip_without_exposing_credentials() {
     let plan = ConfinedPlan::new(request(root)).unwrap();
     let recipe = plan.agy_home().unwrap();
     assert!(!format!("{recipe:?}").contains(token));
-    let prepared = recipe.prepare(&LocalFs).unwrap();
+    let prepared = recipe.prepare().unwrap();
     let state = prepared.path().join(".gemini/antigravity-cli");
     assert!(state.join("bin").is_dir());
     assert!(!state.join("oauth_creds.json").exists());
@@ -154,7 +154,7 @@ fn plan_and_private_home_round_trip_without_exposing_credentials() {
 fn copy_back_preserves_newer_user_state_and_retains_the_private_copy() {
     let temp = fixture();
     let plan = ConfinedPlan::new(request(temp.path())).unwrap();
-    let prepared = plan.agy_home().unwrap().prepare(&LocalFs).unwrap();
+    let prepared = plan.agy_home().unwrap().prepare().unwrap();
     let private = prepared
         .path()
         .join(".gemini/antigravity-cli/history.jsonl");
@@ -176,7 +176,7 @@ fn copy_back_refuses_links_and_private_home_replacement() {
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("history.jsonl"), "outside").unwrap();
         let plan = ConfinedPlan::new(request(temp.path())).unwrap();
-        let prepared = plan.agy_home().unwrap().prepare(&LocalFs).unwrap();
+        let prepared = plan.agy_home().unwrap().prepare().unwrap();
         let state = prepared.path().join(".gemini/antigravity-cli");
         if replace_parent {
             fs::rename(&state, state.with_extension("moved")).unwrap();
@@ -218,7 +218,7 @@ fn read_only_plans_refuse_unconfined_extensions_and_inherited_codex_config() {
 fn database_without_a_snapshot_refuses_instead_of_silently_losing_context() {
     let temp = fixture();
     let plan = ConfinedPlan::new(request(temp.path())).unwrap();
-    let prepared = plan.agy_home().unwrap().prepare(&LocalFs).unwrap();
+    let prepared = plan.agy_home().unwrap().prepare().unwrap();
     let state = prepared.path().join(".gemini/antigravity-cli");
     fs::write(
         state.join("conversation_summaries.db-wal"),
@@ -235,7 +235,7 @@ fn database_without_a_snapshot_refuses_instead_of_silently_losing_context() {
     )
     .unwrap();
     assert!(matches!(
-        plan.agy_home().unwrap().prepare(&LocalFs),
+        plan.agy_home().unwrap().prepare(),
         Err(HomeError::UnsupportedState)
     ));
 }

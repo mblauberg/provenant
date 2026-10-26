@@ -59,7 +59,7 @@ fn recording_on_a_missing_root_creates_nothing() -> Result {
 }
 
 #[test]
-fn unattributed_events_omit_project_id_from_json() -> Result {
+fn unattributed_events_omit_trace_from_json() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     std::fs::create_dir(roots.state.as_path())?;
@@ -73,6 +73,7 @@ fn unattributed_events_omit_project_id_from_json() -> Result {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| event.get("project_id").is_none()));
+    assert!(events.iter().all(|event| event.get("trace").is_none()));
     assert!(
         events
             .iter()
@@ -101,7 +102,7 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     assert!(
         events
             .iter()
-            .all(|event| event["project_id"] == expected_id.to_string())
+            .all(|event| event["trace"]["project"] == expected_id.to_string())
     );
 
     let report = report(&roots, inventory(), None, None)?;

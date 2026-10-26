@@ -19,21 +19,22 @@ responsibility or edges lands in this table in the same PR.
 |---|---|---|
 | core | Pure IDs, roots, paths, clocks as values, shared enums | None |
 | records | Versioned serde records, canonical byte encoders, digest contracts, closed adapter specs | core |
-| config | Config loading/precedence, profiles, installation and managed-file rules | core, records, supervisor's safe filesystem API |
-| supervisor | Sans-IO process state machine, syscall boundary, capture, custody-safe OS handles | core, records |
-| confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, supervisor's safe OS API |
-| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota, supervisor |
+| os | Syscalls, concrete filesystem handles, bounded utility execution, capture, clocks, Git discovery, homes and scratch | core |
+| config | Config loading/precedence, profiles, installation and managed-file rules | core, records, os |
+| supervisor | Sans-IO process state machine, provider custody, guardian handoff and process supervision | core, records, os |
+| confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, os, supervisor |
+| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota, os |
 | quota | Quota windows, reset schedules, refresh scheduling and admission advice | records, config |
-| telemetry | Terminal-attempt usage/cost reduction, price schema and bounded usage log | core, records, supervisor's safe filesystem API |
+| telemetry | Terminal-attempt usage/cost reduction, price schema and bounded usage log | core, records, os |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
-| sqlite | Shared safe SQLite opening, WAL setup, migration execution and budgeted busy retry | core, supervisor's safe filesystem API |
-| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, sqlite |
-| fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API, sqlite |
-| fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, fabric-store |
+| sqlite | Shared safe SQLite opening, WAL setup, migration execution and budgeted busy retry | core, os |
+| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, os, supervisor, confinement, sqlite |
+| fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, os, sqlite |
+| fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, os, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime; fabric-store in tests only, to check store error rendering |
-| workflow | Delivery/review validators, session, tracker and writing tools | core, records, supervisor's safe filesystem API |
-| cli | Argument parsing and output/exit rendering for all commands | core, records, config, confinement, providers, quota, telemetry, routing, run, fabric-runtime, workflow, supervisor |
-| provenant | Binary composition, install identity and process-level setup | core, records, config, supervisor, confinement, providers, quota, telemetry, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
+| workflow | Delivery/review validators, session, tracker and writing tools | core, records, os |
+| cli | Argument parsing and output/exit rendering for all commands | core, records, config, confinement, providers, quota, telemetry, routing, run, fabric-runtime, workflow, os, supervisor |
+| provenant | Binary composition, install identity and process-level setup | core, records, config, os, supervisor, confinement, providers, quota, telemetry, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
 
 `records::ADAPTER_SPECS` is the compiled, closed adapter fact table. Config names,
 CLI values, executable aliases and shared capability lookups use those rows.
@@ -79,7 +80,7 @@ use an explicit canonical encoder in `provenant-records`, never `HashMap`
 order. Read input with a size bound. Keep paths as `OsString` until a record
 needs text. Choose `deny_unknown_fields`, defaults and versioning per record
 in its design, for the record's own reasons. Writes are atomic and fsync'd
-through the supervisor's safe filesystem API.
+through the OS crate's concrete filesystem API.
 
 ## Threads and the supervisor
 
@@ -117,13 +118,16 @@ ADR 0028 decision 5, tested against every tracked file of those kinds.
 
 ## Unsafe
 
-All first-party `unsafe` lives in `supervisor::sys` behind narrow safe
-wrappers with documented invariants. Every other crate, the binary included,
-has `#![forbid(unsafe_code)]`. A workspace `clippy.toml` `disallowed-methods`
-entry bans `std::process::Command::new` outside supervisor. Do not export
-raw owning descriptors or process handles that bypass custody. Each unsafe
-block states validity, ownership, lifetime, concurrency and error conditions,
-and a second reviewer checks it. Secret environment values stay off disk and
+All first-party `unsafe` lives in `os::sys` and supervisor's private
+`process_os` custody boundary behind safe wrappers with documented invariants.
+Every other crate, the binary included, has `#![forbid(unsafe_code)]`.
+A workspace `clippy.toml` entry restricts `std::process::Command::new` to
+these boundaries. Raw owning descriptors and process handles are reserved for
+supervisor custody. `workspace_policy` restricts consumers of OS `sys::{fs,
+child,raw_exec,reaper}`, `handoff_file` and `from_handoff` to supervisor, and
+requires explicit imports rather than broad OS or `sys` namespace aliases.
+Each unsafe block states validity, ownership, lifetime, concurrency and error
+conditions, and a second reviewer checks it. Secret environment values stay off disk and
 out of logs.
 
 ## Diagnostics

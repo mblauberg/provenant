@@ -27,7 +27,7 @@ const ISSUE_FORM_TOP_LEVEL_KEYS: &[&str] = &[
 const ISSUE_FORM_BODY_KEYS: &[&str] = &["attributes", "id", "type", "validations"];
 
 fn read_harness_file(
-    root: &dyn provenant_supervisor::fs::SafeDir,
+    root: &provenant_os::fs::Directory,
     path: &Path,
     limit: u64,
 ) -> Result<Vec<u8>, CheckError> {
@@ -240,15 +240,18 @@ fn check_verified_against(
 }
 
 fn installed_skill_files(roots: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, CheckError> {
-    use provenant_supervisor::fs::{FileKind, LocalFs, SafeFs};
+    use provenant_os::fs::FileKind;
     let mut result = Vec::new();
     let mut total = 0u64;
     for (index, root_path) in roots.iter().enumerate() {
-        let resolved = provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, root_path)
-            .map_err(|_| CheckError::Evidence("skill root resolution failed"))?;
-        let root = match LocalFs.open_anchor(&resolved) {
+        let resolved = provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            root_path,
+        )
+        .map_err(|_| CheckError::Evidence("skill root resolution failed"))?;
+        let root = match provenant_os::fs::Directory::open_anchor(&resolved) {
             Ok(root) => root,
-            Err(provenant_supervisor::fs::FsError::Io { source, .. })
+            Err(provenant_os::fs::FsError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
                 continue;
@@ -261,12 +264,12 @@ fn installed_skill_files(roots: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, Ch
             if root.metadata_at(&name, false)?.kind != FileKind::Directory {
                 continue;
             }
-            let skill_dir = root.open_directory(&name, false)?;
+            let skill_dir = root.open_directory_with_links(&name, false)?;
             match skill_dir.metadata_at(std::ffi::OsStr::new("SKILL.md"), false) {
                 Ok(metadata)
                     if metadata.kind == FileKind::Regular && metadata.size <= FILE_LIMIT => {}
                 Ok(_) => continue,
-                Err(provenant_supervisor::fs::FsError::Io { source, .. })
+                Err(provenant_os::fs::FsError::Io { source, .. })
                     if source.kind() == std::io::ErrorKind::NotFound =>
                 {
                     continue;
@@ -1079,7 +1082,7 @@ fn markdown(
                 continue;
             };
             if !paths.contains(&destination) {
-                let mut directory = git.repo.root_dir().open_directory(
+                let mut directory = git.repo.root_dir().open_directory_with_links(
                     std::ffi::OsStr::new(
                         destination
                             .iter()
@@ -1089,7 +1092,7 @@ fn markdown(
                     false,
                 )?;
                 for name in destination.iter().skip(1) {
-                    directory = directory.open_directory(name, false)?;
+                    directory = directory.open_directory_with_links(name, false)?;
                 }
                 continue;
             }

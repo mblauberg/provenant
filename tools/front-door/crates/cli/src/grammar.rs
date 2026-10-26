@@ -349,6 +349,7 @@ pub enum LaneState {
     Running,
     Settling,
     Succeeded,
+    ReviewRequired,
     Failed,
     Rejected,
     TimedOut,
@@ -359,6 +360,7 @@ pub enum LaneState {
     PermissionDenied,
     Quarantined,
     Lost,
+    Uncommitted,
     Cancelled,
     InputRequired,
 }
@@ -370,6 +372,7 @@ impl LaneState {
             Self::Running => "running",
             Self::Settling => "settling",
             Self::Succeeded => "succeeded",
+            Self::ReviewRequired => "review_required",
             Self::Failed => "failed",
             Self::Rejected => "rejected",
             Self::TimedOut => "timed_out",
@@ -380,6 +383,7 @@ impl LaneState {
             Self::PermissionDenied => "permission_denied",
             Self::Quarantined => "quarantined",
             Self::Lost => "lost",
+            Self::Uncommitted => "uncommitted",
             Self::Cancelled => "cancelled",
             Self::InputRequired => "input_required",
         }
@@ -503,6 +507,9 @@ pub struct Trace {
     /// Restrict the trace to one run.
     #[arg(long)]
     pub run: Option<RunId>,
+    /// Also read the attempts of runs placed on peers, one SSH status read per peer
+    #[arg(long)]
+    pub peers: bool,
 }
 #[derive(Debug, Args)]
 pub struct Stats {

@@ -244,7 +244,7 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
         store.save(&first, 1, context(), budget, &CancelToken::new(), &expired),
         Err(StoreError::Deadline)
     ));
-    // A tiny remaining budget exercises supervisor's nonblocking lock poll.
+    // A tiny remaining budget exercises the OS layer's nonblocking lock poll.
     let almost_expired = TestClock::new(time(30), MonoTime::from_micros(999_999));
     let dir = Directory::open_anchor(&path).unwrap();
     let guard = dir
@@ -634,7 +634,7 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
 
 #[test]
 fn atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors() {
-    use provenant_supervisor::fs::{AtomicWriteOperations, FileHandle};
+    use provenant_os::fs::{AtomicWriteOperations, FileHandle};
     use std::{io::Write as _, path::Path};
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Fault {

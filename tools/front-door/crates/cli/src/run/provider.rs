@@ -5,13 +5,11 @@ use provenant_confinement::permissions::{
 };
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
+use provenant_os::fs::{Directory, FileKind, FsError, PayloadTree, PublishMode, entropy_128};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ADAPTER_SPECS, AdapterSpec};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
-use provenant_supervisor::fs::{
-    Directory, FileKind, FsError, PayloadTree, PublishMode, entropy_128,
-};
 use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::path::{Path, PathBuf};
 
@@ -70,7 +68,7 @@ fn prepare_with(
     let provenant_executable = canonical(&provenant_executable)?;
     let git = canonical(&match registry.host {
         Some(host) => host.git.clone(),
-        None => provenant_supervisor::git::git_executable().ok_or("Git unavailable")?,
+        None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
     })?;
     let project_id = registry
         .project_id
@@ -92,24 +90,20 @@ fn prepare_with(
         .map(|base| run::GitContext::capture(&git, &cwd, base))
         .transpose()
         .map_err(|error| error.to_string())?;
-    let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
+    let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
         .name;
 
-    let executor = provenant_supervisor::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
     // Nested attempts live in a lane-writable child store. Unconfined provider
     // commands, including status, version and token refresh, get a fresh cwd
     // under the host configuration root retained in the launch context.
     let executor =
         provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
             .map_err(|e| e.to_string())?;
-    let config = provenant_config::read_with_domains(
-        roots,
-        &provenant_supervisor::fs::LocalFs,
-        &crate::domains::SECTIONS,
-    )
-    .map_err(|e| e.to_string())?;
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?;
     let request = route_request(task)?;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
@@ -154,12 +148,11 @@ fn prepare_with(
         }
     }
     // These adapters use the CLI's existing local login and configuration.
-    let mut local: Vec<_> = ADAPTER_SPECS
+    for adapter in ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.local_discovery_order.is_some() && eligible(spec.name))
-        .collect();
-    local.sort_by_key(|spec| spec.local_discovery_order);
-    for adapter in local.into_iter().map(|spec| spec.name) {
+        .filter(|spec| spec.local_login && eligible(spec.name))
+        .map(|spec| spec.name)
+    {
         if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
@@ -264,7 +257,7 @@ fn prepare_with(
         })
         .transpose()?
         .or(prior_account);
-    let host = provenant_config::bind_host(roots, &provenant_supervisor::fs::LocalFs)
+    let host = provenant_config::bind_host(roots)
         .map_err(|e| e.to_string())?
         .to_string();
     let resolved = crate::route::resolve_dispatch(
@@ -372,7 +365,7 @@ fn prepare_with(
                     std::ffi::OsStr::new("provider.txt"),
                     ".provider-",
                     adapter.id().as_bytes(),
-                    provenant_supervisor::fs::PublishMode::Replace,
+                    provenant_os::fs::PublishMode::Replace,
                 )
             })
             .map_err(|error| error.to_string())?;
@@ -722,7 +715,7 @@ fn find_session_state_within(
         }
         Ok(false)
     }
-    let opened = provenant_supervisor::fs::canonicalize(provider_state)
+    let opened = provenant_os::fs::canonicalize(provider_state)
         .ok()
         .filter(|canonical| canonical == provider_state)
         .and_then(|_| Directory::open_anchor(provider_state).ok())
@@ -788,7 +781,7 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
     };
     // The copy fills a fresh private sibling and is renamed into place, onto
     // the empty destination, only once whole. Any refusal removes it.
-    let staging = provenant_supervisor::fs::temporary_name().map_err(|error| failed(&error))?;
+    let staging = provenant_os::fs::temporary_name().map_err(|error| failed(&error))?;
     parent
         .mkdir(&staging, 0o700)
         .map_err(|error| failed(&error))?;
@@ -1101,21 +1094,18 @@ fn observe_account(
         Ok(None) => {}
     }
     let argv = [executable.as_os_str().to_owned(), "--version".into()];
-    let mut options = provenant_supervisor::exec::ExecOptions::new(
-        &argv,
-        scratch,
-        std::time::Duration::from_secs(4),
-    );
+    let mut options =
+        provenant_os::exec::ExecOptions::new(&argv, scratch, std::time::Duration::from_secs(4));
     let env = [
         ("HOME".into(), home.as_os_str().to_owned()),
         ("PATH".into(), "/usr/bin:/bin".into()),
     ];
     options.env = Some(&env);
-    options.stdout = provenant_supervisor::exec::StreamPolicy::Capture { limit: 128 };
-    options.stderr = provenant_supervisor::exec::StreamPolicy::Discard;
-    use provenant_supervisor::exec::Executor;
+    options.stdout = provenant_os::exec::StreamPolicy::Capture { limit: 128 };
+    options.stderr = provenant_os::exec::StreamPolicy::Discard;
+    use provenant_os::exec::Executor;
     let out = executor.execute(options).map_err(|e| e.to_string())?;
-    if out.termination != provenant_supervisor::exec::Termination::Exit(0)
+    if out.termination != provenant_os::exec::Termination::Exit(0)
         || out.timed_out
         || out.stdout.truncated
     {
@@ -1212,12 +1202,12 @@ fn credential_authority(
             std::ffi::OsStr::new("credential-authority.json"),
             ".authority-",
             &record,
-            provenant_supervisor::fs::PublishMode::Replace,
+            provenant_os::fs::PublishMode::Replace,
         )
         .map_err(|e| e.to_string())?;
-    if !matches!(publication, provenant_supervisor::fs::Publication::Durable) {
-        return Err("credential authority durability unconfirmed".into());
-    }
+    publication
+        .require_durable()
+        .map_err(|_| "credential authority durability unconfirmed")?;
     Ok(authority)
 }
 
@@ -1287,10 +1277,9 @@ fn launch_prompt(
         text.as_bytes(),
         PublishMode::NoReplace,
     ) {
-        Ok(provenant_supervisor::fs::Publication::Durable) => {}
-        Ok(provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { sync_error }) => {
-            return Err(sync_error.to_string());
-        }
+        Ok(publication) => publication
+            .require_durable()
+            .map_err(|error| error.to_string())?,
         Err(error) if error.is_exists() && matches(name)? => {}
         Err(error) => return Err(error.to_string()),
     }
@@ -1401,11 +1390,12 @@ fn read_only_plan(
     request: PlanRequest,
 ) -> Result<(ConfinedPlan, Option<provenant_core::GitOid>), String> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
-    use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
+    use provenant_os::exec::SystemExecutor;
+
     // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
     let utility_home = host_git_home(roots.state.as_path())?;
-    let utility = UtilityRuntime::new(std::sync::Arc::new(LocalFs), git, utility_home.path())
-        .map_err(|error| error.to_string())?;
+    let utility =
+        UtilityRuntime::new(git, utility_home.path()).map_err(|error| error.to_string())?;
     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
         .map_err(|error| error.to_string())?;
@@ -1435,7 +1425,7 @@ fn read_only_plan(
             .map_or(cwd, |repo| repo.common_git_dir()),
     )
     .map_err(|error| error.to_string())?;
-    let binding = provenant_config::lookup_project(roots, &location, &LocalFs)
+    let binding = provenant_config::lookup_project(roots, &location)
         .map_err(|error| error.to_string())?
         .ok_or("dispatch project binding missing")?;
     if binding.project_id() != project {
@@ -1472,7 +1462,7 @@ pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
     for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
         let candidate = directory.join(name);
-        if candidate.is_file() && provenant_supervisor::sys::is_executable(&candidate) {
+        if candidate.is_file() && provenant_os::sys::is_executable(&candidate) {
             return canonical(&candidate);
         }
     }
@@ -1480,7 +1470,7 @@ pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
 }
 
 fn canonical(path: &Path) -> Result<PathBuf, String> {
-    provenant_supervisor::fs::canonicalize(path).map_err(|error| error.to_string())
+    provenant_os::fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
 /// Generated files stay in scratch and links in scratch or private state.
@@ -1891,14 +1881,13 @@ mod tests {
         use provenant_core::{
             AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
         };
-        use provenant_supervisor::{
-            clock::SystemClock,
-            exec::{ExecOptions, Executor, SystemExecutor, Termination},
-            fs::{LocalFs, SafeFs},
-        };
+        use provenant_os::clock::SystemClock;
+        use provenant_os::exec::ExecOptions;
+        use provenant_os::exec::Executor;
+        use provenant_os::exec::SystemExecutor;
+        use provenant_os::exec::Termination;
         use std::{
             os::unix::fs::{DirBuilderExt, PermissionsExt},
-            sync::Arc,
             time::Duration,
         };
 
@@ -1912,7 +1901,7 @@ mod tests {
         for path in [&home, &state, &project, &assets, &git_home] {
             std::fs::DirBuilder::new().mode(0o700).create(path)?;
         }
-        let git = provenant_supervisor::git::git_executable()
+        let git = provenant_os::git::git_executable()
             .ok_or("git unavailable")?
             .canonicalize()?;
         let executor = SystemExecutor::new(1)?;
@@ -1947,15 +1936,14 @@ mod tests {
             state_dir: Some(state.clone()),
             ..provenant_core::RootInputs::new(home.clone(), project.clone())
         }
-        .resolve(&LocalFs)?;
-        let utility = UtilityRuntime::new(Arc::new(LocalFs), &git, &git_home)?;
+        .resolve(&provenant_os::fs::SystemPathResolver)?;
+        let utility = UtilityRuntime::new(&git, &git_home)?;
         let cancel = CancelToken::new();
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
         let binding = provenant_config::bind_project(
             &roots,
             provenant_config::ProjectLocation::new(repo.common_git_dir())?,
-            &LocalFs,
         )?;
         let worktree_state = state
             .join("worktrees")
@@ -1964,14 +1952,14 @@ mod tests {
             .recursive(true)
             .mode(0o700)
             .create(&worktree_state)?;
-        let project_state = LocalFs.open_anchor(&worktree_state)?;
+        let project_state = provenant_os::fs::Directory::open_anchor(&worktree_state)?;
         let clock = SystemClock::new();
         worktrees::create(
             &worktrees::WorktreeContext {
                 home: &home,
                 repo: &repo,
                 binding: &binding,
-                project_state: project_state.as_ref(),
+                project_state: &project_state,
                 executor: &executor,
                 utility: &utility,
                 workers: &worktrees::SystemWorkerObserver,
@@ -2200,7 +2188,7 @@ mod tests {
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo)?;
         std::fs::create_dir_all(base.join("home"))?;
-        let real = provenant_supervisor::git::git_executable().ok_or("git unavailable")?;
+        let real = provenant_os::git::git_executable().ok_or("git unavailable")?;
         // The smallest repository layout Git accepts, without spawning Git.
         for dir in [".git/objects", ".git/refs/heads"] {
             std::fs::create_dir_all(repo.join(dir))?;
@@ -2380,7 +2368,7 @@ mod tests {
                 let base = temp.path().canonicalize()?;
                 let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
                 inputs.state_dir = Some(base.join("state"));
-                let roots = inputs.resolve(&provenant_supervisor::fs::LocalFs)?;
+                let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
                 let context = run::ExecutionContext {
                     state_root: roots.state,
                     project_id: prior.project_id,

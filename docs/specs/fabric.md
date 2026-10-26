@@ -44,7 +44,7 @@ federation and the MCP surface. It delegates the rest.
   the typed result and never invents a route receipt. A receipt is copied from
   run exactly as `adapter/model@effort`.
 - **Supervisor and confinement** own process custody, the writer lock, worktrees
-  and safe Git ([supervisor](supervisor.md)). A Fabric work claim is advisory
+  and safe Git ([OS boundary](rust-workspace.md#crate-layering)). A Fabric work claim is advisory
   and never authority to write a worktree.
 - **Config and install** own `config.toml` edits and harness registration.
   `fabric-mcp` owns the registration arguments:
@@ -443,6 +443,9 @@ call with `peer_version`, naming the peer and both versions, for example:
 "peer workshop speaks protocol 1, this host speaks 2; upgrade both". Upgrade
 peers together; there is no capability list, negotiation or support for older
 peers. Each call uses one SSH connection.
+Every request carries a `trace`: the sending host, the acting agent's actor ID
+and the operation the action names, each `null` where it does not apply. Ingress
+refuses a request whose `trace.host` is not its `source_host`.
 Health data also carries `protocol`. Host lists retain mismatched peers with
 `available: false`, their remote `protocol` and `reason: "peer_version"`.
 Unprobed or unreachable hosts omit `protocol`. Fan-out uses at most four

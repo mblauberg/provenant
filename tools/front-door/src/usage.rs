@@ -7,8 +7,7 @@ use provenant_records::{CommandResult, Outcome};
 use provenant_telemetry::usage::{self, EVENT_KINDS};
 
 pub fn attribution_enabled(roots: &Roots) -> bool {
-    use provenant_supervisor::fs::LocalFs;
-    provenant_config::read_with_domains(roots, &LocalFs, &provenant_cli::domains::SECTIONS)
+    provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
         .ok()
         .and_then(|config| config.knobs.get("usage.project_attribution").cloned())
         .and_then(|knob| knob.value.as_bool())
@@ -19,15 +18,11 @@ pub fn project_id(resolved: &Resolved) -> Option<ProjectId> {
     if !attribution_enabled(&resolved.roots) {
         return None;
     }
-    use provenant_supervisor::fs::LocalFs;
-    use std::{sync::Arc, time::Duration};
-    let git = provenant_supervisor::git::git_executable()?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(
-        Arc::new(LocalFs),
-        std::fs::canonicalize(git).ok()?,
-    )
-    .ok()?;
-    let executor = provenant_supervisor::exec::SystemExecutor::new(1).ok()?;
+    use std::time::Duration;
+    let git = provenant_os::git::git_executable()?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(std::fs::canonicalize(git).ok()?).ok()?;
+    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(1)).ok()?;
     let location = runtime
         .project_location(
@@ -38,7 +33,7 @@ pub fn project_id(resolved: &Resolved) -> Option<ProjectId> {
         )
         .ok()?
         .location;
-    provenant_config::lookup_project(&resolved.roots, &location, &LocalFs)
+    provenant_config::lookup_project(&resolved.roots, &location)
         .ok()?
         .map(|binding| binding.project_id())
 }
@@ -130,8 +125,7 @@ mod tests {
         let project = base.join("project");
         std::fs::create_dir(&project)?;
         let location = provenant_config::ProjectLocation::new(&project)?;
-        let binding =
-            provenant_config::bind_project(&roots, location, &provenant_supervisor::fs::LocalFs)?;
+        let binding = provenant_config::bind_project(&roots, location)?;
         let expected_id = binding.project_id();
         let resolved = Resolved {
             assets: base.join("checkout"),
@@ -149,7 +143,7 @@ mod tests {
         )?;
         assert!(attribution_enabled(&resolved.roots));
         // No Git installation means best-effort attribution stays unavailable.
-        let expected = provenant_supervisor::git::git_executable().map(|_| expected_id);
+        let expected = provenant_os::git::git_executable().map(|_| expected_id);
         assert_eq!(project_id(&resolved), expected);
         Ok(())
     }

@@ -5,6 +5,7 @@ mod adapters;
 pub use adapters::{ADAPTER_SPECS, AdapterSpec, QuotaProbeKind};
 mod artifact_ref;
 mod attempt_fact;
+mod attempt_file;
 mod canonical;
 mod finding;
 mod install;
@@ -19,6 +20,7 @@ pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
     AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact, Usage,
 };
+pub use attempt_file::{AttemptFile, AttemptFileClass};
 pub use canonical::{CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest};
 pub use finding::Finding;
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};

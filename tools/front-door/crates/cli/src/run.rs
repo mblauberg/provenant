@@ -10,11 +10,12 @@ use provenant_core::{
     WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
+use provenant_os::{clock::SystemClock, fs::entropy_128};
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
-use provenant_supervisor::{clock::SystemClock, custody::ExitObservation, fs::entropy_128};
+use provenant_supervisor::custody::ExitObservation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -214,7 +215,7 @@ impl run::Providers for Registry<'_> {
         };
         let mut events = adapter.observe(&mut state, stdout).unwrap_or_default();
         let code = match exit.termination {
-            Some(provenant_supervisor::exec::Termination::Exit(code)) => Some(code),
+            Some(provenant_os::exec::Termination::Exit(code)) => Some(code),
             _ => None,
         };
         let timed_out =
@@ -436,7 +437,7 @@ pub fn execution_state(
     let mut inputs = provenant_core::RootInputs::new(home.into(), assets.into());
     inputs.state_dir = Some(path.into());
     let state = inputs
-        .resolve(&provenant_supervisor::fs::LocalFs)
+        .resolve(&provenant_os::fs::SystemPathResolver)
         .map_err(|error| Fail::new(Status::Refused, "LANE_CONTEXT", error.to_string()))?
         .state;
     if !state
@@ -468,7 +469,7 @@ fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
     let mut store =
         run::RunStore::open(&context, call)?.with_writer_registry(edge.roots.state.as_path());
     // Inside a lane the host binding may be unreadable; the trace then omits it.
-    if let Ok(host) = provenant_config::bind_host(edge.roots, &provenant_supervisor::fs::LocalFs) {
+    if let Ok(host) = provenant_config::bind_host(edge.roots) {
         store = store.with_host(host);
     }
     Ok(Session { store, context })
@@ -669,13 +670,13 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
         (None, _) => None,
     };
     // A first dispatch can precede the state root's creation; compare lexically then.
-    let state = provenant_supervisor::fs::canonicalize(state_root)
-        .unwrap_or_else(|_| state_root.to_path_buf());
+    let state =
+        provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
     let resolve = |paths: &[PathBuf], flag: &str| {
         paths
             .iter()
             .map(|path| {
-                let canonical = provenant_supervisor::fs::canonicalize(path)
+                let canonical = provenant_os::fs::canonicalize(path)
                     .ok()
                     .filter(|canonical| canonical.is_dir())
                     .ok_or_else(|| {
@@ -759,12 +760,8 @@ pub fn submit_with_host(
     };
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
-    let config = provenant_config::read_with_domains(
-        edge.roots,
-        &provenant_supervisor::fs::LocalFs,
-        &crate::domains::SECTIONS,
-    )
-    .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
     let profile = |class: Option<&str>| {
         config
             .dispatch_profile(class, &submission.knobs)
@@ -828,7 +825,7 @@ pub fn submit_with_host(
             task.base
                 .as_deref()
                 .map(|base| {
-                    let git = provenant_supervisor::git::git_executable()
+                    let git = provenant_os::git::git_executable()
                         .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?;
                     run::resolve_git_base(
                         &git,
@@ -1163,12 +1160,8 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
 fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
-    let config = provenant_config::read_with_domains(
-        roots,
-        &provenant_supervisor::fs::LocalFs,
-        &crate::domains::SECTIONS,
-    )
-    .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
     let max_depth = config
         .knobs
         .get("lanes.max_depth")
@@ -1319,7 +1312,7 @@ fn launch_on_host(
                         .map(|path| (name.into(), path))
                 })
                 .collect(),
-            git: provenant_supervisor::git::git_executable()
+            git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
             #[cfg(feature = "fixture")]
@@ -1540,6 +1533,21 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                     plain_text(&skipped.detail, usize::MAX)
                 ));
             }
+            if !lane.protected_paths.is_empty() {
+                human.push_str(&format!(
+                    "  review head={} paths={}\n",
+                    lane.head
+                        .map(|head| head.to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                    lane.protected_paths
+                        .iter()
+                        .map(|path| {
+                            plain_text(path.as_path_text().unwrap_or("[native path]"), usize::MAX)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
                     "  delivery {}:{} {:?} head={}\n",
@@ -1574,6 +1582,7 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 "read_only_writable": lane.read_only_writable,
                 "git_grants_digest": lane.git_grants_digest,
                 "head": lane.head,
+                "protected_paths": lane.protected_paths,
                 "delivery": lane.delivery,
                 "result_path": result,
             })
@@ -1826,9 +1835,22 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         ));
     }
     if command.trace {
+        let grants = json!({
+            "read_only_writable": record.read_only_writable,
+            "write_grants": record.write_grants,
+            "git_grants_digest": record.git_grants_digest,
+        });
+        let grant_lines = grants_lines(&record);
         let trace = trace_chain(&session.store, record, &call)?;
-        let human = trace.iter().map(trace_line).collect();
-        return Ok((json!({ "attempt_id": id, "trace": trace }), human));
+        let human = trace
+            .iter()
+            .map(trace_line)
+            .chain([grant_lines])
+            .collect::<String>();
+        return Ok((
+            json!({ "attempt_id": id, "trace": trace, "grants": grants }),
+            human,
+        ));
     }
     let part = match command.part {
         Part::Result => run::ArtifactPart::Result,
@@ -1870,9 +1892,16 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     }
     align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+    // The text alone cannot tell a clean success from one that needs the chair.
+    let reason = match &record.state {
+        run::AttemptState::Terminal { reason, .. } => reason.clone(),
+        _ => None,
+    };
     Ok((
         json!({
             "attempt_id": id,
+            "state": state_name(&record.state),
+            "reason": reason,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,
             "next_offset": chunk.next_offset,
@@ -1921,6 +1950,39 @@ fn trace_chain(
         }
     }
     Ok(chain)
+}
+/// The grants the launch applied, one line each. Older attempts show none.
+fn grants_lines(record: &run::AttemptRecord) -> String {
+    let mut text = String::new();
+    for grant in &record.write_grants {
+        let path = grant
+            .path
+            .to_path_buf()
+            .map_or_else(|_| "-".to_owned(), |p| p.display().to_string());
+        let [source, scope] = [
+            serde_json::to_value(grant.source),
+            serde_json::to_value(grant.scope),
+        ]
+        .map(|v| {
+            v.ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        });
+        text.push_str(&format!(
+            "grant write source={source} scope={scope} path={}\n",
+            plain_text(&path, usize::MAX)
+        ));
+    }
+    for path in &record.read_only_writable {
+        text.push_str(&format!(
+            "grant read_only_writable path={}\n",
+            plain_text(path, usize::MAX)
+        ));
+    }
+    if let Some(digest) = record.git_grants_digest {
+        text.push_str(&format!("grant git digest={digest}\n"));
+    }
+    text
 }
 fn trace_line(trace: &provenant_records::Trace) -> String {
     fn field(name: &str, value: Option<impl std::fmt::Display>) -> String {
@@ -2102,7 +2164,7 @@ fn reconcile_summary(state: &run::Reconciled) -> String {
             plain_text(reason, usize::MAX)
         ),
         run::Reconciled::Uncertain { reason } => {
-            format!("uncertain: {}", plain_text(reason, usize::MAX))
+            format!("uncertain: {}", plain_text(&reason.to_string(), usize::MAX))
         }
         _ => state_tag(state),
     }
@@ -2377,7 +2439,7 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let (_, store) = open_read_only(edge, &call)?;
-    let facts = store
+    let mut facts = store
         .map(|store| {
             store
                 .attempts(
@@ -2391,7 +2453,18 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         })
         .transpose()?
         .unwrap_or_default();
-    let trace = provenant_telemetry::trace(&facts, since);
+    let mut hosts = provenant_telemetry::Hosts::default();
+    let mut peers = Vec::new();
+    if command.peers
+        && let Some(found) = remote::peer_facts(edge, command.run)?
+    {
+        facts.extend(found.facts);
+        hosts.local = Some(found.local);
+        hosts.names = found.names;
+        hosts.names.insert(found.local, "this host".to_owned());
+        peers = found.hosts;
+    }
+    let trace = provenant_telemetry::trace(&facts, &hosts, since);
     let events = trace["traceEvents"].as_array().map_or(0, Vec::len);
     let bytes = serde_json::to_vec(&trace)
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
@@ -2403,9 +2476,19 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         )
     })?;
     let out = command.out.display().to_string();
+    let mut human = format!("{events} events written to {out}; open in ui.perfetto.dev\n");
+    for row in &peers {
+        if let Some(error) = row["error"].as_str() {
+            human.push_str(&format!(
+                "peer {} not read: {}\n",
+                row["host"].as_str().unwrap_or("?"),
+                plain_text(error, usize::MAX)
+            ));
+        }
+    }
     Ok((
-        json!({ "out": out, "events": events }),
-        format!("{events} events written to {out}; open in ui.perfetto.dev\n"),
+        json!({ "out": out, "events": events, "peers": peers }),
+        human,
     ))
 }
 
@@ -2532,9 +2615,10 @@ mod lane_depth_tests {
 mod tests {
     use super::*;
     use provenant_run::Providers;
-    use provenant_supervisor::custody::{
-        CaptureTotals, PublicationState, Scope, SettlementEvidence,
-    };
+    use provenant_supervisor::custody::CaptureTotals;
+    use provenant_supervisor::custody::PublicationState;
+    use provenant_supervisor::custody::Scope;
+    use provenant_supervisor::custody::SettlementEvidence;
 
     #[test]
     fn manifest_accepts_task_git_base() {
@@ -2554,10 +2638,12 @@ mod tests {
     fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{ActorId, ProjectId, RootInputs};
-        use provenant_supervisor::{
-            exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-            fs::LocalFs,
-        };
+        use provenant_os::exec::ExecOptions;
+        use provenant_os::exec::Executor;
+        use provenant_os::exec::StreamPolicy;
+        use provenant_os::exec::SystemExecutor;
+        use provenant_os::exec::Termination;
+
         use std::ffi::{OsStr, OsString};
         let executor = SystemExecutor::new(1)?;
         // The regression exercises a top-level submission, even when the
@@ -2600,8 +2686,8 @@ mod tests {
         std::fs::create_dir_all(&cwd)?;
         let mut inputs = RootInputs::new(home.clone(), cwd.clone());
         inputs.state_dir = Some(root.join("state"));
-        let roots = inputs.resolve(&LocalFs)?;
-        let git = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
             let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
                 .chain(
@@ -2761,7 +2847,7 @@ mod tests {
         let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
         inputs.state_dir = Some(root.join("state"));
         let context = run::ExecutionContext {
-            state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
             project_id: provenant_core::ProjectId::from_bytes([1; 16]),
             actor_id: provenant_core::ActorId::from_bytes([2; 16]),
             read_prompts: true,
@@ -2806,6 +2892,41 @@ mod tests {
         let line = trace_line(&chain[2]);
         assert_eq!(line.lines().count(), 1);
         assert!(line.contains("host=- ") && line.contains(&format!("attempt={missing} ")));
+        Ok(())
+    }
+
+    #[test]
+    fn grants_lines_list_each_applied_grant_and_stay_empty_for_older_attempts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let store = trace_store(&temp, &call)?;
+        let prepared = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+        store.create(&prepared, &call)?;
+        let mut record = store.record(prepared.attempts[0].attempt_id, &call)?;
+        assert_eq!(grants_lines(&record), "");
+        record.write_grants = vec![run::WriteGrantRecord {
+            source: run::WriteSource::WriteRoot,
+            path: provenant_records::AbsolutePath::new(std::path::Path::new("/work/shared"))?,
+            scope: run::PathScope::Subtree,
+        }];
+        record.read_only_writable = vec!["docs".into()];
+        record.git_grants_digest = Some(provenant_core::Digest::from_bytes([6; 32]));
+        let lines = grants_lines(&record);
+        let mut lines = lines.lines();
+        assert_eq!(
+            lines.next(),
+            Some("grant write source=write_root scope=subtree path=/work/shared")
+        );
+        assert_eq!(lines.next(), Some("grant read_only_writable path=docs"));
+        assert!(
+            lines
+                .next()
+                .is_some_and(|l| l.starts_with("grant git digest="))
+        );
+        assert_eq!(lines.next(), None);
         Ok(())
     }
 
@@ -2915,7 +3036,7 @@ mod tests {
         let remote = "or\x1bigin";
         let branch = "main\u{009b}line";
         let now = WallTime::from_micros(100)?;
-        let lane: run::AttemptRecord = serde_json::from_value(json!({
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([1; 16]),
             "run_id": RunId::from_bytes([2; 16]),
@@ -2944,7 +3065,7 @@ mod tests {
             "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
             "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
         }))?;
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(std::slice::from_ref(&lane), None, Path::new("/state"));
         assert_eq!(
             human,
             format!(
@@ -2975,6 +3096,28 @@ mod tests {
         );
         assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
         assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
+        lane.state = run::AttemptState::Terminal {
+            outcome: run::Outcome::ReviewRequired,
+            exit_code: Some(0),
+            finished_at: now,
+            reason: None,
+        };
+        lane.head = Some(provenant_core::GitOid::parse(&"a".repeat(40))?);
+        lane.protected_paths = vec![provenant_records::PathWire::from_relative(
+            &provenant_core::RelativePath::parse(".github/unsafe\npath.yml")?,
+        )?];
+        lane.delivery = None;
+        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert_eq!(data["lanes"][0]["state"], "review_required");
+        assert_eq!(data["lanes"][0]["head"], "a".repeat(40));
+        assert_eq!(
+            data["lanes"][0]["protected_paths"][0]["path"],
+            ".github/unsafe\npath.yml"
+        );
+        assert!(human.contains(&format!(
+            "review head={} paths=.github/unsafepath.yml",
+            "a".repeat(40)
+        )));
         Ok(())
     }
 
@@ -3029,6 +3172,50 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn render_lanes_shows_uncommitted_with_its_dirty_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let reason = "writer left uncommitted edits and no new commit: src/a.rs, b.txt";
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "uncommitted-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {
+                "state": "terminal",
+                "outcome": "uncommitted",
+                "finished_at": now,
+                "reason": reason
+            },
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 1,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        assert_eq!(settled(&lane.state), (true, false));
+        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert!(
+            human.contains(&format!(" uncommitted unresolved ({reason})\n")),
+            "{human}"
+        );
+        assert_eq!(data["lanes"][0]["state"], "uncommitted");
+        assert_eq!(data["lanes"][0]["reason"], json!(reason));
+        Ok(())
+    }
+    #[test]
     fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
@@ -3072,7 +3259,7 @@ mod tests {
         .map_err(|fail| fail.message)?;
         assert_eq!(
             granted.write_roots,
-            [provenant_supervisor::fs::canonicalize(&project)?]
+            [provenant_os::fs::canonicalize(&project)?]
         );
         for refused in [
             state.join("projects"),
@@ -3118,7 +3305,7 @@ mod tests {
                 attempt: AttemptId::from_bytes([2; 16]),
                 generation: 1,
             },
-            termination: Some(provenant_supervisor::exec::Termination::Exit(1)),
+            termination: Some(provenant_os::exec::Termination::Exit(1)),
             never_spawned: false,
             stop_reason: None,
             delivered_signals: vec![],
@@ -3197,7 +3384,7 @@ mod tests {
                 attempt: AttemptId::from_bytes([2; 16]),
                 generation: 1,
             },
-            termination: Some(provenant_supervisor::exec::Termination::Exit(0)),
+            termination: Some(provenant_os::exec::Termination::Exit(0)),
             never_spawned: false,
             stop_reason: None,
             delivered_signals: vec![],
@@ -3219,7 +3406,7 @@ mod tests {
     #[test]
     fn codex_rate_limit_reaches_the_decoded_outcome() {
         let mut exit = clean_exit();
-        exit.termination = Some(provenant_supervisor::exec::Termination::Exit(1));
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
         let route = run::RouteRecord {
             provider: Some("codex".into()),
             model: Some("codex/gpt-6-luna".into()),

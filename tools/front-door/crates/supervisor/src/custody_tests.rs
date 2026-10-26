@@ -1,5 +1,5 @@
 use super::*;
-use crate::clock::SystemClock;
+use provenant_os::clock::SystemClock;
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 
@@ -201,7 +201,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     writer.reservation.census_incomplete = false;
     writer.reservation.attempt_device = Some(meta.device);
     writer.reservation.attempt_inode = Some(meta.inode);
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         &writer.directory,
         "reservation.json",
         &writer.reservation,
@@ -222,13 +222,13 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     let manifest = serde_json::to_vec(
         &serde_json::json!({"schema_version":1,"scope":scope(),"kind":"quarantine_manifest"}),
     )?;
-    require_durable(held.atomic_write(
+    Publication::require_durable(held.atomic_write(
         OsStr::new("terminal-commit.json"),
         ".test-",
         &terminal,
         PublishMode::NoReplace,
     )?)?;
-    require_durable(quarantine.atomic_write(
+    Publication::require_durable(quarantine.atomic_write(
         OsStr::new("manifest.json"),
         ".test-",
         &manifest,
@@ -240,7 +240,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         terminal_digest: provenant_records::CanonicalV1::file_digest(&terminal),
         quarantine_digest: provenant_records::CanonicalV1::file_digest(b"wrong"),
     };
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         &held,
         "release.json",
         &release,
@@ -248,7 +248,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     )?)?;
     assert!(recovery.verify_settlement(&held).is_err());
     release.quarantine_digest = provenant_records::CanonicalV1::file_digest(&manifest);
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         &held,
         "release.json",
         &release,
@@ -257,7 +257,8 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     let commit = recovery.verify_settlement(&held)?;
     let scratch_dir = tempfile::tempdir()?;
     std::fs::set_permissions(scratch_dir.path(), std::fs::Permissions::from_mode(0o700))?;
-    let mut scratch = crate::scratch::Scratch::new(Directory::open_anchor(scratch_dir.path())?)?;
+    let mut scratch =
+        provenant_os::scratch::Scratch::new(Directory::open_anchor(scratch_dir.path())?)?;
     scratch.create(OsStr::new("generated"), b"temporary")?;
     std::fs::write(scratch_dir.path().join("transcript"), b"retain")?;
     recovery.settle(commit, &mut scratch)?;

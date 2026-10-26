@@ -5,8 +5,8 @@ use crate::{
     identity::{CrossHostProjectKey, Identity},
 };
 use provenant_core::{ActorId, CancelToken, Clock, HostId, OperationId, WaitBudget};
-use provenant_records::{CanonicalV1, Limits};
-use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+use provenant_records::{CanonicalV1, Limits, Trace};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -22,7 +22,7 @@ pub fn discover_ssh_executable(
 ) -> Result<std::path::PathBuf, PeerError> {
     if let Some(path) = override_path {
         if !crate::config::valid_executable_override(path)
-            || !provenant_supervisor::sys::is_executable(path)
+            || !provenant_os::sys::is_executable(path)
         {
             return Err(PeerError::Unavailable);
         }
@@ -31,7 +31,7 @@ pub fn discover_ssh_executable(
     ["/usr/bin/ssh", "/bin/ssh"]
         .into_iter()
         .map(Path::new)
-        .find(|path| provenant_supervisor::sys::is_executable(path))
+        .find(|path| provenant_os::sys::is_executable(path))
         .map(Path::to_path_buf)
         .ok_or(PeerError::Unavailable)
 }
@@ -264,8 +264,38 @@ pub struct PeerRequest<A = PeerAction> {
     pub agent: String,
     pub project: ProjectLocator,
     pub action: A,
+    /// Who sent this and for which operation, for correlation on the peer.
+    #[serde(default)]
+    pub trace: Trace,
 }
 impl PeerRequest {
+    /// A request from this host: the trace names the sending host, the acting
+    /// agent and the operation the action carries, and nothing else.
+    pub fn new(
+        target_host: HostId,
+        source_host: HostId,
+        agent: String,
+        project: ProjectLocator,
+        action: PeerAction,
+    ) -> Self {
+        let mut request = Self {
+            version: 1,
+            protocol: PROTOCOL,
+            target_host,
+            source_host,
+            agent,
+            project,
+            action,
+            trace: Trace::default(),
+        };
+        request.trace = Trace {
+            host: Some(source_host),
+            actor: request.actor().ok(),
+            operation: request.operation(),
+            ..Trace::default()
+        };
+        request
+    }
     pub fn operation(&self) -> Option<OperationId> {
         match &self.action {
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
@@ -299,6 +329,9 @@ impl PeerRequest {
     ) -> Result<(), PeerError> {
         if self.version != 1 || self.target_host != local {
             return Err(PeerError::Version);
+        }
+        if self.trace.host.is_some_and(|host| host != self.source_host) {
+            return Err(PeerError::SourceHost);
         }
         if self.source_host == local
             || !config
@@ -608,7 +641,7 @@ impl PeerTransport for SshTransport<'_> {
 mod tests {
     use super::*;
     use provenant_core::{MonoTime, TestClock, WallTime};
-    use provenant_supervisor::exec::{CapturedStream, ExecError, ExecOutcome};
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -656,6 +689,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: local,
             source_host: local,
+            trace: Default::default(),
             agent: "fixture".into(),
             project: ProjectLocator {
                 key: CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap(),
@@ -680,11 +714,44 @@ mod tests {
         );
         request.source_host = remote;
         assert!(request.validate(local, &config, home).is_ok());
+        // A trace that names another host than the sender is refused.
+        request.trace.host = Some(local);
+        assert!(matches!(
+            request.validate(local, &config, home),
+            Err(PeerError::SourceHost)
+        ));
+        request.trace.host = Some(remote);
+        assert!(request.validate(local, &config, home).is_ok());
         request.source_host = HostId::from_bytes([3; 16]);
         assert!(matches!(
             request.validate(local, &config, home),
             Err(PeerError::SourceHost)
         ));
+    }
+
+    #[test]
+    fn new_requests_trace_the_sender_and_the_operation() {
+        let (local, remote) = (HostId::from_bytes([1; 16]), HostId::from_bytes([2; 16]));
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(Path::new("/h"), Path::new("/h/repo/.git"))
+                .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let operation = OperationId::parse("note-once").unwrap();
+        let note: PeerAction = serde_json::from_value(serde_json::json!({
+            "action": "coordination",
+            "input": {"domain": "events", "input": {"op": "note", "note": "n", "dedup_key": null}},
+            "operation_id": "note-once",
+        }))
+        .unwrap();
+        let request = PeerRequest::new(remote, local, "worker".into(), project.clone(), note);
+        assert_eq!(request.trace.host, Some(local));
+        assert_eq!(request.trace.actor, Some(request.actor().unwrap()));
+        assert_eq!(request.trace.operation, Some(operation));
+        let health = PeerRequest::new(remote, local, "worker".into(), project, PeerAction::Health);
+        assert_eq!(health.trace.operation, None);
+        assert_eq!((health.version, health.protocol), (1, PROTOCOL));
+        assert_eq!(health.target_host, remote);
     }
 
     #[test]
@@ -864,6 +931,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project,
             action: PeerAction::Coordination {
@@ -943,6 +1011,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: HostId::from_bytes([1; 16]),
+            trace: Default::default(),
             agent: "chair".into(),
             project: ProjectLocator {
                 key: CrossHostProjectKey::from_home(
@@ -1133,6 +1202,7 @@ mod tests {
                     protocol: PROTOCOL,
                     target_host: host,
                     source_host: HostId::from_bytes([1; 16]),
+                    trace: Default::default(),
                     agent: "chair".into(),
                     project: project.clone(),
                     action: action.clone(),
@@ -1229,6 +1299,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project: ProjectLocator {
                 key: CrossHostProjectKey::from_home(
@@ -1303,6 +1374,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project,
             action: PeerAction::Health,
@@ -1356,6 +1428,7 @@ mod tests {
             protocol: PROTOCOL,
             target_host: host,
             source_host: local,
+            trace: Default::default(),
             agent: "chair".into(),
             project,
             action: PeerAction::Health,

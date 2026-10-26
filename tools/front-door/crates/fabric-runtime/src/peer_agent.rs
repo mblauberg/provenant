@@ -8,10 +8,7 @@
 //! the request itself otherwise.
 use crate::hosts::MAX_FRAME;
 use provenant_core::Roots;
-use provenant_supervisor::{
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-    fs::LocalFs,
-};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},
@@ -66,7 +63,7 @@ pub enum AgentError {
     #[error("launchctl {0} failed: {1}")]
     Launchctl(&'static str, String),
     #[error(transparent)]
-    Exec(#[from] provenant_supervisor::exec::ExecError),
+    Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -79,9 +76,7 @@ fn directory(state: &Path) -> PathBuf {
 /// plant the socket or connect to it.
 fn private(directory: &Path) -> bool {
     fs::symlink_metadata(directory).is_ok_and(|meta| {
-        meta.is_dir()
-            && meta.uid() == provenant_supervisor::fs::effective_uid()
-            && meta.mode() & 0o077 == 0
+        meta.is_dir() && meta.uid() == provenant_os::fs::effective_uid() && meta.mode() & 0o077 == 0
     })
 }
 
@@ -465,7 +460,7 @@ fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError>
         .mode(0o700)
         .create(directory(state))?;
     let plist = plist(home);
-    let domain = format!("gui/{}", provenant_supervisor::fs::effective_uid());
+    let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
     let loaded = launchctl(&["print".as_ref(), service.as_ref()], home)?.0;
     if loaded && !changed {
@@ -527,11 +522,10 @@ pub fn eligible(state: &Path, home: &Path) -> bool {
         return false;
     };
     let home = home.as_path();
-    let account_home =
-        provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
-            .ok()
-            .flatten()
-            .and_then(|account| fs::canonicalize(PathBuf::from(account.home)).ok());
+    let account_home = provenant_os::sys::account(provenant_os::sys::Account::Current)
+        .ok()
+        .flatten()
+        .and_then(|account| fs::canonicalize(PathBuf::from(account.home)).ok());
     if !cfg!(target_os = "macos")
         || account_home.as_deref() != Some(home)
         || state != home.join(".local/share/provenant/v1")
@@ -595,7 +589,7 @@ pub type RegistryName = fn(&Path) -> OsString;
 impl Projects {
     #[allow(clippy::print_stderr)]
     fn registered(roots: &Roots, registry_name: RegistryName) -> Self {
-        let common_dirs = match provenant_config::registered_projects(roots, &LocalFs) {
+        let common_dirs = match provenant_config::registered_projects(roots) {
             Ok(bindings) => bindings
                 .iter()
                 .map(|binding| binding.common_dir().to_path_buf())
@@ -699,7 +693,7 @@ fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
             .filter(|dir| dir.is_absolute())
             .filter(|dir| {
                 let path = dir.join(name);
-                path.is_file() && provenant_supervisor::sys::is_executable(&path)
+                path.is_file() && provenant_os::sys::is_executable(&path)
             })
             .find(|dir| match project_worktree(dir, projects) {
                 Some(root) => {
@@ -729,7 +723,7 @@ pub fn install_plist(
     let search = std::env::var_os("PATH").unwrap_or_default();
     let projects = Projects::registered(roots, registry_name);
     let mut executables = provider_executables(&search, &projects);
-    executables.extend(provenant_supervisor::git::git_executable());
+    executables.extend(provenant_os::git::git_executable());
     let bin = program
         .parent()
         .ok_or_else(|| AgentError::Path(program.into()))?;
@@ -758,11 +752,7 @@ pub fn previous_plist(
     let parent = path
         .parent()
         .ok_or_else(|| AgentError::Path(path.clone()))?;
-    let dir = match provenant_config::private_directory(
-        parent,
-        false,
-        &provenant_supervisor::fs::LocalFs,
-    ) {
+    let dir = match provenant_config::private_directory(parent, false) {
         Ok(dir) => dir,
         Err(provenant_config::InstallError::Fs(error)) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(io::Error::other(error).into()),
@@ -791,7 +781,7 @@ fn stop_with(
     home: &Path,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<(), AgentError> {
-    let service = format!("gui/{}/{LABEL}", provenant_supervisor::fs::effective_uid());
+    let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
     if run(&["print".as_ref(), service.as_ref()], home)?.0 {
         let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {
@@ -973,7 +963,9 @@ mod tests {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("home"));
         inputs.state_dir = Some(state);
-        let roots = inputs.resolve(&LocalFs).unwrap();
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
         (temp, base, roots)
     }
 
@@ -981,7 +973,7 @@ mod tests {
         use super::*;
         fs::create_dir_all(root.join(".git")).unwrap();
         let location = provenant_config::ProjectLocation::new(root.join(".git")).unwrap();
-        provenant_config::bind_project(roots, location, &LocalFs).unwrap();
+        provenant_config::bind_project(roots, location).unwrap();
     }
 
     fn provider(path: &std::path::Path) {

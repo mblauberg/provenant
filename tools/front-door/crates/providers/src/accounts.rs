@@ -1,7 +1,7 @@
 //! Durable non-secret registrations and host identity checks.
 use crate::{ProviderError, host::PROBE_DIR_OPERATION, identity::RegisteredAccount};
 use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
-use provenant_supervisor::{
+use provenant_os::{
     exec::{ExecError, ExecOptions, Executor, StreamPolicy, Termination},
     fs::{ReadOptions, read_following},
 };

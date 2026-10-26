@@ -4,7 +4,7 @@ use crate::permissions::{
     PlanPermissions, ProviderProfile,
 };
 use provenant_core::{RelativePath, WorkScope};
-use provenant_supervisor::home::{HomeError, HomeFiles, HomeRecipe};
+use provenant_os::home::{HomeError, HomeFiles, HomeRecipe};
 pub use read_only::{ReadOnlyGrants, ReadOnlyPolicy};
 use std::path::PathBuf;
 use thiserror::Error;

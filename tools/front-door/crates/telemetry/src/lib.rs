@@ -1,6 +1,6 @@
 //! Pure usage and API-equivalent cost reduction over terminal attempt facts,
 //! and the local demand-counter log (`usage`), written through the
-//! supervisor's safe filesystem API.
+//! OS crate's held filesystem handles.
 #![forbid(unsafe_code)]
 
 mod prices;
@@ -12,4 +12,4 @@ pub use prices::{
     PriceTable, Rates, validate_prices,
 };
 pub use reducer::*;
-pub use trace::trace;
+pub use trace::{Hosts, trace};

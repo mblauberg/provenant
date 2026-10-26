@@ -1,7 +1,7 @@
 //! GC composition for terminal provider state, including nested run stores.
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots, WaitBudget};
+use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
-use provenant_supervisor::{clock::SystemClock, fs::Directory};
 use std::{ffi::OsStr, path::Path};
 
 pub(crate) fn collect(
@@ -112,7 +112,6 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, OperationId, RootInputs, RunId, TaskId, WallTime};
     use provenant_records::CanonicalV1;
-    use provenant_supervisor::fs::LocalFs;
     use std::{fs, os::unix::fs::DirBuilderExt};
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
@@ -121,7 +120,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     fs::create_dir(&assets)?;
     let mut inputs = RootInputs::new(home.clone(), assets.clone());
     inputs.state_dir = Some(base.join("state"));
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let child_path = roots.state.as_path().join("children/child");
     fs::DirBuilder::new()
         .recursive(true)
@@ -129,7 +128,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         .create(&child_path)?;
     inputs.state_dir = Some(child_path.clone());
     let context = ExecutionContext {
-        state_root: inputs.resolve(&LocalFs)?.state,
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
         project_id: ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
         read_prompts: false,

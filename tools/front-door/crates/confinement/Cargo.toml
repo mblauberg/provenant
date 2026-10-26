@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-core = { workspace = true }
 provenant-config = { workspace = true }
 provenant-records = { workspace = true }

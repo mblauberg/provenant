@@ -12,8 +12,8 @@ use provenant_core::{
     ActorId, CancelToken, ClaimId, Clock, DurationMicros, GitOid, MessageId, ProjectId, StateRoot,
     TaskId, WaitBudget, WaitTransport,
 };
+use provenant_os::fs::FsError;
 use provenant_records::{ArtifactRef, RecordHeader};
-use provenant_supervisor::fs::{FsError, LocalFs, SafeFs};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -481,7 +481,7 @@ impl<'a> LocalCoordination<'a> {
     }
 
     fn new_id_bytes() -> Result<[u8; 16], CoordinationError> {
-        LocalFs.entropy_128().map_err(CoordinationError::Entropy)
+        provenant_os::fs::entropy_128().map_err(CoordinationError::Entropy)
     }
 
     fn task_fence(&self, proof: &TaskProof) -> provenant_fabric_store::TaskFence {
@@ -539,7 +539,7 @@ impl CoordinationApi for LocalCoordination<'_> {
     ) -> Result<MutationResult, CoordinationError> {
         let operation_id = operation_id.unwrap_or(
             provenant_core::OperationId::parse(&provenant_core::hex(
-                &provenant_supervisor::fs::entropy_128().map_err(CoordinationError::Entropy)?,
+                &provenant_os::fs::entropy_128().map_err(CoordinationError::Entropy)?,
             ))
             .map_err(|_| CoordinationError::EntropyEncoding)?,
         );
@@ -1148,7 +1148,7 @@ mod tests {
             MonoTime::from_micros(0)
         }
         fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-            Ok(())
+            unreachable!("fixed-time test clock never waits")
         }
     }
 

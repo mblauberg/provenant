@@ -4,11 +4,6 @@
 //! hold build output whose `*.lock` names guard nothing once custody clears.
 use super::*;
 
-/// Grant for one payload removal. Only `PayloadTree` constructs it, so a
-/// `SafeDir` adapter can forward a removal but no caller can start one.
-#[derive(Debug)]
-pub struct PayloadRemoval(());
-
 /// A claimed payload directory and its descendants. Unlike ordinary handles,
 /// `unlink` and `rmdir` here also remove lock-named entries, still without
 /// following a final link.
@@ -17,7 +12,7 @@ pub struct PayloadRemoval(());
 /// deliberate opt-in rather than proof of custody. Callers must already hold
 /// whatever lock or reservation excludes every live user of the tree, and
 /// must never claim supervisor state that contains stable owner locks.
-pub struct PayloadTree(Box<dyn SafeDir>);
+pub struct PayloadTree(Directory);
 
 impl PayloadTree {
     /// Open `name` under `parent` as a payload root. The opened directory must
@@ -25,7 +20,7 @@ impl PayloadTree {
     /// group or other access; anything else is refused before any removal.
     /// Owner bits may be narrower than rwx, so walkers widen them through
     /// `make_writable` before removing entries.
-    pub fn claim(parent: &dyn SafeDir, name: &OsStr, expected: &Metadata) -> Result<Self> {
+    pub fn claim(parent: &Directory, name: &OsStr, expected: &Metadata) -> Result<Self> {
         let directory = parent.open_verified_directory(name)?;
         let opened = directory.metadata()?;
         if !expected.same_identity(&opened) {
@@ -38,8 +33,8 @@ impl PayloadTree {
     }
     /// Ordinary operations on the claimed directory. These keep lock-name
     /// protection; only this tree's `unlink` and `rmdir` dispose of payload.
-    pub fn directory(&self) -> &dyn SafeDir {
-        self.0.as_ref()
+    pub fn directory(&self) -> &Directory {
+        &self.0
     }
     pub fn metadata(&self) -> Result<Metadata> {
         self.0.metadata()
@@ -47,7 +42,7 @@ impl PayloadTree {
     pub fn metadata_at(&self, name: &OsStr) -> Result<Metadata> {
         self.0.metadata_at(name, false)
     }
-    pub fn entries(&self) -> Result<Box<dyn Iterator<Item = Result<OsString>>>> {
+    pub fn entries(&self) -> Result<Entries> {
         self.0.entries()
     }
     pub fn make_writable(&self) -> Result<()> {
@@ -59,9 +54,18 @@ impl PayloadTree {
         Ok(Self(self.0.open_verified_directory(name)?))
     }
     pub fn unlink(&self, name: &OsStr) -> Result<()> {
-        self.0.remove_payload(name, false, PayloadRemoval(()))
+        self.remove(name, false)
+    }
+    fn remove(&self, name: &OsStr, directory: bool) -> Result<()> {
+        let name = component(name)?;
+        let operation = if directory {
+            "rmdir payload"
+        } else {
+            "unlinkat payload"
+        };
+        os::unlink(&self.0.file, name, directory).map_err(error(operation, &self.0.path.join(name)))
     }
     pub fn rmdir(&self, name: &OsStr) -> Result<()> {
-        self.0.remove_payload(name, true, PayloadRemoval(()))
+        self.remove(name, true)
     }
 }

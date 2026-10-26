@@ -2,7 +2,7 @@
 use super::{CheckError, GitContext, Scan, WorkingFile, checked_bytes, index_records, read_file};
 use provenant_confinement::utility::{GitObjectKind, GitRead};
 use provenant_core::GitOid;
-use provenant_supervisor::exec::Termination;
+use provenant_os::exec::Termination;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 

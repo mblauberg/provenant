@@ -1,9 +1,10 @@
 //! Read-only lane-cache and worktree disk inventory.
-use crate::permissions::{
+use crate::cache::{
     CARGO_CACHE_OWNER, CacheGcPolicy, CacheGcReason, LEGACY_CARGO_CACHE_OWNER_PREFIX,
-    PermissionError, cache_gc_reason_with_newest, cache_owner_fingerprint, cache_tombstone,
-    is_cache_digest, read_cache_owner,
+    cache_gc_reason_with_newest, cache_owner_fingerprint, cache_tombstone, is_cache_digest,
+    read_cache_owner,
 };
+use crate::permissions::PermissionError;
 use crate::repo::VerifiedRepo;
 use crate::utility::{GitRead, UtilityBudget, UtilityRuntime, run_utility};
 use crate::worktrees::{
@@ -11,9 +12,11 @@ use crate::worktrees::{
     WorktreeInfo, WriterState, combine_worker_state, disk_writer_state, parse_worktree_list,
 };
 use provenant_core::CancelToken;
-use provenant_supervisor::disk::DiskReport;
-use provenant_supervisor::exec::{Executor, Termination};
-use provenant_supervisor::fs::{Directory, FileKind, SafeDir, effective_uid, entry_names};
+use provenant_os::{
+    disk::DiskReport,
+    exec::{Executor, Termination},
+    fs::{Directory, FileKind, effective_uid, entry_names},
+};
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -94,7 +97,7 @@ pub fn lane_caches(home: &Path, policy: &CacheGcPolicy, report: &mut DiskReport)
 }
 
 fn classify_lane_cache(
-    cache: &dyn SafeDir,
+    cache: &Directory,
     relative: &Path,
     policy: &CacheGcPolicy,
     newest_write_ns: i128,
@@ -286,7 +289,7 @@ pub fn worktrees(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permissions::CARGO_CACHE_OWNER_PREFIX;
+    use crate::cache::CARGO_CACHE_OWNER_PREFIX;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn marker(path: &Path, owner: &Path) -> Result<(), Box<dyn std::error::Error>> {

@@ -394,7 +394,6 @@ mod tests {
     fn homebrew_launch_plan_anchors_with_default_xdg_homes() {
         use provenant_confinement::permissions::snapshot::compile;
         use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
-        use provenant_supervisor::fs::LocalFs;
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -446,7 +445,7 @@ mod tests {
             let directories = required_anchors(plan.permissions(), &spec.profile, None)
                 .into_iter()
                 .map(|path| {
-                    AnchoredDirectory::open_canonical(&LocalFs, &path).unwrap_or_else(|error| {
+                    AnchoredDirectory::open_canonical(&path).unwrap_or_else(|error| {
                         panic!("{access:?} anchor {} refused: {error}", path.display())
                     })
                 })
@@ -454,7 +453,6 @@ mod tests {
             let anchors = Anchors {
                 home: &home,
                 directories: &directories,
-                safe_fs: &LocalFs,
                 worktree: None,
             };
             let launch = compile(plan.permissions(), &spec.profile, &anchors)

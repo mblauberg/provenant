@@ -52,10 +52,10 @@ and `provenant help <verb>` lists the flags.
 | --- | --- |
 | `dispatch` | One prompt (`--prompt-file` or `--prompt-stdin`) or `--manifest`. `--operation-id` is required and makes retries idempotent. Optional `--task-id`, `--delivery-id`, `--host`, `--base` and, for delivery, `--deliver-remote`, `--deliver-branch`, `--open-pr` and `--branch`. Detached unless `--wait` is given. It returns exact IDs, route, state and artifact paths. |
 | `lanes` | Lists lanes by `--id`, `--state`, `--since`, `--all`, `--limit` (1 to 100) and `--cursor`. With `--wait` it waits for `--condition any` (default) or `all`. Read-only otherwise; no implicit repair. |
-| `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. `--trace` instead prints the attempt's trace and its parent chain, one hop per line (a `trace` array in `--json`). |
+| `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. `--trace` instead prints the attempt's trace and its parent chain, one hop per line (a `trace` array in `--json`), then the grants applied at launch: write grants, read-only exceptions and the Git grants digest (a `grants` object in `--json`). |
 | `cancel` | Target `RUN[/TASK[/ATTEMPT]]` with a required `--operation-id`, optional `--reason` and `--wait`. It returns requested, already terminal or unobservable, plus custody. Accepted cancellation does not prove exit. |
 | `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
-| `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. It never replays an uncertain launch. |
+| `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. An uncertain reason is typed (`reason.kind`, for example `writer_custody_unconfirmed` or `guardian_not_observable`), with the underlying error text or path alongside. It never replays an uncertain launch. |
 
 When a terminal attempt has no requested output, local and peer reads report
 `NOT_FOUND` (facade code `not_found`, exit 2). An active attempt still
@@ -146,6 +146,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     prompt.txt                 # run-owned immutable prompt
     prompt.md                  # full launch prompt, only for top-level argv spills
     result.md                  # run-owned sealed result, including failure
+    writer-terminal.json       # checked candidate head and protected paths
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
     provider-state/            # resumable private state with bounded retention
     provider-history/          # transcripts archived when resume state expires
@@ -157,6 +158,11 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
 
 The supervisor file names inside an attempt directory are the run and
 supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
+
+`AttemptFile` (in `records`) is the one typed list of the entries an attempt
+directory may hold. `output`, the disk report and provider-state retention name
+entries and classify them through it (temporary, provider state, retained
+captures and history, or sealed record) rather than by literal file name.
 
 Launch prompts, including the durable-output preamble, are bounded to 1 MiB
 for every adapter. Claude, Codex and OpenCode receive the full launch text on
@@ -211,7 +217,9 @@ the worktree writer lock is not held during deletion.
 
 Nested submission uses a dedicated store under the submitting attempt, selected
 by `PROVENANT_RUN_STATE_DIR`, while identity and config stay on the original
-root. A host-side worker launches only runs whose operation is accepted. See
+root. A host-side worker launches only runs whose operation is accepted. A
+child may use a different adapter or account from its parent, by design; the
+host does not bind the two. See
 [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 
 A project may grant write exceptions to a read-only run in
@@ -237,6 +245,9 @@ Stored records:
   applied and observed route and effort, confinement, subject identity,
   deadlines, custody, timestamps, state, outcome, usage with source, artifact
   paths and digests, and publication errors. It also carries a `Trace`.
+  Writers retain their candidate `head` and `protected_paths` (contained
+  `PathWire` values) when terminal checks complete. CLI lane JSON and MCP run
+  records expose both fields.
 - `AttemptFact`: a `Serialize`-only terminal projection built from validated
   records. It carries the resolved route and account label, usage, reviewer,
   `delivery_id`, `queued_at`, optional `started_at`, `provider_ms` and the
@@ -262,7 +273,13 @@ Attempt states run `queued`, `starting`, `running`, `settling`, `terminal`;
 refusal, queued cancellation and spawn failure can end before `running`. The
 outcomes are `succeeded`, `failed`, `rejected`, `cancelled`, `timed_out`,
 `rate_limited`, `quota_limited`, `auth_required`, `model_unavailable`,
-`permission_denied`, `quarantined`, `lost` and `input_required`. A dead owner
+`permission_denied`, `quarantined`, `review_required`, `lost`, `uncommitted` and
+`input_required`. A completed writer whose protected changes need review ends
+as `review_required`, retains its candidate head and protected paths, and skips
+automatic delivery. It is terminal for lane waits and accepts the
+`lanes --state review_required` filter. A writer that succeeds with edits left
+uncommitted and no new commit ends `uncommitted`, naming the dirty paths, and
+skips host delivery. A dead owner
 is not a failed provider: unresolved custody stays an observation until
 supervisor proves exit or loss. A natural completion wins over a late
 cancellation or deadline. Success needs supervisor-observed exit 0, a matching

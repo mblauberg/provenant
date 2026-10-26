@@ -5,18 +5,13 @@ use provenant_confinement::{
     push::{PushContext, PushUpdate},
 };
 use provenant_core::{CancelToken, DurationMicros, GitOid};
-use provenant_supervisor::{
-    clock::SystemClock,
-    exec::SystemExecutor,
-    fs::{LocalFs, SafeFs},
-    sys::hook_io,
-};
+use provenant_os::{clock::SystemClock, exec::SystemExecutor, sys::hook_io};
 use provenant_workflow::session::{HookEvent, HostSessionId};
 use serde::Deserialize;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 const INPUT_CAP: usize = 1024 * 1024;
@@ -141,12 +136,8 @@ fn guard_config(globals: &Globals, cwd: &Path) -> provenant_confinement::guard::
             crate::roots::Product::Required,
         )?
         .roots;
-        let domains = provenant_config::read_with_domains(
-            &roots,
-            &LocalFs,
-            &provenant_cli::domains::SECTIONS,
-        )?
-        .domains;
+        let domains =
+            provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?.domains;
         Ok(domains.guard)
     };
     read().unwrap_or_default()
@@ -228,8 +219,8 @@ fn checkpoint(
         let location = runtime
             .project_location(executor, &project, budget, cancel)?
             .location;
-        let binding = provenant_config::lookup_project(&roots, &location, &LocalFs)?
-            .ok_or("project not bound")?;
+        let binding =
+            provenant_config::lookup_project(&roots, &location)?.ok_or("project not bound")?;
         Ok(provenant_workflow::session::hook_context(
             &roots.state,
             binding.project_id(),
@@ -249,13 +240,13 @@ fn with_git<T>(
     ) -> Result<T, Error>,
 ) -> Result<T, Error> {
     let temp = std::fs::canonicalize(std::env::temp_dir())?;
-    let anchor = LocalFs.open_anchor(&temp)?;
-    let name = LocalFs.temporary_name()?;
+    let anchor = provenant_os::fs::Directory::open_anchor(&temp)?;
+    let name = provenant_os::fs::temporary_name()?;
     anchor.mkdir(&name, 0o700)?;
     let result = (|| {
-        let git = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let git = std::fs::canonicalize(git)?;
-        let runtime = UtilityRuntime::new(Arc::new(LocalFs), git, temp.join(&name))?;
+        let runtime = UtilityRuntime::new(git, temp.join(&name))?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(1))?;
         operation(&runtime, &executor, budget, &CancelToken::new())

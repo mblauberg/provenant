@@ -7,10 +7,13 @@ structured output. The contract is in the [telemetry spec](../specs/telemetry.md
 
 ## Offline timeline
 
-`provenant telemetry trace [--out FILE] [--since 7d] [--run ID]` writes retained
-attempts as Chrome Trace Event JSON (default `provenant-trace.json`), with one
-process per task and one thread per attempt. Open the file in ui.perfetto.dev
-or chrome://tracing; no collector is needed.
+`provenant telemetry trace [--out FILE] [--since 7d] [--run ID] [--peers]` writes
+retained attempts as Chrome Trace Event JSON (default `provenant-trace.json`),
+with one process per host and one thread per attempt; arrows join a child
+attempt to its parent, across hosts too. Open the file in ui.perfetto.dev or
+chrome://tracing; no collector is needed. Add `--peers` to read each configured
+peer's newest 100 lanes as well, whoever placed them; an unreachable peer is
+reported and skipped.
 
 ## Local usage counters
 
@@ -30,7 +33,7 @@ not counted. These counters are separate from token and cost reports, and do
 not enable OTel prompt or tool logging.
 
 Set `usage.project_attribution` to `true` to include the existing `ProjectId`
-hash, rather than a path or name, in usage events and group counts by project.
+hash, rather than a path or name, in usage events (as `trace.project`) and group counts by project.
 This reveals which projects use Provenant to anyone who can read the local
 usage log, so it is off by default. Per-project rows are subsets of the
 aggregate row for each kind and unit; do not sum them with the aggregate.

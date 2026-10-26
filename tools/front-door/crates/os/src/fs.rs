@@ -28,6 +28,12 @@ pub enum FsError {
         #[source]
         source: io::Error,
     },
+    #[error("filesystem read file failed for {path:?}: {source} ({kind:?})", kind = .source.kind())]
+    ReadIo {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("filesystem rename failed from {from_path:?} to {to_path:?}: {source} ({kind:?})", kind = .source.kind())]
     Rename {
         from_path: PathBuf,
@@ -82,7 +88,10 @@ pub fn effective_uid() -> u32 {
     os::effective_uid()
 }
 
-impl provenant_core::PathResolver for LocalFs {
+/// Resolve trusted setup paths without granting filesystem mutation authority.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemPathResolver;
+impl provenant_core::PathResolver for SystemPathResolver {
     fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
         os::resolve_existing_ancestor(path)
     }
@@ -184,10 +193,12 @@ impl LockGuard {
             .map_err(error("fstat owner lock", Path::new("<lock>")))
     }
     // Only the private guardian handoff can duplicate custody descriptions.
-    pub(crate) fn handoff_file(&self) -> &File {
+    #[doc(hidden)]
+    pub fn handoff_file(&self) -> &File {
         &self._file
     }
-    pub(crate) fn from_handoff(file: File) -> Self {
+    #[doc(hidden)]
+    pub fn from_handoff(file: File) -> Self {
         Self { _file: file }
     }
 }
@@ -196,6 +207,7 @@ impl FsError {
     pub fn raw_os_error(&self) -> Option<i32> {
         match self {
             Self::Io { source, .. }
+            | Self::ReadIo { source, .. }
             | Self::Symlink { source, .. }
             | Self::Rename { source, .. } => source.raw_os_error(),
             Self::CrossDevice { .. } => Some(errno::EXDEV),
@@ -244,6 +256,7 @@ impl From<FsError> for io::Error {
     fn from(error: FsError) -> Self {
         match error {
             FsError::Io { source, .. }
+            | FsError::ReadIo { source, .. }
             | FsError::Symlink { source, .. }
             | FsError::Rename { source, .. } => source,
             FsError::CrossDevice { .. } => Self::from_raw_os_error(errno::EXDEV),
@@ -335,7 +348,18 @@ pub struct Metadata {
     pub mode: u32,
 }
 impl Metadata {
-    pub(crate) fn from_std(m: std::fs::Metadata) -> Self {
+    /// Compare identity and read-relevant metadata, excluding allocated bytes.
+    pub fn unchanged(&self, other: &Self) -> bool {
+        self.same_identity(other)
+            && self.kind == other.kind
+            && self.links == other.links
+            && self.size == other.size
+            && self.modified_ns == other.modified_ns
+            && self.uid == other.uid
+            && self.mode == other.mode
+    }
+
+    pub fn from_std(m: std::fs::Metadata) -> Self {
         Self {
             kind: if m.is_file() {
                 FileKind::Regular
@@ -379,6 +403,43 @@ pub struct Directory {
     path: PathBuf,
 }
 impl Directory {
+    /// Bounded no-follow read that refuses changed metadata or name identity.
+    /// This detects observed changes; it is not a filesystem snapshot.
+    pub fn read_stable(&self, name: &OsStr, limit: u64) -> Result<Vec<u8>> {
+        let before = self.metadata_at(name, false)?;
+        let mut file = self.open_read(name)?;
+        let opened = file.metadata()?;
+        if before.kind != FileKind::Regular || !before.unchanged(&opened) {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        if opened.size > limit {
+            return Err(FsError::TooLarge { limit });
+        }
+        let bytes = file.read_bounded(limit)?;
+        if bytes.len() as u64 != opened.size
+            || !opened.unchanged(&file.metadata()?)
+            || !opened.unchanged(&self.metadata_at(name, false)?)
+        {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        Ok(bytes)
+    }
+
+    pub fn atomic_write_with_permissions(
+        &self,
+        name: &OsStr,
+        prefix: &str,
+        bytes: &[u8],
+        permissions: u32,
+        mode: PublishMode,
+    ) -> Result<Publication> {
+        let mut operations = PermissionedAtomicWriteOperations {
+            inner: LocalAtomicWriteOperations,
+            permissions,
+        };
+        self.atomic_write_with_operations(name, prefix, bytes, mode, &mut operations)
+    }
+
     /// Duplicate the held descriptor without resolving its pathname again.
     pub fn try_clone(&self) -> Result<Self> {
         Self::from_file(
@@ -389,10 +450,12 @@ impl Directory {
             self.anchorable,
         )
     }
-    pub(crate) fn handoff_file(&self) -> &File {
+    #[doc(hidden)]
+    pub fn handoff_file(&self) -> &File {
         &self.file
     }
-    pub(crate) fn from_handoff(file: File) -> Result<Self> {
+    #[doc(hidden)]
+    pub fn from_handoff(file: File) -> Result<Self> {
         Self::from_file(file, PathBuf::new(), false)
     }
     /// The initial path is trusted; symlinks in ancestors (e.g. macOS /var) are
@@ -959,14 +1022,15 @@ impl Iterator for Entries {
     }
 }
 
-/// File capability; no raw owning descriptor escapes the supervisor boundary.
+/// File capability; native handoff stays within the OS and custody boundaries.
 #[derive(Debug)]
 pub struct FileHandle {
     file: File,
     path: PathBuf,
 }
 impl FileHandle {
-    pub(crate) fn handoff_file(&self) -> &File {
+    #[doc(hidden)]
+    pub fn handoff_file(&self) -> &File {
         &self.file
     }
     fn regular(file: File, path: &Path) -> Result<Self> {
@@ -1033,7 +1097,10 @@ impl FileHandle {
         (&mut self.file)
             .take(limit.saturating_add(1))
             .read_to_end(&mut bytes)
-            .map_err(error("read file", &self.path))?;
+            .map_err(|source| FsError::ReadIo {
+                path: self.path.clone(),
+                source,
+            })?;
         if bytes.len() as u64 > limit {
             return Err(FsError::TooLarge { limit });
         }
@@ -1088,11 +1155,60 @@ fn staging_name(prefix: &str) -> Result<OsString> {
     Ok(name)
 }
 
-mod traits;
-pub use traits::{LocalFs, SafeDir, SafeFile, SafeFs, entry_names};
+struct PermissionedAtomicWriteOperations {
+    inner: LocalAtomicWriteOperations,
+    permissions: u32,
+}
+impl AtomicWriteOperations for PermissionedAtomicWriteOperations {
+    fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()> {
+        self.inner.write(file, bytes, path)?;
+        use std::os::unix::fs::PermissionsExt;
+        file.file
+            .set_permissions(std::fs::Permissions::from_mode(self.permissions))
+            .map_err(error("fchmod staging file", path))
+    }
+    fn sync_file(&mut self, file: &FileHandle) -> Result<()> {
+        self.inner.sync_file(file)
+    }
+    fn rename(
+        &mut self,
+        directory: &Directory,
+        temporary: &OsStr,
+        name: &OsStr,
+        mode: PublishMode,
+    ) -> Result<()> {
+        self.inner.rename(directory, temporary, name, mode)
+    }
+    fn sync_directory(&mut self, directory: &Directory) -> Result<()> {
+        self.inner.sync_directory(directory)
+    }
+}
 
 mod payload;
-pub use payload::{PayloadRemoval, PayloadTree};
+pub use payload::PayloadTree;
 
 mod path_io;
 pub use path_io::*;
+
+impl Publication {
+    /// Require directory durability without retrying an already visible write.
+    pub fn require_durable(self) -> Result<()> {
+        match self {
+            Self::Durable => Ok(()),
+            Self::VisibleDurabilityUnconfirmed { sync_error } => Err(sync_error),
+        }
+    }
+}
+
+/// Snapshot names before mutating a bounded directory.
+pub fn entry_names(directory: &Directory, limit: usize) -> Result<Vec<OsString>> {
+    let mut names = Vec::new();
+    for entry in directory.entries()? {
+        let name = entry?;
+        if names.len() == limit {
+            return Err(FsError::EntryLimit { limit });
+        }
+        names.push(name);
+    }
+    Ok(names)
+}

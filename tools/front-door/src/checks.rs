@@ -6,15 +6,11 @@ use provenant_cli::{
 };
 use provenant_config::{Release, Targets};
 use provenant_core::CancelToken;
+use provenant_os::{exec::SystemExecutor, fs};
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::{
-    exec::SystemExecutor,
-    fs::{self, LocalFs, SafeFs},
-};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
@@ -35,7 +31,7 @@ enum Error {
     #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
     #[error(transparent)]
-    Exec(#[from] provenant_supervisor::exec::ExecError),
+    Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     Writing(#[from] provenant_workflow::writing::WritingError),
 }
@@ -213,11 +209,8 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     let page = match check {
         Inspectable::Writing { .. } => return Err(CheckError::Invalid("writing selector").into()),
         Inspectable::Config(page) => {
-            let inspection = provenant_config::inspect_config(
-                &roots,
-                &LocalFs,
-                &provenant_cli::domains::SECTIONS,
-            )?;
+            let inspection =
+                provenant_config::inspect_config(&roots, &provenant_cli::domains::SECTIONS)?;
             Ok(provenant_cli::check::config_page(
                 inspection,
                 ("config", selector),
@@ -232,17 +225,18 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 .map(|path| {
                     // Resolve aliased ancestors (macOS /tmp, /var) as install does; the
                     // release tree itself still refuses symlinks.
-                    let path =
-                        provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, path)
-                            .unwrap_or_else(|_| path.to_path_buf());
-                    Release::read(&path, env!("PROVENANT_TARGET_TRIPLE"), &LocalFs)
+                    let path = provenant_core::PathResolver::resolve_existing_ancestor(
+                        &provenant_os::fs::SystemPathResolver,
+                        path,
+                    )
+                    .unwrap_or_else(|_| path.to_path_buf());
+                    Release::read(&path, env!("PROVENANT_TARGET_TRIPLE"))
                 })
                 .transpose()?;
             let inspection = provenant_config::inspect_install(
                 &Targets::new(roots.clone(), &home, &[]),
                 release.as_ref(),
                 env!("PROVENANT_TARGET_TRIPLE"),
-                &LocalFs,
                 &smoke,
                 &cancel,
             )?;
@@ -270,11 +264,10 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 roots.clone(),
                 &home,
                 &harnesses,
-                &LocalFs,
                 claude_config.as_deref(),
                 codex_home.as_deref(),
             )?;
-            targets.resolve_destinations(&LocalFs)?;
+            targets.resolve_destinations(&provenant_os::fs::SystemPathResolver)?;
             let skill_roots: Vec<_> = targets
                 .harnesses
                 .into_iter()
@@ -304,8 +297,8 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
 }
 fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
     let temp = fs::canonicalize(&std::env::temp_dir()).map_err(io::Error::from)?;
-    let anchor = LocalFs.open_anchor(&temp)?;
-    let name = LocalFs.temporary_name()?;
+    let anchor = provenant_os::fs::Directory::open_anchor(&temp)?;
+    let name = provenant_os::fs::temporary_name()?;
     anchor.mkdir(&name, 0o700)?;
     let result = operation(&temp.join(&name));
     let cleanup = anchor.rmdir(&name);
@@ -326,11 +319,10 @@ fn git_page(
     operation: impl FnOnce(&GitContext<'_>) -> Result<CheckPage, CheckError>,
 ) -> Result<CheckPage, Error> {
     private_home(|home| {
-        let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-        let git = provenant_supervisor::git::git_executable()
+        let git = provenant_os::git::git_executable()
             .ok_or(CheckError::Evidence("Git executable unavailable"))?;
         let git = fs::canonicalize(&git)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(fs, git, home)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(git, home)?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
         let repo = runtime.open_read_repo(

@@ -4,17 +4,14 @@
 //! descendants. Utility execution remains in `exec`. Provider signals use
 //! `ProviderGroup::stop`; adopted-child signals require exact tracked identity
 //! and a live direct-child wait relationship.
-use super::{
-    child,
-    reaper::{Permit, Reaper},
+use crate::census::{
+    Ancestry, Census, MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessLookup, ProcessObservation,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::machine::{DeliveryFailure, DeliveryOutcome};
-use crate::{
-    census::{
-        Ancestry, Census, MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessLookup, ProcessObservation,
-    },
-    exec::Termination,
+use provenant_os::sys::{
+    child,
+    reaper::{Permit, Reaper},
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -80,7 +77,7 @@ pub(crate) struct GuardianReactor {
 }
 impl GuardianReactor {
     pub(crate) fn install() -> io::Result<Self> {
-        super::raw_exec::verify_child_wait_policy()?;
+        provenant_os::sys::raw_exec::verify_child_wait_policy()?;
         let mask = SignalMask::block()?;
         #[cfg(target_os = "linux")]
         {
@@ -393,7 +390,7 @@ pub(crate) struct AdoptedDelivery {
 /// of the handshake. It is joined on every path before custody is returned.
 fn spawn_identified(
     mut command: Command,
-    lease: &crate::fs::LockGuard,
+    lease: &provenant_os::fs::LockGuard,
     env: &[(OsString, OsString)],
     boot: &str,
     permit: Permit,
@@ -499,8 +496,8 @@ pub(crate) struct ProviderGroup {
 }
 impl ProviderGroup {
     pub(crate) fn spawn(
-        spec: super::raw_exec::SpawnSpec<'_>,
-        lease: &crate::fs::LockGuard,
+        spec: provenant_os::sys::raw_exec::SpawnSpec<'_>,
+        lease: &provenant_os::fs::LockGuard,
         boot: &str,
     ) -> io::Result<Self> {
         let (program, args) = spec
@@ -1382,3 +1379,5 @@ mod quiescence_tests {
         }
     }
 }
+
+use provenant_os::exec::Termination;

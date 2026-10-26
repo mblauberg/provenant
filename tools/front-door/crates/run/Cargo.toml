@@ -13,6 +13,7 @@ fixture = []
 workspace = true
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
 provenant-config = { workspace = true }

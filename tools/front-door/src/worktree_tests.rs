@@ -4,7 +4,7 @@
 #[path = "../tests/support/mod.rs"]
 pub(super) mod support;
 use provenant_core::Clock;
-use provenant_supervisor::exec::{ExecOutcome, Executor};
+use provenant_os::exec::{ExecOutcome, Executor};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -116,6 +116,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
+            "writer_protected_changes_wait_for_review_and_ignore_upstream",
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "create_list_and_remove_a_managed_worktree",
@@ -150,6 +151,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "second_writer_is_refused_while_first_holds_the_worktree" => {
                     second_writer_is_refused_while_first_holds_the_worktree()
+                }
+                "writer_protected_changes_wait_for_review_and_ignore_upstream" => {
+                    writer_protected_changes_wait_for_review_and_ignore_upstream()
                 }
                 "writer_terminal_refuses_sequencer_state" => {
                     writer_terminal_refuses_sequencer_state()
@@ -213,7 +217,7 @@ fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
 }
 
 pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let git = provenant_supervisor::git::git_executable().ok_or("Git executable unavailable")?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
     let output = rig.execute(&git, args, None)?;
     assert_eq!(
         code(&output),
@@ -249,11 +253,10 @@ pub(super) fn writer_backend_available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
     }
-    let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let cancel = provenant_core::CancelToken::new();
     let backend = provenant_confinement::permissions::system_backend(
         &provenant_confinement::permissions::BackendContext {
-            safe_fs: &provenant_supervisor::fs::LocalFs,
             executor: &executor,
             cancel: &cancel,
             #[cfg(target_os = "macos")]
@@ -283,7 +286,7 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
     let (roots, context) = writer_context(&rig)?;
     let cleanup = writer_process_cleanup(&context);
     let store = open_writer_store(&context)?;
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let absolute =
@@ -304,12 +307,22 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
         "{started:?}"
     );
     let first_terminal = await_terminal(&store, first_attempt, &call)?;
-    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Succeeded)?;
+    // The fixture edits without committing: no plain success, and the dirty
+    // path is named for the chair.
+    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Uncommitted)?;
+    assert!(matches!(
+        &first_terminal.state,
+        provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
+            if reason.contains("uncommitted edits") && reason.contains("writer-edited")
+    ));
     assert_eq!(
         fs::read_to_string(path.join("writer-edited"))?,
         "writer fixture completed"
     );
     wait_for_writer_release(&store)?;
+    let path_text = path.to_str().ok_or("fixture worktree encoding")?;
+    git(&rig, &["-C", path_text, "add", "writer-edited"])?;
+    git(&rig, &["-C", path_text, "commit", "-qm", "Writer edit"])?;
 
     // Fabric supplies absolute paths; the CLI also accepts repo-relative ones.
     let relative = provenant_run::resolve_writer(
@@ -345,7 +358,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     let (roots, context) = writer_context(&rig)?;
     let cleanup = writer_process_cleanup(&context);
     let store = open_writer_store(&context)?;
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let relative = provenant_run::resolve_writer(
@@ -399,7 +412,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
 
     fs::write(&release, b"release")?;
     let first_terminal = await_terminal(&store, first_attempt, &call)?;
-    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Succeeded)?;
+    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Uncommitted)?;
     assert!(matches!(
         store.record(second_attempt, &call)?.state,
         provenant_run::AttemptState::Terminal {
@@ -409,6 +422,113 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     ));
     wait_for_writer_release(&store)?;
     cleanup.disarm();
+    Ok(())
+}
+
+fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    for own_change in [true, false] {
+        let rig = repository()?;
+        ok(
+            &rig,
+            &["worktree", "create", "writer", "--base", "HEAD", "--json"],
+        )?;
+        let path = rig.project.join(".worktrees/writer");
+        let path_text = path.to_str().ok_or("fixture worktree encoding")?;
+        let (roots, context) = writer_context(&rig)?;
+        let cleanup = writer_process_cleanup(&context);
+        let store = open_writer_store(&context)?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = writer_call(&clock, &cancel)?;
+        let writer =
+            provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+        let prepared = writer_run(writer, "protected-review", 101, "hold for protected commit")?;
+        let attempt = prepared.attempts[0].attempt_id;
+        let record = store.create(&prepared, &call)?;
+        let release = path.join(".writer-fixture-release");
+        let _release_on_drop = ReleaseOnDrop(release.clone());
+        let provider = WriterProvider {
+            state: context.state_root.as_path().to_owned(),
+            home: fs::canonicalize(&rig.home)?,
+            project: context.project_id,
+            mode: "hold",
+        };
+        let holder = holder_context(&rig, &roots, &context);
+        let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+        assert!(
+            matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt)
+        );
+        wait_for_path(
+            &path.join(".writer-fixture-ready"),
+            Duration::from_secs(8),
+            "writer hold",
+        )?;
+        // Upstream advances after launch while local main stays at the base.
+        git(&rig, &["checkout", "-qb", "upstream"])?;
+        fs::write(
+            rig.project.join(".github/workflows/check.yml"),
+            b"upstream workflow",
+        )?;
+        fs::write(rig.project.join(".github/new.yml"), b"upstream addition")?;
+        fs::remove_file(rig.project.join("nested/AGENTS.md"))?;
+        git(&rig, &["add", "-A"])?;
+        git(&rig, &["commit", "-qm", "Upstream protected changes"])?;
+        git(&rig, &["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+        git(
+            &rig,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )?;
+        git(&rig, &["checkout", "-q", "main"])?;
+        fs::write(path.join("source.txt"), b"writer source")?;
+        git(&rig, &["-C", path_text, "add", "source.txt"])?;
+        git(&rig, &["-C", path_text, "commit", "-qm", "Writer source"])?;
+        git(
+            &rig,
+            &["-C", path_text, "merge", "--no-edit", "origin/main"],
+        )?;
+        if own_change {
+            fs::write(path.join(".github/workflows/check.yml"), b"writer workflow")?;
+            git(
+                &rig,
+                &["-C", path_text, "add", ".github/workflows/check.yml"],
+            )?;
+            git(
+                &rig,
+                &["-C", path_text, "commit", "-qm", "Writer protected change"],
+            )?;
+        }
+        let head = git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?;
+        fs::write(&release, b"release")?;
+        let terminal = await_terminal(&store, attempt, &call)?;
+        let value = serde_json::to_value(&terminal)?;
+        assert_eq!(
+            value["state"]["outcome"],
+            if own_change {
+                "review_required"
+            } else {
+                "succeeded"
+            }
+        );
+        if own_change {
+            assert_eq!(value["head"], head);
+            assert_eq!(
+                value["protected_paths"],
+                serde_json::json!([
+                    {"encoding": "utf8", "path": ".github/workflows/check.yml"}
+                ])
+            );
+            assert!(terminal.delivery.is_none());
+        }
+        wait_for_writer_release(&store)?;
+        cleanup.disarm();
+    }
     Ok(())
 }
 
@@ -425,7 +545,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let (roots, context) = writer_context(&rig)?;
     let cleanup = writer_process_cleanup(&context);
     let store = open_writer_store(&context)?;
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
@@ -548,7 +668,7 @@ fn writer_production_plan_denies_outside_writes() -> Result {
     let (roots, context) = writer_context(&rig)?;
     let cleanup = writer_process_cleanup(&context);
     let store = open_writer_store(&context)?;
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
@@ -579,7 +699,7 @@ fn writer_production_plan_denies_outside_writes() -> Result {
     );
     assert_terminal_outcome(
         &await_terminal(&store, attempt, &call)?,
-        provenant_run::Outcome::Succeeded,
+        provenant_run::Outcome::Uncommitted,
     )?;
     for target in [
         rig.project.join("negative-write"),
@@ -599,14 +719,14 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
     fn admit(
         &self,
         context: &[u8],
-        attempt: &provenant_supervisor::fs::Directory,
+        attempt: &provenant_os::fs::Directory,
     ) -> provenant_supervisor::custody::Result<()> {
         self.0.admit(context, attempt)
     }
     fn terminal(
         &self,
         context: &[u8],
-        attempt: &provenant_supervisor::fs::Directory,
+        attempt: &provenant_os::fs::Directory,
         exit: &provenant_supervisor::custody::ExitObservation,
         recovery: &provenant_supervisor::custody::Recovery,
     ) -> provenant_supervisor::custody::Result<()> {
@@ -641,7 +761,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     let (roots, context) = writer_context(&rig)?;
     let cleanup = writer_process_cleanup(&context);
     let store = open_writer_store(&context)?;
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
@@ -758,10 +878,9 @@ pub(super) fn writer_context(
 ) -> Result<(provenant_core::Roots, provenant_run::ExecutionContext)> {
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&provenant_supervisor::fs::LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let location = provenant_config::ProjectLocation::new(rig.project.join(".git"))?;
-    let binding =
-        provenant_config::bind_project(&roots, location, &provenant_supervisor::fs::LocalFs)?;
+    let binding = provenant_config::bind_project(&roots, location)?;
     let context = provenant_run::ExecutionContext {
         state_root: roots.state.clone(),
         project_id: binding.project_id(),
@@ -772,7 +891,7 @@ pub(super) fn writer_context(
 }
 
 fn writer_call<'a>(
-    clock: &'a provenant_supervisor::clock::SystemClock,
+    clock: &'a provenant_os::clock::SystemClock,
     cancel: &'a provenant_core::CancelToken,
 ) -> Result<provenant_run::Request<'a>> {
     Ok(provenant_run::Request {
@@ -785,7 +904,7 @@ fn writer_call<'a>(
 pub(super) fn open_writer_store(
     context: &provenant_run::ExecutionContext,
 ) -> Result<provenant_run::RunStore> {
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let mut store = provenant_run::RunStore::open(context, &call)?;
@@ -805,7 +924,7 @@ fn writer_run(
     let task = provenant_core::TaskId::from_bytes([seed; 16]);
     let attempt = provenant_core::AttemptId::from_bytes([seed.wrapping_add(1); 16]);
     let prompt_digest = provenant_records::CanonicalV1::file_digest(prompt.as_bytes());
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     Ok(provenant_run::PreparedRun {
         run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
         operation_id: provenant_core::OperationId::parse(operation)?,
@@ -1169,13 +1288,10 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
         repo::{GitRefName, verify_worktree},
         utility::{UtilityBudget, UtilityRuntime},
     };
-    use provenant_supervisor::{exec::SystemExecutor, fs::LocalFs};
+    use provenant_os::exec::SystemExecutor;
 
     let runtime = UtilityRuntime::new(
-        std::sync::Arc::new(LocalFs),
-        fs::canonicalize(
-            provenant_supervisor::git::git_executable().ok_or("Git executable unavailable")?,
-        )?,
+        fs::canonicalize(provenant_os::git::git_executable().ok_or("Git executable unavailable")?)?,
         rig.state.join("utility-home"),
     )?;
     let executor = SystemExecutor::new(1)?;
@@ -1188,7 +1304,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let worktree = verify_worktree(&repo, path)?;
     let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
     let authority = WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home)?;
-    prepare_writer_directories(&LocalFs, &worktree, &branch, &authority, &rig.home)?;
+    prepare_writer_directories(&worktree, &branch, &authority, &rig.home)?;
     let cache = authority.cargo_cache().path.clone();
     fs::write(cache.join("artifact"), b"lane build output")?;
     Ok(cache)
@@ -1278,7 +1394,8 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
 }
 
 fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Result {
-    use provenant_supervisor::fs::{Directory, LockMode};
+    use provenant_os::fs::Directory;
+    use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
 
     fn make_idle(path: &Path) -> Result {
@@ -1963,7 +2080,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
     rig.copy_executable(&std::env::current_exe()?, &executable)?;
     // Production preparation needs registered, freshly observed accounts.
     let home = fs::canonicalize(&home)?;
-    let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let mut accounts = String::new();
     let mut claude_key = String::new();
     let probe_root = tempfile::tempdir()?;
@@ -2061,7 +2178,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             ),
             ..Default::default()
         });
-        let clock = provenant_supervisor::clock::SystemClock::new();
+        let clock = provenant_os::clock::SystemClock::new();
         let cancel = provenant_core::CancelToken::new();
         let call = writer_call(&clock, &cancel)?;
         let store = provenant_run::RunStore::open(&context, &call)?;
@@ -2120,7 +2237,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
         let selected_git =
-            fs::canonicalize(provenant_supervisor::git::git_executable().ok_or("host Git")?)?;
+            fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
         if adapter == "claude" && writer {
             // Claude's env scrub drops GIT_CONFIG_GLOBAL, so scratch git wraps
@@ -2212,16 +2329,16 @@ fn lane_prepare_isolates_nested_state() -> Result {
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_submit\",\"arguments\":{\"op\":\"submission\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"adapter\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_ms\":1000}],\"concurrency\":1}}}\n"
         );
-        let mut options = provenant_supervisor::exec::ExecOptions::new(
+        let mut options = provenant_os::exec::ExecOptions::new(
             &launch.argv,
             &launch.cwd,
             Duration::from_secs(10),
         );
         options.env = Some(&launch.environment);
         options.stdin = Some(frames.as_bytes());
-        options.stdout = provenant_supervisor::exec::StreamPolicy::Capture { limit: 64 * 1024 };
-        options.stderr = provenant_supervisor::exec::StreamPolicy::Capture { limit: 64 * 1024 };
-        let output = provenant_supervisor::exec::SystemExecutor::new(1)?.execute(options)?;
+        options.stdout = provenant_os::exec::StreamPolicy::Capture { limit: 64 * 1024 };
+        options.stderr = provenant_os::exec::StreamPolicy::Capture { limit: 64 * 1024 };
+        let output = provenant_os::exec::SystemExecutor::new(1)?.execute(options)?;
         assert_eq!(
             code(&output),
             0,
@@ -2266,14 +2383,14 @@ fn lane_prepare_isolates_nested_state() -> Result {
         // in the configured child store without launching in the lane.
         if adapter == "codex" && !writer {
             fs::write(rig.state.join("config.toml"), config(2))?;
-            let mut options = provenant_supervisor::exec::ExecOptions::new(
+            let mut options = provenant_os::exec::ExecOptions::new(
                 &launch.argv,
                 &launch.cwd,
                 Duration::from_secs(10),
             );
             options.env = Some(&launch.environment);
             options.stdin = Some(frames.as_bytes());
-            let output = provenant_supervisor::exec::SystemExecutor::new(1)?.execute(options)?;
+            let output = provenant_os::exec::SystemExecutor::new(1)?.execute(options)?;
             assert_eq!(
                 code(&output),
                 0,
@@ -2294,7 +2411,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
                     .join(paths.attempt_id.to_string()),
             );
             let queued_context = provenant_run::ExecutionContext {
-                state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+                state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
                 ..context.clone()
             };
             let queued = provenant_run::RunStore::open(&queued_context, &call)?;
@@ -2369,7 +2486,10 @@ pub(crate) fn lane_provider() -> Result {
         }
         return Ok(());
     }
-    use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    use provenant_os::exec::ExecOptions;
+    use provenant_os::exec::Executor;
+    use provenant_os::exec::StreamPolicy;
+    use provenant_os::exec::SystemExecutor;
     let mut entry = serde_json::Map::new();
     for arg in std::env::args().filter(|arg| arg.starts_with("mcp_servers.fabric.")) {
         let value: Value = toml_edit::de::from_str(&arg)?;
@@ -2483,7 +2603,7 @@ pub(crate) fn lane_provider() -> Result {
     let assets = PathBuf::from(std::env::var_os("PROVENANT_ROOT").ok_or("assets")?);
     let mut inputs = provenant_core::RootInputs::new(home, assets);
     inputs.state_dir = Some(PathBuf::from(entry["args"][1].as_str().ok_or("state arg")?));
-    let roots = inputs.resolve(&provenant_supervisor::fs::LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     provenant_cli::fabric::publish(
         &provenant_records::CommandResult::new(
             "fixture",
@@ -2507,14 +2627,13 @@ fn verify_lane_profile(
         AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
         prepare_writer_directories, required_anchors, system_backend,
     };
-    use provenant_supervisor::{
-        exec::{ExecOptions, StreamPolicy, SystemExecutor},
-        fs::LocalFs,
-    };
+    use provenant_os::exec::ExecOptions;
+    use provenant_os::exec::StreamPolicy;
+    use provenant_os::exec::SystemExecutor;
+
     let executor = SystemExecutor::new(1)?;
     let cancel = provenant_core::CancelToken::new();
     let backend = match system_backend(&BackendContext {
-        safe_fs: &LocalFs,
         executor: &executor,
         cancel: &cancel,
         #[cfg(target_os = "macos")]
@@ -2542,16 +2661,15 @@ fn verify_lane_profile(
     if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
         (writer, &confinement.plan.permissions().mode)
     {
-        prepare_writer_directories(&LocalFs, worktree, branch, authority, &confinement.home)?;
+        prepare_writer_directories(worktree, branch, authority, &confinement.home)?;
     }
     let directories = required_anchors(confinement.plan.permissions(), profile, writer)
         .iter()
-        .map(|path| AnchoredDirectory::open_canonical(&LocalFs, path))
+        .map(AnchoredDirectory::open_canonical)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let anchors = Anchors {
         home: &confinement.home,
         directories: &directories,
-        safe_fs: &LocalFs,
         worktree: writer,
     };
     let compiled = confinement
@@ -2565,14 +2683,14 @@ fn verify_lane_profile(
         fn admit(
             &self,
             _: &[u8],
-            _: &provenant_supervisor::fs::Directory,
+            _: &provenant_os::fs::Directory,
         ) -> provenant_supervisor::custody::Result<()> {
             Ok(())
         }
         fn terminal(
             &self,
             _: &[u8],
-            _: &provenant_supervisor::fs::Directory,
+            _: &provenant_os::fs::Directory,
             _: &provenant_supervisor::custody::ExitObservation,
             _: &provenant_supervisor::custody::Recovery,
         ) -> provenant_supervisor::custody::Result<()> {
@@ -2583,7 +2701,7 @@ fn verify_lane_profile(
     let host = provenant_cli::run::HostHolder::new(&ParentFixture);
     host.admit(
         &parent.encode()?,
-        &provenant_supervisor::fs::Directory::open_anchor(attempt)?,
+        &provenant_os::fs::Directory::open_anchor(attempt)?,
     )?;
     let shell_writer = launch
         .argv
@@ -2685,12 +2803,12 @@ fn verify_lane_profile(
         provenant_core::RootInputs::new(confinement.home.clone(), parent.roots.checkout.clone());
     inputs.state_dir = Some(child.clone());
     let child_context = provenant_run::ExecutionContext {
-        state_root: inputs.resolve(&LocalFs)?.state,
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
         project_id: parent.project_id,
         actor_id: parent.actor_id,
         read_prompts: true,
     };
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let call = writer_call(&clock, &cancel)?;
     // Admission is not launch: the host decides from its sealed parent task.
     let admit = |frames: &str| -> Result<provenant_core::AttemptId> {
@@ -3017,8 +3135,8 @@ struct FixtureCredential;
 impl Executor for FixtureCredential {
     fn execute(
         &self,
-        options: provenant_supervisor::exec::ExecOptions<'_>,
-    ) -> std::result::Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> std::result::Result<ExecOutcome, provenant_os::exec::ExecError> {
         // `auth status` answers the identity check; anything else reads the credential.
         let bytes: &[u8] = if options.argv.iter().any(|arg| arg == "status") {
             br#"{"loggedIn":true,"email":"fixture@example.test"}"#
@@ -3026,8 +3144,8 @@ impl Executor for FixtureCredential {
             br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#
         };
         Ok(ExecOutcome {
-            termination: provenant_supervisor::exec::Termination::Exit(0),
-            stdout: provenant_supervisor::exec::CapturedStream {
+            termination: provenant_os::exec::Termination::Exit(0),
+            stdout: provenant_os::exec::CapturedStream {
                 bytes: bytes.to_vec(),
                 ..Default::default()
             },
@@ -3054,7 +3172,8 @@ fn mcp_error_code(result: &Value) -> &str {
 }
 
 fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
-    use provenant_supervisor::fs::{Directory, LockMode};
+    use provenant_os::fs::Directory;
+    use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
     let rig = repository()?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\n**/target/\n")?;
@@ -3128,7 +3247,7 @@ fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
     let unmerged = branch_commit(&rig, "unmerged")?;
     let (_, context) = writer_context(&rig)?;
     let store = open_writer_store(&context)?;
-    let clock = provenant_supervisor::clock::SystemClock;
+    let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let merged_writer =
@@ -3301,7 +3420,7 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     std::os::unix::fs::symlink(&external, path.join("node_modules"))?;
     let (roots, context) = writer_context(&rig)?;
     let store = open_writer_store(&context)?;
-    let clock = provenant_supervisor::clock::SystemClock;
+    let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
     let call = writer_call(&clock, &cancel)?;
     let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
@@ -3330,7 +3449,7 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     child_inputs.state_dir = Some(rig.state.join("children/nested"));
     let child_context = provenant_run::ExecutionContext {
         state_root: child_inputs
-            .resolve(&provenant_supervisor::fs::LocalFs)?
+            .resolve(&provenant_os::fs::SystemPathResolver)?
             .state,
         ..context.clone()
     };
@@ -3436,7 +3555,7 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
         1
     );
     let (roots, context) = writer_context(&rig)?;
-    let clock = provenant_supervisor::clock::SystemClock;
+    let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
     let backoff = provenant_fabric_store::ThreadWait;
     let request = provenant_fabric_store::Request {

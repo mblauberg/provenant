@@ -9,7 +9,7 @@ use crate::{
 };
 use provenant_confinement::valid_read_only_writable;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WaitBudget, WallTime};
-use provenant_supervisor::{
+use provenant_os::{
     fs::Directory,
     sys::resources::{self, MemorySample},
 };

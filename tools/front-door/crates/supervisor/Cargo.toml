@@ -7,9 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
-jiff = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
@@ -20,7 +20,7 @@ provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 
 [features]
-fixture = []
+fixture = ["provenant-os/fixture"]
 
 [[test]]
 name = "process"
@@ -29,7 +29,7 @@ harness = false
 required-features = ["fixture"]
 
 # Cargo cannot override one lint with lints.workspace = true.
-# Mirror the workspace policy, lowering unsafe_code only so sys can allow it.
+# Mirror the workspace policy so process_os can allow its custody syscalls.
 [lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"

@@ -54,7 +54,7 @@ pub fn read_only_plan(
     if request.scope != WorkScope::Project(binding.project_id()) {
         return Err(RunError::Refused);
     }
-    let root = provenant_supervisor::fs::Directory::open_anchor(state.as_path())?;
+    let root = provenant_os::fs::Directory::open_anchor(state.as_path())?;
     let project = match root.open_verified_directory(OsStr::new("projects")) {
         Ok(projects) => {
             match projects.open_verified_directory(OsStr::new(&binding.project_id().to_string())) {
@@ -68,7 +68,7 @@ pub fn read_only_plan(
     };
     let policy = project
         .as_ref()
-        .map(|project| ReadOnlyPolicy::read(project))
+        .map(ReadOnlyPolicy::read)
         .transpose()
         .map_err(RunError::Confinement)?
         .unwrap_or_default();
@@ -85,11 +85,12 @@ mod tests {
         permissions::{AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions},
     };
     use provenant_core::{CancelToken, RootInputs};
-    use provenant_supervisor::{
-        exec::{ExecOptions, Executor, SystemExecutor, Termination},
-        fs::LocalFs,
-    };
-    use std::{path::Path, sync::Arc, time::Duration};
+    use provenant_os::exec::ExecOptions;
+    use provenant_os::exec::Executor;
+    use provenant_os::exec::SystemExecutor;
+    use provenant_os::exec::Termination;
+
+    use std::{path::Path, time::Duration};
 
     #[test]
     fn run_plan_loads_only_its_bound_projects_policy_and_uses_attempt_temp()
@@ -128,7 +129,7 @@ mod tests {
         let mut options = ExecOptions::new(&argv, &base, Duration::from_secs(10));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
-        let runtime = UtilityRuntime::new(Arc::new(LocalFs), std::fs::canonicalize(git)?, &home)?;
+        let runtime = UtilityRuntime::new(std::fs::canonicalize(git)?, &home)?;
         let repo = runtime.open_read_repo(
             &executor,
             &repo_path,
@@ -137,11 +138,10 @@ mod tests {
         )?;
         let mut root_input = RootInputs::new(home, repo_path.clone());
         root_input.state_dir = Some(context.state_root.as_path().to_owned());
-        let roots = root_input.resolve(&LocalFs)?;
+        let roots = root_input.resolve(&provenant_os::fs::SystemPathResolver)?;
         let binding = provenant_config::bind_project(
             &roots,
             provenant_config::ProjectLocation::new(repo_path.join(".git"))?,
-            &LocalFs,
         )?;
         context.project_id = binding.project_id();
         let store = RunStore::open(&context, &call)?;

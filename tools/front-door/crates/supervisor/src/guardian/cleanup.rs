@@ -11,7 +11,7 @@ impl Driver<'_> {
             .map_err(|_| CustodyError::InvalidRecord)
             .and_then(|bytes| {
                 if self.last_tracking.as_ref() != Some(&bytes) {
-                    require_durable(write_record(
+                    Publication::require_durable(write_record(
                         &self.writer_dir,
                         "reservation.json",
                         &self.reservation,
@@ -37,7 +37,7 @@ impl Driver<'_> {
         self.exit_publisher
             .unwrap_or(&system_publisher)
             .commit_reservation(&self.writer_dir, &bytes)
-            .and_then(require_durable)
+            .and_then(|publication| publication.require_durable().map_err(Into::into))
             .is_ok()
     }
 
@@ -114,7 +114,7 @@ impl Driver<'_> {
     #[allow(clippy::disallowed_methods)]
     fn terminate_group(
         &mut self,
-        child: &mut crate::sys::provider::ProviderGroup,
+        child: &mut crate::process_os::provider::ProviderGroup,
         plan: CapturePlan,
         reason: machine::StopReason,
         warnings: &mut Vec<String>,
@@ -183,7 +183,7 @@ impl Driver<'_> {
 
     pub(super) fn refresh_census(
         &mut self,
-        child: &mut crate::sys::provider::ProviderGroup,
+        child: &mut crate::process_os::provider::ProviderGroup,
     ) -> Option<crate::census::Census> {
         let mut census = match self.observer.census(crate::census::MAX_CENSUS_ENTRIES) {
             Ok(census) => census,
@@ -241,7 +241,7 @@ impl Driver<'_> {
                     registry_listed = true;
                     for registered in children {
                         let identity = registered.registration.identity();
-                        match crate::sys::census::prove_nested_custody(
+                        match crate::process_os::census::prove_nested_custody(
                             self.observer,
                             &registered.registration,
                             registered.custody.handoff_file(),
@@ -337,7 +337,7 @@ impl Driver<'_> {
                         census.ancestry(&fact.identity, owner) != crate::census::Ancestry::No
                     })
                     && i32::try_from(fact.identity.pid)
-                        .is_ok_and(|pid| crate::sys::census::darwin_in_attempt_sandbox(pid, &name))
+                        .is_ok_and(|pid| crate::process_os::census::darwin_in_attempt_sandbox(pid, &name))
             })
             .map(|fact| fact.identity.clone())
             .collect();
@@ -348,7 +348,7 @@ impl Driver<'_> {
     #[cfg(target_os = "macos")]
     pub(super) fn darwin_quiescent(
         &mut self,
-        child: &mut crate::sys::provider::ProviderGroup,
+        child: &mut crate::process_os::provider::ProviderGroup,
         first: &crate::census::Census,
     ) -> Result<bool> {
         let Some(provider) = self.reservation.provider.clone() else {
@@ -365,7 +365,7 @@ impl Driver<'_> {
         if !child.quiescent_children()? {
             return Ok(false);
         }
-        crate::sys::wait_pause(Duration::from_millis(20));
+        provenant_os::sys::wait_pause(Duration::from_millis(20));
         let Some(second) = self.refresh_census(child) else {
             return Ok(false);
         };
@@ -391,7 +391,7 @@ impl Driver<'_> {
     #[allow(clippy::disallowed_methods)]
     pub(super) fn cleanup(
         &mut self,
-        child: &mut crate::sys::provider::ProviderGroup,
+        child: &mut crate::process_os::provider::ProviderGroup,
         plan: CapturePlan,
         cancelled: bool,
         warnings: &mut Vec<String>,
@@ -537,10 +537,13 @@ impl Driver<'_> {
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn try_writer_lease(
     directory: &Directory,
-    expected: crate::fs::Metadata,
-) -> Result<crate::fs::LockGuard> {
-    let lease = directory.try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)?;
-    let actual = crate::fs::Metadata::from_std(lease.handoff_file().metadata()?);
+    expected: provenant_os::fs::Metadata,
+) -> Result<provenant_os::fs::LockGuard> {
+    let lease = directory.try_lock(
+        OsStr::new("writer.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let actual = lease.metadata()?;
     if !expected.same_identity(&actual) {
         return Err(CustodyError::InvalidRecord);
     }

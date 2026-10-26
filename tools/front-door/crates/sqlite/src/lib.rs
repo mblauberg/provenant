@@ -1,5 +1,5 @@
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
-use provenant_supervisor::fs::{Directory, FileKind, FsError, Metadata, verify_directory_identity};
+use provenant_os::fs::{Directory, FileKind, FsError, Metadata, verify_directory_identity};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     ffi::{OsStr, OsString},
@@ -106,7 +106,7 @@ pub fn checked_directory(
 
 /// Whether a directory belongs to the current user and has no group/other access.
 pub fn is_private(metadata: Metadata) -> bool {
-    metadata.mode & 0o077 == 0 && metadata.uid == provenant_supervisor::fs::effective_uid()
+    metadata.mode & 0o077 == 0 && metadata.uid == provenant_os::fs::effective_uid()
 }
 
 #[derive(Debug, PartialEq, Eq)]
