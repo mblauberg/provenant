@@ -58,7 +58,7 @@ fn project_attribution_requires_the_knob_and_an_available_resolver() -> Result {
 }
 
 #[test]
-fn unattributed_events_omit_project_id_from_json() -> Result {
+fn unattributed_events_omit_trace_from_json() -> Result {
     let temp = crate::worktree_tests::support::tempdir()?;
     let roots = roots(temp.path())?;
     std::fs::create_dir(roots.state.as_path())?;
@@ -70,7 +70,7 @@ fn unattributed_events_omit_project_id_from_json() -> Result {
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     assert_eq!(events.len(), 2);
-    assert!(events.iter().all(|event| event.get("project_id").is_none()));
+    assert!(events.iter().all(|event| event.get("trace").is_none()));
     Ok(())
 }
 
@@ -94,7 +94,7 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     assert!(
         events
             .iter()
-            .all(|event| event["project_id"] == expected_id.to_string())
+            .all(|event| event["trace"]["project"] == expected_id.to_string())
     );
 
     let stats = Stats {

@@ -1,7 +1,7 @@
 //! Local demand counters. The command edge owns these effects, not the reducer.
 use provenant_cli::{Globals, Stats};
 use provenant_core::{ProjectId, Roots};
-use provenant_records::{CommandResult, Outcome};
+use provenant_records::{CommandResult, Outcome, Trace};
 use provenant_supervisor::fs::{Directory, LockMode};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,8 +27,17 @@ struct Event {
     outcome: Option<String>,
     duration_ms: u64,
     timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project_id: Option<ProjectId>,
+    /// Only the project, and only when attribution is on: counting records no
+    /// other identity and never creates state to learn one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<Trace>,
+}
+
+fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
+    project_id.map(|project| Trace {
+        project: Some(project),
+        ..Trace::default()
+    })
 }
 
 pub fn selected_roots(globals: &Globals) -> Option<Roots> {
@@ -146,7 +155,7 @@ pub fn record_cli(
             outcome: None,
             duration_ms,
             timestamp,
-            project_id,
+            trace: project_trace(project_id),
         },
         true,
     );
@@ -168,7 +177,7 @@ pub fn record_tool(
             outcome: Some(outcome.into()),
             duration_ms,
             timestamp,
-            project_id,
+            trace: project_trace(project_id),
         },
         false,
     );
@@ -255,7 +264,7 @@ fn report(roots: &Roots, stats: &Stats) -> Result<Report, Box<dyn std::error::Er
                     .entry((event.kind.clone(), event.unit.clone(), None))
                     .or_default();
                 *calls = calls.saturating_add(1);
-                if let Some(project_id) = event.project_id {
+                if let Some(project_id) = event.trace.and_then(|trace| trace.project) {
                     let calls = units
                         .entry((event.kind, event.unit, Some(project_id)))
                         .or_default();

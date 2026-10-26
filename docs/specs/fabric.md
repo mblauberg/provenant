@@ -443,6 +443,9 @@ call with `peer_version`, naming the peer and both versions, for example:
 "peer workshop speaks protocol 1, this host speaks 2; upgrade both". Upgrade
 peers together; there is no capability list, negotiation or support for older
 peers. Each call uses one SSH connection.
+Every request carries a `trace`: the sending host, the acting agent's actor ID
+and the operation the action names, each `null` where it does not apply. Ingress
+refuses a request whose `trace.host` is not its `source_host`.
 Health data also carries `protocol`. Host lists retain mismatched peers with
 `available: false`, their remote `protocol` and `reason: "peer_version"`.
 Unprobed or unreachable hosts omit `protocol`. Fan-out uses at most four
