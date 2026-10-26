@@ -43,7 +43,8 @@ the index and working tree are clean. Run calls
 `worktrees::check_writer_terminal` before
 committing a writer's terminal result, including a result recovered by
 reconcile. Unfinished Git operations produce a failed result with the worktree
-path and reason.
+path and reason. A writer that succeeded but left edits uncommitted with no
+new commit ends `uncommitted`, and its reason names the dirty paths.
 No force removal is offered.
 
 ## Ownership and cleanup

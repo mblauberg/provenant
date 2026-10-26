@@ -235,12 +235,22 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
         "{started:?}"
     );
     let first_terminal = await_terminal(&store, first_attempt, &call)?;
-    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Succeeded)?;
+    // The fixture edits without committing: no plain success, and the dirty
+    // path is named for the chair.
+    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Uncommitted)?;
+    assert!(matches!(
+        &first_terminal.state,
+        provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
+            if reason.contains("uncommitted edits") && reason.contains("writer-edited")
+    ));
     assert_eq!(
         fs::read_to_string(path.join("writer-edited"))?,
         "writer fixture completed"
     );
     wait_for_writer_release(&store)?;
+    let path_text = path.to_str().ok_or("fixture worktree encoding")?;
+    git(&rig, &["-C", path_text, "add", "writer-edited"])?;
+    git(&rig, &["-C", path_text, "commit", "-qm", "Writer edit"])?;
 
     // Fabric supplies absolute paths; the CLI also accepts repo-relative ones.
     let relative = provenant_run::resolve_writer(
@@ -330,7 +340,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
 
     fs::write(&release, b"release")?;
     let first_terminal = await_terminal(&store, first_attempt, &call)?;
-    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Succeeded)?;
+    assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Uncommitted)?;
     assert!(matches!(
         store.record(second_attempt, &call)?.state,
         provenant_run::AttemptState::Terminal {
@@ -510,7 +520,7 @@ fn writer_production_plan_denies_outside_writes() -> Result {
     );
     assert_terminal_outcome(
         &await_terminal(&store, attempt, &call)?,
-        provenant_run::Outcome::Succeeded,
+        provenant_run::Outcome::Uncommitted,
     )?;
     for target in [
         rig.project.join("negative-write"),

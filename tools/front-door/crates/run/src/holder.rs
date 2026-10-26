@@ -413,6 +413,39 @@ impl RunStore {
                         RECORD_LIMIT,
                     )?;
                 }
+                Ok(false) if decoded.outcome == Outcome::Succeeded => {
+                    // Edits with no commit are not a success, and nothing is delivered.
+                    let left =
+                        crate::prepare_writer(writer, &self.writer_registry, record.project_id)
+                            .and_then(|launch| {
+                                launch.uncommitted(
+                                    self.context.state_root.as_path(),
+                                    recovery.ok_or(RunError::Validation(
+                                        "writer terminal custody missing",
+                                    ))?,
+                                )
+                            });
+                    let note = match left {
+                        Ok(None) => None,
+                        Ok(Some(reason)) => {
+                            decoded.outcome = Outcome::Uncommitted;
+                            Some(reason)
+                        }
+                        Err(error) => {
+                            decoded.outcome = Outcome::Failed;
+                            Some(format!(
+                                "writer terminal check failed for {}: {error}",
+                                writer.worktree.display()
+                            ))
+                        }
+                    };
+                    if let Some(note) = note {
+                        decoded.reason = Some(match decoded.reason.take() {
+                            Some(reason) => format!("{reason}; {note}"),
+                            None => note,
+                        });
+                    }
+                }
                 Ok(false) => {}
                 Ok(true) => {
                     decoded.outcome = Outcome::Failed;
@@ -469,7 +502,7 @@ impl RunStore {
             decoded.result.truncate(end);
             decoded.complete = false;
         }
-        if decoded.outcome == Outcome::Succeeded {
+        if matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
             let refusal = if exit.termination != Some(Termination::Exit(0)) {
                 Some("provider exited unsuccessfully")
             } else if !decoded.complete || decoded.result.is_empty() {

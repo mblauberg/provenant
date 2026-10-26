@@ -15,6 +15,7 @@ wake, in this order:
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.
 3. **Review** finished lanes; adjudicate returned reviews.
+   An `uncommitted` lane left edits in its worktree and made no commit: its reason lists the dirty paths. Review them there, then commit, or re-dispatch with an instruction to commit.
    A `quarantined` lane kept its result but not its `.agents/` edits: review the listed `protected.patch`, apply it deliberately in a worktree if adopted. Its history still holds the edit commit, so claim verification and Fabric landing refuse it until the chair rewrites the lane without that commit or releases the reviewed tip (see `orchestrate`). A `failed` lane with a restore fix still carries the edits: restore `.agents/` to the start commit first.
 4. **Refill** from the frontier up to the resource budget.
 5. **Tracker:** make issues and the board match what started and landed, when
