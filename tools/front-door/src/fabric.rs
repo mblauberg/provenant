@@ -82,7 +82,9 @@ impl stdio::Factory for Factory {
         crate::usage::maintain_tools(&self.context.roots);
     }
     fn record_usage(&self, tool: &str, outcome: &str, duration_ms: u64) {
-        crate::usage::record_tool(&self.context.roots, tool, outcome, duration_ms);
+        let project_id = crate::usage::attribution_enabled(&self.context.roots)
+            .then_some(self.context.identity.project);
+        crate::usage::record_tool(&self.context.roots, tool, outcome, duration_ms, project_id);
     }
     type Facade<'a> = BoundFacade<'a>;
     fn input_limits(&self) -> provenant_records::Limits {

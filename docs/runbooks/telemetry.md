@@ -29,6 +29,10 @@ Arguments, prompts and results are never logged. Skill loads and scripts are
 not counted. These counters are separate from token and cost reports, and do
 not enable OTel prompt or tool logging.
 
+Set `usage.project_attribution` to `true` to include the existing `ProjectId`
+in usage events and group counts by project. This reveals which projects use
+Provenant to anyone who can read the local usage log, so it is off by default.
+
 Writes are best effort: one small `O_APPEND` write, no sync or background
 collector. I/O failures leave command results unchanged. Only rotation takes
 an exclusive nonblocking lock; a busy rotation lock still allows appends.

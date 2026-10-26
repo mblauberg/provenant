@@ -146,6 +146,9 @@ discard the event without changing the call.
 tolerates a missing backup, then sorts units by call count. The CLI grammar and
 MCP catalogue supply zero-call rows. Retention is bounded by size, not days, so
 counts are observed demand, not proof of inactivity beyond the retained logs.
+The `usage.project_attribution` knob is off by default; when enabled, events
+include the existing `ProjectId` and reports include per-project rows. This
+reveals which projects use Provenant to anyone who can read the local logs.
 
 ### Quota display
 

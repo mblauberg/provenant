@@ -1,6 +1,6 @@
 //! Local demand counters. The command edge owns these effects, not the reducer.
 use provenant_cli::{Globals, Stats};
-use provenant_core::Roots;
+use provenant_core::{ProjectId, Roots};
 use provenant_records::{CommandResult, Outcome};
 use provenant_supervisor::fs::{Directory, LockMode};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ struct Event {
     outcome: Option<String>,
     duration_ms: u64,
     timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<ProjectId>,
 }
 
 pub fn selected_roots(globals: &Globals) -> Option<Roots> {
@@ -37,6 +39,43 @@ pub fn selected_roots(globals: &Globals) -> Option<Roots> {
     };
     let assets = crate::roots::product_root().unwrap_or_else(|_| project.clone());
     crate::roots::roots(globals, &assets, &project).ok()
+}
+
+pub fn attribution_enabled(roots: &Roots) -> bool {
+    use provenant_supervisor::fs::LocalFs;
+    provenant_config::read_with_domains(roots, &LocalFs, &provenant_cli::domains::SECTIONS)
+        .ok()
+        .and_then(|config| config.knobs.get("usage.project_attribution").cloned())
+        .and_then(|knob| knob.value.as_bool())
+        .unwrap_or(false)
+}
+
+pub fn project_id(roots: &Roots, project: &std::path::Path) -> Option<ProjectId> {
+    if !attribution_enabled(roots) {
+        return None;
+    }
+    use provenant_supervisor::fs::LocalFs;
+    use std::{sync::Arc, time::Duration};
+    let git = crate::roots::git_binary()?;
+    let runtime = provenant_confinement::UtilityRuntime::read_only(
+        Arc::new(LocalFs),
+        std::fs::canonicalize(git).ok()?,
+    )
+    .ok()?;
+    let executor = provenant_supervisor::exec::SystemExecutor::new(1).ok()?;
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
+    let location = runtime
+        .project_location(
+            &executor,
+            project,
+            budget,
+            &provenant_core::CancelToken::new(),
+        )
+        .ok()?
+        .location;
+    provenant_config::lookup_project(roots, &location, &LocalFs)
+        .ok()?
+        .map(|binding| binding.project_id())
 }
 
 fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
@@ -86,7 +125,13 @@ fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     (file.write(&line).ok()? == line.len()).then_some(())
 }
 
-pub fn record_cli(roots: &Roots, verb: &str, exit_code: u8, duration_ms: u64) {
+pub fn record_cli(
+    roots: &Roots,
+    verb: &str,
+    exit_code: u8,
+    duration_ms: u64,
+    project_id: Option<ProjectId>,
+) {
     let Some(timestamp) = timestamp() else { return };
     let _ = append(
         roots,
@@ -97,11 +142,18 @@ pub fn record_cli(roots: &Roots, verb: &str, exit_code: u8, duration_ms: u64) {
             outcome: None,
             duration_ms,
             timestamp,
+            project_id,
         },
         true,
     );
 }
-pub fn record_tool(roots: &Roots, tool: &str, outcome: &str, duration_ms: u64) {
+pub fn record_tool(
+    roots: &Roots,
+    tool: &str,
+    outcome: &str,
+    duration_ms: u64,
+    project_id: Option<ProjectId>,
+) {
     let Some(timestamp) = timestamp() else { return };
     let _ = append(
         roots,
@@ -112,6 +164,7 @@ pub fn record_tool(roots: &Roots, tool: &str, outcome: &str, duration_ms: u64) {
             outcome: Some(outcome.into()),
             duration_ms,
             timestamp,
+            project_id,
         },
         false,
     );
@@ -130,6 +183,8 @@ struct Unit {
     kind: String,
     unit: String,
     calls: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<ProjectId>,
 }
 #[derive(Serialize)]
 struct Report {
@@ -137,17 +192,17 @@ struct Report {
     until: Option<String>,
     units: Vec<Unit>,
 }
-fn inventory() -> BTreeMap<(String, String), u64> {
+fn inventory() -> BTreeMap<(String, String, Option<ProjectId>), u64> {
     provenant_cli::usage_verbs()
         .into_iter()
-        .map(|verb| ((EVENT_KINDS[0].into(), verb), 0))
+        .map(|verb| ((EVENT_KINDS[0].into(), verb, None), 0))
         .chain(
             provenant_fabric_mcp::tools::catalogue()
                 .iter()
                 .filter_map(|tool| {
                     tool["name"]
                         .as_str()
-                        .map(|name| ((EVENT_KINDS[1].into(), name.into()), 0))
+                        .map(|name| ((EVENT_KINDS[1].into(), name.into(), None), 0))
                 }),
         )
         .collect()
@@ -190,20 +245,34 @@ fn report(roots: &Roots, stats: &Stats) -> Result<Report, Box<dyn std::error::Er
                 {
                     continue;
                 }
-                let calls = units.entry((event.kind, event.unit)).or_default();
+                let calls = units
+                    .entry((event.kind.clone(), event.unit.clone(), None))
+                    .or_default();
                 *calls = calls.saturating_add(1);
+                if let Some(project_id) = event.project_id {
+                    let calls = units
+                        .entry((event.kind, event.unit, Some(project_id)))
+                        .or_default();
+                    *calls = calls.saturating_add(1);
+                }
             }
         }
     }
     let mut units: Vec<_> = units
         .into_iter()
-        .map(|((kind, unit), calls)| Unit { kind, unit, calls })
+        .map(|((kind, unit, project_id), calls)| Unit {
+            kind,
+            unit,
+            calls,
+            project_id,
+        })
         .collect();
     units.sort_by(|a, b| {
         b.calls
             .cmp(&a.calls)
             .then(a.kind.cmp(&b.kind))
             .then(a.unit.cmp(&b.unit))
+            .then(a.project_id.cmp(&b.project_id))
     });
     Ok(Report {
         since: stats.since.map(|s| s.to_string()),

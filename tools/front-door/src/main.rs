@@ -567,6 +567,11 @@ fn main() -> ExitCode {
     };
     let verb = verb.to_owned();
     let usage_roots = usage::selected_roots(globals);
+    let usage_project = globals
+        .project
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .and_then(|path| std::fs::canonicalize(path).ok());
     let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv),
         ParseOutcome::Invalid { error, globals } => fail(
@@ -629,6 +634,9 @@ fn main() -> ExitCode {
             &verb,
             status,
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            usage_project
+                .as_deref()
+                .and_then(|project| usage::project_id(&roots, project)),
         );
     }
     ExitCode::from(status)
