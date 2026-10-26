@@ -486,8 +486,8 @@ pub struct AttemptRecord {
     /// Fallback candidates that did not launch before this attempt did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_routes: Vec<SkippedRoute>,
-    /// Stamped when the attempt is created; records from before it read as all
-    /// unknown.
+    /// Stamped when the attempt is created; a record without one decodes as
+    /// all unknown.
     #[serde(default)]
     pub trace: crate::Trace,
 }

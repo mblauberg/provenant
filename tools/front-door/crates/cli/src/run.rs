@@ -1876,19 +1876,23 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
 /// The attempt's trace, then each parent's, nearest first. The chain ends at an
 /// attempt with no parent, or at a parent this store does not hold (a nested
 /// run's submitter lives in its parent's store), which appears as a hop that
-/// knows only its attempt ID.
+/// knows only its attempt ID. A parent that repeats is a corrupt store and
+/// fails.
 fn trace_chain(
     store: &run::RunStore,
     record: run::AttemptRecord,
     call: &run::Request<'_>,
 ) -> Result<Vec<provenant_records::Trace>, Fail> {
-    // Bounds a malformed store whose parents loop.
-    const MAX_HOPS: usize = 64;
+    let mut seen = std::collections::HashSet::from([record.attempt_id]);
     let mut chain = vec![record.trace];
-    while chain.len() < MAX_HOPS {
-        let Some(parent) = chain.last().and_then(|t| t.parent) else {
-            break;
-        };
+    while let Some(parent) = chain.last().and_then(|t| t.parent) {
+        if !seen.insert(parent) {
+            return Err(Fail::new(
+                Status::Error,
+                "IO",
+                format!("trace parents loop back to attempt {parent}"),
+            ));
+        }
         match store.record(parent, call) {
             Ok(record) => chain.push(record.trace),
             Err(run::RunError::NotFound) => {
@@ -2687,10 +2691,55 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn trace_chain_follows_parents_and_ends_at_a_parent_this_store_lacks()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
+    fn trace_run(
+        n: u8,
+        parent_attempt: AttemptId,
+        created_at: WallTime,
+    ) -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
+        let task_id = TaskId::from_bytes([n; 16]);
+        Ok(run::PreparedRun {
+            run_id: RunId::from_bytes([n + 1; 16]),
+            operation_id: OperationId::parse(&format!("trace-{n}"))?,
+            created_at,
+            request: run::CanonicalRequest {
+                schema_version: 1,
+                tasks: vec![run::TaskRequest {
+                    base: None,
+                    base_ref: None,
+                    task_id,
+                    prompt_digest: CanonicalV1::file_digest(b"p"),
+                    route: run::RequestedRoute::Model {
+                        provider: "fixture".into(),
+                        model: "fixture/model".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    profile: Default::default(),
+                    authority_digest: provenant_core::Digest::from_bytes([5; 32]),
+                    provider_timeout_seconds: 3600,
+                    writer: None,
+                    delivery_id: None,
+                    deliver: None,
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                parent: None,
+                lane_depth: Some(1),
+                parent_attempt: Some(parent_attempt),
+            },
+            attempts: vec![run::NewAttempt {
+                task_id,
+                attempt_id: AttemptId::from_bytes([n + 2; 16]),
+                prompt: "p".into(),
+            }],
+        })
+    }
+
+    fn trace_store(
+        temp: &tempfile::TempDir,
+        call: &run::Request<'_>,
+    ) -> Result<run::RunStore, Box<dyn std::error::Error>> {
         let root = std::fs::canonicalize(temp.path())?;
         std::fs::create_dir_all(root.join("home"))?;
         std::fs::create_dir_all(root.join("checkout"))?;
@@ -2702,52 +2751,20 @@ mod tests {
             actor_id: provenant_core::ActorId::from_bytes([2; 16]),
             read_prompts: true,
         };
+        Ok(run::RunStore::open(&context, call)?)
+    }
+
+    #[test]
+    fn trace_chain_follows_parents_and_ends_at_a_parent_this_store_lacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = request(&clock, &cancel).map_err(|f| f.message)?;
-        let store = run::RunStore::open(&context, &call)?;
+        let store = trace_store(&temp, &call)?;
         let missing = AttemptId::from_bytes([9; 16]);
         let prepared =
-            |n: u8, parent_attempt: AttemptId| -> Result<_, Box<dyn std::error::Error>> {
-                let task_id = TaskId::from_bytes([n; 16]);
-                Ok(run::PreparedRun {
-                    run_id: RunId::from_bytes([n + 1; 16]),
-                    operation_id: OperationId::parse(&format!("trace-{n}"))?,
-                    created_at: clock.wall_now()?,
-                    request: run::CanonicalRequest {
-                        schema_version: 1,
-                        tasks: vec![run::TaskRequest {
-                            base: None,
-                            base_ref: None,
-                            task_id,
-                            prompt_digest: CanonicalV1::file_digest(b"p"),
-                            route: run::RequestedRoute::Model {
-                                provider: "fixture".into(),
-                                model: "fixture/model".into(),
-                                effort: None,
-                            },
-                            account: None,
-                            fallback: vec![],
-                            profile: Default::default(),
-                            authority_digest: provenant_core::Digest::from_bytes([5; 32]),
-                            provider_timeout_seconds: 3600,
-                            writer: None,
-                            delivery_id: None,
-                            deliver: None,
-                            access: Default::default(),
-                        }],
-                        concurrency: 1,
-                        parent: None,
-                        lane_depth: Some(1),
-                        parent_attempt: Some(parent_attempt),
-                    },
-                    attempts: vec![run::NewAttempt {
-                        task_id,
-                        attempt_id: AttemptId::from_bytes([n + 2; 16]),
-                        prompt: "p".into(),
-                    }],
-                })
-            };
+            |n: u8, parent_attempt: AttemptId| trace_run(n, parent_attempt, clock.wall_now()?);
         let first = prepared(10, missing)?;
         let second = prepared(20, first.attempts[0].attempt_id)?;
         store.create(&first, &call)?;
@@ -2774,6 +2791,55 @@ mod tests {
         let line = trace_line(&chain[2]);
         assert_eq!(line.lines().count(), 1);
         assert!(line.contains("host=- ") && line.contains(&format!("attempt={missing} ")));
+        Ok(())
+    }
+
+    #[test]
+    fn trace_chain_keeps_every_ancestor_of_a_long_chain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const LEN: u8 = 70;
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let store = trace_store(&temp, &call)?;
+        let missing = AttemptId::from_bytes([9; 16]);
+        let mut parent = missing;
+        let mut ids = Vec::new();
+        for link in 1..=LEN {
+            // Each run uses three bytes of ID space, so step by three.
+            let prepared = trace_run(3 * link, parent, clock.wall_now()?)?;
+            store.create(&prepared, &call)?;
+            parent = prepared.attempts[0].attempt_id;
+            ids.push(parent);
+        }
+        let leaf = store.record(parent, &call)?;
+        let chain = trace_chain(&store, leaf, &call).map_err(|f| f.message)?;
+        let attempts: Vec<_> = chain.iter().filter_map(|t| t.attempt).collect();
+        ids.reverse();
+        ids.push(missing);
+        assert_eq!(attempts, ids);
+        Ok(())
+    }
+
+    #[test]
+    fn trace_chain_fails_when_parents_loop() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let store = trace_store(&temp, &call)?;
+        // Attempt IDs are n + 2, so 12 and 22 name each other.
+        let first = trace_run(10, AttemptId::from_bytes([22; 16]), clock.wall_now()?)?;
+        let second = trace_run(20, AttemptId::from_bytes([12; 16]), clock.wall_now()?)?;
+        store.create(&first, &call)?;
+        store.create(&second, &call)?;
+        let leaf = store.record(second.attempts[0].attempt_id, &call)?;
+        let Err(fail) = trace_chain(&store, leaf, &call) else {
+            return Err("a looping chain must fail".into());
+        };
+        assert_eq!(fail.code, "IO");
+        assert!(fail.message.contains("loop back"), "{}", fail.message);
         Ok(())
     }
 
