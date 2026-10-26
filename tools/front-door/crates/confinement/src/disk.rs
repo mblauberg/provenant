@@ -161,6 +161,8 @@ fn classify_lane_cache(
         Some(CacheGcReason::Idle) => "idle",
         Some(CacheGcReason::Tombstone) => "tombstone",
         Some(CacheGcReason::Foreign) => "foreign",
+        Some(CacheGcReason::Live) => "live",
+        Some(CacheGcReason::Unobservable) => "unobservable",
         None if owner.identity.is_none() => "legacy",
         None => "live",
     };
@@ -384,7 +386,9 @@ mod tests {
             classify_lane_cache(&directory, relative, &policy, 100)?.0,
             "live"
         );
-        policy.protected_owners.insert(owner.clone());
+        policy
+            .protected_owners
+            .insert(owner.clone(), crate::worktrees::WriterState::Live);
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
             "live"

@@ -36,6 +36,16 @@ pub trait SafeDir: Send + Sync {
     fn mkdir(&self, name: &OsStr, mode: u32) -> Result<()>;
     fn entries(&self) -> Result<Box<dyn Iterator<Item = Result<OsString>>>>;
     fn make_writable(&self) -> Result<()>;
+    /// Observe an existing stable lock without creating or repairing it.
+    /// Adapters without this capability refuse observation.
+    fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
+        let _ = mode;
+        Err(FsError::Io {
+            operation: "existing lock unsupported",
+            path: name.into(),
+            source: io::Error::from(io::ErrorKind::Unsupported),
+        })
+    }
     fn lock(
         &self,
         name: &OsStr,
@@ -189,6 +199,9 @@ impl SafeFile for FileHandle {
     }
 }
 impl SafeDir for Directory {
+    fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
+        Directory::try_lock_existing(self, name, mode)
+    }
     /// Unlike `unlink`, this permits payload names such as Cargo.lock. No
     /// final symlink is followed.
     fn remove_payload(&self, name: &OsStr, directory: bool, _: PayloadRemoval) -> Result<()> {

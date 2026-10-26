@@ -385,6 +385,30 @@ fn one_second_budget() -> WaitBudget {
 }
 
 #[test]
+fn existing_lock_observation_through_safe_dir_never_creates_a_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let observed: &dyn SafeDir = &directory;
+    let name = OsStr::new("writer.lock");
+    assert!(
+        observed
+            .try_lock_existing(name, LockMode::Exclusive)
+            .unwrap_err()
+            .is_not_found()
+    );
+    assert!(!temp.path().join(name).exists());
+    let held = directory.try_lock(name, LockMode::Exclusive).unwrap();
+    assert!(matches!(
+        observed.try_lock_existing(name, LockMode::Exclusive),
+        Err(FsError::LockTimeout { .. })
+    ));
+    drop(held);
+    let _guard = observed
+        .try_lock_existing(name, LockMode::Exclusive)
+        .unwrap();
+}
+
+#[test]
 fn owner_lock_is_nonblocking_bounded_and_releases_only_when_its_guard_drops() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();

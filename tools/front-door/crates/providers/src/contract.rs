@@ -47,16 +47,31 @@ pub struct AvailabilityRecord {
     pub expires_unix_seconds: i64,
 }
 
-pub struct Prompt(String);
+pub struct Prompt {
+    text: String,
+    file: Option<std::path::PathBuf>,
+}
 impl Prompt {
     pub fn new(text: String) -> Self {
-        Self(text)
+        Self { text, file: None }
+    }
+    pub fn from_file(path: std::path::PathBuf) -> Self {
+        Self {
+            text: format!(
+                "Read the file at {} first and treat its full contents as your task instructions.",
+                path.display()
+            ),
+            file: Some(path),
+        }
+    }
+    pub fn file(&self) -> Option<&std::path::Path> {
+        self.file.as_deref()
     }
     pub fn text(&self) -> &str {
-        &self.0
+        &self.text
     }
     pub fn check_argv(&self) -> Result<(), ProviderError> {
-        if self.0.len() > 65_536 {
+        if self.text.len() > 65_536 {
             Err(ProviderError::PromptTooLarge)
         } else {
             Ok(())

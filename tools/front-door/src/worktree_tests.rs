@@ -44,6 +44,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "create_list_and_remove_a_managed_worktree",
+            "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
@@ -81,6 +82,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
+                }
+                "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
+                    gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
                 }
                 "remove_a_managed_worktree_deletes_its_legacy_lane_cache" => {
                     remove_a_managed_worktree_deletes_its_legacy_lane_cache()
@@ -123,7 +127,8 @@ fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
 }
 
 pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let output = rig.execute(Path::new("/usr/bin/git"), args, None)?;
+    let git = crate::roots::git_binary().ok_or("Git executable unavailable")?;
+    let output = rig.execute(&git, args, None)?;
     assert_eq!(
         code(&output),
         0,
@@ -1078,7 +1083,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
 
     let runtime = UtilityRuntime::new(
         std::sync::Arc::new(LocalFs),
-        fs::canonicalize("/usr/bin/git")?,
+        fs::canonicalize(crate::roots::git_binary().ok_or("Git executable unavailable")?)?,
         rig.state.join("utility-home"),
     )?;
     let executor = SystemExecutor::new(1)?;
@@ -1095,6 +1100,130 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let cache = authority.cargo_cache().path.clone();
     fs::write(cache.join("artifact"), b"lane build output")?;
     Ok(cache)
+}
+
+fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Result {
+    use provenant_supervisor::fs::{Directory, LockMode};
+    use std::ffi::OsStr;
+
+    fn make_idle(path: &Path) -> Result {
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                make_idle(&entry?.path())?;
+            }
+        }
+        fs::File::open(path)?.set_modified(std::time::UNIX_EPOCH)?;
+        Ok(())
+    }
+
+    for writer in [
+        "live",
+        "live_reserved",
+        "free",
+        "missing",
+        "unsafe",
+        "reserved",
+    ] {
+        let rig = repository()?;
+        ok(&rig, &["worktree", "create", "idle", "--json"])?;
+        let worktree = rig.project.join(".worktrees/idle");
+        let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
+        let projects =
+            fs::read_dir(rig.state.join("worktrees"))?.collect::<std::io::Result<Vec<_>>>()?;
+        let project = projects.first().ok_or("project state")?.path();
+        let states = fs::read_dir(project)?.collect::<std::io::Result<Vec<_>>>()?;
+        let state = states
+            .iter()
+            .find(|entry| entry.path().join("identity.json").is_file())
+            .ok_or("worktree registration")?
+            .path();
+        let directory = Directory::open_anchor(&state)?;
+        let lock = OsStr::new("writer.lock");
+        let held = match writer {
+            "live" | "live_reserved" => {
+                let held = directory.try_lock_existing(lock, LockMode::Exclusive)?;
+                if writer == "live_reserved" {
+                    fs::write(state.join("reservation.json"), b"active writer")?;
+                }
+                Some(held)
+            }
+            "missing" => {
+                fs::remove_file(state.join(lock))?;
+                None
+            }
+            "unsafe" => {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(state.join(lock), fs::Permissions::from_mode(0o666))?;
+                None
+            }
+            "reserved" => {
+                fs::write(state.join("reservation.json"), b"unsettled writer")?;
+                None
+            }
+            _ => None,
+        };
+        make_idle(&cache)?;
+        let listed = ok(&rig, &["worktree", "list", "--json"])?;
+        let listed_writer = listed["data"]
+            .as_array()
+            .ok_or("worktrees")?
+            .iter()
+            .find(|info| info["branch"] == "refs/heads/idle")
+            .ok_or("idle worktree")?["writer"]
+            .as_str()
+            .ok_or("writer state")?;
+        assert_eq!(
+            listed_writer,
+            match writer {
+                "live" => "live",
+                "free" => "free",
+                _ => "unknown",
+            }
+        );
+        for dry_run in [true, false] {
+            let mut args = vec!["gc", "--idle-days", "1", "--json"];
+            if dry_run {
+                args.push("--dry-run");
+            }
+            let result = ok(&rig, &args)?;
+            if writer == "free" {
+                assert_eq!(result["data"]["removed"][0]["reason"], "idle");
+                assert_eq!(cache.exists(), dry_run);
+            } else {
+                assert!(
+                    result["data"]["removed"]
+                        .as_array()
+                        .ok_or("removed")?
+                        .is_empty()
+                );
+                assert_eq!(
+                    result["data"]["kept"][0]["reason"],
+                    // A reservation makes the listing unknown even when the
+                    // kernel lock is held; GC preserves that observation.
+                    if writer == "live" {
+                        "live"
+                    } else {
+                        "unobservable"
+                    }
+                );
+                assert!(cache.is_dir());
+            }
+        }
+        if writer == "missing" {
+            assert!(!state.join(lock).exists(), "gc must not recreate the lock");
+        }
+        drop(held);
+        if writer.starts_with("live") {
+            let _released = directory.try_lock_existing(lock, LockMode::Exclusive)?;
+        } else if writer == "missing" {
+            assert!(matches!(
+                directory.try_lock_existing(lock, LockMode::Exclusive),
+                Err(error) if error.is_not_found()
+            ));
+        }
+        rig.assert_legacy_unchanged()?;
+    }
+    Ok(())
 }
 
 fn create_list_and_remove_a_managed_worktree() -> Result {
