@@ -2082,13 +2082,13 @@ fn compile_sbpl(
         verify_writable_tree(&grants.worktree.path, anchors)?;
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
-    let mut read_grants = plan.read_roots.clone();
+    let grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
+    let read_grants = &grants.reads;
     if let Some(read_only) = &plan.read_only {
         if !matches!(plan.mode, AccessMode::ReadOnly) {
             return Err(PermissionError::InvalidReadOnlyPolicy);
         }
         read_only.revalidate(anchors.safe_fs)?;
-        read_grants.extend(read_only.git_reads.iter().cloned());
         for grant in &read_only.writes {
             validate_noncredential_grant(grant)?;
             if plan
@@ -2103,8 +2103,8 @@ fn compile_sbpl(
             verify_writable_tree(&grant.path, anchors)?;
         }
     }
-    let credential_writes =
-        extend_read_grants(&mut read_grants, plan, profile, worktree_grants.as_ref())?;
+    let credential_writes = &grants.credential_writes;
+    let worktree_grants = grants.worktree.as_ref();
 
     let shared_writes: Vec<&PathGrant> = plan
         .write_roots
@@ -2122,13 +2122,13 @@ fn compile_sbpl(
     {
         return Err(PermissionError::CredentialRoot);
     }
-    for grant in &read_grants {
+    for grant in read_grants {
         anchors.verify_grant_held(grant)?;
     }
     for executable in &profile.spec.process_executables {
         anchors.verify_executable(executable)?;
     }
-    for grant in &credential_writes {
+    for grant in credential_writes {
         anchors.verify_single_link_grant(grant)?;
     }
     verify_state_writes(plan, profile, anchors)?;
@@ -2204,7 +2204,7 @@ fn compile_sbpl(
         secret.validate()?;
         anchors.verify_grant_held(secret)?;
     }
-    for read in &read_grants {
+    for read in read_grants {
         if plan.secret_roots.iter().any(|secret| read.overlaps(secret)) {
             return Err(PermissionError::ProtectedOverlap);
         }
@@ -2230,14 +2230,7 @@ fn compile_sbpl(
         return Err(PermissionError::ProtectedOverlap);
     }
 
-    let mut profile_bytes = render_profile(
-        plan,
-        profile,
-        &read_grants,
-        &credential_writes,
-        worktree_grants.as_ref(),
-        anchors.home,
-    )?;
+    let mut profile_bytes = render(&grants)?.into_bytes();
     if profile_bytes.len() > PROFILE_LIMIT {
         return Err(PermissionError::ProfileTooLarge);
     }
@@ -2320,6 +2313,56 @@ fn extend_read_grants(
         read_grants.extend(profile.spec.continuation_reads.iter().cloned());
     }
     Ok(credential_writes)
+}
+
+/// All path grants and inputs used to render one launch profile.
+///
+/// Build this once from the launch inputs, then use the same set for
+/// validation, rendering and the post-render checks.
+pub struct GrantSet<'a> {
+    plan: &'a PlanPermissions,
+    profile: &'a ProviderProfile,
+    home: &'a Path,
+    reads: Vec<PathGrant>,
+    credential_writes: Vec<PathGrant>,
+    worktree: Option<WorktreeWriteGrants>,
+}
+
+impl<'a> GrantSet<'a> {
+    fn build(
+        plan: &'a PlanPermissions,
+        profile: &'a ProviderProfile,
+        home: &'a Path,
+        worktree: Option<WorktreeWriteGrants>,
+    ) -> Result<Self, PermissionError> {
+        let mut reads = plan.read_roots.clone();
+        if let Some(read_only) = &plan.read_only {
+            reads.extend(read_only.git_reads.iter().cloned());
+        }
+        let credential_writes = extend_read_grants(&mut reads, plan, profile, worktree.as_ref())?;
+        Ok(Self {
+            plan,
+            profile,
+            home,
+            reads,
+            credential_writes,
+            worktree,
+        })
+    }
+}
+
+/// Render a built grant set without filesystem or environment access.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub fn render(grants: &GrantSet<'_>) -> Result<String, PermissionError> {
+    String::from_utf8(render_profile(
+        grants.plan,
+        grants.profile,
+        &grants.reads,
+        &grants.credential_writes,
+        grants.worktree.as_ref(),
+        grants.home,
+    )?)
+    .map_err(|_| PermissionError::NonUtf8Path)
 }
 
 /// Provider state writes stay outside every secret, protected and Git root, and

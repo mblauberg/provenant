@@ -1,7 +1,7 @@
 //! Compose filesystem inventories without initialising any state owners.
 use crate::roots;
 use provenant_cli::{Globals, RenderError, RenderMode};
-use provenant_confinement::{UtilityBudget, UtilityRuntime, permissions::CacheGcPolicy};
+use provenant_confinement::{UtilityBudget, UtilityRuntime, cache::CacheGcPolicy};
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, WaitBudget};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use provenant_run::{ExecutionContext, Request, RunStore};
