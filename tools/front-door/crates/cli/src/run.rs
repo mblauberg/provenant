@@ -719,6 +719,20 @@ pub fn submit(
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
+    // Reuse the originally resolved boundary before consulting Git. Retrying
+    // the same operation must work even after its caller-supplied ref vanishes.
+    let previous = match session.store.operation(&submission.operation_id, call)? {
+        Some(operation) => match session.store.request(operation.run_id, call) {
+            Ok(request) => Some(request),
+            // A prepared operation may have crashed before request publication;
+            // leave its existing adoption/repair path to RunStore::create.
+            Err(run::RunError::NotFound) if operation.state == run::OperationState::Prepared => {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        },
+        None => None,
+    };
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
     let config = provenant_config::read_with_domains(
@@ -776,7 +790,15 @@ pub fn submit(
                 Ok::<_, run::RunError>(writer)
             })
             .transpose()?;
-        let base = if parent_attempt.is_some() {
+        let base_ref = task.base.clone();
+        let previous_base = previous.as_ref().and_then(|request| {
+            request.tasks.iter().find(|prior| {
+                base_ref.is_some() && prior.task_id == task.task_id && prior.base_ref == base_ref
+            })
+        });
+        let base = if let Some(prior) = previous_base {
+            prior.base.clone()
+        } else if parent_attempt.is_some() {
             task.base
         } else {
             task.base
@@ -818,6 +840,7 @@ pub fn submit(
             profile: profile(task.task_class.as_deref())?,
             task_id: task.task_id,
             prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
+            base_ref,
             base,
             route: task.route,
             account: task.account,
@@ -2440,6 +2463,138 @@ mod tests {
         .unwrap();
         assert_eq!(manifest.tasks[0].base.as_deref(), Some("main"));
         assert_eq!(manifest.tasks[1].base, None);
+    }
+
+    #[test]
+    fn operation_replays_after_its_context_ref_moves_or_is_deleted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{ActorId, ProjectId, RootInputs};
+        use provenant_supervisor::fs::LocalFs;
+        // The regression exercises a top-level submission, even when the
+        // contributor running it is itself inside a nested lane.
+        if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
+            || std::env::var_os(run::LANE_DEPTH_ENV).is_some()
+            || std::env::var_os(run::PARENT_ATTEMPT_ENV).is_some()
+        {
+            let out = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "run::tests::operation_replays_after_its_context_ref_moves_or_is_deleted",
+                    "--nocapture",
+                ])
+                .env_remove(provenant_core::RUN_STATE_DIRECTORY_ENV)
+                .env_remove(run::LANE_DEPTH_ENV)
+                .env_remove(run::PARENT_ATTEMPT_ENV)
+                .output()?;
+            assert!(
+                out.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let cwd = root.join("checkout");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&cwd)?;
+        let mut inputs = RootInputs::new(home.clone(), cwd.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&LocalFs)?;
+        let git = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
+        let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let out = std::process::Command::new(&git)
+                .current_dir(&cwd)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                ])
+                .args(args)
+                .output()?;
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            Ok(String::from_utf8(out.stdout)?.trim().to_owned())
+        };
+        command(&["init", "-q"])?;
+        command(&["commit", "--allow-empty", "-qm", "initial"])?;
+        command(&["branch", "context-base"])?;
+        let original_base = command(&["rev-parse", "context-base"])?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let context = run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        let session = Session {
+            store: run::RunStore::open(&context, &call)?,
+            context,
+        };
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &cwd,
+            cwd: &cwd,
+        };
+        let submission = |base: &str| Submission {
+            operation_id: OperationId::parse("context-ref-replay").unwrap(),
+            tasks: vec![Submitted {
+                task_class: None,
+                task_id: TaskId::from_bytes([3; 16]),
+                prompt: "review".into(),
+                base: Some(base.into()),
+                route: run::RequestedRoute::Model {
+                    provider: "fixture".into(),
+                    model: "fixture/model".into(),
+                    effort: None,
+                },
+                account: None,
+                fallback: vec![],
+                provider_timeout: 10,
+                delivery_id: None,
+                deliver: None,
+                worktree: None,
+                access: Default::default(),
+            }],
+            concurrency: Some(1),
+            knobs: vec![],
+        };
+        let (first, _) =
+            submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
+        command(&["commit", "--allow-empty", "-qm", "moved"])?;
+        command(&["branch", "-f", "context-base", "HEAD"])?;
+        for deleted in [false, true] {
+            if deleted {
+                command(&["branch", "-D", "context-base"])?;
+            }
+            let (replayed, _) = submit(&session, &edge, submission("context-base"), &call)
+                .map_err(|f| f.message)?;
+            assert_eq!(replayed.run_id, first.run_id);
+            assert_eq!(
+                session.store.request(first.run_id, &call)?.tasks[0]
+                    .base
+                    .as_deref(),
+                Some(original_base.as_str())
+            );
+        }
+        assert!(
+            matches!(submit(&session, &edge, submission("HEAD"), &call), Err(fail) if fail.code == "OPERATION_CONFLICT")
+        );
+        Ok(())
     }
 
     #[test]

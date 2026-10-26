@@ -297,6 +297,7 @@ impl RunStore {
                 schema_version: 1,
                 tasks: vec![TaskRequest {
                     base: task.base.clone(),
+                    base_ref: task.base_ref.clone(),
                     profile: task.profile.clone(),
                     task_id: prior.task_id,
                     prompt_digest: provenant_records::CanonicalV1::file_digest(

@@ -49,6 +49,7 @@ pub(super) fn input() -> PreparedRun {
             schema_version: 1,
             tasks: vec![TaskRequest {
                 base: None,
+                base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),
                 task_id: task,
