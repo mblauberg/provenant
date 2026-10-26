@@ -33,8 +33,8 @@ dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
 ## Local graphs
 
 Use a graph for a writer followed by a review. Create and register the writer's
-worktree first with `provenant worktree create`, then save a project-local
-graph document in the project:
+worktree first with `provenant worktree create`, then save the following
+as a graph file in the project:
 
 ```json
 {
@@ -388,7 +388,7 @@ provenant workflow session handoff --to workshop --account personal \
   --no-checkpoint --wip --note "Finish the failing parser test on feat/x."
 ```
 
-Read-only investigation, from a written prompt with a log attached, while
+Investigation from a written prompt with a log attached, while
 this tree stays dirty:
 
 ```sh

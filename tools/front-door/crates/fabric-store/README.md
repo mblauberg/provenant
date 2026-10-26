@@ -102,8 +102,6 @@ Identical live acquire retries by the same actor/token return the existing fence
 without renewing it or appending an event. Landing retries also match frozen OIDs;
 a changed expected or candidate OID conflicts, including during an unresolved push.
 
-Migration 3 adds claims, paths and push operations.
-Migration 4 adds persistent counters and indexed path lookup/pruning.
 Migration 7 drops the removed legacy import's table and strips its always-null
 `legacy` members from messages, tasks, coordination receipts and committed peer
 replies, and deletes the `imported` event of an import that brought nothing

@@ -41,6 +41,7 @@ Deferred red or green runs remain unverified until their gate runs before merge.
 - Name the plausible production defect no existing test catches. Write no
   test for duplication, trivial wiring, unconsumed configuration or guarantees
   already enforced by types, schemas or lint; give the named existing check.
+  Retain one boundary test proving the real path applies that check.
   Money, authorisation, privacy and data integrity always earn tests.
 - Expected values come from the spec, never implementation output. Assert
   specific error variants or codes. Stop on a spec/test conflict.

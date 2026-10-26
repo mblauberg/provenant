@@ -1,6 +1,6 @@
 ---
 name: implement
-description: "Use for an approved software change through verified implementation, independent review, bounded repair, and acceptance. Not for unsettled scope, diagnosis-only, read-only review, or release."
+description: "Use for approved software changes through verification, review, repair and acceptance. Use scope for unsettled scope, diagnose for investigation, code-review for read-only review and release for promotion."
 ---
 
 # Implement
@@ -38,8 +38,8 @@ Read [delivery contract and execution detail](references/run-contract.md).
    multiple crates/packages, subject to `review.polish`. Keep changes within
    approved structure and every fast check green.
 5. Invoke read-only code-review under the HARNESS ladder. Bind attempts with
-   `provenant workflow review`. UI changes need viewport screenshots and
-   vision-capable reviewers. Record omissions and substitutions; native
+   `provenant workflow review`. Give viewport screenshots for UI changes to
+   reviewers with vision. Record omissions and substitutions; native
    reviewers record resolved routes from tool evidence.
 6. Batch review and slow-check findings into bounded repair. A failed gate
    gets one repair at the same tier, then escalates one tier. Downward

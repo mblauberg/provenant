@@ -33,6 +33,5 @@ transaction.
 
 Updates have one explicit writer per file class. A user changes product
 behaviour through the product or a supported configuration surface, rather
-than editing managed release files. The retired instance YAML, product-pointer
-and rename-registry formats are not current installation contracts. Current
-owners are described in the [state design](../specs/state.md).
+than editing managed release files. Owners are described in the
+[state design](../specs/state.md).

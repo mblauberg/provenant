@@ -131,8 +131,8 @@ for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
 one branch may cover several issues or a slice. The worktree directory is the
 branch with `/` replaced by `-`. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
-extra authority. Removing a clean worktree also needs no extra authority;
-dirty worktrees are refused and unmerged branches are kept.
+extra authority. An authorised merge covers pruning its own worktree and
+merged refs; other deletion needs user authority. Dirty worktrees are refused.
 
 ```sh
 provenant worktree create fix/repo-runbook-mechanics --base main
@@ -150,7 +150,8 @@ provenant worktree create fix/repo-runbook-mechanics
 
 Use `provenant worktree list` to inspect worktrees and
 `provenant worktree remove NAME` to remove an eligible one; its branch goes
-too once merged. `--discard` also deletes an unmerged branch.
+too once merged. `--discard` deletes an unmerged branch and needs explicit
+user authority.
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).
