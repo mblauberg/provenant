@@ -322,68 +322,6 @@ pub(crate) fn lane_states(
     Ok(snapshot)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn terminal_age_must_be_newer_than_worktree_creation() {
-        assert!(!terminal_after_worktree_creation(99, Some(100)));
-        assert!(!terminal_after_worktree_creation(100, Some(100)));
-        assert!(terminal_after_worktree_creation(101, Some(100)));
-        assert!(!terminal_after_worktree_creation(101, None));
-    }
-
-    #[test]
-    fn stale_snapshot_is_rescanned_once() {
-        let snapshot = RefCell::new(Some(1));
-        let failed = Cell::new(false);
-        let rescans = Cell::new(0);
-        refresh_if_stale(
-            &snapshot,
-            &failed,
-            |_| false,
-            || {
-                rescans.set(rescans.get() + 1);
-                Some(2)
-            },
-        );
-        assert_eq!(*snapshot.borrow(), Some(2));
-        assert_eq!(rescans.get(), 1);
-        refresh_if_stale(
-            &snapshot,
-            &failed,
-            |_| true,
-            || {
-                rescans.set(rescans.get() + 1);
-                Some(3)
-            },
-        );
-        assert_eq!(rescans.get(), 1);
-    }
-
-    #[test]
-    fn failed_rescan_is_not_retried_during_the_sweep() {
-        let snapshot = RefCell::new(Some(1));
-        let failed = Cell::new(false);
-        let rescans = Cell::new(0);
-        for _ in 0..2 {
-            refresh_if_stale(
-                &snapshot,
-                &failed,
-                |_| false,
-                || {
-                    rescans.set(rescans.get() + 1);
-                    None::<i32>
-                },
-            );
-        }
-        assert!(snapshot.borrow().is_none());
-        assert!(failed.get());
-        assert_eq!(rescans.get(), 1);
-    }
-}
-
 fn scan_terminal(
     context: &ExecutionContext,
     snapshot: &mut LaneSnapshot,
@@ -591,4 +529,67 @@ pub(crate) fn disk_alert(
     }
     gc.atomic_write(latch, ".low-disk-", b"true\n", PublishMode::NoReplace)?;
     Ok(vec![detail])
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
+    use super::*;
+
+    #[test]
+    fn terminal_age_must_be_newer_than_worktree_creation() {
+        assert!(!terminal_after_worktree_creation(99, Some(100)));
+        assert!(!terminal_after_worktree_creation(100, Some(100)));
+        assert!(terminal_after_worktree_creation(101, Some(100)));
+        assert!(!terminal_after_worktree_creation(101, None));
+    }
+
+    #[test]
+    fn stale_snapshot_is_rescanned_once() {
+        let snapshot = RefCell::new(Some(1));
+        let failed = Cell::new(false);
+        let rescans = Cell::new(0);
+        refresh_if_stale(
+            &snapshot,
+            &failed,
+            |_| false,
+            || {
+                rescans.set(rescans.get() + 1);
+                Some(2)
+            },
+        );
+        assert_eq!(*snapshot.borrow(), Some(2));
+        assert_eq!(rescans.get(), 1);
+        refresh_if_stale(
+            &snapshot,
+            &failed,
+            |_| true,
+            || {
+                rescans.set(rescans.get() + 1);
+                Some(3)
+            },
+        );
+        assert_eq!(rescans.get(), 1);
+    }
+
+    #[test]
+    fn failed_rescan_is_not_retried_during_the_sweep() {
+        let snapshot = RefCell::new(Some(1));
+        let failed = Cell::new(false);
+        let rescans = Cell::new(0);
+        for _ in 0..2 {
+            refresh_if_stale(
+                &snapshot,
+                &failed,
+                |_| false,
+                || {
+                    rescans.set(rescans.get() + 1);
+                    None::<i32>
+                },
+            );
+        }
+        assert!(snapshot.borrow().is_none());
+        assert!(failed.get());
+        assert_eq!(rescans.get(), 1);
+    }
 }

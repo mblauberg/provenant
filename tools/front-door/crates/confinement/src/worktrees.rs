@@ -1821,6 +1821,7 @@ fn settle_branch(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn remove_merged_candidate(
     context: &WorktreeContext<'_>,
     branch: &GitRefName,

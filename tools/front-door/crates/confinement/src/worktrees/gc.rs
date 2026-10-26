@@ -139,11 +139,11 @@ pub fn collect(
                 }
                 Ok(())
             };
-            if let Err(error) = prune() {
-                if !matches!(error, WorktreeError::UnknownWriter) {
-                    retain(&mut report.worktrees, &branch, retain_reason(&error));
-                    continue;
-                }
+            if let Err(error) = prune()
+                && !matches!(error, WorktreeError::UnknownWriter)
+            {
+                retain(&mut report.worktrees, &branch, retain_reason(&error));
+                continue;
             }
         }
         let Some(upstream) = policy.upstream else {
