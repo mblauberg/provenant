@@ -28,6 +28,9 @@ const MODEL_ON_WIRE: bool = true;
 /// bound.
 const PRINT_TIMEOUT: &str = "0s";
 const SECURITY: &str = "/usr/bin/security";
+/// Its `run_command` tool runs commands through `SHELL`, pinned so that the
+/// exec grant names one binary.
+const SHELL: &str = "/bin/zsh";
 const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 
 /// Agy runs with the attempt's private state as `HOME`, so it sees none of the
@@ -101,6 +104,13 @@ fn prepare(
             *value = home.into();
         }
     }
+    env.push(("SHELL".into(), SHELL.into()));
+    // The keyring library reads its token through Apple's `security`. Only
+    // writers run commands.
+    let mut process_executables = vec![exact(input.executable), exact(SECURITY)];
+    if access == Access::WorktreeWrite {
+        process_executables.push(exact(SHELL));
+    }
     let keychains = home.join("Library/Keychains");
     Ok(LaunchSpec {
         argv,
@@ -117,8 +127,7 @@ fn prepare(
         ],
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
-                // The keyring library reads its token through Apple's `security`.
-                process_executables: vec![exact(input.executable), exact(SECURITY)],
+                process_executables,
                 allow_process_fork: true,
                 // Its `run_command` tool fails unless it can allocate a PTY.
                 allow_pseudo_tty: true,

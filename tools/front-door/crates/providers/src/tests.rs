@@ -1364,6 +1364,44 @@ fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), Provide
 }
 
 #[test]
+fn agy_writers_may_exec_only_their_pinned_shell() -> Result<(), ProviderError> {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "fixture-model");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("keychain"), false);
+        let spec = agy::Agy.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        assert!(
+            spec.env
+                .iter()
+                .any(|(key, value)| key == "SHELL" && value == "/bin/zsh")
+        );
+        let shell = PathGrant {
+            path: "/bin/zsh".into(),
+            scope: PathScope::Exact,
+        };
+        let executables = &spec.profile.spec.process_executables;
+        assert_eq!(
+            executables.contains(&shell),
+            access == Access::WorktreeWrite
+        );
+        // The one shell binary, never a directory of programs.
+        assert_eq!(
+            executables.len(),
+            2 + usize::from(access == Access::WorktreeWrite)
+        );
+        assert!(spec.profile.spec.tool_exec_roots.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), ProviderError> {
     use provenant_confinement::permissions::{PathGrant, PathScope};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
