@@ -91,6 +91,9 @@ pub enum Command {
     /// Create, list and remove worktrees
     #[command(subcommand)]
     Worktree(Worktree),
+    /// Watch pull request CI and merge a verified head
+    #[command(subcommand)]
+    Pr(Pr),
     /// Remove orphaned and idle lane build caches
     Gc(Gc),
     /// Inspect disk use without changing files
@@ -110,6 +113,21 @@ pub enum Command {
     Hook(Hook),
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+#[derive(Debug, Subcommand)]
+pub enum Pr {
+    /// Wait for CI and report pass or fail with the pull request head
+    Watch {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+    },
+    /// Merge only the specified head after CI has passed
+    Merge {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+        #[arg(long)]
+        head: GitOid,
+    },
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {

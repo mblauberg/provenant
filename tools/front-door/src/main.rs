@@ -12,6 +12,7 @@ mod hosts;
 mod install;
 mod overflow;
 mod peer_agent;
+mod pr;
 mod quota_live;
 mod release_smoke;
 mod roots;
@@ -478,6 +479,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             }
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals),
+        Command::Pr(command) => pr::run(command, globals),
         Command::Gc(command) => worktrees::run_gc(command, globals),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Bench(command) => bench::run(command, globals),
