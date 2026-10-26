@@ -113,6 +113,13 @@ impl PrepareFixture {
         &self,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        self.terminal_via("origin", write)
+    }
+    fn terminal_via(
+        &self,
+        remote: &str,
+        write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
+    ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
         use provenant_core::{CancelToken, Clock, WaitBudget};
         use provenant_os::fs::Directory;
@@ -176,7 +183,7 @@ impl PrepareFixture {
         .into_recovery()?;
         assert_eq!(recovery.observe(), RecoveryState::Absent);
         write()?;
-        let review = launch.terminal(&state, &attempt, &recovery, "origin")?;
+        let review = launch.terminal(&state, &attempt, &recovery, remote)?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
         let manifest: serde_json::Value = serde_json::from_slice(
             &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,
@@ -245,6 +252,63 @@ fn terminal_falls_back_when_delivery_target_cannot_be_resolved()
             assert_eq!(review, protected, "{target}");
         }
     }
+    Ok(())
+}
+
+#[test]
+fn terminal_uses_origin_head_when_the_delivery_remote_has_none()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    std::fs::create_dir_all(fixture.writer.project.join(".github"))?;
+    std::fs::write(
+        fixture.writer.project.join(".github/ci.yml"),
+        "main policy\n",
+    )?;
+    fixture.git(&["add", ".github"])?;
+    fixture.commit(&fixture.writer.project, "Upstream policy")?;
+    fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+    // The delivery remote "fork" has no HEAD; origin's does.
+    let review = fixture.terminal_via("fork", || {
+        fixture.lane_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "merge",
+            "--no-edit",
+            "origin/main",
+        ])?;
+        std::fs::write(
+            fixture.writer.worktree.join("source.txt"),
+            "writer source\n",
+        )?;
+        fixture.lane_git(&["add", "source.txt"])?;
+        fixture.commit(&fixture.writer.worktree, "Writer source")
+    })?;
+    assert!(!review);
+    Ok(())
+}
+
+#[test]
+fn terminal_names_a_writer_left_off_the_lane_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let error = fixture
+        .terminal(|| {
+            fixture.lane_git(&["checkout", "--detach"])?;
+            fixture.commit(&fixture.writer.worktree, "Detached work")
+        })
+        .expect_err("detached writer HEAD")
+        .to_string();
+    assert!(
+        error.contains("writer HEAD is not the lane branch"),
+        "{error}"
+    );
     Ok(())
 }
 

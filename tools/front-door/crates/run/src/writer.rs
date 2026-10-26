@@ -372,24 +372,31 @@ impl WriterLaunch {
         // Remote refs only refine attribution. Missing or stale refs must not
         // prevent quarantine from publishing evidence against the lane start.
         let comparison_base = (|| -> Result<GitOid> {
-            let remote_head = provenant_confinement::run_utility(
-                &executor,
-                provenant_confinement::GitRead::RemoteHead {
-                    remote: remote.into(),
-                },
-                self.worktree.repo(),
-                &utility,
-                budget()?,
-                &cancel,
-            )
-            .map_err(error)?;
-            if remote_head.termination != provenant_os::exec::Termination::Exit(0)
-                || remote_head.stdout.truncated
-            {
-                return Err(RunError::Validation(
-                    "writer delivery target cannot be resolved",
-                ));
+            // A fork delivery remote may have no HEAD; origin still names the
+            // upstream default branch, so try it before giving up.
+            let mut remote_head = None;
+            for name in [remote, "origin"] {
+                let head = provenant_confinement::run_utility(
+                    &executor,
+                    provenant_confinement::GitRead::RemoteHead {
+                        remote: name.into(),
+                    },
+                    self.worktree.repo(),
+                    &utility,
+                    budget()?,
+                    &cancel,
+                )
+                .map_err(error)?;
+                if head.termination == provenant_os::exec::Termination::Exit(0)
+                    && !head.stdout.truncated
+                {
+                    remote_head = Some(head);
+                    break;
+                }
             }
+            let remote_head = remote_head.ok_or(RunError::Validation(
+                "writer delivery target cannot be resolved",
+            ))?;
             let name = GitRefName::remote_tracking(
                 std::str::from_utf8(&remote_head.stdout.bytes)
                     .map_err(error)?
@@ -446,9 +453,7 @@ impl WriterLaunch {
             },
         )? != tip
         {
-            return Err(RunError::Validation(
-                "writer head changed during quarantine",
-            ));
+            return Err(RunError::Validation("writer HEAD is not the lane branch"));
         }
         let ancestry = provenant_confinement::run_utility(
             &executor,
