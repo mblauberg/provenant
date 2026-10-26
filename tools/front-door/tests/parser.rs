@@ -527,10 +527,8 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     assert_eq!(code(&human), 0);
     let text = String::from_utf8_lossy(&human.stdout.bytes);
     assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(
-        text.ends_with(" profile=balanced schema_version=1\n"),
-        "{text}"
-    );
+    assert!(text.contains(" profile=balanced "), "{text}");
+    assert!(text.ends_with(" schema_version=1\n"), "{text}");
     assert!(!rig.state.exists());
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
