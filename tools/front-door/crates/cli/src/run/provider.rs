@@ -78,6 +78,12 @@ fn prepare_with(
     };
     let prompt = Prompt::new(prompt_text.to_owned());
     prompt.check_argv().map_err(|error| error.to_string())?;
+    let git_context = task
+        .base
+        .as_deref()
+        .map(|base| run::GitContext::capture(&git, &cwd, base))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -329,6 +335,15 @@ fn prepare_with(
             None => None,
         };
         let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        let prompt = match &git_context {
+            Some(context) => {
+                let location = context
+                    .write_to(scratch)
+                    .map_err(|error| error.to_string())?;
+                Prompt::new(format!("{location}\n{prompt_text}"))
+            }
+            None => Prompt::new(prompt_text.to_owned()),
+        };
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
@@ -398,7 +413,7 @@ fn prepare_with(
         let provider_route = adapter_route(&route);
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let spec = match adapter.prepare(PrepareInput {
+        let mut spec = match adapter.prepare(PrepareInput {
             route: &provider_route,
             confined: &plan,
             prompt: &prompt,
@@ -428,6 +443,12 @@ fn prepare_with(
                 continue;
             }
         };
+        if git_context.is_some() && adapter.id() == "claude" {
+            // Scratch is already granted by the outer profile. Claude's file
+            // tools also need it in their working directories to read context.
+            spec.argv
+                .splice(1..1, ["--add-dir".into(), scratch.as_os_str().to_owned()]);
+        }
         let transcript_account = account
             .as_ref()
             .filter(|_| adapter.id() == "claude")
@@ -1573,6 +1594,7 @@ mod tests {
             std::fs::create_dir_all(path)?;
         }
         let task = run::TaskRequest {
+            base: Some("HEAD".into()),
             task_id: TaskId::from_bytes([3; 16]),
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"fixture prompt"),
@@ -1623,12 +1645,35 @@ mod tests {
             Some("cursor/gpt-5.3-codex-low")
         );
         assert_eq!(launch.argv[0], executable.as_os_str());
+        let scratch = paths.temporary.join("candidate-0");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.join("git-context.json"))?)?;
+        assert_eq!(metadata["base"], metadata["head"]);
+        assert_eq!(std::fs::read(scratch.join("git-diff.patch"))?, b"");
+        assert!(launch.argv.iter().any(|arg| {
+            arg.to_string_lossy().contains("Host-written Git context")
+                && arg
+                    .to_string_lossy()
+                    .contains(&scratch.display().to_string())
+        }));
         let confinement = launch.confinement.ok_or("writer confinement missing")?;
         assert!(confinement.writer.is_some());
         assert_eq!(
             confinement.plan.permissions().scratch.path,
             paths.temporary.join("candidate-0")
         );
+        let mut bad_task = task;
+        bad_task.base = Some("absent-base".into());
+        let result = prepare_with(
+            &registry,
+            &bad_task,
+            "fixture prompt",
+            &paths,
+            None,
+            |_| Err("provider lookup must not happen for an invalid base".into()),
+            None,
+        );
+        assert!(matches!(result, Err(error) if error.contains("invalid Git base \"absent-base\"")));
         Ok(())
     }
 

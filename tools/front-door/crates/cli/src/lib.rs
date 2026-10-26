@@ -747,6 +747,41 @@ mod tests {
         invalid(&["disk", "report", "--dry-run"]);
     }
     #[test]
+    fn dispatch_base_is_optional_without_a_peer_branch() {
+        for input in [
+            vec!["--prompt-stdin", "--model", "codex/id"],
+            vec!["--manifest", "tasks.json"],
+        ] {
+            let mut words = vec![
+                "dispatch",
+                "--operation-id",
+                "git-context",
+                "--base",
+                "main",
+            ];
+            words.extend(input);
+            let Command::Dispatch(request) = valid(&words).command else {
+                panic!("dispatch")
+            };
+            assert_eq!(request.base.as_deref(), Some("main"));
+            assert!(request.branch.is_none());
+        }
+        invalid(&[
+            "dispatch",
+            "--prompt-stdin",
+            "--operation-id",
+            "git-context",
+            "--model",
+            "codex/id",
+            "--host",
+            "peer",
+            "--mode",
+            "worktree-write",
+            "--branch",
+            "feat/context",
+        ]);
+    }
+    #[test]
     fn manifest_and_writer_authority_do_not_mix() {
         valid(&[
             "route",

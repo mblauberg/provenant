@@ -848,6 +848,28 @@ fn published_output_schemas_accept_real_runtime_records() {
 }
 
 #[test]
+fn submit_accepts_optional_bounded_git_base() {
+    use provenant_fabric_runtime::coordination::facade::SubmitInput;
+
+    let schema = &catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_submit")
+        .unwrap()["inputSchema"];
+    let mut input = json!({
+        "op":"submission", "operation_id":"git-context", "tasks":[{
+            "prompt":"review", "route":{}, "timeout_ms":1000, "base":"main"
+        }]
+    });
+    assert!(accepts(schema, schema, &input));
+    assert!(ToolCall::parse("fabric_submit", input.clone()).is_ok());
+    let SubmitInput::Submission { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(tasks[0].base.as_deref(), Some("main"));
+    input["tasks"][0]["base"] = json!("a".repeat(1025));
+    assert!(!accepts(schema, schema, &input));
+    assert!(ToolCall::parse("fabric_submit", input).is_err());
+}
+
+#[test]
 fn peer_worktree_requests_are_not_mcp_submit_inputs() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 

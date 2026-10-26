@@ -48,6 +48,7 @@ pub(super) fn input() -> PreparedRun {
         request: CanonicalRequest {
             schema_version: 1,
             tasks: vec![TaskRequest {
+                base: None,
                 writer: None,
                 profile: HarnessProfile::default(),
                 task_id: task,

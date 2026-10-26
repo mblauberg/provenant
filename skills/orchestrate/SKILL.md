@@ -51,6 +51,15 @@ One surface per action. Fabric MCP tools cover submit, graph, status, resume, ca
   - Research: when a decision rests on external facts (docs, papers, prices, prior art), dispatch research lanes with network access proactively, fanned out across juniors with a senior synthesis.
 - Every enabled lane, including junior lanes, receives Provenant's generated Fabric MCP configuration and supported hooks. Nested MCP submission admits child records within `lanes.max_depth` and attempts the shared launch path. Live nested provider launch and utility-model execution remain unverified and subject to provider activation gates; do not assume submission means execution. Dispatch sets `PROVENANT_LANE_DEPTH` and records the parent attempt; `lanes.max_depth` defaults to 2 and refuses deeper nesting. User MCP servers and personal hooks are excluded.
 - A dispatched lane has no inbox. Peers message sessions, not lanes; a lane gets new instructions only through `resume` or a new dispatch.
+- For reviews that need history, pass `--base REF` to `provenant dispatch`, or
+  `base` on each manifest or Fabric submission task. The host writes bounded
+  log and diff files into the attempt's temporary scratch directory and names
+  their paths in the prompt. Reviewers read `git-context.json` first for the
+  resolved base, captured HEAD and truncation flags, then `git-log.txt` and
+  `git-diff.patch`. Report incomplete coverage when either file is truncated.
+  These files describe committed changes; inspect the checkout separately for
+  uncommitted edits. They are removed at settlement, so put review evidence in
+  the final answer.
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify

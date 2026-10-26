@@ -55,6 +55,9 @@ pub struct TaskRequest {
     pub profile: HarnessProfile,
     pub task_id: TaskId,
     pub prompt_digest: FileDigest,
+    /// Git base for host-written attempt context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     pub route: RequestedRoute,
     /// Optional dispatch override; normal placement comes from routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]

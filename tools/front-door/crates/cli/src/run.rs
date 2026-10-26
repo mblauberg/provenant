@@ -67,7 +67,9 @@ impl From<run::RunError> for Fail {
             E::WorktreeMissing(_) => (Status::Invalid, "WORKTREE_MISSING"),
             E::WorktreeUnregistered(_) => (Status::Refused, "WORKTREE_UNREGISTERED"),
             E::Writer(_) | E::Confinement(_) => (Status::Refused, "REFUSED"),
-            E::Validation(_) | E::TooLarge { .. } => (Status::Invalid, "INVALID"),
+            E::Validation(_) | E::InvalidBase(_) | E::TooLarge { .. } => {
+                (Status::Invalid, "INVALID")
+            }
             E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),
             E::NotFound => (Status::Invalid, "NOT_FOUND"),
             E::Nonterminal => (Status::Refused, "NONTERMINAL"),
@@ -487,6 +489,7 @@ struct Manifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestTask {
+    base: Option<String>,
     task_id: Option<TaskId>,
     prompt: Option<String>,
     prompt_file: Option<PathBuf>,
@@ -691,6 +694,7 @@ pub struct Submitted {
     pub task_class: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
+    pub base: Option<String>,
     pub route: run::RequestedRoute,
     pub account: Option<String>,
     pub fallback: Vec<String>,
@@ -772,6 +776,23 @@ pub fn submit(
                 Ok::<_, run::RunError>(writer)
             })
             .transpose()?;
+        let base = if parent_attempt.is_some() {
+            task.base
+        } else {
+            task.base
+                .as_deref()
+                .map(|base| {
+                    let git = provenant_supervisor::git::git_executable()
+                        .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?;
+                    run::resolve_git_base(
+                        &git,
+                        writer.as_ref().map_or(edge.cwd, |writer| &writer.worktree),
+                        base,
+                    )
+                    .map_err(Fail::from)
+                })
+                .transpose()?
+        };
         #[derive(serde::Serialize)]
         struct RunAuthority<'a> {
             writer: Option<&'a run::WriterRequest>,
@@ -797,6 +818,7 @@ pub fn submit(
             profile: profile(task.task_class.as_deref())?,
             task_id: task.task_id,
             prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
+            base,
             route: task.route,
             account: task.account,
             fallback: fallback(&task.fallback)?,
@@ -976,6 +998,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 task.delivery_id,
                 task.account,
                 task.deliver.or_else(|| flag_delivery.clone()),
+                task.base.or_else(|| command.base.clone()),
             ));
         }
     } else {
@@ -1004,6 +1027,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             command.delivery_id,
             command.account.clone(),
             flag_delivery,
+            command.base.clone(),
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -1013,7 +1037,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     };
     if let Some(host) = &command.host {
         let mut placed = Vec::new();
-        for (index, (task_id, prompt, _, route, fallback, delivery_id, account, deliver)) in
+        for (index, (task_id, prompt, _, route, fallback, delivery_id, account, deliver, base)) in
             tasks.into_iter().enumerate()
         {
             // The peer derives task IDs from the operation and has no fallback field.
@@ -1029,6 +1053,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 );
             }
             placed.push(remote::Task {
+                base,
                 prompt,
                 route,
                 account,
@@ -1053,18 +1078,21 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, _, fallback, delivery_id, account, deliver)| Submitted {
-                task_class: None,
-                task_id,
-                prompt,
-                route,
-                fallback,
-                account,
-                provider_timeout: command.provider_timeout,
-                delivery_id,
-                deliver,
-                worktree: access.worktree.clone(),
-                access: lane_access.clone(),
+            |(task_id, prompt, route, _, fallback, delivery_id, account, deliver, base)| {
+                Submitted {
+                    task_class: None,
+                    base,
+                    task_id,
+                    prompt,
+                    route,
+                    fallback,
+                    account,
+                    provider_timeout: command.provider_timeout,
+                    delivery_id,
+                    deliver,
+                    worktree: access.worktree.clone(),
+                    access: lane_access.clone(),
+                }
             },
         )
         .collect();
@@ -2399,6 +2427,20 @@ mod tests {
     use provenant_supervisor::custody::{
         CaptureTotals, PublicationState, Scope, SettlementEvidence,
     };
+
+    #[test]
+    fn manifest_accepts_task_git_base() {
+        let manifest: Manifest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "tasks": [
+                {"prompt": "review", "base": "main"},
+                {"prompt": "review"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(manifest.tasks[0].base.as_deref(), Some("main"));
+        assert_eq!(manifest.tasks[1].base, None);
+    }
 
     #[test]
     fn check_continuable_refuses_nonterminal_before_session()

@@ -347,6 +347,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
         request: CanonicalRequest {
             schema_version: 1,
             tasks: vec![TaskRequest {
+                base: None,
                 profile: HarnessProfile::default(),
                 task_id,
                 prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),

@@ -47,6 +47,7 @@ pub(super) struct RouteText {
     pub(super) effort: Option<String>,
 }
 pub(super) struct Task {
+    pub(super) base: Option<String>,
     pub(super) prompt: String,
     pub(super) route: RouteText,
     pub(super) account: Option<String>,
@@ -442,6 +443,7 @@ pub(super) fn dispatch(
         .tasks
         .into_iter()
         .map(|task| SubmittedTask {
+            base: task.base,
             account: task.account,
             access,
             worktree: None,
