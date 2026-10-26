@@ -407,6 +407,13 @@ fn stderr_line(bytes: &[u8]) -> String {
         .map(|line| plain_text(line, 200))
         .unwrap_or_default()
 }
+/// Whether stderr contains an exact trimmed line, after removing controls.
+fn stderr_has_line(bytes: &[u8], expected: &str) -> bool {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .any(|line| plain_text(line, 200) == expected)
+}
 pub trait PeerTransport {
     fn exchange(
         &self,
@@ -518,7 +525,12 @@ impl SshTransport<'_> {
         if let Termination::Exit(code) = outcome.termination {
             if code != 0 {
                 let line = stderr_line(&outcome.stderr.bytes);
-                if code == 3 && line == "provenant: fabric peer: invalid peer frame" {
+                if code == 3
+                    && stderr_has_line(
+                        &outcome.stderr.bytes,
+                        "provenant: fabric peer: invalid peer frame",
+                    )
+                {
                     return Err(PeerError::ProtocolMismatch {
                         peer: peer.destination.clone(),
                         remote: 1,
@@ -1030,7 +1042,11 @@ mod tests {
         for mutation in [false, true] {
             for reply in [
                 reply.clone(),
-                outcome(3, "provenant: fabric peer: invalid peer frame\n", false),
+                outcome(
+                    3,
+                    "SSH login banner\nprovenant: fabric peer: invalid peer frame\n",
+                    false,
+                ),
             ] {
                 let error = exchange_failure(Ok(reply), mutation);
                 assert!(
