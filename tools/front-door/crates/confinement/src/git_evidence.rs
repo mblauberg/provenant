@@ -262,7 +262,9 @@ impl<'a> Git<'a> {
         if self.head()? != base {
             return Ok(Vec::new());
         }
-        let status = self.read(GitRead::Status)?;
+        // Lists each untracked file, not its directory, whatever
+        // `status.showUntrackedFiles` says.
+        let status = self.read(GitRead::StatusIncludingIgnored)?;
         Ok(parse_porcelain_v2_z(&status.stdout.bytes)?
             .into_iter()
             .filter(|record| record.kind != StatusKind::Ignored)
@@ -605,11 +607,20 @@ mod tests {
         fs::write(fixture.root.join(".gitignore"), "ignored.log\n")?;
         fs::write(fixture.root.join("ignored.log"), "noise")?;
         fs::write(fixture.root.join("edit.txt"), "work")?;
+        fs::create_dir(fixture.root.join("new"))?;
+        fs::write(fixture.root.join("new/file.rs"), "work")?;
         fs::create_dir(fixture.root.join(".review-snapshots"))?;
         fs::write(fixture.root.join(".review-snapshots/1.md"), "issue")?;
         let mut dirty = git.uncommitted_since(base)?;
         dirty.sort();
-        assert_eq!(dirty, [b".gitignore".to_vec(), b"edit.txt".to_vec()]);
+        assert_eq!(
+            dirty,
+            [
+                b".gitignore".to_vec(),
+                b"edit.txt".to_vec(),
+                b"new/file.rs".to_vec()
+            ]
+        );
         // A commit moves HEAD past the base: the lane delivered something.
         fixture.run(&["add", "--", "edit.txt"])?;
         fixture.run(&["commit", "-m", "work"])?;
