@@ -8,9 +8,7 @@ Anchor: `crates/supervisor/tests/custody.rs`, `crates/supervisor/src/custody_tes
 Supervisor holds processes, output and kernel locks from launch through
 durable exit publication. Confinement turns an authorised plan into
 filesystem, Git, network and provider permissions, checks evidence and
-quarantines instruction changes. Together they ensure that a failed write, a
-lost client or a mistaken process identity cannot kill a healthy lane, free a
-busy worktree or publish an incomplete result. Run owns admission and result
+quarantines instruction changes. Together they prevent a failed write, a lost client or a mistaken process identity from killing a healthy lane, freeing a busy worktree or publishing an incomplete result. Run owns admission and result
 semantics ([run](run.md)). Wiring and platform limits are in the [crate
 notes](../../tools/front-door/crates/supervisor/README.md). Paths are
 relative to `tools/front-door/`.
@@ -19,8 +17,7 @@ relative to `tools/front-door/`.
 
 ### Closed stop reasons; natural exit wins
 
-Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancel,
-wall deadline, protocol rejection, supervisor signal or post-terminal
+Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation, wall deadline, protocol rejection, supervisor signal or post-terminal
 cleanup. Silence, CPU inactivity, capture failure, ENOSPC and failed
 publication cannot construct a reason, and there is no startup deadline. A
 natural exit observed in a tick wins over a late cancel or deadline.
@@ -35,7 +32,7 @@ Child observation is registered before spawn, exit is observed with
 `WNOWAIT`, and the handle is reaped last, so the PID stays reserved through
 cleanup. Only the unreaped provider, its group while the leader is unreaped,
 and proven attempt-sandbox escapees may be signalled. Reused identities,
-members that left the group, shared hosts and sibling groups never are.
+members that left the group, shared hosts and sibling groups are never signalled.
 Census and CWD observations never grant signal authority.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
@@ -47,7 +44,7 @@ Census and CWD observations never grant signal authority.
 A registered nested owner is spared only with matching native identity,
 observed ancestry and proof of its held custody; an unlocked descriptor,
 environment token or process name is not proof. When macOS cannot prove an
-owner's custody, it and its descendants stay protected.
+owner's custody, that owner and its descendants stay protected.
 - Why: a nested lane's owner must survive its parent's cleanup.
 - Test: `crates/supervisor/tests/custody.rs::nested_owner_stays_protected_when_native_custody_proof_is_uncertain`;
   `crates/supervisor/src/census.rs::ancestry_requires_exact_identities_and_strictly_older_parent_stamps`

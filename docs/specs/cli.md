@@ -5,8 +5,7 @@ Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/hooks.rs`
 
 One executable, `provenant`, serves people, skills, hooks and CI. The `cli`
 crate parses arguments, calls typed library operations and renders typed
-results. The [cross-cutting decisions](README.md#cross-cutting-decisions) fix
-the envelope, exit codes and wait budgets. `provenant help --json` is the
+results. The [cross-cutting decisions](README.md#cross-cutting-decisions) define the envelope, exit codes and wait budgets. `provenant help --json` is the
 authoritative catalogue, and the generated [CLI
 reference](../reference/cli.md) lists every leaf, flag and bound. Paths are
 relative to `tools/front-door/`.
@@ -16,8 +15,7 @@ relative to `tools/front-door/`.
 ### Pure entry points, one spelling
 
 `help`, `--version` and `root` resolve no checkout, open no database, start
-no thread, probe no provider and create no state; MCP starts only through
-`fabric mcp`. There are no aliases or abbreviated options; unknown,
+no thread, probe no provider and create no state; the MCP server starts only through `fabric mcp`. There are no aliases or abbreviated options; unknown,
 duplicate or conflicting options fail with exit 2, and paths stay raw bytes.
 - Why: scripts call these constantly, and an alias can turn a typo into a
   different authority.

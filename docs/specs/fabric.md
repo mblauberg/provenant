@@ -102,8 +102,7 @@ text before side effects with the field path. MCP submission rejects
 ### Lossless, bounded output
 
 Output is UTF-8 when valid, otherwise padded base64; neither is lossy, and
-a page never splits a character. Oversized observations fail
-`result_too_large`, but committed mutation receipts keep the transport
+a page never splits a character. Oversized observations fail with `result_too_large`, but committed mutation receipts keep the transport
 ceiling. `fetch` copies only run-exported regular files, refuses links and
 traversal, and verifies a manifest digest before atomic publication.
 - Why: agents must read every byte, never lose a receipt and never import a

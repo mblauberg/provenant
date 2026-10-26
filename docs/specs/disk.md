@@ -30,8 +30,7 @@ without publishing an artefact.
 The walk never follows symlinks or crosses a held anchor's device. Each
 measured path has a budget of 1,000,000 entries and ten seconds, and depth is
 capped at 256; reaching a limit records one error and keeps partial bytes.
-Hard-linked files count once across the report, and allocation belongs to
-the first observation when roots overlap.
+Hard-linked files count once across the report; when roots overlap, allocation belongs to the first observation.
 - Why: a link or a huge tree must not send the report outside its roots or
   hang it.
 - Test: `crates/os/src/disk.rs::measurement_never_follows_links_and_separates_tagged_cache`;
