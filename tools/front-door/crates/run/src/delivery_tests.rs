@@ -5,6 +5,171 @@ use provenant_core::GitOid;
 use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use std::{ffi::OsString, path::Path, time::Duration};
 
+struct PrepareFixture {
+    _temp: tempfile::TempDir,
+    root: std::path::PathBuf,
+    environment: Vec<(OsString, OsString)>,
+    writer: WriterRequest,
+    request: WriterDeliveryRequest,
+}
+impl PrepareFixture {
+    fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let home = root.join("home");
+        std::fs::create_dir(&project)?;
+        std::fs::create_dir(&home)?;
+        let fixture = Self {
+            _temp: temp,
+            root: root.clone(),
+            environment: vec![
+                ("HOME".into(), home.into_os_string()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ],
+            writer: WriterRequest {
+                project,
+                worktree: root.join("lane"),
+            },
+            request: WriterDeliveryRequest {
+                remote: "origin".into(),
+                branch: "published/lane".into(),
+                open_pr: false,
+            },
+        };
+        fixture.git(&["init", "-q"])?;
+        fixture.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Initial",
+        ])?;
+        let remote = root.join("remote.git");
+        fixture.git(&["init", "--bare", "-q", remote.to_str().ok_or("remote")?])?;
+        fixture.git(&["remote", "add", "origin", remote.to_str().ok_or("remote")?])?;
+        fixture.git(&[
+            "worktree",
+            "add",
+            "-qb",
+            "lane",
+            fixture.writer.worktree.to_str().ok_or("lane")?,
+        ])?;
+        Ok(fixture)
+    }
+    fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+        let argv: Vec<OsString> = std::iter::once(git.into_os_string())
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        let mut options = ExecOptions::new(&argv, &self.writer.project, Duration::from_secs(5));
+        options.env = Some(&self.environment);
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(
+            output.termination,
+            Termination::Exit(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        Ok(())
+    }
+    fn executable(&self, path: &Path, script: &str) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+    fn prepare(&self) -> Result<HostDeliveryContext> {
+        HostDeliveryContext::new(self.environment.clone()).prepare(&self.writer, &self.request)
+    }
+}
+
+#[test]
+fn prepare_accepts_absolute_shell_helper_outside_path()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let helper = fixture.root.join("gh");
+    fixture.executable(&helper, "#!/bin/sh\nexit 0\n")?;
+    fixture.git(&[
+        "config",
+        "credential.helper",
+        &format!("!{} auth git-credential", helper.display()),
+    ])?;
+    fixture.prepare()?;
+    Ok(())
+}
+
+#[test]
+fn prepare_failures_name_step_and_bound_git_stderr()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for (pattern, step) in [
+        ("remote get-url", "remote URL"),
+        ("symbolic-ref --quiet", "HEAD"),
+        ("rev-parse --absolute-git-dir", "git dir"),
+        ("config --get-regexp", "credential helper"),
+        ("fetch --no-tags", "fetch"),
+    ] {
+        let mut fixture = PrepareFixture::new()?;
+        let git = fixture.root.join("git");
+        let real_git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+        fixture.executable(&git, &format!(
+            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ {}' >&2\nexit 1;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
+        fixture
+            .environment
+            .push(("PROVENANT_GIT".into(), git.into_os_string()));
+        fixture
+            .environment
+            .push(("GH_TOKEN".into(), "private-token".into()));
+        let reason = fixture.prepare().expect_err("git must fail").to_string();
+        assert!(reason.contains("Prepare"), "{reason}");
+        assert!(reason.contains(step), "{reason}");
+        assert!(reason.contains("fixture git failure"), "{reason}");
+        assert!(!reason.contains("private-token"), "{reason}");
+        assert!(!reason.contains("user:password"), "{reason}");
+        assert!(!reason.contains("receipt"), "{reason}");
+        assert!(reason.len() < 1400, "diagnostic has {} bytes", reason.len());
+    }
+    Ok(())
+}
+
+#[test]
+fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let unavailable = fixture.root.join("missing/gh");
+    let not_executable = fixture.root.join("not-executable");
+    std::fs::write(&not_executable, "not executable")?;
+    let lane_helper = fixture.writer.worktree.join("gh");
+    fixture.executable(&lane_helper, "#!/bin/sh\nexit 0\n")?;
+    let link = fixture.root.join("linked-gh");
+    std::os::unix::fs::symlink(&lane_helper, &link)?;
+    let opaque = fixture.root.join("gh;echo");
+    fixture.executable(&opaque, "#!/bin/sh\nexit 0\n")?;
+    for (helper, detail) in [
+        (&unavailable, "missing/gh"),
+        (&not_executable, "not-executable"),
+        (&fixture.root, "unavailable"),
+        (&lane_helper, "inside the writer worktree"),
+        (&link, "inside the writer worktree"),
+        (&opaque, "opaque shell credential helper"),
+    ] {
+        fixture.git(&[
+            "config",
+            "credential.helper",
+            &format!("!{} auth git-credential", helper.display()),
+        ])?;
+        let reason = fixture.prepare().expect_err("unsafe helper").to_string();
+        assert!(reason.contains("Prepare (credential helper)"), "{reason}");
+        assert!(reason.contains(detail), "{reason}");
+        assert!(!reason.contains("receipt"), "{reason}");
+    }
+    Ok(())
+}
+
 #[test]
 fn host_delivery_fetches_commits_pushes_and_records_upstream()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -25,11 +190,11 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     ];
     let host = HostDeliveryContext::new(environment.clone());
     let executor = SystemExecutor::new(1)?;
+    let git_executable = provenant_supervisor::git::git_executable().ok_or("git executable")?;
     let git =
         |cwd: &Path, args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
-            let argv: Vec<OsString> = std::iter::once("/usr/bin/git")
-                .chain(args.iter().copied())
-                .map(Into::into)
+            let argv: Vec<OsString> = std::iter::once(git_executable.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
                 .collect();
             let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
             options.env = Some(&environment);

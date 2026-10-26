@@ -4,6 +4,7 @@ use crate::{
     Result, RunError, WriterDeliveryReceipt, WriterDeliveryRequest, WriterDeliveryStage as Stage,
     WriterDeliveryState, WriterRequest,
 };
+use provenant_confinement::redact::Redactor;
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
 use provenant_supervisor::{
@@ -117,7 +118,8 @@ impl HostDeliveryContext {
         request: &WriterDeliveryRequest,
     ) -> Result<Self> {
         validate(request)?;
-        self.host_environment(writer)?;
+        self.host_environment(writer)
+            .map_err(|error| prepare_error("credential helper", error))?;
         let stage = Stage::Prepare;
         let git = self.executable("git", writer)?;
         let gh = if request.open_pr {
@@ -136,9 +138,9 @@ impl HostDeliveryContext {
         let url = urls
             .next()
             .filter(|v| !v.is_empty() && !v.starts_with('-'))
-            .ok_or(RunError::Delivery(stage))?;
+            .ok_or_else(|| prepare_error("remote URL", "no usable push URL"))?;
         if urls.next().is_some() {
-            return Err(RunError::Delivery(stage));
+            return Err(prepare_error("remote URL", "multiple push URLs"));
         }
         // Embedded HTTP credentials would become process arguments below.
         // Host credential helpers, gh config and the SSH agent remain available.
@@ -155,7 +157,10 @@ impl HostDeliveryContext {
                         .next()
                         .is_some_and(|user| user.contains(':')))
         {
-            return Err(RunError::Delivery(stage));
+            return Err(prepare_error(
+                "remote URL",
+                "embedded credentials, query or fragment refused",
+            ));
         }
         let branch = self.command(
             &writer.worktree,
@@ -163,7 +168,7 @@ impl HostDeliveryContext {
             &["symbolic-ref", "--quiet", "--short", "HEAD"],
             stage,
         )?;
-        GitRefName::branch(&branch).map_err(|_| RunError::Delivery(stage))?;
+        GitRefName::branch(&branch).map_err(|error| prepare_error("HEAD", error))?;
         let git_dir = self.command(
             &writer.worktree,
             "git",
@@ -172,9 +177,9 @@ impl HostDeliveryContext {
         )?;
         let push_url = if !url.contains(':') && !Path::new(url).is_absolute() {
             std::fs::canonicalize(writer.worktree.join(url))
-                .map_err(|_| RunError::Delivery(stage))?
+                .map_err(|error| prepare_error("remote URL", error))?
                 .to_str()
-                .ok_or(RunError::Delivery(stage))?
+                .ok_or_else(|| prepare_error("remote URL", "path is not UTF-8"))?
                 .to_owned()
         } else {
             url.to_owned()
@@ -186,14 +191,16 @@ impl HostDeliveryContext {
             stage,
         )?;
         self.bound = Some(BoundDelivery {
-            base_head: GitOid::parse(&base).map_err(|_| RunError::Delivery(stage))?,
+            base_head: GitOid::parse(&base).map_err(|error| prepare_error("HEAD", error))?,
             push_url,
             lane_branch: branch,
             pull_request_repo: request
                 .open_pr
                 .then(|| pull_request_repo(url))
-                .transpose()?,
-            git_dir: std::fs::canonicalize(git_dir).map_err(|_| RunError::Delivery(stage))?,
+                .transpose()
+                .map_err(|error| prepare_error("remote URL", error))?,
+            git_dir: std::fs::canonicalize(git_dir)
+                .map_err(|error| prepare_error("git dir", error))?,
             host_cwd: writer.project.clone(),
             destination: request.clone(),
         });
@@ -215,7 +222,8 @@ impl HostDeliveryContext {
                 continue;
             }
             if key.eq_ignore_ascii_case("core.sshcommand") {
-                return Err(RunError::Validation(
+                return Err(prepare_error(
+                    "credential helper",
                     "delivery does not support core.sshCommand; use host SSH config",
                 ));
             }
@@ -224,16 +232,19 @@ impl HostDeliveryContext {
                 if parts.len() != 3
                     || parts[1..] != ["auth", "git-credential"]
                     || (parts[0] != "gh" && !Path::new(parts[0]).is_absolute())
+                    || !parts[0]
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/_-.=~:@".contains(&b))
                 {
-                    return Err(RunError::Validation(
+                    return Err(prepare_error(
+                        "credential helper",
                         "delivery refuses an opaque shell credential helper",
                     ));
                 }
-                let gh = self.executable("gh", writer)?;
-                if parts[0] != "gh" && host_path(Path::new(parts[0]), writer)? != gh {
-                    return Err(RunError::Validation(
-                        "delivery shell credential helper must be gh auth git-credential",
-                    ));
+                if Path::new(parts[0]).is_absolute() {
+                    credential_helper(Path::new(parts[0]), writer)?;
+                } else {
+                    self.executable("gh", writer)?;
                 }
             } else {
                 let parts: Vec<_> = value.split_whitespace().collect();
@@ -241,19 +252,16 @@ impl HostDeliveryContext {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b" /_-.=~:@".contains(&b))
                 {
-                    return Err(RunError::Validation(
+                    return Err(prepare_error(
+                        "credential helper",
                         "delivery credential helper needs a plain executable",
                     ));
                 }
                 if Path::new(parts[0]).is_absolute() {
-                    let helper = host_path(Path::new(parts[0]), writer)?;
-                    if !provenant_supervisor::sys::is_executable(&helper) {
-                        return Err(RunError::Validation(
-                            "delivery credential helper is unavailable",
-                        ));
-                    }
+                    credential_helper(Path::new(parts[0]), writer)?;
                 } else if parts[0].contains('/') {
-                    return Err(RunError::Validation(
+                    return Err(prepare_error(
+                        "credential helper",
                         "delivery credential helper must resolve outside the lane",
                     ));
                 }
@@ -319,15 +327,21 @@ impl HostDeliveryContext {
             let path = provenant_supervisor::git::resolve_git_executable(
                 override_path.as_deref().map(Path::new),
             )
-            .ok_or(RunError::Delivery(Stage::Prepare))?;
-            return host_path(&path, writer);
+            .ok_or_else(|| prepare_error("git executable", "git is unavailable"))?;
+            return host_path(&path, writer)
+                .map_err(|error| prepare_error("git executable", error));
         }
         let path = self
             .environment
             .iter()
             .find(|(k, _)| k == b"PATH")
             .map(|(_, v)| OsString::from_vec(v.clone()))
-            .ok_or(RunError::Delivery(Stage::Prepare))?;
+            .ok_or_else(|| {
+                prepare_error(
+                    "credential helper",
+                    format!("{tool} is unavailable: PATH is unset"),
+                )
+            })?;
         std::env::split_paths(&path)
             .filter(|p| p.is_absolute())
             .map(|p| p.join(tool))
@@ -335,9 +349,30 @@ impl HostDeliveryContext {
             .find(|p| {
                 !p.starts_with(&writer.worktree) && provenant_supervisor::sys::is_executable(p)
             })
-            .ok_or(RunError::Delivery(Stage::Prepare))
+            .ok_or_else(|| {
+                prepare_error(
+                    "credential helper",
+                    format!("{tool} is unavailable on PATH"),
+                )
+            })
     }
     fn command(&self, cwd: &Path, tool: &str, args: &[&str], stage: Stage) -> Result<String> {
+        let failure = |reason: String| {
+            if stage == Stage::Prepare {
+                let step = match args.first().copied() {
+                    Some("remote") => "remote URL",
+                    Some("symbolic-ref") => "HEAD",
+                    Some("rev-parse") if args.contains(&"--absolute-git-dir") => "git dir",
+                    Some("rev-parse") => "HEAD",
+                    Some("config") => "credential helper",
+                    Some("fetch") => "fetch",
+                    _ => "git executable",
+                };
+                prepare_error(step, reason)
+            } else {
+                RunError::Delivery(stage)
+            }
+        };
         let mut environment: Vec<_> = self
             .environment
             .iter()
@@ -353,11 +388,17 @@ impl HostDeliveryContext {
         } else {
             cwd
         };
-        let tools = self.tools.as_ref().ok_or(RunError::Delivery(stage))?;
+        let tools = self
+            .tools
+            .as_ref()
+            .ok_or_else(|| failure("host tools are unavailable".into()))?;
         let executable = match tool {
             "git" => &tools.git,
-            "gh" => tools.gh.as_ref().ok_or(RunError::Delivery(stage))?,
-            _ => return Err(RunError::Delivery(stage)),
+            "gh" => tools
+                .gh
+                .as_ref()
+                .ok_or_else(|| failure("gh is unavailable".into()))?,
+            _ => return Err(failure(format!("{tool} is unavailable"))),
         };
         let git_options: &[&str] = if tool == "git" {
             &[
@@ -372,29 +413,52 @@ impl HostDeliveryContext {
         let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
             .chain(git_options.iter().chain(args).map(OsString::from))
             .collect();
-        let executor = SystemExecutor::new(1).map_err(|_| RunError::Delivery(stage))?;
+        let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
+        let mut redactor = Redactor::new(
+            self.environment
+                .iter()
+                .filter(|(key, value)| {
+                    matches!(key.as_slice(), b"GH_TOKEN" | b"GITHUB_TOKEN") && !value.is_empty()
+                })
+                .map(|(_, value)| value.clone()),
+        )
+        .map_err(|_| failure("diagnostic redaction unavailable".into()))?;
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
         options.env = Some(&environment);
         options.stdin = Some(b"");
         options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
-        options.stderr = StreamPolicy::Discard;
+        options.stderr = if stage == Stage::Prepare {
+            StreamPolicy::Capture { limit: 4096 }
+        } else {
+            StreamPolicy::Discard
+        };
+        options.stderr_filter = Some(&mut redactor);
         let output = executor
             .execute(options)
-            .map_err(|_| RunError::Delivery(stage))?;
+            .map_err(|error| failure(format!("{}: {error}", executable.display())))?;
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)
-            && output.stdout.bytes.is_empty();
+            && output.stdout.bytes.is_empty()
+            && output.stderr.bytes.is_empty();
         if (output.termination != Termination::Exit(0) && !absent_helpers)
             || output.timed_out
             || output.stdout.truncated
             || output.stdout.read_failed
             || output.drain_truncated
         {
-            return Err(RunError::Delivery(stage));
+            let stderr = if output.stderr.filter_failed {
+                "diagnostic redaction failed".into()
+            } else {
+                String::from_utf8_lossy(&output.stderr.bytes).into_owned()
+            };
+            return Err(failure(format!(
+                "{tool} {:?} (timed out: {}): {stderr}",
+                output.termination, output.timed_out
+            )));
         }
         String::from_utf8(output.stdout.bytes)
             .map(|v| v.trim().into())
-            .map_err(|_| RunError::Delivery(stage))
+            .map_err(|error| failure(error.to_string()))
     }
     fn head(&self, writer: &WriterRequest) -> Result<GitOid> {
         let head = self.command(
@@ -530,6 +594,41 @@ impl HostDeliveryContext {
             Ok(None)
         }
     }
+}
+
+fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
+    let detail = detail.to_string();
+    let safe = provenant_confinement::redact::known_shapes(detail.as_bytes())
+        .unwrap_or_else(|_| b"diagnostic redaction failed".to_vec());
+    let mut reason = String::from_utf8_lossy(&safe)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if reason.len() > 1024 {
+        reason.truncate(reason.floor_char_boundary(1024));
+        reason.push_str("...");
+    }
+    RunError::DeliveryPrepare { step, reason }
+}
+
+fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    let helper = host_path(path, writer).map_err(|error| {
+        prepare_error(
+            "credential helper",
+            format!("{name}: {error} ({})", path.display()),
+        )
+    })?;
+    if !helper.is_file() || !provenant_supervisor::sys::is_executable(&helper) {
+        return Err(prepare_error(
+            "credential helper",
+            format!("{name} is unavailable ({})", path.display()),
+        ));
+    }
+    Ok(())
 }
 
 fn host_path(path: &Path, writer: &WriterRequest) -> Result<PathBuf> {
