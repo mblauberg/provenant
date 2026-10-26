@@ -235,6 +235,14 @@ home or tmp grants.
   Corepack cache and a writer's `--write-root` and `domains.run.writer_writes`
   roots, which are also executable. Homebrew prefixes are readable except
   `var/`.
+- **Writer tests.** Only `worktree-write` lanes may read and execute fixtures
+  in their own attempt's `tmp/candidate-N` subtree. No parent, sibling
+  candidate, other attempt or retained provider-state directory gains exec.
+  Writers may signal their children (`signal (target children)`) and read
+  `/dev/fd/N` through a file-read grant on the `/dev/fd` subpath. Read-only
+  and other modes keep their existing grants. Hard links remain denied and
+  short Unix socket paths still require host tests. Private check homes use
+  `std::env::temp_dir()`, honouring the lane's `TMPDIR`.
 - **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
   `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
   grants.
