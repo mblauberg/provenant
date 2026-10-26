@@ -14,8 +14,8 @@ use crate::{
     *,
 };
 use provenant_core::{AttemptId, ProjectId};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path, time::Duration};
+use rusqlite::{Connection, OptionalExtension, params};
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
 const FILE: &str = "admission.sqlite3";
 const SCHEMA: &str = "
@@ -43,15 +43,14 @@ pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     Ok(db)
 }
 fn version(db: &Connection) -> Result<i64> {
-    let (version, has_schema): (i64, bool) = db.query_row(
-        "SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    if !(0..=1).contains(&version) || (version == 0 && has_schema) {
-        return Err(RunError::Version(version));
+    match provenant_sqlite::read_version(db, 1) {
+        Ok(version) => Ok(version as i64),
+        Err(provenant_sqlite::VersionError::Unsupported(version)) => {
+            Err(RunError::Version(version))
+        }
+        Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
+        Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
     }
-    Ok(version)
 }
 
 /// Take this attempt's lease when host and project counts and startup spacing
@@ -146,14 +145,7 @@ impl Owner {
             Err(_) => return Self::Unreadable,
             Ok(_) => {}
         }
-        Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .and_then(|db| db.busy_timeout(Duration::ZERO).map(|()| db))
-        .map_or(Self::Unreadable, Self::Store)
+        provenant_sqlite::open_connection(path, true).map_or(Self::Unreadable, Self::Store)
     }
     fn released(&self, attempt: &str) -> bool {
         match self {

@@ -7,7 +7,6 @@ use std::{
     marker::PhantomData,
     path::{Component, Path},
     rc::Rc,
-    time::{Duration, Instant},
 };
 
 /// Identity and prompt-read authority verified by the calling edge. This store
@@ -41,31 +40,19 @@ impl Request<'_> {
         }
     }
     /// Retry an incomplete observation within the call's budget and cancellation.
-    fn wait<T>(&self, mut action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
-        let started = Instant::now();
-        let cap = Duration::from_micros(self.budget.remaining(self.clock.mono_now()).as_micros());
-        let mut delay = Duration::from_millis(1);
-        loop {
-            if self.cancel.is_cancelled() {
-                return Err(RunError::Cancelled);
-            }
-            let remaining = cap
-                .saturating_sub(started.elapsed())
-                .min(Duration::from_micros(
-                    self.budget.remaining(self.clock.mono_now()).as_micros(),
-                ));
-            if remaining.is_zero() {
-                return Err(RunError::Contention);
-            }
-            match action() {
-                Ok(None) => {
-                    std::thread::park_timeout(delay.min(remaining));
-                    delay = (delay * 2).min(Duration::from_millis(10));
-                }
-                Ok(Some(value)) => return Ok(value),
-                Err(error) => return Err(error),
-            }
-        }
+    fn wait<T>(&self, action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
+        provenant_sqlite::observe(
+            self.clock,
+            self.budget,
+            self.cancel,
+            &provenant_sqlite::ThreadWait,
+            action,
+        )
+        .map_err(|error| match error {
+            provenant_sqlite::RetryError::Busy => RunError::Contention,
+            provenant_sqlite::RetryError::Cancelled => RunError::Cancelled,
+            provenant_sqlite::RetryError::Action(error) => error,
+        })
     }
 }
 // Leave room below macOS's common 256-descriptor soft limit for SQLite,
@@ -278,21 +265,14 @@ impl RunStore {
                     include_str!("schema_v3.sql"),
                     include_str!("schema_v4.sql"),
                 ];
-                provenant_sqlite::apply_migrations(
-                    tx,
-                    &steps,
-                    start,
-                    steps.len(),
-                    |_, _| Ok(()),
-                    |index, db| {
-                        if index == 3 {
-                            for id in &absent_temporary {
-                                db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
-                            }
+                provenant_sqlite::apply_migrations(tx, &steps, start, |index, db| {
+                    if index == 3 {
+                        for id in &absent_temporary {
+                            db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
                         }
-                        Ok(())
-                    },
-                )?;
+                    }
+                    Ok(())
+                })?;
                 Ok(())
             })?;
         }

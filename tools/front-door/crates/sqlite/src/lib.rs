@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The shared capped exponential schedule: 1 ms initially, capped at 250 ms.
 pub trait RetryWait {
     fn wait(&self, delay: DurationMicros, cancel: &CancelToken);
 }
@@ -36,7 +35,7 @@ pub enum RetryError<E> {
 }
 
 /// Retry only the errors selected by `is_busy`, within the caller's budget.
-/// The real elapsed cap also bounds a frozen or inaccurate injected clock.
+/// The shared capped exponential schedule: 1 ms initially, capped at 250 ms.
 pub fn retry<T, E>(
     clock: &dyn Clock,
     budget: WaitBudget,
@@ -44,6 +43,22 @@ pub fn retry<T, E>(
     wait: &dyn RetryWait,
     mut is_busy: impl FnMut(&E) -> bool,
     mut action: impl FnMut() -> Result<T, E>,
+) -> Result<T, RetryError<E>> {
+    observe(clock, budget, cancel, wait, || match action() {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if is_busy(&error) => Ok(None),
+        Err(error) => Err(error),
+    })
+}
+
+/// Retry incomplete observations on the same schedule as `retry`.
+/// The real elapsed cap also bounds a frozen or inaccurate injected clock.
+pub fn observe<T, E>(
+    clock: &dyn Clock,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    wait: &dyn RetryWait,
+    mut action: impl FnMut() -> Result<Option<T>, E>,
 ) -> Result<T, RetryError<E>> {
     let started = Instant::now();
     let cap = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
@@ -58,8 +73,8 @@ pub fn retry<T, E>(
             return Err(RetryError::Busy);
         }
         match action() {
-            Ok(value) => return Ok(value),
-            Err(error) if is_busy(&error) => {
+            Ok(Some(value)) => return Ok(value),
+            Ok(None) => {
                 let micros = u64::try_from(remaining.as_micros())
                     .unwrap_or(u64::MAX)
                     .min(delay);
@@ -90,12 +105,11 @@ pub fn is_private(metadata: Metadata) -> bool {
     metadata.mode & 0o077 == 0 && metadata.uid == provenant_supervisor::fs::effective_uid()
 }
 
-/// Check one SQLite file or companion's safety, returning false for a name
-/// whose inode disappeared during observation so the caller can retry it.
 #[derive(Debug, PartialEq, Eq)]
-pub struct UnsafeCompanion;
+struct UnsafeCompanion;
 
-pub fn companion_is_safe(metadata: Metadata) -> Result<bool, UnsafeCompanion> {
+/// Return false when the observed inode disappeared so the caller can retry.
+fn companion_is_safe(metadata: Metadata) -> Result<bool, UnsafeCompanion> {
     if metadata.kind != FileKind::Regular || !is_private(metadata) || metadata.links > 1 {
         return Err(UnsafeCompanion);
     }
@@ -216,19 +230,9 @@ pub fn apply_migrations(
     db: &Connection,
     steps: &[&str],
     start: usize,
-    end: usize,
-    mut before_step: impl FnMut(usize, &Connection) -> rusqlite::Result<()>,
     mut after_step: impl FnMut(usize, &Connection) -> rusqlite::Result<()>,
 ) -> rusqlite::Result<()> {
-    if start > end || end > steps.len() {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let current: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if usize::try_from(current).ok() != Some(start) {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    for (index, sql) in steps.iter().enumerate().take(end).skip(start) {
-        before_step(index, db)?;
+    for (index, sql) in steps.iter().enumerate().skip(start) {
         db.execute_batch(sql)?;
         after_step(index, db)?;
         db.pragma_update(None, "user_version", (index + 1) as i64)?;
@@ -240,7 +244,29 @@ pub fn apply_migrations(
 mod tests {
     use super::*;
     use provenant_core::{MonoTime, TestClock, WallTime};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+
+    struct AdvancingWait {
+        clock: RefCell<TestClock>,
+        delays: RefCell<Vec<u64>>,
+    }
+
+    impl Clock for AdvancingWait {
+        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
+            self.clock.borrow().wall_now()
+        }
+
+        fn mono_now(&self) -> MonoTime {
+            self.clock.borrow().mono_now()
+        }
+    }
+
+    impl RetryWait for AdvancingWait {
+        fn wait(&self, delay: DurationMicros, _: &CancelToken) {
+            self.delays.borrow_mut().push(delay.as_micros());
+            self.clock.borrow_mut().advance(delay).unwrap();
+        }
+    }
 
     #[derive(Default)]
     struct CountingWait(Cell<usize>);
@@ -276,13 +302,120 @@ mod tests {
     }
 
     #[test]
+    fn retry_exhausts_budget_with_capped_delays() -> Result<(), Box<dyn std::error::Error>> {
+        let wait = AdvancingWait {
+            clock: RefCell::new(TestClock::new(
+                WallTime::from_micros(0)?,
+                MonoTime::from_micros(0),
+            )),
+            delays: RefCell::default(),
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(wait.mono_now(), 1)?;
+        let mut attempts = 0;
+        let result: Result<(), _> = retry(
+            &wait,
+            budget,
+            &cancel,
+            &wait,
+            |error: &bool| *error,
+            || {
+                attempts += 1;
+                Err(true)
+            },
+        );
+        assert_eq!(result, Err(RetryError::Busy));
+        assert_eq!(attempts, 11);
+        assert_eq!(
+            *wait.delays.borrow(),
+            [
+                1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 250_000, 250_000,
+                245_000
+            ]
+        );
+        assert_eq!(budget.remaining(wait.mono_now()).as_micros(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn retry_stops_on_cancellation() -> Result<(), Box<dyn std::error::Error>> {
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        for already_cancelled in [false, true] {
+            let cancel = CancelToken::new();
+            let wait = CountingWait::default();
+            let budget = WaitBudget::cli(clock.mono_now(), 1)?;
+            if already_cancelled {
+                cancel.cancel();
+            }
+            let mut attempts = 0;
+            let result: Result<(), _> = retry(
+                &clock,
+                budget,
+                &cancel,
+                &wait,
+                |error: &bool| *error,
+                || {
+                    attempts += 1;
+                    cancel.cancel();
+                    Err(true)
+                },
+            );
+            assert_eq!(result, Err(RetryError::Cancelled));
+            assert_eq!(attempts, usize::from(!already_cancelled));
+            assert_eq!(wait.0.get(), attempts);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retry_returns_non_busy_errors_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let wait = CountingWait::default();
+        let budget = WaitBudget::cli(clock.mono_now(), 1)?;
+        let mut attempts = 0;
+        let result: Result<(), _> = retry(
+            &clock,
+            budget,
+            &cancel,
+            &wait,
+            |error: &bool| *error,
+            || {
+                attempts += 1;
+                Err(false)
+            },
+        );
+        assert_eq!(result, Err(RetryError::Action(false)));
+        assert_eq!(attempts, 1);
+        assert_eq!(wait.0.get(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn observe_retries_incomplete_observations() -> Result<(), Box<dyn std::error::Error>> {
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let wait = CountingWait::default();
+        let budget = WaitBudget::cli(clock.mono_now(), 1)?;
+        let mut attempts = 0;
+        let result: Result<_, RetryError<()>> = observe(&clock, budget, &cancel, &wait, || {
+            attempts += 1;
+            Ok((attempts == 3).then_some(42))
+        });
+        assert_eq!(result, Ok(42));
+        assert_eq!(attempts, 3);
+        assert_eq!(wait.0.get(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn migration_runner_applies_ordered_steps_and_versions() -> rusqlite::Result<()> {
         let db = Connection::open_in_memory()?;
         let steps = [
             "CREATE TABLE first (id INTEGER);",
             "CREATE TABLE second (id INTEGER);",
         ];
-        apply_migrations(&db, &steps, 0, 2, |_, _| Ok(()), |_, _| Ok(()))?;
+        apply_migrations(&db, &steps, 0, |_, _| Ok(()))?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let tables: i64 = db.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('first','second')",
@@ -291,6 +424,30 @@ mod tests {
         )?;
         assert_eq!(version, 2);
         assert_eq!(tables, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_runner_resumes_and_calls_after_step() -> rusqlite::Result<()> {
+        let db = Connection::open_in_memory()?;
+        let steps = [
+            "CREATE TABLE first (id INTEGER);",
+            "CREATE TABLE second (id INTEGER);",
+        ];
+        apply_migrations(&db, &steps[..1], 0, |_, _| Ok(()))?;
+        let mut applied = Vec::new();
+        apply_migrations(&db, &steps, 1, |index, db| {
+            applied.push(index);
+            db.execute("INSERT INTO second VALUES (42)", [])?;
+            Ok(())
+        })?;
+        apply_migrations(&db, &steps, steps.len(), |_, _| panic!("already migrated"))?;
+        assert_eq!(applied, [1]);
+        assert_eq!(read_version(&db, steps.len()).unwrap(), 2);
+        assert_eq!(
+            db.query_row("SELECT id FROM second", [], |row| row.get::<_, i64>(0))?,
+            42
+        );
         Ok(())
     }
 }

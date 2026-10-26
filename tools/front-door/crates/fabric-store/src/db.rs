@@ -1,5 +1,5 @@
 use crate::*;
-use provenant_core::{CancelToken, Clock, DurationMicros, StateRoot, WaitBudget};
+use provenant_core::{CancelToken, Clock, StateRoot, WaitBudget};
 pub use provenant_sqlite::{RetryWait, ThreadWait};
 use provenant_supervisor::fs::Directory;
 #[cfg(test)]
@@ -12,7 +12,6 @@ use std::{
     marker::PhantomData,
     path::Component,
     rc::Rc,
-    time::{Duration, Instant},
 };
 
 // Index + 1 is the schema version; each migration commits independently.
@@ -94,7 +93,6 @@ fn enable_wal(db: &Connection) -> Result<()> {
     }
 }
 
-/// The only blocking seam: called between retries, with a bounded delay.
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
     pub budget: WaitBudget,
@@ -127,34 +125,13 @@ impl Request<'_> {
         }
     }
     /// Retry an incomplete observation within the request's budget and cancellation.
-    fn wait<T>(&self, mut action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
-        // The real elapsed cap also bounds a frozen/inaccurate injected clock.
-        let started = Instant::now();
-        let cap = Duration::from_micros(self.budget.remaining(self.clock.mono_now()).as_micros());
-        let mut delay = 1_000_u64;
-        loop {
-            if self.cancel.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let remaining =
-                Duration::from_micros(self.budget.remaining(self.clock.mono_now()).as_micros())
-                    .min(cap.saturating_sub(started.elapsed()));
-            if remaining.is_zero() {
-                return Err(Error::Busy);
-            }
-            match action() {
-                Ok(None) => {
-                    let micros = u64::try_from(remaining.as_micros())
-                        .unwrap_or(u64::MAX)
-                        .min(delay);
-                    self.backoff
-                        .wait(DurationMicros::from_micros(micros), self.cancel);
-                    delay = delay.saturating_mul(2).min(250_000);
-                }
-                Ok(Some(value)) => return Ok(value),
-                Err(error) => return Err(error),
-            }
-        }
+    fn wait<T>(&self, action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
+        provenant_sqlite::observe(self.clock, self.budget, self.cancel, self.backoff, action)
+            .map_err(|error| match error {
+                provenant_sqlite::RetryError::Busy => Error::Busy,
+                provenant_sqlite::RetryError::Cancelled => Error::Cancelled,
+                provenant_sqlite::RetryError::Action(error) => error,
+            })
     }
 }
 
@@ -238,20 +215,14 @@ impl Store {
         loop {
             let done = store.write(request, |tx| {
                 let version = schema_version(tx)?;
-                let Some(_) = MIGRATIONS.get(version) else {
+                let Some(sql) = MIGRATIONS.get(version) else {
                     return Ok(true);
                 };
                 if version == REMOVE_LEGACY_IMPORT {
                     refuse_legacy_import_data(tx)?;
                 }
-                provenant_sqlite::apply_migrations(
-                    tx,
-                    MIGRATIONS,
-                    version,
-                    version + 1,
-                    |_, _| Ok(()),
-                    |_, _| Ok(()),
-                )?;
+                tx.execute_batch(sql)?;
+                tx.pragma_update(None, "user_version", (version + 1) as i64)?;
                 Ok(false)
             })?;
             if done {
@@ -326,7 +297,7 @@ fn checked_directory(parent: &Directory, name: &OsStr, device: Option<u64>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{MonoTime, TestClock};
+    use provenant_core::{DurationMicros, MonoTime, TestClock};
     use std::cell::Cell;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
