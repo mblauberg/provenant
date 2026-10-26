@@ -2,7 +2,7 @@
 # Advisory CI signal: mutation-test the source lines a diff changed.
 #   run-mutants [<base> [<head>]]
 # Without a base it covers the last 24 hours of HEAD (the nightly run). Uses
-# cargo-mutants --in-diff with nextest, skips every file that mentions unsafe,
+# cargo-mutants --in-diff --in-place (CI checkouts only) with nextest, skips every file that mentions unsafe,
 # and runs at most MUTANT_CAP mutants (default 40) by taking one shard of the
 # list. Surviving mutants become warning annotations; the script always exits 0.
 # --in-diff finds nothing in a diff that only touches tests.
@@ -40,7 +40,7 @@ for f in $(cd "$ws" && grep -rlw --include='*.rs' unsafe crates src 2>/dev/null)
 done
 
 cd "$ws"
-common="--workspace --in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --cargo-arg=--locked"
+common="--in-place --workspace --in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --cargo-arg=--locked"
 # shellcheck disable=SC2086
 total=$(cargo mutants $common "$@" --list | grep -c . || true)
 if [ "$total" -eq 0 ]; then
