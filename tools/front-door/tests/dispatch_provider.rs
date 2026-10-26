@@ -291,13 +291,20 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     Ok(())
 }
 
-fn opencode_free_pool_cools_second_model() -> Result {
+/// Finish one attempt on `stdout` as provider output and return the quota
+/// record its refusal persisted for the applied account.
+fn persisted_refusal(
+    provider: &str,
+    model: &str,
+    (label, key): (&str, &str),
+    stdout: &[u8],
+) -> Result<provenant_quota::AccountRecord> {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
         TaskId, WaitBudget,
     };
     use provenant_records::{
-        CanonicalV1, ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+        CanonicalV1,
         run::{CanonicalRequest, HarnessProfile, RequestedRoute, RouteRecord, TaskRequest},
     };
     use provenant_run::{ExecutionContext, NewAttempt, PreparedRun, Request, RunStore};
@@ -332,18 +339,18 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let attempt_id = AttemptId::from_bytes([24; 16]);
     let task_id = TaskId::from_bytes([25; 16]);
     let applied = RouteRecord {
-        provider: Some("opencode".into()),
-        model: Some("opencode/opencode/deepseek-v4.1-flash-free".into()),
+        provider: Some(provider.into()),
+        model: Some(model.into()),
         effort: None,
-        account_label: Some("open-code-free".into()),
-        account_key: Some("keyless-free".into()),
+        account_label: Some(label.into()),
+        account_key: Some(key.into()),
         source: Some("fixture_route".into()),
         pool_selection: None,
     };
     let prompt = "reply OK";
     let prepared = PreparedRun {
         run_id,
-        operation_id: OperationId::parse("opencode-cooldown")?,
+        operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
             schema_version: 1,
             tasks: vec![TaskRequest {
@@ -351,8 +358,8 @@ fn opencode_free_pool_cools_second_model() -> Result {
                 task_id,
                 prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                 route: RequestedRoute::Model {
-                    provider: "opencode".into(),
-                    model: "opencode/opencode/deepseek-v4.1-flash-free".into(),
+                    provider: provider.into(),
+                    model: model.into(),
                     effort: None,
                 },
                 account: None,
@@ -444,7 +451,6 @@ fn opencode_free_pool_cools_second_model() -> Result {
     exit_file.sync_all()?;
 
     // Fixture provider output enters Registry.decode through RunStore::finish.
-    let stdout = br#"{"type":"error","error":{"type":"provider.quota","message":"free tier exhausted","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture free allowance exhausted"}}}}}"#;
     let mut stdout_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -470,8 +476,23 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let account_path = roots
         .state
         .as_path()
-        .join("quota/keyless-free/opencode.json");
-    let quota_record = provenant_quota::AccountRecord::decode(&fs::read(account_path)?)?;
+        .join(format!("quota/{key}/{provider}.json"));
+    Ok(provenant_quota::AccountRecord::decode(&fs::read(
+        account_path,
+    )?)?)
+}
+
+fn opencode_free_pool_cools_second_model() -> Result {
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+    let stdout = br#"{"type":"error","error":{"type":"provider.quota","message":"free tier exhausted","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture free allowance exhausted"}}}}}"#;
+    let quota_record = persisted_refusal(
+        "opencode",
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        ("open-code-free", "keyless-free"),
+        stdout,
+    )?;
     assert_eq!(quota_record.refusals.len(), 1);
     assert_eq!(
         quota_record.refusals[0].pool.as_deref(),
@@ -514,6 +535,70 @@ fn opencode_free_pool_cools_second_model() -> Result {
     Ok(())
 }
 
+fn agy_individual_quota_cools_model_until_reset() -> Result {
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+    let stdout = br#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"Individual quota reached. Resets in 7h23m.","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+    let quota_record = persisted_refusal(
+        "agy",
+        "agy/gemini-3.8-flash",
+        ("work", "google-fixture"),
+        stdout,
+    )?;
+    assert_eq!(quota_record.refusals.len(), 1);
+    let refusal = &quota_record.refusals[0];
+    assert_eq!(
+        (refusal.model.as_str(), refusal.pool.as_deref()),
+        ("gemini-3.8-flash", None)
+    );
+    let now = refusal.observed_unix_seconds;
+    let resets = now + 7 * 3600 + 23 * 60;
+    assert_eq!(refusal.resets_unix_seconds, Some(resets));
+
+    let mut route = ResolvedRoute {
+        adapter: "agy".into(),
+        model: "gemini-3.8-flash".into(),
+        effort: None,
+        catalogue_revision: "fixture-catalogue".into(),
+        account_key: Some("google-fixture".into()),
+        host: "fixture-host".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: RouteEligibility::Eligible,
+        readiness: RouteReadiness::Ready {
+            availability_ref: "fixture-preflight".into(),
+            expires_unix_seconds: resets + 300,
+        },
+        confidentiality: RouteConfidentiality {
+            evidence_ref: "fixture-access".into(),
+        },
+        pool_selection: None,
+    };
+    let admit = |route: &ResolvedRoute, now_unix_seconds| {
+        provenant_quota::Admission {
+            policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
+            now_unix_seconds,
+            records: std::slice::from_ref(&quota_record),
+            pools: &[],
+        }
+        .check(route)
+    };
+    // Past the unknown-reset hour, the stated reset still holds the model.
+    for at in [now, now + 3600, resets - 1] {
+        assert!(matches!(
+            admit(&route, at),
+            Err(provenant_quota::QuotaError::Refused(
+                "scoped provider refusal"
+            ))
+        ));
+    }
+    admit(&route, resets)?;
+    route.model = "gemini-3.8-pro".into();
+    admit(&route, now)?;
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = if args
@@ -528,12 +613,16 @@ fn main() -> ExitCode {
                 "codex_dispatch_observes_rollout",
                 "claude_dispatch_refreshes_registered_account",
                 "opencode_free_pool_cools_second_model",
+                "agy_individual_quota_cools_model_until_reset",
             ],
             |name| {
                 let result = match name {
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()
+                    }
+                    "agy_individual_quota_cools_model_until_reset" => {
+                        agy_individual_quota_cools_model_until_reset()
                     }
                     _ => opencode_free_pool_cools_second_model(),
                 };

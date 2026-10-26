@@ -183,7 +183,17 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             if !result.conversation_id.is_empty() {
                 events.push(E::Session(result.conversation_id));
             }
-            if result.error.is_some() || result.status != "SUCCESS" {
+            if let Some(message) = result
+                .error
+                .as_deref()
+                .filter(|message| quota_reached(message))
+            {
+                events.push(E::QuotaLimited {
+                    message: message.to_owned(),
+                    pool: None,
+                    resets_in_seconds: resets_in(message),
+                });
+            } else if result.error.is_some() || result.status != "SUCCESS" {
                 events.push(E::Error);
             } else {
                 events.push(E::Text(result.response));
@@ -193,4 +203,30 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         _ => vec![],
     })
+}
+/// The CLI's own exhausted-quota refusal (`Individual quota reached`). A bare
+/// 429 or `RESOURCE_EXHAUSTED` may be a per-minute rate limit, so neither counts.
+fn quota_reached(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("quota reached")
+}
+/// The refusal's stated wait, as in `Resets in 7h23m`, within one weekly window.
+fn resets_in(message: &str) -> Option<u64> {
+    const MARKER: &str = "resets in ";
+    let lower = message.to_ascii_lowercase();
+    let mut rest = &lower[lower.find(MARKER)? + MARKER.len()..];
+    let mut total = 0_u64;
+    loop {
+        rest = rest.trim_start();
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let scale = match rest.as_bytes().get(digits).filter(|_| digits > 0) {
+            Some(b'd') => 86_400,
+            Some(b'h') => 3_600,
+            Some(b'm') => 60,
+            Some(b's') => 1,
+            _ => break,
+        };
+        total = total.checked_add(rest[..digits].parse::<u64>().ok()?.checked_mul(scale)?)?;
+        rest = &rest[digits + 1..];
+    }
+    (1..=7 * 86_400).contains(&total).then_some(total)
 }

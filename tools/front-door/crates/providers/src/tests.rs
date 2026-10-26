@@ -156,6 +156,54 @@ fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
+    let exit = ExitObservation {
+        code: Some(1),
+        ..EXIT
+    };
+    let result = |error: &str| {
+        serde_json::json!({"event":"result","result":{
+            "conversation_id":"","status":"ERROR","response":"","error":error,
+            "usage":{"input_tokens":0,"output_tokens":0}}})
+        .to_string()
+            + "\n"
+    };
+    for (message, resets_in_seconds) in [
+        (
+            "429: Individual quota reached for gemini-3.8-flash. Resets in 7h23m.",
+            Some(26_580),
+        ),
+        (
+            "Individual quota reached. Resets in 2d 5m 30s",
+            Some(173_130),
+        ),
+        ("Individual quota reached. Resets in 8d", None),
+        ("Individual quota reached. Resets in 0m", None),
+        ("INDIVIDUAL QUOTA REACHED", None),
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused, "{message}");
+        assert!(
+            events.contains(&ProviderEvent::QuotaLimited {
+                message: message.into(),
+                pool: None,
+                resets_in_seconds,
+            }),
+            "{message}"
+        );
+    }
+    // A bare 429 may be a per-minute rate limit, not a spent quota.
+    for message in [
+        "429 RESOURCE_EXHAUSTED: Quota exceeded for requests per minute",
+        "upstream error",
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed, "{message}");
+        assert!(events.contains(&ProviderEvent::Error), "{message}");
+    }
+    Ok(())
+}
+#[test]
 fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dyn std::error::Error>>
 {
     let exit = ExitObservation {
@@ -2324,7 +2372,8 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
             assert_eq!(outcome.status(), OutcomeStatus::Refused);
             assert!(events.contains(&ProviderEvent::QuotaLimited {
                 message: message.into(),
-                pool: Some("opencode-free".into())
+                pool: Some("opencode-free".into()),
+                resets_in_seconds: None,
             }));
         }
     }
@@ -2337,7 +2386,8 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
         assert_eq!(outcome.status(), OutcomeStatus::Refused);
         assert!(events.contains(&ProviderEvent::QuotaLimited {
             message: "provider quota message".into(),
-            pool: None
+            pool: None,
+            resets_in_seconds: None,
         }));
     }
     Ok(())

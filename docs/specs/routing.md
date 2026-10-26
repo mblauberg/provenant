@@ -217,6 +217,14 @@ and unsupported.
 - OpenCode decodes its structured `provider.quota` body. A free-usage limit
   names the shared `opencode-free` pool and blocks other free models on the
   same account key until reset or the one-hour backoff.
+- Agy decodes a result error reporting `Individual quota reached` as quota
+  limiting. Its stated `Resets in` wait (such as `7h23m`, at most seven days)
+  sets the reset; otherwise the one-hour backoff applies. The refusal names no
+  pool, so it holds only that model on that account. A bare 429 or
+  `RESOURCE_EXHAUSTED` may be a per-minute limit and stays a failure.
+- The host persists a quota refusal that names a pool, and one without a pool
+  only when the route names an account. A nested lane's refusal stays in its
+  attempt reason.
 - Codex decodes an `error` event reporting `429 Too Many Requests` (retries
   exhausted) as a rate limit, never a quota refusal; a `Reconnecting` message
   stays transient.
