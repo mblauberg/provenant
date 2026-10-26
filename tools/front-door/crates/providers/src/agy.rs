@@ -24,8 +24,9 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
 crate::adapter!(Agy, "agy", prepare);
 const MODEL_ON_WIRE: bool = true;
 
-/// The CLI's own turn limit; the supervisor's deadline is the real bound.
-const PRINT_TIMEOUT: &str = "900s";
+/// The CLI's own turn limit, off at zero; the supervisor's deadline is the real
+/// bound.
+const PRINT_TIMEOUT: &str = "0s";
 const SECURITY: &str = "/usr/bin/security";
 const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 
