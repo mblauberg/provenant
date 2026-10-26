@@ -345,6 +345,11 @@ jobs:
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
       - name: Check retired names
         run: scripts/check-retired-names
+      - name: Test scratch-path advisory
+        run: scripts/test-check-scratch-paths
+      - name: Advise on scratch-path citations
+        continue-on-error: true
+        run: scripts/check-scratch-paths
       - name: Check release-note fragments
         run: scripts/collate-release-notes --check
       - name: Test release-note collation

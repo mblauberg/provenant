@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+script=$(cd "$(dirname "$0")" && pwd -P)/check-scratch-paths
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-scratch-paths.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+git -C "$tmp" init -q
+cd "$tmp"
+mkdir -p docs .github/ISSUE_TEMPLATE src
+printf '%s\n' 'Use docs/plans/design.md and /tmpfs as project references.' > docs/clean.md
+printf '%s\n' 'Do not cite a session plan code or scratch path.' >> docs/clean.md
+printf '%s\n' 'Ignore untracked /tmp/scratch.' > docs/untracked.md
+printf '%s\n' 'const SCRATCH: &str = "/tmp/runtime";' > src/main.rs
+git add docs/clean.md src/main.rs
+"$script" > "$tmp/out" 2> "$tmp/err"
+test ! -s "$tmp/out"
+test ! -s "$tmp/err"
+
+# The fixture needs literal shell variables and tildes.
+# shellcheck disable=SC2016,SC2088
+for citation in '/tmp/plan' '/private/tmp/plan' '/var/folders/xx/plan' \
+  '$TMPDIR/plan' '${TMPDIR}/plan' '.agent-run/result.md' \
+  '~/.local/share/provenant/v1/runs/run/result.md' \
+  'state/runs/run/attempts/attempt/result.md' '~/.claude/plans/example.md' \
+  '~/.codex/plans/example.md' 'Plan code: amber-river' \
+  'Plan ID: amber-river' 'PLAN_CODE=amber-river'; do
+  printf '%s\n' "$citation" > 'docs/has space.md'
+  git add 'docs/has space.md'
+  "$script" > "$tmp/out" 2> "$tmp/err"
+  test ! -s "$tmp/out"
+  grep -F 'docs/has space.md:1:' "$tmp/err" > /dev/null
+  grep -F 'warning:' "$tmp/err" > /dev/null
+done
+
+# Placeholders and excluded paths stay quiet; real citations elsewhere warn.
+mkdir -p docs/specs
+git rm -q -f --cached 'docs/has space.md'
+for quiet in 'state/<state>/runs/<run>/attempts/x' '/tmp/<name>' \
+  '/private/tmp/<name>'; do
+  printf '%s\n' "$quiet" > docs/placeholder.md
+  git add docs/placeholder.md
+  "$script" > "$tmp/out" 2> "$tmp/err"
+  test ! -s "$tmp/err"
+done
+git rm -q -f --cached docs/placeholder.md
+printf '%s\n' 'Specs may cite /tmp/state and Plan code: x on purpose.' > docs/specs/state.md
+printf '%s\n' 'Specs may cite /tmp/state on purpose.' > HARNESS.md
+git add docs/specs/state.md HARNESS.md
+"$script" > "$tmp/out" 2> "$tmp/err"
+test ! -s "$tmp/err"
+
+printf '%s\n' 'description: See /tmp/plan' > .github/ISSUE_TEMPLATE/work.yml
+git add .github/ISSUE_TEMPLATE/work.yml
+cd docs
+"$script" > "$tmp/out" 2> "$tmp/err"
+grep -F '.github/ISSUE_TEMPLATE/work.yml:1:' "$tmp/err" > /dev/null
+
+mkdir "$tmp/outside"
+cd "$tmp/outside"
+GIT_CEILING_DIRECTORIES="$tmp" "$script" > "$tmp/out" 2> "$tmp/err"
+grep -F 'warning: cannot locate tracked files' "$tmp/err" > /dev/null
+echo 'scratch-path advisory checks passed'

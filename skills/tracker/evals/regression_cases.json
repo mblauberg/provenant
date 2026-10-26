@@ -15,6 +15,65 @@
         "companion_skills": []
       },
       "note": "A priority or horizon field is optional and repository-declared; agents use its documented default and promotion rule."
+    },
+    {
+      "id": "r17620",
+      "relation": "positive",
+      "prompt": "File an agent issue for a possible future bottleneck. No failure, contradiction, user event or review finding has happened; we merely think it might become slow.",
+      "tags": [
+        "direct",
+        "filing",
+        "evidence-free"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      },
+      "note": "Refuse to file without an observed event and resolvable evidence. Speculation and an agent approving its own suggestion do not establish readiness."
+    },
+    {
+      "id": "r17621",
+      "relation": "positive",
+      "prompt": "A review found an actual access-grant mismatch. Search before filing it, record agent provenance and move it to Ready yourself immediately.",
+      "tags": [
+        "direct",
+        "filing",
+        "provenance"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      },
+      "note": "Search, cite the finding, check the advisory cap, use source:agent from the synced declaration and an actual Filed-by trailer. Leave readiness to an independent authorised triager; never self-approve."
+    },
+    {
+      "id": "r17622",
+      "relation": "positive",
+      "prompt": "Bulk edits refreshed every updatedAt value. A referenced PR has merged and an issue dependency has closed. Decide which issues need re-verification.",
+      "tags": [
+        "direct",
+        "hygiene"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      },
+      "note": "Use content changes to select re-verification; neither old age nor a fresh timestamp establishes staleness or completion."
+    },
+    {
+      "id": "r17623",
+      "relation": "positive",
+      "prompt": "The declared Ready cap is full. File every planned checklist-epic leaf now even though no writer has leased any of them.",
+      "tags": [
+        "direct",
+        "board",
+        "lease"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      },
+      "note": "Pause filing at the advisory cap. Keep unleased plans in the epic; create or reuse one leaf per live task on lease and use native sub-issue links once it exists."
     }
   ]
 }

@@ -1,0 +1,33 @@
+# J1: bound what earns a test; drop the mandatory contract-test rule
+
+## Outcome
+
+The ~150 tests that grep a document and assert a sentence did not come from the `tdd` skill. `skills/tdd/SKILL.md:39-41` already says a valid test survives an internal refactor, which a wording assertion cannot. They come from a governance rule: `MAINTAINING.md:98-100` says "Trigger fixtures and contract tests remain mandatory for every skill change", repeated at `:172` and in `skills/skill-craft/references/author.md:31-32`. A wording-only change has no machine-enforceable invariant, so the only way to satisfy the rule was to assert the wording. The 2026-08-30/31 documentation audit commits (`5c561fc3`, `0d88be81`, `e78e933e`, `474e81b4`, `1a5ad1ba`, `13d29b1a`) each edit a `.md` and add phrase assertions in the same commit.
+
+#752 deletes the tests and #751 the standalone validators. This issue removes the rule that generates them, so they do not come back. Wording follows the three most used external TDD skills (obra/superpowers "Behavior, not text", addyosmani "When NOT to use", mattpocock "test only at pre-agreed seams").
+
+## Changes
+
+1. `skills/tdd/SKILL.md`, new paragraph under **Test boundaries**:
+
+   > **Not observable behaviour.** Prose is not a contract. Documentation, `SKILL.md` and reference wording, ADR and specification text, commit and PR bodies, and the literal values of configuration keys are not behaviour and earn no test. A test that greps a document, asserts an exact sentence or counts occurrences of a phrase can only fail when a maintainer rewords something deliberately: it fires on every intentional edit and sleeps through every defect. Before writing any test, name the production change that would make it fail. If the only answer is "someone changed the text", there is no test to write. Where a document carries a machine-checkable invariant (a route in a fixture, a JSON policy value, a path that must resolve, a schema field) test the parsed structure or run the script and assert its output, exit code or side effect. Never assert the source text itself.
+
+2. `skills/tdd/SKILL.md`, new short section **Where a test lives**: find the repository's existing layout, naming and test commands first; put the test in the file that owns the unit's behaviour; a new test file is justified only by a new production unit with no owning file, never by a review, audit finding, issue number or documentation pass; name test files after the behaviour they protect, not the process that prompted them.
+
+3. `skills/tdd/references/tests.md` red flags: reads a `.md` and asserts a phrase or phrase count; asserts a constant equals its own literal; would still pass if the feature were deleted and only the document remained.
+
+4. `MAINTAINING.md` step 7 of **Change a skill**: trigger fixtures stay mandatory for every skill change; contract tests are mandatory only where the change introduces or alters an invariant a script, validator or CI gate evaluates at runtime; wording, ordering, examples and explanation add no contract test; assert parsed structure or script effects, never document text. Same edit at `:172`.
+
+5. `skills/skill-craft/references/author.md` step 6 and `skills/skill-craft/SKILL.md` shared doctrine: a contract test protects a machine-enforced invariant, never the prose describing it; if the invariant has no enforcing script, the correct output is an enforcing script or nothing.
+
+## Acceptance
+
+- [ ] The five edits above land; `skills/tdd` SKILL.md body stays under the 500-word budget or the new text moves to a reference.
+- [ ] `MAINTAINING.md` no longer contains the sentence "contract tests remain mandatory for every skill change" in any form.
+- [ ] Trigger fixtures for `tdd` and `skill-craft` cover a docs-only change routing to no test.
+- [ ] A docs-only PR after this change adds no test file and passes the harness gate.
+
+Size S/M/L: S. Risk: Low.
+
+Related: #751, #752
+Parent: #743
