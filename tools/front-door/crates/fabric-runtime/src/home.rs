@@ -382,6 +382,7 @@ impl<'a> CoordinationService<'a> {
                 .ok_or(PeerError::Unavailable)?;
             let request = PeerRequest {
                 version: 1,
+                protocol: PROTOCOL,
                 target_host: *host,
                 source_host: identity.host,
                 agent: identity.inbox.agent.clone(),
@@ -480,6 +481,7 @@ mod tests {
             assert!(matches!(&request.action, PeerAction::Receipt { .. }));
             Ok(PeerResponse {
                 version: request.version,
+                protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
                 result: PeerResult::Coordination(CoordinationResult::Events(EventsResult::Noted {
@@ -514,6 +516,7 @@ mod tests {
                 ));
                 return Ok(PeerResponse {
                     version: request.version,
+                    protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
@@ -532,6 +535,7 @@ mod tests {
             ));
             Ok(PeerResponse {
                 version: request.version,
+                protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
                 result: PeerResult::Coordination(CoordinationResult::Events(EventsResult::Noted {
@@ -592,6 +596,7 @@ mod tests {
         fn remote<'a>(&'a self, transport: Box<dyn PeerTransport + 'a>) -> RemoteCoordination<'a> {
             let request = PeerRequest {
                 version: 1,
+                protocol: PROTOCOL,
                 target_host: self.remote_host,
                 source_host: self.local_host,
                 agent: "chair".into(),
@@ -691,6 +696,29 @@ mod tests {
                 error.to_string(),
                 format!("peer worker speaks protocol 1, this host speaks {PROTOCOL}; upgrade both")
             );
+            let operation = remote
+                .journal
+                .lookup_peer(
+                    fixture.project,
+                    fixture.actor,
+                    &id,
+                    &Request {
+                        clock: &fixture.clock,
+                        budget: fixture.budget,
+                        cancel: &fixture.cancel,
+                        backoff: &fixture.backoff,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                operation.phase,
+                if recovery {
+                    PeerPhase::Sent
+                } else {
+                    PeerPhase::Prepared
+                }
+            );
         }
     }
 
@@ -711,6 +739,7 @@ mod tests {
                 assert!(request.operation().is_none());
                 Ok(PeerResponse {
                     version: request.version,
+                    protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
@@ -769,6 +798,7 @@ mod tests {
             ) -> Result<PeerResponse, PeerError> {
                 Ok(PeerResponse {
                     version: request.version,
+                    protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {

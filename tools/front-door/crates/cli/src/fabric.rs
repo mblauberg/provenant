@@ -966,14 +966,16 @@ pub fn run(
     }
 }
 
-/// The command outcome for a coordination error code. A refused store upgrade
-/// is a refusal here, as on the facade edge (`context::facade_outcome`).
+/// The command outcome for a coordination error code. Store upgrades and peer
+/// versions are refusals here, as on the facade edge (`context::facade_outcome`).
 pub fn coordination_outcome(code: &str) -> Outcome {
     match code {
         "invalid_input" | "not_found" => Outcome::Invalid,
-        "stale_fence" | "conflict" | "lane_coordination_refused" | "upgrade_refused" => {
-            Outcome::Refused
-        }
+        "stale_fence"
+        | "conflict"
+        | "lane_coordination_refused"
+        | "upgrade_refused"
+        | "peer_version" => Outcome::Refused,
         "timeout" => Outcome::Timeout,
         "cancelled" => Outcome::Cancelled,
         _ => Outcome::Error,
@@ -985,17 +987,18 @@ mod outcome_tests {
     use super::*;
 
     #[test]
-    fn refused_upgrade_is_a_refusal_on_both_edges() {
-        assert_eq!(coordination_outcome("upgrade_refused"), Outcome::Refused);
-        assert_eq!(
-            facade_outcome(
-                &provenant_fabric_runtime::coordination::facade::FacadeError::from_code(
-                    "upgrade_refused",
-                    None
+    fn upgrade_and_peer_version_refusals_match_on_both_edges() {
+        for code in ["upgrade_refused", "peer_version"] {
+            assert_eq!(coordination_outcome(code), Outcome::Refused);
+            assert_eq!(
+                facade_outcome(
+                    &provenant_fabric_runtime::coordination::facade::FacadeError::from_code(
+                        code, None
+                    )
                 )
-            )
-            .0,
-            Outcome::Refused
-        );
+                .0,
+                Outcome::Refused
+            );
+        }
     }
 }

@@ -220,7 +220,8 @@ impl F3Facade for BoundFacade<'_> {
             }
             let Some(peer) = peer else {
                 page.push(HostHealth {
-                    protocol: PROTOCOL,
+                    protocol: Some(PROTOCOL),
+                    reason: None,
                     host,
                     available: true,
                     execution: Some(
@@ -236,7 +237,8 @@ impl F3Facade for BoundFacade<'_> {
                 continue;
             };
             let mut health = HostHealth {
-                protocol: PROTOCOL,
+                protocol: None,
+                reason: None,
                 host,
                 available: false,
                 execution: None,
@@ -251,6 +253,7 @@ impl F3Facade for BoundFacade<'_> {
             {
                 let request = PeerRequest {
                     version: 1,
+                    protocol: PROTOCOL,
                     target_host: host,
                     source_host: ctx.identity.host,
                     agent: ctx.identity.inbox.agent.clone(),
@@ -276,8 +279,9 @@ impl F3Facade for BoundFacade<'_> {
                         result: PeerResult::Health(value),
                         ..
                     }) => health = value,
-                    Err(PeerError::ProtocolMismatch { peer, remote }) => {
-                        return Err(FacadeError::PeerProtocolMismatch { peer, remote });
+                    Err(PeerError::ProtocolMismatch { remote, .. }) => {
+                        health.protocol = Some(remote);
+                        health.reason = Some("peer_version".into());
                     }
                     _ => {}
                 }
@@ -467,6 +471,15 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
             MAX_FRAME,
             Instant::now() + std::time::Duration::from_secs(30),
         )?;
+        if let Some(refusal) = protocol_refusal(&bytes)? {
+            let mut reply = serde_json::to_vec(&refusal)?;
+            reply.push(b'\n');
+            provenant_supervisor::sys::hook_io::write_stdout(
+                &reply,
+                Instant::now() + std::time::Duration::from_secs(30),
+            )?;
+            return Ok(());
+        }
         let home = crate::roots::home()?;
         if !in_process {
             let assets = crate::roots::product_root()?;
@@ -479,6 +492,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                     let request = decode_request(&bytes)?;
                     let mut busy = serde_json::to_vec(&PeerResponse {
                         version: 1,
+                        protocol: PROTOCOL,
                         host: request.target_host,
                         project: request.project.key,
                         result: PeerResult::Error {
@@ -596,7 +610,8 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 ))
             }
             PeerAction::Health => PeerResult::Health(HostHealth {
-                protocol: PROTOCOL,
+                protocol: Some(PROTOCOL),
+                reason: None,
                 host: context.identity.host,
                 available: true,
                 execution: Some(owner.capabilities().submit),
@@ -725,6 +740,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
         };
         let response = PeerResponse {
             version: 1,
+            protocol: PROTOCOL,
             host: context.identity.host,
             project: request.project.key,
             result,
@@ -891,6 +907,7 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                 )?;
                 let request = PeerRequest {
                     version: 1,
+                    protocol: PROTOCOL,
                     target_host: *host,
                     source_host: ctx.identity.host,
                     agent: ctx.identity.inbox.agent.clone(),

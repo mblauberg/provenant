@@ -211,6 +211,7 @@ impl Context {
             .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused))?;
         let request = PeerRequest {
             version: 1,
+            protocol: provenant_fabric_runtime::hosts::PROTOCOL,
             target_host: host,
             source_host: self.identity.host,
             agent: self.identity.inbox.agent.clone(),

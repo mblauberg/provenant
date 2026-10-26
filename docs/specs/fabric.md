@@ -407,16 +407,27 @@ executable overrides come only from validated config (an absolute SSH
 executable, and per peer an absolute remote executable and a connect timeout of
 1 to 30 s). Supervisor captures bounded stdin, stdout and stderr under a fixed
 argv and deadline. The ingress also carries Git object transfer, so one SSH key
-restricted with `command=` supports every peer operation. Before sending work,
-the transport reads health and checks its required integer `protocol`, currently
-2, along with the host ID and `ProjectKey`. The framing envelope's `version`
-remains 1. Any protocol difference fails the call with `peer_version`, naming
-the peer and both versions, for example: "peer workshop speaks protocol 1, this
-host speaks 2; upgrade both". Upgrade peers together; there is no capability
-list, negotiation or support for older peers. The health check and operation
-share one deadline. Fan-out uses at most four transport threads, holds no
-database transaction and never recurses from a peer request. Cancelling a peer
-call stops the SSH child, not the remote run.
+restricted with `command=` supports every peer operation. Every request and
+reply envelope carries integer `protocol`, currently 2. Ingress refuses a
+different protocol before decoding or executing the action, replying with
+`peer_version` and its own protocol. The client checks the reply protocol,
+host ID and `ProjectKey` before decoding its result. A reply without `protocol`,
+or the released peer's refusal to decode the request, identifies protocol 1.
+The framing envelope's `version` remains 1. Any protocol difference fails the
+call with `peer_version`, naming the peer and both versions, for example:
+"peer workshop speaks protocol 1, this host speaks 2; upgrade both". Upgrade
+peers together; there is no capability list, negotiation or support for older
+peers. Each call uses one SSH connection.
+Health data also carries `protocol`. Host lists retain mismatched peers with
+`available: false`, their remote `protocol` and `reason: "peer_version"`.
+Unprobed or unreachable hosts omit `protocol`. Fan-out uses at most four
+transport threads, holds no database transaction and never recurses from a
+peer request. Cancelling a peer call stops the SSH child, not the remote run.
+
+The released v1 peer-agent can hide a decode refusal in its log and close
+without a reply. This opaque failure is indistinguishable from a lost reply
+after execution. It remains `home_unavailable` for reads and `launch_unknown`
+for mutations; it cannot safely be classified as a protocol refusal.
 
 Requests carry the version, target and source hosts, the agent label and a
 home-relative locator bound to the `ProjectKey`. Ingress checks the source
