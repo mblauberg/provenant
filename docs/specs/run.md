@@ -146,6 +146,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     prompt.txt                 # run-owned immutable prompt
     prompt.md                  # full launch prompt, only for top-level argv spills
     result.md                  # run-owned sealed result, including failure
+    writer-terminal.json       # checked candidate head and protected paths
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
     provider-state/            # resumable private state with bounded retention
     provider-history/          # transcripts archived when resume state expires
@@ -237,6 +238,9 @@ Stored records:
   applied and observed route and effort, confinement, subject identity,
   deadlines, custody, timestamps, state, outcome, usage with source, artifact
   paths and digests, and publication errors. It also carries a `Trace`.
+  Writers retain their candidate `head` and `protected_paths` (contained
+  `PathWire` values) when terminal checks complete. CLI lane JSON and MCP run
+  records expose both fields.
 - `AttemptFact`: a `Serialize`-only terminal projection built from validated
   records. It carries the resolved route and account label, usage, reviewer,
   `delivery_id`, `queued_at`, optional `started_at`, `provider_ms` and the
@@ -262,7 +266,11 @@ Attempt states run `queued`, `starting`, `running`, `settling`, `terminal`;
 refusal, queued cancellation and spawn failure can end before `running`. The
 outcomes are `succeeded`, `failed`, `rejected`, `cancelled`, `timed_out`,
 `rate_limited`, `quota_limited`, `auth_required`, `model_unavailable`,
-`permission_denied`, `quarantined`, `lost` and `input_required`. A dead owner
+`permission_denied`, `quarantined`, `review_required`, `lost` and
+`input_required`. A completed writer whose protected changes need review ends
+as `review_required`, retains its candidate head and protected paths, and skips
+automatic delivery. It is terminal for lane waits and accepts the
+`lanes --state review_required` filter. A dead owner
 is not a failed provider: unresolved custody stays an observation until
 supervisor proves exit or loss. A natural completion wins over a late
 cancellation or deadline. Success needs supervisor-observed exit 0, a matching

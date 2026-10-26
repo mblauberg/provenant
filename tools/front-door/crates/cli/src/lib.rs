@@ -661,6 +661,8 @@ mod tests {
             "running",
             "--state",
             "input_required",
+            "--state",
+            "review_required",
             "--since",
             "24h",
         ]);

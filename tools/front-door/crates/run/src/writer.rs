@@ -324,6 +324,7 @@ impl WriterLaunch {
         state: &Path,
         attempt: &Directory,
         custody: &provenant_supervisor::custody::Recovery,
+        remote: &str,
     ) -> Result<bool> {
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), false)?;
         let base = custody
@@ -346,17 +347,86 @@ impl WriterLaunch {
         let snapshot = git
             .recover_instruction_snapshot(custody, base, &archive)
             .map_err(error)?;
-        let outcome = git
-            .quarantine_instructions(custody, &snapshot, &archive)
+        let oid = |repo: &provenant_confinement::repo::VerifiedRepo, operation| -> Result<GitOid> {
+            let output = provenant_confinement::run_utility(
+                &executor,
+                operation,
+                repo,
+                &utility,
+                budget()?,
+                &cancel,
+            )
             .map_err(error)?;
-        let (evidence, review) = match outcome {
+            if output.termination != provenant_supervisor::exec::Termination::Exit(0)
+                || output.stdout.truncated
+            {
+                return Err(RunError::Validation("writer comparison cannot be resolved"));
+            }
+            GitOid::parse(
+                std::str::from_utf8(&output.stdout.bytes)
+                    .map_err(error)?
+                    .trim(),
+            )
+            .map_err(error)
+        };
+        let tip = oid(
+            self.worktree.repo(),
+            provenant_confinement::GitRead::RevParseHead,
+        )?;
+        // Remote refs only refine attribution. Missing or stale refs must not
+        // prevent quarantine from publishing evidence against the lane start.
+        let comparison_base = (|| -> Result<GitOid> {
+            let remote_head = provenant_confinement::run_utility(
+                &executor,
+                provenant_confinement::GitRead::RemoteHead {
+                    remote: remote.into(),
+                },
+                self.worktree.repo(),
+                &utility,
+                budget()?,
+                &cancel,
+            )
+            .map_err(error)?;
+            if remote_head.termination != provenant_supervisor::exec::Termination::Exit(0)
+                || remote_head.stdout.truncated
+            {
+                return Err(RunError::Validation(
+                    "writer delivery target cannot be resolved",
+                ));
+            }
+            let name = GitRefName::remote_tracking(
+                std::str::from_utf8(&remote_head.stdout.bytes)
+                    .map_err(error)?
+                    .trim()
+                    .strip_prefix("refs/remotes/")
+                    .ok_or(RunError::Validation("writer delivery target is not remote"))?,
+            )
+            .map_err(error)?;
+            let target = oid(
+                self.worktree.repo(),
+                provenant_confinement::GitRead::ResolveRef { name },
+            )?;
+            oid(
+                self.worktree.repo(),
+                provenant_confinement::GitRead::MergeBase {
+                    left: target,
+                    right: tip,
+                },
+            )
+        })()
+        .unwrap_or(snapshot.head());
+        let outcome = git
+            .quarantine_instructions(custody, &snapshot, comparison_base, &archive)
+            .map_err(error)?;
+        let (evidence, review, protected_paths) = match outcome {
             provenant_confinement::quarantine::QuarantineOutcome::Restored {
                 evidence_digest,
                 ..
-            } => (evidence_digest, false),
+            } => (evidence_digest, false, Vec::new()),
             provenant_confinement::quarantine::QuarantineOutcome::ReviewRequired {
                 evidence_digest,
-            } => (evidence_digest, true),
+                paths,
+            } => (evidence_digest, true, paths),
         };
         let result =
             archive.read_bounded(OsStr::new("quarantine-result.json"), crate::RECORD_LIMIT)?;
@@ -373,23 +443,17 @@ impl WriterLaunch {
             })?,
             crate::RECORD_LIMIT,
         )?;
-        let tip = provenant_confinement::run_utility(
-            &executor,
+        if oid(
+            self.worktree.repo(),
             provenant_confinement::GitRead::ResolveRef {
                 name: self.branch.clone(),
             },
-            self.worktree.repo(),
-            &utility,
-            budget()?,
-            &cancel,
-        )
-        .map_err(error)?;
-        let tip = GitOid::parse(
-            std::str::from_utf8(&tip.stdout.bytes)
-                .map_err(error)?
-                .trim(),
-        )
-        .map_err(error)?;
+        )? != tip
+        {
+            return Err(RunError::Validation(
+                "writer head changed during quarantine",
+            ));
+        }
         let ancestry = provenant_confinement::run_utility(
             &executor,
             provenant_confinement::GitRead::MergeBaseIsAncestor {
@@ -408,8 +472,25 @@ impl WriterLaunch {
             ));
         }
         worktrees::check_writer_terminal(self.worktree.repo())?;
+        crate::artifacts::seal(
+            attempt,
+            "writer-terminal.json",
+            &crate::db::bytes(&WriterTerminal {
+                schema_version: 1,
+                head: tip,
+                protected_paths,
+            })?,
+            crate::RECORD_LIMIT,
+        )?;
         Ok(review)
     }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WriterTerminal {
+    pub schema_version: u64,
+    pub head: GitOid,
+    pub protected_paths: Vec<provenant_records::PathWire>,
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {

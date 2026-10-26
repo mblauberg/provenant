@@ -1540,6 +1540,21 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                     plain_text(&skipped.detail, usize::MAX)
                 ));
             }
+            if !lane.protected_paths.is_empty() {
+                human.push_str(&format!(
+                    "  review head={} paths={}\n",
+                    lane.head
+                        .map(|head| head.to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                    lane.protected_paths
+                        .iter()
+                        .map(|path| {
+                            plain_text(path.as_path_text().unwrap_or("[native path]"), usize::MAX)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
                     "  delivery {}:{} {:?} head={}\n",
@@ -1574,6 +1589,7 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 "read_only_writable": lane.read_only_writable,
                 "git_grants_digest": lane.git_grants_digest,
                 "head": lane.head,
+                "protected_paths": lane.protected_paths,
                 "delivery": lane.delivery,
                 "result_path": result,
             })
@@ -2915,7 +2931,7 @@ mod tests {
         let remote = "or\x1bigin";
         let branch = "main\u{009b}line";
         let now = WallTime::from_micros(100)?;
-        let lane: run::AttemptRecord = serde_json::from_value(json!({
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([1; 16]),
             "run_id": RunId::from_bytes([2; 16]),
@@ -2944,7 +2960,7 @@ mod tests {
             "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
             "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
         }))?;
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(std::slice::from_ref(&lane), None, Path::new("/state"));
         assert_eq!(
             human,
             format!(
@@ -2975,6 +2991,28 @@ mod tests {
         );
         assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
         assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
+        lane.state = run::AttemptState::Terminal {
+            outcome: run::Outcome::ReviewRequired,
+            exit_code: Some(0),
+            finished_at: now,
+            reason: None,
+        };
+        lane.head = Some(provenant_core::GitOid::parse(&"a".repeat(40))?);
+        lane.protected_paths = vec![provenant_records::PathWire::from_relative(
+            &provenant_core::RelativePath::parse(".github/unsafe\npath.yml")?,
+        )?];
+        lane.delivery = None;
+        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert_eq!(data["lanes"][0]["state"], "review_required");
+        assert_eq!(data["lanes"][0]["head"], "a".repeat(40));
+        assert_eq!(
+            data["lanes"][0]["protected_paths"][0]["path"],
+            ".github/unsafe\npath.yml"
+        );
+        assert!(human.contains(&format!(
+            "review head={} paths=.github/unsafepath.yml",
+            "a".repeat(40)
+        )));
         Ok(())
     }
 
