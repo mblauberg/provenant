@@ -93,8 +93,9 @@ these mutations, landing push or reconcile, `dispatch --host` and
 resume are also refused. `fabric peer` and `fabric peer-agent` refuse to start
 there at all, because a peer frame names its own agent. Reads and child-store
 run submit, cancel and output remain available within the existing child
-policy. Local resume is refused with `continuation_unsupported` (`UNSUPPORTED`
-on the CLI) because the host never launches a child continuation. Graph status
+policy. Local resume is refused with `continuation_unsupported` because the
+host never launches a child continuation; the CLI returns `UNSUPPORTED` for
+every in-lane resume, peer targets included. Graph status
 reads an atomic checkpoint without creating graph directories or acquiring the
 writer lock.
 
