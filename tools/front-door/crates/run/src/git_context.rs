@@ -501,6 +501,27 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn git_context_refuses_a_staged_file_it_cannot_read_back() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        let context = GitContext::capture_with(
+            &InspectGit(Mutex::new(Vec::new())),
+            Path::new("/fixture/git"),
+            Path::new("/fixture/repo"),
+            "main",
+        )?;
+        let scratch = tempfile::tempdir()?;
+        let log = scratch.path().join("git-log.txt");
+        std::fs::write(&log, b"context")?;
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644))?;
+        let directory = Directory::open_anchor(scratch.path())?;
+        assert!(matches!(
+            context.write_to(&directory, scratch.path()),
+            Err(RunError::UnsafePath)
+        ));
+        Ok(())
+    }
+
     fn git(executor: &SystemExecutor, binary: &Path, cwd: &Path, args: &[&str]) -> TestResult {
         read_git(executor, binary, cwd, args, 4096)?;
         Ok(())
