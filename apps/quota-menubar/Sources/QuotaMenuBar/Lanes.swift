@@ -126,7 +126,7 @@ extension CLI {
         guard let launcher = cached ?? resolve() else { return (nil, .failure(Failure(message: "provenant was not found"))) }
         var kept: [Lane] = [], cursor: String?
         for _ in 0..<20 {
-            let arguments = ["lanes", "--all", "--since", "24h", "--limit", "100", "--json"] + (cursor.map { ["--cursor", $0] } ?? [])
+            let arguments = ["lanes", "--all", "--since", "86400", "--limit", "100", "--json"] + (cursor.map { ["--cursor", $0] } ?? [])
             do {
                 let run = try exec(launcher.url, arguments, path: launcher.path, limit: 20, qos: QOS_CLASS_BACKGROUND)
                 guard run.status == 0, !run.timedOut, !run.signalled else {

@@ -56,35 +56,7 @@ pub enum CoordinationError {
 
 impl CoordinationError {
     pub fn code(&self) -> &'static str {
-        match self {
-            Self::LaneMutation => "lane_coordination_refused",
-            Self::Peer(error) => error.code(),
-            Self::InvalidInput(_) | Self::Input(_) => "invalid_input",
-            Self::Time(_) => "state_corrupt",
-            Self::Cancelled => "cancelled",
-            Self::Timeout => "timeout",
-            Self::Busy => "busy",
-            Self::Entropy(_) | Self::EntropyEncoding => "io",
-            Self::ResponseEncoding(_) => "state_corrupt",
-            Self::UpgradeRefused(_) => "upgrade_refused",
-            Self::Store(error) => match error {
-                provenant_fabric_store::Error::NotFound => "not_found",
-                provenant_fabric_store::Error::Conflict
-                | provenant_fabric_store::Error::Overlap { .. }
-                | provenant_fabric_store::Error::PushUnresolved { .. }
-                | provenant_fabric_store::Error::PushTransition { .. } => "conflict",
-                provenant_fabric_store::Error::StaleFence => "stale_fence",
-                provenant_fabric_store::Error::Busy => "busy",
-                provenant_fabric_store::Error::Cancelled => "cancelled",
-                provenant_fabric_store::Error::Invalid(_) => "invalid_input",
-                provenant_fabric_store::Error::Decode(_)
-                | provenant_fabric_store::Error::SchemaVersion(_)
-                | provenant_fabric_store::Error::UnversionedDatabase
-                | provenant_fabric_store::Error::Encode(_) => "state_corrupt",
-                provenant_fabric_store::Error::LegacyImportData { .. } => "upgrade_refused",
-                _ => "io",
-            },
-        }
+        facade::FacadeError::from(self).code()
     }
 }
 
@@ -106,6 +78,7 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
 pub struct TaskProof {
     pub task: TaskId,
     pub generation: u64,
+    #[serde(with = "input::hex_token")]
     pub token: [u8; 16],
 }
 impl std::fmt::Debug for TaskProof {
@@ -122,6 +95,7 @@ impl std::fmt::Debug for TaskProof {
 pub struct ClaimProof {
     pub id: ClaimId,
     pub generation: u64,
+    #[serde(with = "input::hex_token")]
     pub token: [u8; 16],
 }
 impl std::fmt::Debug for ClaimProof {
@@ -139,6 +113,7 @@ pub struct LandingProof {
     pub reference: String,
     pub id: ClaimId,
     pub generation: u64,
+    #[serde(with = "input::hex_token")]
     pub token: [u8; 16],
 }
 impl std::fmt::Debug for LandingProof {
@@ -185,7 +160,7 @@ bounded_input! {
             after: Option<TaskId>,
             limit: u64,
         },
-        Claim { id: TaskId, lease_ms: u64 },
+        Claim { id: TaskId, lease_seconds: u64 },
         Update {
             proof: TaskProof,
             objective: String,
@@ -212,7 +187,7 @@ bounded_input! {
         Read {
             after: Option<i64>,
             limit: u64,
-            wait_ms: Option<u64>,
+            wait_seconds: Option<u64>,
         },
         Note { note: String, dedup_key: Option<String> },
     }
@@ -276,12 +251,19 @@ fn bounded_page<T: Serialize>(
     Ok(page)
 }
 
+// Claims and landings share the `fabric_lease` tool, so each op names its kind
+// on every wire.
 bounded_input! {
     pub enum ClaimInput as WireClaimInput {
-        Acquire { scope: WorkScope, lease_ms: u64 },
-        Renew { proof: ClaimProof, lease_ms: u64 },
+        #[serde(rename = "claim_acquire")]
+        Acquire { scope: WorkScope, lease_seconds: u64 },
+        #[serde(rename = "claim_renew")]
+        Renew { proof: ClaimProof, lease_seconds: u64 },
+        #[serde(rename = "claim_verify")]
         Verify { proof: ClaimProof },
+        #[serde(rename = "claim_release")]
         Release { proof: ClaimProof },
+        #[serde(rename = "claim_list")]
         List { after: Option<ClaimId>, limit: u64 },
     }
 }
@@ -298,16 +280,21 @@ pub enum ClaimResult {
 
 bounded_input! {
     pub enum LandingInput as WireLandingInput {
+        #[serde(rename = "landing_acquire")]
         Acquire {
             reference: String,
             expected: GitOid,
             candidate: GitOid,
-            lease_ms: u64,
+            lease_seconds: u64,
         },
-        Renew { proof: LandingProof, lease_ms: u64 },
+        #[serde(rename = "landing_renew")]
+        Renew { proof: LandingProof, lease_seconds: u64 },
+        #[serde(rename = "landing_verify")]
         Verify { proof: LandingProof },
+        #[serde(rename = "landing_release")]
         Release { proof: LandingProof },
-        Wait { reference: String, generation: u64, wait_ms: u64 },
+        #[serde(rename = "landing_wait")]
+        Wait { reference: String, generation: u64, wait_seconds: u64 },
     }
 }
 
@@ -443,18 +430,18 @@ impl<'a> LocalCoordination<'a> {
         Ok(())
     }
 
-    fn lease_duration(milliseconds: u64) -> DurationMicros {
-        DurationMicros::from_micros(milliseconds * 1_000)
+    fn lease_duration(seconds: u64) -> DurationMicros {
+        DurationMicros::from_micros(seconds * 1_000_000)
     }
 
     fn observation_budget(
         &self,
         budget: WaitBudget,
-        wait_ms: u64,
+        wait_seconds: u64,
     ) -> Result<WaitBudget, CoordinationError> {
         let requested = WaitBudget::new(
             self.clock.mono_now(),
-            DurationMicros::from_micros(wait_ms * 1_000),
+            DurationMicros::from_micros(wait_seconds * 1_000_000),
             WaitTransport::Cli,
         )?;
         Ok(
@@ -644,14 +631,14 @@ impl CoordinationApi for LocalCoordination<'_> {
                     page: bounded_page(page.items, page.truncated)?,
                 })
             }
-            TaskInput::Claim { id, lease_ms } => {
+            TaskInput::Claim { id, lease_seconds } => {
                 let fence = self.store.claim_task(
                     &TaskClaim {
                         project: self.project,
                         task: id,
                         actor: self.actor,
                         token: Self::new_id_bytes()?,
-                        lease: Self::lease_duration(lease_ms),
+                        lease: Self::lease_duration(lease_seconds),
                     },
                     &request,
                 )?;
@@ -708,7 +695,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     CoordinationError::Timeout,
                     EventsInput::Read {
                         after,
-                        wait_ms: Some(_),
+                        wait_seconds: Some(_),
                         ..
                     },
                 ) => Ok(EventsResult::Read {
@@ -729,9 +716,9 @@ impl CoordinationApi for LocalCoordination<'_> {
             EventsInput::Read {
                 after,
                 limit,
-                wait_ms,
+                wait_seconds,
             } => {
-                let read_budget = match wait_ms {
+                let read_budget = match wait_seconds {
                     Some(ms) => self.observation_budget(budget, ms)?,
                     None => budget,
                 };
@@ -742,7 +729,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     .store
                     .events(self.project, start, limit, &read_request)?;
                 let mut timed_out = false;
-                while page.items.is_empty() && wait_ms.is_some() {
+                while page.items.is_empty() && wait_seconds.is_some() {
                     if cancel.is_cancelled() {
                         return Err(CoordinationError::Cancelled);
                     }
@@ -791,14 +778,17 @@ impl CoordinationApi for LocalCoordination<'_> {
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
-            ClaimInput::Acquire { scope, lease_ms } => {
+            ClaimInput::Acquire {
+                scope,
+                lease_seconds,
+            } => {
                 let fence = self.store.acquire_claim(
                     &ClaimRequest {
                         id: ClaimId::from_bytes(Self::new_id_bytes()?),
                         project: self.project,
                         actor: self.actor,
                         token: Self::new_id_bytes()?,
-                        lease: Self::lease_duration(lease_ms),
+                        lease: Self::lease_duration(lease_seconds),
                         scope,
                     },
                     &request,
@@ -809,12 +799,15 @@ impl CoordinationApi for LocalCoordination<'_> {
                     claim,
                 })
             }
-            ClaimInput::Renew { proof, lease_ms } => {
+            ClaimInput::Renew {
+                proof,
+                lease_seconds,
+            } => {
                 let fence = self.claim_fence(&proof);
                 self.store.renew_claim(
                     self.project,
                     &fence,
-                    Self::lease_duration(lease_ms),
+                    Self::lease_duration(lease_seconds),
                     &request,
                 )?;
                 let claim = self.store.verify_claim(self.project, &fence, &request)?;
@@ -863,9 +856,9 @@ impl CoordinationApi for LocalCoordination<'_> {
             LandingInput::Wait {
                 reference,
                 generation,
-                wait_ms,
+                wait_seconds,
             } => {
-                let poll_budget = self.observation_budget(budget, wait_ms)?;
+                let poll_budget = self.observation_budget(budget, wait_seconds)?;
                 let poll_request = self.request(poll_budget, cancel);
                 let mut current = None;
                 loop {
@@ -919,7 +912,7 @@ impl LocalCoordination<'_> {
                 reference,
                 expected,
                 candidate,
-                lease_ms,
+                lease_seconds,
             } => {
                 let fence = self.store.acquire_landing(
                     guard,
@@ -931,7 +924,7 @@ impl LocalCoordination<'_> {
                         reference: reference.clone(),
                         expected,
                         candidate,
-                        lease: Self::lease_duration(lease_ms),
+                        lease: Self::lease_duration(lease_seconds),
                     },
                     request,
                 )?;
@@ -941,10 +934,17 @@ impl LocalCoordination<'_> {
                     landing,
                 })
             }
-            LandingInput::Renew { proof, lease_ms } => {
+            LandingInput::Renew {
+                proof,
+                lease_seconds,
+            } => {
                 let fence = self.landing_fence(&proof);
-                self.store
-                    .renew_landing(guard, &fence, Self::lease_duration(lease_ms), request)?;
+                self.store.renew_landing(
+                    guard,
+                    &fence,
+                    Self::lease_duration(lease_seconds),
+                    request,
+                )?;
                 let landing = self.store.verify_landing(guard, &fence, request)?;
                 Ok(LandingResult::Renewed { landing })
             }
@@ -1172,10 +1172,7 @@ mod tests {
             text.contains("2 row(s) of legacy import data in table tasks"),
             "{text}"
         );
-        assert_eq!(
-            facade::FacadeError::from_code(error.code(), None).code(),
-            "upgrade_refused"
-        );
+        assert_eq!(facade::FacadeError::from(&error).code(), "upgrade_refused");
     }
 
     #[test]
@@ -1327,7 +1324,7 @@ mod tests {
                 EventsInput::Read {
                     after: None,
                     limit: 10,
-                    wait_ms: None,
+                    wait_seconds: None,
                 },
                 fixture.budget(),
                 &cancel,
@@ -1348,7 +1345,7 @@ mod tests {
                 EventsInput::Read {
                     after: None,
                     limit: 10,
-                    wait_ms: None,
+                    wait_seconds: None,
                 },
                 fixture.budget(),
                 &cancel,
@@ -1364,7 +1361,7 @@ mod tests {
                 EventsInput::Read {
                     after: Some(cursor),
                     limit: 10,
-                    wait_ms: None,
+                    wait_seconds: None,
                 },
                 fixture.budget(),
                 &cancel,
@@ -1398,7 +1395,7 @@ mod tests {
             .task(
                 TaskInput::Claim {
                     id: task.id,
-                    lease_ms: 5_000,
+                    lease_seconds: 5,
                 },
                 fixture.budget(),
                 &cancel,
@@ -1457,7 +1454,7 @@ mod tests {
                     scope: WorkScope::Issue {
                         key: "PR-42".into(),
                     },
-                    lease_ms: 5_000,
+                    lease_seconds: 5,
                 },
                 fixture.budget(),
                 &cancel,
@@ -1490,7 +1487,7 @@ mod tests {
                         .expect("expected OID"),
                     candidate: GitOid::parse("abcdefabcdefabcdefabcdefabcdefabcdefabcd")
                         .expect("candidate OID"),
-                    lease_ms: 5_000,
+                    lease_seconds: 5,
                 },
                 fixture.budget(),
                 &cancel,
@@ -1505,7 +1502,7 @@ mod tests {
                 LandingInput::Wait {
                     reference: proof.reference.clone(),
                     generation: 0,
-                    wait_ms: 1_000,
+                    wait_seconds: 1,
                 },
                 fixture.budget(),
                 &cancel
@@ -1542,7 +1539,7 @@ mod tests {
                     reference: "refs/heads/expired-wait".into(),
                     expected: GitOid::parse(&"a".repeat(40)).expect("expected oid"),
                     candidate: GitOid::parse(&"b".repeat(40)).expect("candidate oid"),
-                    lease_ms: 1_000,
+                    lease_seconds: 1,
                 },
                 clock.budget(),
                 &cancel,
@@ -1560,7 +1557,7 @@ mod tests {
                 LandingInput::Wait {
                     reference: landing.reference,
                     generation: landing.generation,
-                    wait_ms: 5_000,
+                    wait_seconds: 5,
                 },
                 clock.budget(),
                 &cancel,
@@ -1612,7 +1609,7 @@ mod tests {
                     reference: "refs/heads/main".into(),
                     expected: GitOid::parse(&"a".repeat(40)).expect("oid"),
                     candidate: GitOid::parse(&"b".repeat(40)).expect("oid"),
-                    lease_ms: 5000,
+                    lease_seconds: 5,
                 },
                 budget(),
                 &cancel,
@@ -1626,7 +1623,7 @@ mod tests {
                 LandingInput::Wait {
                     reference: "refs/heads/main".into(),
                     generation: landing.generation,
-                    wait_ms: 1000,
+                    wait_seconds: 1,
                 },
                 budget(),
                 &cancel,
@@ -1640,7 +1637,7 @@ mod tests {
                 EventsInput::Read {
                     after: None,
                     limit: 100,
-                    wait_ms: None,
+                    wait_seconds: None,
                 },
                 budget(),
                 &cancel,
@@ -1654,7 +1651,7 @@ mod tests {
                 EventsInput::Read {
                     after: Some(cursor),
                     limit: 100,
-                    wait_ms: Some(1000),
+                    wait_seconds: Some(1),
                 },
                 budget(),
                 &cancel
@@ -1672,7 +1669,7 @@ mod tests {
                 EventsInput::Read {
                     after: Some(cursor),
                     limit: 100,
-                    wait_ms: Some(1000),
+                    wait_seconds: Some(1),
                 },
                 expired,
                 &cancel
@@ -1687,7 +1684,7 @@ mod tests {
                 LandingInput::Wait {
                     reference: "refs/heads/main".into(),
                     generation: landing.generation,
-                    wait_ms: 1000,
+                    wait_seconds: 1,
                 },
                 expired,
                 &cancel
@@ -1708,7 +1705,7 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_str::<TaskInput>(
-            r#"{"op":"claim","id":"00000000000000000000000000000001","lease_ms":1000,"actor":"forged"}"#
+            r#"{"op":"claim","id":"00000000000000000000000000000001","lease_seconds":1,"actor":"forged"}"#
         )
         .is_err());
         let fixture = Fixture::new();
@@ -1720,7 +1717,7 @@ mod tests {
                 EventsInput::Read {
                     after: None,
                     limit: 10,
-                    wait_ms: None,
+                    wait_seconds: None,
                 },
                 fixture.budget(),
                 &cancel

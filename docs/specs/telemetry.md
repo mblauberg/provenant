@@ -42,11 +42,11 @@ provenant quota show | display [--headline auto|5h|weekly] [--icon ID] | tick
 ```
 
 `provenant help telemetry` and `provenant help quota` own the flags. Dates mean
-midnight UTC and timestamps require an offset; `--since` also takes a day count
-such as `7d`. Terminal times are selected on `finished_at` in `[since, until)`.
-Invalid bounds or `since >= until` are refused. Selection is host-local and
-respects the project scope. There is no telemetry MCP tool and no `--account`
-flag.
+midnight UTC and timestamps require an offset; `--since` also takes a whole
+number of seconds ago, such as `604800`. Terminal times are selected on
+`finished_at` in `[since, until)`. Invalid bounds or `since >= until` are
+refused. Selection is host-local and respects the project scope. There is no
+telemetry MCP tool and no `--account` flag.
 
 ### Report
 

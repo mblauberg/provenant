@@ -1,6 +1,6 @@
 ## Breaking changes
 
-- Every peer request and reply envelope now carries integer `protocol: 2`.
+- Every peer request and reply envelope now carries integer `protocol`.
   The host listing reports the protocol observed in the reply envelope. Calls
   use one SSH connection and reject any different version, naming both
   versions; upgrade peers together. Missing reply protocols and released

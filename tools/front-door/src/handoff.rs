@@ -876,10 +876,10 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
         }
         Err(PeerFailure { error, detail }) => {
             let detail = detail.map(|d| format!(" ({d})")).unwrap_or_default();
-            let (status, code) = facade_outcome(&error);
+            let (status, kind) = facade_outcome(&error);
             return Err(Refusal::new(
                 status,
-                code,
+                kind.code(),
                 format!(
                     "peer {} refused or is unavailable: {error}{detail}",
                     args.to

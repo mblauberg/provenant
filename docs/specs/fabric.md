@@ -205,107 +205,89 @@ peer ingress) and `fabric peer-agent` (the macOS LaunchAgent relay). `--json`
 is refused by `fabric mcp` before it reads stdin, and a bare `provenant` prints
 usage and exits 2, so a registration must name `fabric mcp`.
 
-The MCP server exposes 11 tools. Each takes a tagged `op` enum that rejects
-unknown fields, with no numeric-string coercion or synonym repair. The schema
-catalogue has two cached forms: strict schemas for serde acceptance probes and
-error paths, and compact schemas for `tools/list`. Every valid strict-schema
-probe must also pass its compact schema.
+The MCP server exposes eight tools. Each takes a tagged `op` enum that rejects
+unknown fields, with no numeric-string coercion or synonym repair. Every tool
+advertises `_meta["io.provenant/schemaVersion"]: 2`. This contract version is
+independent of the standard MCP transport protocol date.
 
 | Tool | Operations |
 |---|---|
-| `fabric_identity` | inspect |
+| `fabric_context` | inspect, hosts |
 | `fabric_mail` | send, read, mark_read |
 | `fabric_task` | create, list, claim, update, finish, release |
 | `fabric_events` | read, note |
-| `fabric_claim` | acquire, renew, verify, release, list |
-| `fabric_landing` | acquire, renew, verify, release, wait |
-| `fabric_submit` | submission |
-| `fabric_run` | list, status, wait, cancel, resume |
+| `fabric_lease` | `claim_` acquire, renew, verify, release, list; `landing_` acquire, renew, verify, release, wait |
+| `fabric_run` | submit, list, status, wait, cancel, resume |
 | `fabric_graph` | run, status, cancel, resume |
 | `fabric_output` | read, fetch |
-| `fabric_hosts` | list |
 
-The compact input schemas keep `maxLength` and identifier patterns for IDs,
-operation IDs, Git OIDs, SHA-256 digests and graph IDs. They omit text
-`minLength`, UTF-8 byte annotations and the NUL-exclusion pattern. Runtime
-validation still rejects empty text, NUL characters and excess UTF-8 bytes
-before side effects, with `invalid_input` and the exact field path. Since a
-string's code point count cannot exceed its UTF-8 byte count, these schemas
-only relax acceptance. Single-use definitions are inlined recursively;
-unreachable definitions are removed. Definitions used at least twice stay in
-`$defs` at the input-schema root, and an empty `$defs` is omitted.
+The schema catalogue has two cached forms: strict schemas for serde acceptance
+probes and error paths, and compact schemas for `tools/list`. Every valid
+strict-schema probe must also pass its compact schema. Compact schemas retain
+identifier patterns while omitting text minimum lengths, UTF-8 byte annotations
+and the NUL-exclusion pattern. Runtime validation still rejects empty text,
+NUL characters and excess UTF-8 bytes before side effects, with `invalid_input`
+and the exact field path. Single-use definitions are inlined recursively;
+unreachable definitions are removed. Shared definitions stay in `$defs`.
 
-Only identity and submit publish `outputSchema`, each with `type: "object"`.
-Submit's optional `worktree` receipt is an object with `path` and `branch`.
-Other tools still send `structuredContent`. `fabric_hosts` returns
-`{"hosts":[...]}`, including `{"hosts":[]}` for an empty page. The CLI host
-list keeps its JSON `data` array; peer health replies keep the single
-`HostHealth` record. The wrapper belongs only to the MCP edge. This also
-satisfies the object requirement in MCP 2025-11-25; MCP 2026-07-28 permits any
-JSON value.
+The context tool publishes an object `outputSchema` covering identity and host
+listing. Other tools send typed `structuredContent` without an output schema.
+`fabric_context` with `op: hosts` returns `{"hosts":[...]}`, including
+`{"hosts":[]}` for an empty page. The CLI host list keeps its JSON `data` array;
+peer health replies keep the single `HostHealth` record. The wrapper belongs
+only to the MCP edge.
 
-The identity reply adds `server_version`, the MCP server's package version. A
+Identity replies add `server_version`, the MCP server's package version. A
 reinstall does not restart a running server, and the CLI keeps no record of
 running MCP servers, so agents compare `server_version` with
 `provenant --version` (see the orchestrate identity reference).
 
-The shared submit wire type accepts `new_worktree` for peer ingress. The MCP
-submit owner refuses worktree creation, so MCP parsing rejects that field,
-including `null`, with `invalid_input` at `arguments.tasks[N].new_worktree`.
-It remains absent from the input schema. Peer deserialisation and worktree
-creation through CLI dispatch are unchanged.
+Context errors omit `structuredContent` so error details cannot be mistaken
+for the published success schema. Their `content` text carries the stable
+code and JSON details. Other tools retain structured error details, including
+the field path for invalid input and `operation_id` for `launch_unknown`.
+Legacy catalogues omit output schemas; both transport eras use the same input
+contract and error policy.
 
-Both the [2025-11-25 output-schema rules](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#output-schema)
-and the [2026-07-28 rules](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#output-schema)
-require structured results to conform to a published output schema, without
-an explicit exemption for `isError`. Fabric therefore omits
-`structuredContent` on identity and submit errors. Their `content` text
-contains the stable code and JSON error details, including the field path
-for invalid input and `operation_id` for `launch_unknown`. This avoids
-validating error details against a success schema or inventing a success
-receipt after an uncertain launch. Other tools retain structured error
-details; a frame-size fallback whose tool is unknown uses text only.
+Schema tests bound individual tool sizes and the total catalogue, including
+the complete tool objects and excluding catalogue array framing. Combined
+lease and run tools may use up to 4,608 bytes; the total stays below 18 KiB.
 
-Legacy catalogues omit all output schemas. Both protocol eras use the same
-compact input schemas and error policy; protocol versions and catalogue
-cache behaviour are unchanged.
+Mutating mail, task, events and lease operations accept an optional
+`operation_id` so a caller can retry after a lost reply; observation operations
+reject it. Responses carry typed `structuredContent` and a short text digest
+of IDs, state, route and the next cursor. Fencing proof tokens are 32 lower-case
+hex digits. Output is UTF-8 text when valid, otherwise standard padded base64
+with `encoding: "base64"` and the encoded string in `data`. Neither
+representation is lossy. A clipped page stops before a split UTF-8 character,
+so its `next_offset` starts the character whole. An `events` page holds as
+many whole events as fit `max_bytes`; a single larger event is
+`output_too_large`.
 
-Issue #1571 wave 1 measured the following bytes with
-`serde_json::to_vec(tool).len()`, including each complete tool object and
-excluding catalogue array framing. The total fell by 75.8%. Tests allow 10%
-growth per tool, rounded up, with hard caps of 3,072 bytes per tool and 18 KiB
-for the sum.
+All request durations use seconds: `lease_seconds` (1 to 3,600),
+`wait_seconds` (1 to 55 over MCP), and submission `timeout_seconds` (1 to
+14,400). Observed provider durations use `provider_seconds` (nullable,
+fractional seconds retain millisecond precision). Output parts are `prompt`,
+`result`, `stderr` and `events`, matching the CLI. `result` and `stderr` have
+no combined ordering. `fetch` copies only run-exported regular files, refuses
+symlinks and traversal, enforces byte and file caps and verifies a manifest
+digest before atomic publication under `fetch/<host>/<run>/`. Output tools
+accept no arbitrary source or destination path.
 
-| Tool | Before (bytes) | After (bytes) |
-|---|---:|---:|
-| `fabric_identity` | 5,973 | 1,387 |
-| `fabric_mail` | 6,586 | 2,441 |
-| `fabric_task` | 7,710 | 2,209 |
-| `fabric_events` | 6,220 | 781 |
-| `fabric_claim` | 6,776 | 2,185 |
-| `fabric_landing` | 7,105 | 2,020 |
-| `fabric_submit` | 6,780 | 2,338 |
-| `fabric_run` | 7,545 | 1,776 |
-| `fabric_graph` | 5,780 | 838 |
-| `fabric_output` | 7,395 | 1,375 |
-| `fabric_hosts` | 5,188 | 336 |
-| **Total** | **73,058** | **17,686** |
+Submission tasks carry a prompt and the shared tagged route request:
+`{"kind":"model","provider":"codex","model":"...","effort":"high"}` or
+`{"kind":"named","name":"utility","effort":null}`. Effort is optional.
+The service normalises bare model IDs and refuses an explicit provider that
+mismatches a qualified model ID. Tasks may also name an account, task class,
+access, worktree, `deliver` and
+delivery ID.
+They accept no artefact inputs. `resume` cannot change route, account or
+authority.
 
-Mutating operations in the mail, task, events, claim and landing tools accept
-an optional `operation_id` so a caller can retry after a lost reply; observation
-operations reject it. Responses carry typed `structuredContent` and a short text
-digest of IDs, state, the exact route if known and the next cursor. Output is
-UTF-8 text when valid and an explicit byte array otherwise, never lossy.
-`stdout` and `stderr` are separate streams with no combined ordering. `fetch`
-copies only run-exported regular files, refuses symlinks and traversal, enforces
-byte and file caps and verifies a manifest digest before atomic publication
-under `fetch/<host>/<run>/`. Output tools accept no arbitrary source or
-destination path.
-
-Submission tasks carry a prompt and route preference, with optional account,
-access, worktree, `deliver` and delivery ID, and a required `timeout_ms` (1000
-to 14400000). They accept no artefact inputs. `resume` is separate from
-submission and cannot change route, account or authority.
+The shared submission type accepts `new_worktree` for peer ingress. MCP
+parsing rejects that field, including `null`, with `invalid_input` at
+`arguments.tasks[N].new_worktree`. It remains absent from the MCP schema.
+Peer worktree creation through CLI dispatch uses the same service.
 
 ### Bounded graphs and route fallback
 
@@ -318,7 +300,7 @@ provider account, with the same meaning as `dispatch --account`; each fallback
 route can select a different account. Limits are 8 routes per node, 64 nodes,
 256 edges, 64 KiB per prompt and 256 KiB of prompt in total. `run` and `resume`
 take a project-local document path, and `status` and `cancel` take the graph
-`id`. Each graph attempt is bounded by `limits.graph_timeout_ms`.
+`id`. Each graph attempt is bounded by `limits.graph_timeout_seconds`.
 
 `run` starts ready nodes and returns. After a run settles, its existing
 supervisor advances pending graphs in the same project, after releasing
@@ -433,14 +415,14 @@ executable, and per peer an absolute remote executable and a connect timeout of
 1 to 30 s). Supervisor captures bounded stdin, stdout and stderr under a fixed
 argv and deadline. The ingress also carries Git object transfer, so one SSH key
 restricted with `command=` supports every peer operation. Every request and
-reply envelope carries integer `protocol`, currently 2. Ingress refuses a
+reply envelope carries integer `protocol`, currently 3. Ingress refuses a
 different protocol before decoding or executing the action, replying with
 `peer_version` and its own protocol. The client checks the reply protocol,
 host ID and `ProjectKey` before decoding its result. A reply without `protocol`,
 or the released peer's refusal to decode the request, identifies protocol 1.
 The framing envelope's `version` remains 1. Any protocol difference fails the
 call with `peer_version`, naming the peer and both versions, for example:
-"peer workshop speaks protocol 1, this host speaks 2; upgrade both". Upgrade
+"peer workshop speaks protocol 1, this host speaks 3; upgrade both". Upgrade
 peers together; there is no capability list, negotiation or support for older
 peers. Each call uses one SSH connection.
 Every request carries a `trace`: the sending host, the acting agent's actor ID
@@ -573,18 +555,19 @@ Fabric does not own these wire forms.
   `not_terminal` identifies an active attempt; `operation_conflict` identifies
   an operation ID reused with different input. Both retain their code over the
   peer wire. The CLI reports `NONTERMINAL`, `OPERATION_CONFLICT` and, for
-  `owner_unavailable`, `OWNER_UNAVAILABLE`. `UNSUPPORTED` remains specific to
-  the operation's origin: continuation refusal on resume, confinement refusal
-  on submission.
+  `owner_unavailable`, `OWNER_UNAVAILABLE`. A resume the adapter cannot
+  continue is `CONTINUATION_UNSUPPORTED`; `UNSUPPORTED` is a confinement
+  refusal on submission. The CLI and MCP render one typed category per run
+  error, so a run error has the same meaning at both edges.
   Uncertain mutations include their `operation_id`. Oversized read responses
   return `result_too_large`, while committed mutation receipts keep the
   transport ceiling so a lowered read limit cannot hide them. Health checks do
   not repair, prune or acquire claims.
 
-Peer errors use the locally frozen request's operation ID. A supplied peer ID
-must match it; generic refusals may omit the ID. A mismatch is a protocol error
-(`state_corrupt`). A remote status snapshot must name the requested attempt,
-as must each record returned to a wait or cancel. A resume receipt must name
+A peer error reply carries only its typed error. Only `launch_unknown` names
+an operation ID, which must match the locally frozen request's; a mismatch is
+a protocol error (`state_corrupt`). A remote status snapshot must name the
+requested attempt, as must each record returned to a wait or cancel. A resume receipt must name
 the requested continuation operation. Submission receipts must name the
 requested operation and placement; a peer writer must return the requested
 branch, and a read-only submission cannot return a worktree. Landing push and

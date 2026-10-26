@@ -2257,7 +2257,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let frames = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_submit\",\"arguments\":{\"op\":\"submission\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"adapter\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_ms\":1000}],\"concurrency\":1}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"submit\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"kind\":\"model\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_seconds\":1}],\"concurrency\":1}}}\n"
         );
         let mut options = provenant_os::exec::ExecOptions::new(
             &launch.argv,
@@ -2788,9 +2788,9 @@ fn verify_lane_profile(
             ("confined-parent-writer", ".worktrees/writer"),
         ] {
             let proposal = admit(&nested_frames.replace("confined-child", name).replace(
-                "\"timeout_ms\":1000",
+                "\"timeout_seconds\":1",
                 &format!(
-                    "\"timeout_ms\":1000,\"access\":\"worktree_write\",\"worktree\":\"{worktree}\""
+                    "\"timeout_seconds\":1,\"access\":\"worktree_write\",\"worktree\":\"{worktree}\""
                 ),
             ))?;
             let store = provenant_run::RunStore::open(&child_context, &call)?;
@@ -2813,7 +2813,7 @@ fn verify_lane_profile(
     let nested_frames = if cancel_child {
         nested_frames
             .replace("read only", "wait for host cancellation")
-            .replace("\"timeout_ms\":1000", "\"timeout_ms\":10000")
+            .replace("\"timeout_seconds\":1", "\"timeout_seconds\":10")
     } else {
         nested_frames
     };

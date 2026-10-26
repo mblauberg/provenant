@@ -188,7 +188,7 @@ impl F3Facade for BoundFacade<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Vec<HostHealth>, FacadeError> {
-        let HostsInput::List { after, limit } = input;
+        let HostsInput::Hosts { after, limit } = input;
         let ctx = &self.factory.context;
         let mut candidates: std::collections::BTreeMap<
             provenant_core::HostId,
@@ -442,7 +442,7 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
         let factory = factory(globals)?;
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         Ok(BoundFacade { factory: &factory }.hosts(
-            HostsInput::List {
+            HostsInput::Hosts {
                 after: None,
                 limit: 100,
             },
@@ -510,8 +510,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                         host: request.target_host,
                         project: request.project.key,
                         result: PeerResult::Error {
-                            code: "busy".into(),
-                            operation_id: None,
+                            error: FacadeError::Busy,
                         },
                     })?;
                     busy.push(b'\n');
@@ -576,40 +575,34 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
             PeerAction::RunStatuses { targets } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {
-                        code: "invalid_input".into(),
-                        operation_id: None,
+                        error: FacadeError::InvalidInput,
                     }
                 } else {
                     peer_result(
                         owner.snapshots_local(targets, budget, &cancel),
-                        None,
                         PeerResult::RunStatuses,
                     )
                 }
             }
-            PeerAction::Run { input } => peer_result(
-                owner.run(input.clone(), budget, &cancel),
-                request.operation(),
-                |value| PeerResult::Run(Box::new(value)),
-            ),
+            PeerAction::Run { input } => {
+                peer_result(owner.run(input.clone(), budget, &cancel), |value| {
+                    PeerResult::Run(Box::new(value))
+                })
+            }
             PeerAction::Submit { input } => peer_result(
                 owner.submit(input.clone(), budget, &cancel),
-                request.operation(),
                 PeerResult::Submitted,
             ),
             PeerAction::Output { input } => peer_result(
                 owner.output(input.clone(), budget, &cancel),
-                None,
                 PeerResult::Output,
             ),
             PeerAction::RunEvents { after, limit } => peer_result(
                 owner.events(*after, *limit, budget, &cancel),
-                None,
                 PeerResult::RunEvents,
             ),
             PeerAction::Lanes { all, limit } => peer_result(
                 owner.lanes_local(*all, *limit, budget, &cancel),
-                None,
                 PeerResult::RunStatuses,
             ),
             PeerAction::SessionHandoff { input, .. } => {
@@ -642,8 +635,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                     .is_some_and(|h| *h != context.identity.host)
                 {
                     PeerResult::Error {
-                        code: "home_unavailable".into(),
-                        operation_id: Some(operation_id.clone()),
+                        error: FacadeError::HomeUnavailable,
                     }
                 } else {
                     let executor = SystemExecutor::new(1)?;
@@ -659,14 +651,9 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                         &cancel,
                     ) {
                         Ok(value) => PeerResult::Push(value),
-                        Err(error) => {
-                            let code = landing_error_code(error.as_ref());
-                            PeerResult::Error {
-                                code: code.into(),
-                                operation_id: (code == "launch_unknown")
-                                    .then(|| operation_id.clone()),
-                            }
-                        }
+                        Err(error) => PeerResult::Error {
+                            error: landing_error(error.as_ref()),
+                        },
                     }
                 }
             }
@@ -687,8 +674,9 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 )? {
                     Some(value) => PeerResult::Coordination(value.into()),
                     None => PeerResult::Error {
-                        code: "launch_unknown".into(),
-                        operation_id: Some(operation_id.clone()),
+                        error: FacadeError::LaunchUnknown {
+                            operation_id: operation_id.clone(),
+                        },
                     },
                 }
             }
@@ -704,8 +692,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                     .is_some_and(|h| *h != context.identity.host)
                 {
                     PeerResult::Error {
-                        code: "home_unavailable".into(),
-                        operation_id: operation_id.clone(),
+                        error: FacadeError::HomeUnavailable,
                     }
                 } else {
                     let coverage =
@@ -739,15 +726,11 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                                     PeerResult::Coordination(value)
                                 }
                                 Err(error) => PeerResult::Error {
-                                    code: error.code().into(),
-                                    operation_id: operation_id.clone(),
+                                    error: FacadeError::from(&error),
                                 },
                             }
                         }
-                        Err(error) => PeerResult::Error {
-                            code: error.code().into(),
-                            operation_id: operation_id.clone(),
-                        },
+                        Err(error) => PeerResult::Error { error },
                     }
                 }
             }
@@ -782,53 +765,31 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
     }
 }
 
-fn store_error_code(error: &provenant_fabric_store::Error) -> &'static str {
-    use provenant_fabric_store::Error as StoreError;
-    match error {
-        StoreError::NotFound => "not_found",
-        StoreError::StaleFence => "stale_fence",
-        StoreError::Conflict
-        | StoreError::PushUnresolved { .. }
-        | StoreError::PushTransition { .. }
-        | StoreError::Overlap { .. } => "conflict",
-        StoreError::Busy => "busy",
-        StoreError::Cancelled => "cancelled",
-        StoreError::Invalid(_) | StoreError::PathEncoding => "invalid_input",
-        StoreError::Decode(_)
-        | StoreError::Encode(_)
-        | StoreError::SchemaVersion(_)
-        | StoreError::UnversionedDatabase
-        | StoreError::JournalMode(_) => "state_corrupt",
-        StoreError::LegacyImportData { .. } => "upgrade_refused",
-        _ => "io",
-    }
-}
-
-fn landing_error_code(error: &(dyn std::error::Error + 'static)) -> &'static str {
-    use provenant_fabric_runtime::git_transport::GitTransportError as GitError;
-    if let Some(error) = error.downcast_ref::<GitError>() {
-        if error.is_unknown() {
-            return "launch_unknown";
-        }
+fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
+    use provenant_fabric_runtime::git_transport::GitTransportError as E;
+    if let Some(error) = error.downcast_ref::<E>() {
         return match error {
-            GitError::Store(error) => store_error_code(error),
-            GitError::PushNotFound { .. } => "not_found",
-            GitError::Invalid(_) | GitError::InvalidRemote | GitError::BundleTooLarge => {
-                "invalid_input"
+            E::PushUnknown { operation } | E::PushUnresolved { operation } => {
+                FacadeError::LaunchUnknown {
+                    operation_id: operation.clone(),
+                }
             }
-            GitError::DirtyWorktree
-            | GitError::IncompleteRepository
-            | GitError::OidMismatch
-            | GitError::NonFastForward
-            | GitError::BundleHeadMismatch
-            | GitError::TransportConflict
-            | GitError::RemoteMoved => "conflict",
-            _ => "io",
+            E::Store(error) => FacadeError::from(error),
+            E::PushNotFound { .. } => FacadeError::NotFound,
+            E::Invalid(_) | E::InvalidRemote | E::BundleTooLarge => FacadeError::InvalidInput,
+            E::DirtyWorktree
+            | E::IncompleteRepository
+            | E::OidMismatch
+            | E::NonFastForward
+            | E::BundleHeadMismatch
+            | E::TransportConflict
+            | E::RemoteMoved => FacadeError::Conflict,
+            _ => FacadeError::Io,
         };
     }
     error
         .downcast_ref::<provenant_fabric_store::Error>()
-        .map_or("io", store_error_code)
+        .map_or(FacadeError::Io, FacadeError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -940,17 +901,19 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                 };
                 return match transport.exchange(peer, &request, budget, &cancel)?.result {
                     PeerResult::Push(value) if value.id == recovery_id => Ok(value),
-                    PeerResult::Error { code, operation_id } => {
-                        if operation_id.as_ref().is_some_and(|id| id != &recovery_id) {
+                    PeerResult::Error { error } => {
+                        if let FacadeError::LaunchUnknown { operation_id } = &error
+                            && operation_id != &recovery_id
+                        {
                             return Err(PeerError::Frame.into());
                         }
-                        if code == "launch_unknown" {
+                        if matches!(error, FacadeError::LaunchUnknown { .. }) {
                             Err(PeerError::Unknown {
                                 operation_id: recovery_id.clone(),
                             }
                             .into())
                         } else {
-                            Err(PeerError::Refused { code }.into())
+                            Err(PeerError::Refused { error }.into())
                         }
                     }
                     _ => Err(PeerError::Frame.into()),
@@ -1013,7 +976,9 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
         Err(error)
             if matches!(
                 error.downcast_ref::<PeerError>(),
-                Some(PeerError::Refused { code }) if code == "busy"
+                Some(PeerError::Refused {
+                    error: FacadeError::Busy
+                })
             ) =>
         {
             let message = error.to_string();
@@ -1153,62 +1118,65 @@ struct BinaryRunOwner<'a> {
 }
 fn peer_result<T>(
     result: Result<T, FacadeError>,
-    operation_id: Option<provenant_core::OperationId>,
     wrap: impl FnOnce(T) -> PeerResult,
 ) -> PeerResult {
     match result {
         Ok(value) => wrap(value),
-        Err(error) => PeerResult::Error {
-            code: error.code().into(),
-            operation_id,
-        },
+        Err(error) => PeerResult::Error { error },
     }
+}
+/// How many leading events fit in a JSON array of at most `max_bytes`.
+fn events_within<T: serde::Serialize>(events: &[T], max_bytes: u64) -> Result<usize, FacadeError> {
+    let mut size = 2;
+    for (index, event) in events.iter().enumerate() {
+        let len = serde_json::to_vec(event)
+            .map_err(|_| FacadeError::StateCorrupt)?
+            .len() as u64;
+        size += len + u64::from(index > 0);
+        if size > max_bytes {
+            return Ok(index);
+        }
+    }
+    Ok(events.len())
 }
 fn run_error(error: provenant_run::RunError) -> FacadeError {
-    use provenant_run::RunError;
-    match error {
-        RunError::NotFound => FacadeError::NotFound,
-        RunError::InvalidBase(_) => FacadeError::InvalidInput,
-        RunError::Refused => FacadeError::ConfinementRefused,
-        RunError::DepthExceeded { .. } | RunError::DepthOverflow => FacadeError::LaneDepth,
-        RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
-        RunError::WorktreeMissing(_) => FacadeError::WorktreeMissing,
-        RunError::Contention | RunError::Capacity => FacadeError::Busy,
-        RunError::Conflict => FacadeError::Conflict,
-        RunError::OperationConflict => FacadeError::OperationConflict,
-        RunError::Nonterminal => FacadeError::NotTerminal,
-        RunError::Cancelled => FacadeError::Cancelled,
-        RunError::Validation(_) | RunError::Decode(_) | RunError::ArtifactMismatch => {
-            FacadeError::StateCorrupt
-        }
-        _ => FacadeError::Io,
-    }
+    kind_error(provenant_run::ErrorKind::from(&error))
 }
-/// Map a shared run-edge refusal to its stable facade code.
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
-    match fail.code {
-        "SECRET_INPUT" | "REFUSED" => FacadeError::ConfinementRefused,
-        "LANE_DEPTH" => FacadeError::LaneDepth,
-        "LANE_CONTEXT" | "PARENT_ATTEMPT" => FacadeError::InvalidInput,
-        "INVALID" | "WORKTREE_REQUIRED" | "WORKTREE_NOT_APPLICABLE" => FacadeError::InvalidInput,
-        "WORKTREE_MISSING" => FacadeError::WorktreeMissing,
-        "NOT_FOUND" => FacadeError::NotFound,
-        "CONFLICT" => FacadeError::Conflict,
-        "OPERATION_CONFLICT" => FacadeError::OperationConflict,
-        "NONTERMINAL" => FacadeError::NotTerminal,
-        "CANCELLED" => FacadeError::Cancelled,
-        "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
-        "UNSUPPORTED" => FacadeError::ConfinementRefused,
-        "PROVIDER_STATE_EXPIRED" => FacadeError::ProviderStateExpired,
-        "OWNER_UNAVAILABLE" => FacadeError::OwnerUnavailable,
-        _ => FacadeError::Io,
-    }
+    kind_error(fail.kind)
 }
-/// A resume refusal of `UNSUPPORTED` comes from `check_continuable`.
-fn resume_fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
-    match fail.code {
-        "UNSUPPORTED" => FacadeError::ContinuationUnsupported,
-        _ => fail_error(fail),
+/// Translate a typed run category at the MCP edge. `ErrorKind` is the one
+/// categorisation of run errors; this only renders it.
+fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
+    use provenant_run::ErrorKind as E;
+    match kind {
+        E::SecretInput | E::Refused | E::WorktreeUnregistered | E::Unsupported => {
+            FacadeError::ConfinementRefused
+        }
+        E::LaneDepth => FacadeError::LaneDepth,
+        E::LaneContext
+        | E::ParentAttempt
+        | E::Invalid
+        | E::WorktreeRequired
+        | E::WorktreeNotApplicable => FacadeError::InvalidInput,
+        E::WorktreeMissing => FacadeError::WorktreeMissing,
+        E::NotFound => FacadeError::NotFound,
+        E::Conflict => FacadeError::Conflict,
+        E::OperationConflict => FacadeError::OperationConflict,
+        E::Nonterminal => FacadeError::NotTerminal,
+        E::Cancelled => FacadeError::Cancelled,
+        E::Timeout => FacadeError::Timeout,
+        E::QueueFull | E::Contention => FacadeError::Busy,
+        E::ContinuationUnsupported => FacadeError::ContinuationUnsupported,
+        E::ProviderStateExpired => FacadeError::ProviderStateExpired,
+        E::OwnerUnavailable => FacadeError::OwnerUnavailable,
+        E::StateCorrupt => FacadeError::StateCorrupt,
+        E::BaseUnreachable => FacadeError::BaseUnreachable,
+        E::BranchExists => FacadeError::BranchExists,
+        E::LaneCoordinationRefused => FacadeError::LaneCoordinationRefused,
+        E::UpgradeRefused => FacadeError::UpgradeRefused,
+        E::PeerVersion => FacadeError::PeerVersion,
+        _ => FacadeError::Io,
     }
 }
 impl BinaryRunOwner<'_> {
@@ -1238,7 +1206,7 @@ impl BinaryRunOwner<'_> {
             .map_err(fail_error)?,
             project_id: ctx.identity.project,
             actor_id: self.actor.unwrap_or(ctx.identity.inbox.actor),
-            read_prompts: false,
+            read_prompts: true,
         };
         let store = provenant_run::RunStore::open(&context, &self.call(budget, cancel))
             .map_err(run_error)?
@@ -1257,20 +1225,13 @@ impl BinaryRunOwner<'_> {
         &self,
         action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> Result<T, provenant_cli::run::Fail>,
     ) -> Result<T, FacadeError> {
-        self.with_edge_as(fail_error, action)
-    }
-    fn with_edge_as<T>(
-        &self,
-        map: fn(provenant_cli::run::Fail) -> FacadeError,
-        action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> Result<T, provenant_cli::run::Fail>,
-    ) -> Result<T, FacadeError> {
         action(&provenant_cli::run::Edge {
             roots: &self.factory.context.roots,
             home: &self.factory.home,
             assets: &self.factory.assets,
             cwd: &self.factory.cwd,
         })
-        .map_err(map)
+        .map_err(fail_error)
     }
     /// The attempts of a run this owner just accepted or continued.
     fn receipt(
@@ -1289,7 +1250,7 @@ impl BinaryRunOwner<'_> {
             return Err(FacadeError::LaunchUnknown { operation_id });
         }
         let page = session
-            .store
+            .service()
             .lanes(
                 &provenant_run::LaneQuery {
                     targets: vec![provenant_run::LaneTarget {
@@ -1368,8 +1329,8 @@ impl BinaryRunOwner<'_> {
                 _ => Err(FacadeError::StateCorrupt),
             };
         }
-        self.store(budget, cancel)?
-            .record(
+        provenant_run::Service::new(&self.store(budget, cancel)?)
+            .status(
                 target.attempt,
                 &provenant_run::Request {
                     clock: &self.factory.clock,
@@ -1398,8 +1359,8 @@ impl BinaryRunOwner<'_> {
             .iter()
             .map(|target| {
                 session
-                    .store
-                    .record(target.attempt, &call)
+                    .service()
+                    .status(target.attempt, &call)
                     .map_err(run_error)
             })
             .collect()
@@ -1417,7 +1378,7 @@ impl BinaryRunOwner<'_> {
             return Err(FacadeError::InvalidInput);
         }
         let store = self.store(budget, cancel)?;
-        let page = store
+        let page = provenant_run::Service::new(&store)
             .lanes(
                 &provenant_run::LaneQuery {
                     targets: Vec::new(),
@@ -1474,8 +1435,8 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        use provenant_cli::run::{Submission, Submitted, derived_task, requested, worktree_access};
-        let SubmitInput::Submission {
+        use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
+        let SubmitInput::Submit {
             operation_id,
             tasks,
             concurrency,
@@ -1494,7 +1455,7 @@ impl BinaryRunOwner<'_> {
             {
                 return Err(FacadeError::OwnerUnavailable);
             }
-            let input = SubmitInput::Submission {
+            let input = SubmitInput::Submit {
                 operation_id: operation_id.clone(),
                 tasks,
                 concurrency,
@@ -1543,31 +1504,15 @@ impl BinaryRunOwner<'_> {
                 task.worktree.as_deref().map(Path::new),
             )
             .map_err(fail_error)?;
-            let route = &task.route;
-            let model = match (&route.adapter, &route.model) {
-                (_, Some(model)) if model.contains('/') => Some(model.clone()),
-                (Some(adapter), Some(model)) => Some(format!("{adapter}/{model}")),
-                (None, Some(_)) => return Err(FacadeError::InvalidInput),
-                (_, None) => None,
-            };
-            let name = match model {
-                Some(_) => None,
-                None => route
-                    .route
-                    .as_deref()
-                    .or(route.role.as_deref())
-                    .or(route.task_class.as_deref()),
-            };
             submitted.push(Submitted {
                 base: task.base,
-                task_class: route.task_class.clone(),
+                task_class: task.task_class,
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 account: task.account,
-                route: requested(model.as_deref(), name, route.effort.clone())
-                    .map_err(fail_error)?,
+                route: task.route,
                 fallback: Vec::new(),
-                provider_timeout: task.timeout_ms.div_ceil(1000).max(1),
+                provider_timeout: task.timeout_seconds,
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
@@ -1704,8 +1649,8 @@ impl BinaryRunOwner<'_> {
         let session = self.session(budget, cancel)?;
         let call = self.call(budget, cancel);
         let record = session
-            .store
-            .record(target.attempt, &call)
+            .service()
+            .status(target.attempt, &call)
             .map_err(run_error)?;
         let digest = |chunk: &provenant_run::OutputChunk| {
             provenant_core::Digest::from_bytes(*chunk.digest.bytes())
@@ -1717,20 +1662,53 @@ impl BinaryRunOwner<'_> {
                 max_bytes,
                 ..
             } => {
+                if matches!(part, OutputPart::Events) {
+                    let mut events = session
+                        .service()
+                        .events(offset, 64, Some(record.attempt_id), &call)
+                        .map_err(run_error)?;
+                    let eof = events.len() < 64;
+                    // Trim the page, never an event, so a caller can page on.
+                    let kept = events_within(&events, max_bytes)?;
+                    if kept == 0 && !events.is_empty() {
+                        return Err(FacadeError::OutputTooLarge);
+                    }
+                    let eof = eof && kept == events.len();
+                    events.truncate(kept);
+                    let next_offset = events.last().map_or(offset, |event| event.sequence);
+                    let bytes =
+                        serde_json::to_vec(&events).map_err(|_| FacadeError::StateCorrupt)?;
+                    if bytes.len() as u64 > max_bytes {
+                        return Err(FacadeError::OutputTooLarge);
+                    }
+                    return Ok(OutputResult::Chunk {
+                        target,
+                        part,
+                        offset,
+                        next_offset,
+                        eof,
+                        digest: provenant_core::Digest::from_bytes(
+                            *provenant_records::CanonicalV1::file_digest(&bytes).bytes(),
+                        ),
+                        bytes: OutputBytes::from_bytes(bytes),
+                    });
+                }
                 let artifact = match part {
-                    OutputPart::Stdout => provenant_run::ArtifactPart::Result,
+                    OutputPart::Result => provenant_run::ArtifactPart::Result,
+                    OutputPart::Prompt => provenant_run::ArtifactPart::Prompt,
                     OutputPart::Stderr => provenant_run::ArtifactPart::Stderr,
+                    OutputPart::Events => return Err(FacadeError::InvalidInput),
                 };
-                let chunk = session
-                    .store
-                    .read_output(
+                let mut chunk = session
+                    .service()
+                    .output(
                         record.attempt_id,
                         artifact,
                         provenant_run::ByteRange { offset, max_bytes },
-                        &session.context,
                         &call,
                     )
                     .map_err(run_error)?;
+                provenant_cli::run::align_utf8_tail(&mut chunk);
                 Ok(OutputResult::Chunk {
                     target,
                     part,
@@ -1757,15 +1735,14 @@ impl BinaryRunOwner<'_> {
                 let mut bytes = Vec::new();
                 loop {
                     let chunk = session
-                        .store
-                        .read_output(
+                        .service()
+                        .output(
                             record.attempt_id,
                             provenant_run::ArtifactPart::Result,
                             provenant_run::ByteRange {
                                 offset: bytes.len() as u64,
                                 max_bytes: provenant_records::run::OUTPUT_LIMIT,
                             },
-                            &session.context,
                             &call,
                         )
                         .map_err(run_error)?;
@@ -1798,12 +1775,14 @@ impl BinaryRunOwner<'_> {
             RunInput::Wait {
                 targets,
                 condition,
-                wait_ms,
+                wait_seconds,
             } => {
                 let requested = WaitBudget::new(
                     self.factory.clock.mono_now(),
                     provenant_core::DurationMicros::from_micros(
-                        wait_ms.checked_mul(1000).ok_or(FacadeError::InvalidInput)?,
+                        wait_seconds
+                            .checked_mul(1_000_000)
+                            .ok_or(FacadeError::InvalidInput)?,
                     ),
                     provenant_core::WaitTransport::Cli,
                 )
@@ -1865,8 +1844,8 @@ impl BinaryRunOwner<'_> {
                         for index in &local_indices {
                             attempts[*index] = Some(
                                 session
-                                    .store
-                                    .record(targets[*index].attempt, &local_call)
+                                    .service()
+                                    .status(targets[*index].attempt, &local_call)
                                     .map_err(run_error)?,
                             );
                         }
@@ -1974,11 +1953,12 @@ impl BinaryRunOwner<'_> {
                 }
                 let store = self.store(budget, cancel)?;
                 let call = self.call(budget, cancel);
-                store
+                let reason = format!("cancelled by Fabric operation {operation_id}");
+                let service = provenant_run::Service::new(&store);
+                service
                     .bind_cancel(operation_id, &target.attempt.to_string(), &call)
                     .map_err(run_error)?;
-                let reason = format!("cancelled by Fabric operation {operation_id}");
-                let receipt = store
+                let receipt = service
                     .cancel(target.attempt, &reason, &call)
                     .map_err(run_error)?;
                 // Without a launch summary nothing was asked to stop.
@@ -1988,7 +1968,7 @@ impl BinaryRunOwner<'_> {
                     });
                 }
                 Ok(RunResult::Cancel {
-                    attempt: store.record(target.attempt, &call).map_err(run_error)?,
+                    attempt: service.status(target.attempt, &call).map_err(run_error)?,
                 })
             }
             RunInput::Resume {
@@ -2029,7 +2009,7 @@ impl BinaryRunOwner<'_> {
                 }
                 let session = self.session(budget, cancel)?;
                 let call = self.call(budget, cancel);
-                let (run, started) = self.with_edge_as(resume_fail_error, |edge| {
+                let (run, started) = self.with_edge(|edge| {
                     provenant_cli::run::continue_attempt(
                         &session,
                         edge,
@@ -2045,8 +2025,8 @@ impl BinaryRunOwner<'_> {
                 let attempt = receipt.targets.first().ok_or(FacadeError::StateCorrupt)?;
                 Ok(RunResult::Resume {
                     attempt: session
-                        .store
-                        .record(attempt.attempt, &call)
+                        .service()
+                        .status(attempt.attempt, &call)
                         .map_err(run_error)?,
                 })
             }
@@ -2073,7 +2053,7 @@ impl BinaryRunOwner<'_> {
                     })
                     .transpose()?
                     .unwrap_or(0);
-                let page = store
+                let page = provenant_run::Service::new(&store)
                     .lanes(
                         &provenant_run::LaneQuery {
                             targets: Vec::new(),
@@ -2123,14 +2103,14 @@ impl BinaryRunOwner<'_> {
             cancel,
         };
         let requested = usize::from(limit).saturating_add(1).min(64);
-        let mut items = store
+        let mut items = provenant_run::Service::new(&store)
             .events(after, requested, None, &call)
             .map_err(run_error)?;
         let truncated = if limit < 64 {
             items.len() > usize::from(limit)
         } else if items.len() == 64 {
             let cursor = items.last().map_or(after, |event| event.sequence);
-            !store
+            !provenant_run::Service::new(&store)
                 .events(cursor, 1, None, &call)
                 .map_err(run_error)?
                 .is_empty()
@@ -2264,7 +2244,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             (target, Some(reference.to_owned()))
         } else {
             let operation_id = graph_operation("graph-attempt-operation", key)?;
-            let input = SubmitInput::Submission {
+            let input = SubmitInput::Submit {
                 operation_id,
                 tasks: vec![SubmittedTask {
                     base: None,
@@ -2272,15 +2252,23 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     access,
                     worktree: worktree.map(str::to_owned),
                     prompt: prompt.into(),
-                    route: RoutePreference {
-                        adapter: Some(route.adapter.clone()),
-                        model: route.model.clone(),
-                        route: route.alias.clone(),
-                        role: None,
-                        task_class: None,
-                        effort: route.effort.clone(),
+                    task_class: None,
+                    route: match &route.model {
+                        Some(model) => provenant_records::run::RequestedRoute::Model {
+                            provider: route.adapter.clone(),
+                            model: if model.contains('/') {
+                                model.clone()
+                            } else {
+                                format!("{}/{model}", route.adapter)
+                            },
+                            effort: route.effort.clone(),
+                        },
+                        None => provenant_records::run::RequestedRoute::Named {
+                            name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
+                            effort: route.effort.clone(),
+                        },
                     },
-                    timeout_ms: self.factory.context.config.limits.graph_timeout_ms,
+                    timeout_seconds: self.factory.context.config.limits.graph_timeout_seconds,
                     delivery_id: None,
                     deliver: None,
                     new_worktree: None,
@@ -2683,7 +2671,7 @@ impl Factory {
             backoff: &self.backoff,
         };
         let store = provenant_fabric_store::Store::open(&ctx.roots.state, &request)
-            .map_err(|error| FacadeError::from_code(store_error_code(&error), None))?;
+            .map_err(|error| FacadeError::from(&error))?;
         let mut owner = BinaryRunOwner {
             factory: self,
             allow_remote: true,
@@ -2777,7 +2765,7 @@ pub fn events(
                     EventsInput::Read {
                         after: page.after,
                         limit: page.limit,
-                        wait_ms: None,
+                        wait_seconds: None,
                     },
                     budget,
                     &cancel,
@@ -2845,15 +2833,17 @@ pub fn events(
             )
         }
         Err(error) => {
-            let code = error
+            let typed = error
                 .downcast_ref::<CoordinationError>()
-                .map(CoordinationError::code)
-                .or_else(|| error.downcast_ref::<FacadeError>().map(FacadeError::code));
+                .map(FacadeError::from)
+                .or_else(|| error.downcast_ref::<FacadeError>().cloned());
             crate::fail(
                 "fabric events read",
-                code.map(provenant_cli::fabric::coordination_outcome)
+                typed
+                    .as_ref()
+                    .map(provenant_cli::fabric::coordination_outcome)
                     .unwrap_or(provenant_records::Outcome::Error),
-                code.unwrap_or("events_read"),
+                typed.as_ref().map_or("events_read", FacadeError::code),
                 &error.to_string(),
                 globals,
             )
@@ -2862,152 +2852,78 @@ pub fn events(
 }
 #[cfg(test)]
 mod peer_tests {
-    #[allow(dead_code)] // The worktree driver includes this module without libtest.
-    fn fail(code: &'static str) -> provenant_cli::run::Fail {
-        provenant_cli::run::Fail {
-            status: provenant_records::Outcome::Refused,
-            code,
-            message: String::new(),
-        }
-    }
-
     #[test]
-    fn unsupported_is_continuation_only_on_resume() {
-        assert!(matches!(
-            super::resume_fail_error(fail("UNSUPPORTED")),
-            super::FacadeError::ContinuationUnsupported
-        ));
-        assert!(matches!(
-            super::fail_error(fail("UNSUPPORTED")),
-            super::FacadeError::ConfinementRefused
-        ));
-    }
-
-    #[test]
-    fn resume_mapper_defers_other_codes() {
-        assert!(matches!(
-            super::resume_fail_error(fail("NONTERMINAL")),
-            super::FacadeError::NotTerminal
-        ));
-        assert!(matches!(
-            super::resume_fail_error(fail("NOT_FOUND")),
-            super::FacadeError::NotFound
-        ));
-    }
-
-    #[test]
-    fn expired_provider_state_keeps_its_facade_code() {
-        assert!(matches!(
-            super::resume_fail_error(fail("PROVIDER_STATE_EXPIRED")),
-            super::FacadeError::ProviderStateExpired
-        ));
-        assert!(matches!(
-            super::fail_error(fail("PROVIDER_STATE_EXPIRED")),
-            super::FacadeError::ProviderStateExpired
-        ));
-        assert_eq!(
-            super::FacadeError::from_code("provider_state_expired", None).code(),
-            "provider_state_expired"
-        );
-    }
-
-    #[test]
-    fn run_errors_keep_distinct_facade_codes() {
-        assert_eq!(
-            super::run_error(provenant_run::RunError::Nonterminal).code(),
-            "not_terminal"
-        );
-        assert_eq!(
-            super::run_error(provenant_run::RunError::OperationConflict).code(),
-            "operation_conflict"
-        );
-        assert_eq!(
-            super::run_error(provenant_run::RunError::Conflict).code(),
-            "conflict"
-        );
-    }
-
-    #[test]
-    fn local_run_failures_keep_distinct_facade_codes() {
-        for (code, expected) in [
-            ("NONTERMINAL", "not_terminal"),
-            ("OPERATION_CONFLICT", "operation_conflict"),
-            ("CONFLICT", "conflict"),
+    fn typed_run_errors_keep_their_codes() {
+        for (error, expected) in [
+            (provenant_run::RunError::Nonterminal, "not_terminal"),
+            (
+                provenant_run::RunError::OperationConflict,
+                "operation_conflict",
+            ),
+            (provenant_run::RunError::Conflict, "conflict"),
+            (
+                provenant_run::RunError::ProviderStateExpired,
+                "provider_state_expired",
+            ),
+            // The CLI and MCP share one categorisation.
+            (
+                provenant_run::RunError::Validation("input"),
+                "invalid_input",
+            ),
+            (provenant_run::RunError::ArtifactMismatch, "state_corrupt"),
+            (provenant_run::RunError::Refused, "confinement_refused"),
+            (provenant_run::RunError::Capacity, "busy"),
         ] {
-            assert_eq!(super::fail_error(fail(code)).code(), expected);
-            assert_eq!(super::resume_fail_error(fail(code)).code(), expected);
+            assert_eq!(super::run_error(error).code(), expected);
         }
     }
-
     #[test]
-    fn peer_refusal_codes_keep_their_facade_meaning() {
-        for code in [
-            "not_terminal",
-            "operation_conflict",
-            "stale_fence",
-            "timeout",
-            "state_corrupt",
-            "upgrade_refused",
-            "peer_version",
-            "publication_failed",
-            "home_unavailable",
-        ] {
-            assert_eq!(
-                super::FacadeError::from_code(code, None).code(),
-                code,
-                "{code}"
-            );
-        }
-    }
-
-    #[test]
-    fn peer_run_error_codes_round_trip_through_the_cli() -> Result<(), Box<dyn std::error::Error>> {
+    fn peer_run_errors_stay_typed_through_cli_rendering() -> Result<(), Box<dyn std::error::Error>>
+    {
         for error in [
             super::FacadeError::NotTerminal,
             super::FacadeError::OperationConflict,
             super::FacadeError::OwnerUnavailable,
         ] {
             let expected = error.code();
-            let response = super::peer_result::<()>(Err(error), None, |()| unreachable!());
-            let bytes = serde_json::to_vec(&response)?;
-            let response: super::PeerResult = serde_json::from_slice(&bytes)?;
-            let super::PeerResult::Error { code, operation_id } = response else {
+            let response = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
+                error: super::FacadeError::Io,
+            });
+            let response: super::PeerResult =
+                serde_json::from_slice(&serde_json::to_vec(&response)?)?;
+            let super::PeerResult::Error { error } = response else {
                 return Err("expected error".into());
             };
-            assert_eq!(code, expected);
-            let decoded = super::FacadeError::from_code(&code, operation_id);
-            let (_, cli_code) = provenant_cli::fabric::facade_outcome(&decoded);
-            assert_eq!(super::fail_error(fail(cli_code)).code(), expected);
+            let (status, kind) = provenant_cli::fabric::facade_outcome(&error);
+            let fail = provenant_cli::run::Fail {
+                status,
+                kind,
+                message: error.to_string(),
+            };
+            assert_eq!(super::fail_error(fail).code(), expected);
         }
         Ok(())
     }
-
     #[test]
     fn host_probe_budget_is_shared_fairly() {
         assert_eq!(super::fair_probe_micros(10_000_000, 4), Some(2_500_000));
         assert_eq!(super::fair_probe_micros(55_000_000, 100), Some(550_000));
     }
-
     #[test]
     fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std::error::Error>>
     {
-        // The home host answers an unobservable cancel through `peer_result`.
-        let id = provenant_core::OperationId::parse("stop")?;
-        let unknown = super::FacadeError::LaunchUnknown {
-            operation_id: id.clone(),
+        let error = super::FacadeError::LaunchUnknown {
+            operation_id: provenant_core::OperationId::parse("stop")?,
         };
-        let reply =
-            super::peer_result::<()>(Err(unknown), Some(id), |()| super::PeerResult::Error {
-                code: String::new(),
-                operation_id: None,
-            });
-        let super::PeerResult::Error { code, operation_id } = reply else {
-            return Err("expected a peer refusal".into());
+        let reply = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
+            error: super::FacadeError::Io,
+        });
+        let super::PeerResult::Error { error } = reply else {
+            return Err("expected error".into());
         };
-        assert!(matches!(
-            super::FacadeError::from_code(&code, operation_id),
-            super::FacadeError::LaunchUnknown { operation_id } if operation_id.as_str() == "stop"
-        ));
+        assert!(
+            matches!(error, super::FacadeError::LaunchUnknown { operation_id } if operation_id.as_str() == "stop")
+        );
         Ok(())
     }
 }

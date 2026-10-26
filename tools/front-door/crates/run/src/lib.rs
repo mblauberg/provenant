@@ -13,7 +13,11 @@ mod ledger;
 mod plan;
 mod reader;
 mod retention;
+mod service;
+#[cfg(test)]
+mod service_tests;
 mod store;
+pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 mod writer;
 
 pub use admission::{
@@ -57,6 +61,8 @@ pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("{message}")]
+    Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
     #[error("host writer delivery failed at Prepare ({step}): {reason}")]
@@ -130,6 +136,11 @@ pub enum RunError {
     Path(#[from] provenant_records::PathWireError),
 }
 pub type Result<T> = std::result::Result<T, RunError>;
+impl RunError {
+    pub fn code(&self) -> &'static str {
+        ErrorKind::from(self).code()
+    }
+}
 #[cfg(test)]
 mod delivery_tests;
 #[cfg(test)]

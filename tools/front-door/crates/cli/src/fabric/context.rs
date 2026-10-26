@@ -227,20 +227,16 @@ impl Context {
             .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
-            PeerResult::Error {
-                code,
-                operation_id: returned_operation,
-            } => {
-                let operation_id = request.operation();
-                // Busy and other generic refusals may omit the ID. Any ID the
-                // peer supplies must agree with this locally frozen request.
-                if returned_operation
-                    .as_ref()
-                    .is_some_and(|id| Some(id) != operation_id.as_ref())
+            PeerResult::Error { error } => {
+                // An uncertain launch must name this locally frozen request.
+                if let FacadeError::LaunchUnknown {
+                    operation_id: returned,
+                } = &error
+                    && Some(returned) != request.operation().as_ref()
                 {
                     return Err(peer_failure(&peer.destination, &PeerError::Frame));
                 }
-                Err(FacadeError::from_code(&code, operation_id).into())
+                Err(error.into())
             }
             value => Ok(value),
         }
@@ -249,7 +245,7 @@ impl Context {
         if lease.lease_seconds > self.config.limits.lease_seconds {
             return Err(EdgeError::Invalid);
         }
-        Ok(lease.lease_seconds * 1000)
+        Ok(lease.lease_seconds)
     }
 }
 /// A peer call failure: the stable error plus, for transport failures, the
@@ -278,44 +274,43 @@ impl From<FacadeError> for PeerFailure {
 /// The stable outcome and code for a peer refusal, shared by remote runs and
 /// session hand-off. `LaunchUnknown` is handled by each caller, which names
 /// its own recovery step. `TIMEOUT` is retryable.
-pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
+pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind) {
+    use provenant_run::ErrorKind;
     match error {
-        FacadeError::LaunchUnknown { .. } => (Outcome::Error, "LAUNCH_UNKNOWN"),
-        FacadeError::HomeUnavailable => (Outcome::Error, "PEER_UNAVAILABLE"),
+        FacadeError::LaunchUnknown { .. } => (Outcome::Error, ErrorKind::LaunchUnknown),
+        FacadeError::HomeUnavailable => (Outcome::Error, ErrorKind::PeerUnavailable),
         FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
-            (Outcome::Refused, "PEER_VERSION")
+            (Outcome::Refused, ErrorKind::PeerVersion)
         }
-        FacadeError::InvalidInput => (Outcome::Invalid, "INVALID"),
-        FacadeError::NotFound => (Outcome::Invalid, "NOT_FOUND"),
-        FacadeError::Conflict => (Outcome::Refused, "CONFLICT"),
-        FacadeError::NotTerminal => (Outcome::Refused, "NONTERMINAL"),
-        FacadeError::OperationConflict => (Outcome::Refused, "OPERATION_CONFLICT"),
-        FacadeError::Busy => (Outcome::Refused, "QUEUE_FULL"),
-        FacadeError::ConfinementRefused => (Outcome::Refused, "REFUSED"),
-        FacadeError::WorktreeMissing => (Outcome::Invalid, "WORKTREE_MISSING"),
-        FacadeError::BaseUnreachable => (Outcome::Refused, "BASE_UNREACHABLE"),
-        FacadeError::BranchExists => (Outcome::Refused, "BRANCH_EXISTS"),
-        FacadeError::LaneDepth => (Outcome::Refused, "LANE_DEPTH"),
-        FacadeError::LaneCoordinationRefused => (Outcome::Refused, "lane_coordination_refused"),
-        FacadeError::OwnerUnavailable => (Outcome::Refused, "OWNER_UNAVAILABLE"),
-        FacadeError::ProviderStateExpired => (Outcome::Refused, "PROVIDER_STATE_EXPIRED"),
-        FacadeError::Cancelled => (Outcome::Error, "CANCELLED"),
-        FacadeError::StateCorrupt => (Outcome::Error, "STATE_CORRUPT"),
-        FacadeError::UpgradeRefused => (Outcome::Refused, "UPGRADE_REFUSED"),
-        FacadeError::Timeout => (Outcome::Error, "TIMEOUT"),
+        FacadeError::InvalidInput => (Outcome::Invalid, ErrorKind::Invalid),
+        FacadeError::NotFound => (Outcome::Invalid, ErrorKind::NotFound),
+        FacadeError::Conflict => (Outcome::Refused, ErrorKind::Conflict),
+        FacadeError::NotTerminal => (Outcome::Refused, ErrorKind::Nonterminal),
+        FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
+        FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
+        FacadeError::ConfinementRefused => (Outcome::Refused, ErrorKind::Refused),
+        FacadeError::WorktreeMissing => (Outcome::Invalid, ErrorKind::WorktreeMissing),
+        FacadeError::BaseUnreachable => (Outcome::Refused, ErrorKind::BaseUnreachable),
+        FacadeError::BranchExists => (Outcome::Refused, ErrorKind::BranchExists),
+        FacadeError::LaneDepth => (Outcome::Refused, ErrorKind::LaneDepth),
+        FacadeError::LaneCoordinationRefused => {
+            (Outcome::Refused, ErrorKind::LaneCoordinationRefused)
+        }
+        FacadeError::OwnerUnavailable => (Outcome::Refused, ErrorKind::OwnerUnavailable),
+        FacadeError::ProviderStateExpired => (Outcome::Refused, ErrorKind::ProviderStateExpired),
+        FacadeError::Cancelled => (Outcome::Error, ErrorKind::Cancelled),
+        FacadeError::StateCorrupt => (Outcome::Error, ErrorKind::StateCorrupt),
+        FacadeError::UpgradeRefused => (Outcome::Refused, ErrorKind::UpgradeRefused),
+        FacadeError::Timeout => (Outcome::Error, ErrorKind::Timeout),
         FacadeError::StaleFence
         | FacadeError::ContinuationUnsupported
         | FacadeError::OutputTooLarge
         | FacadeError::PublicationFailed
-        | FacadeError::Io => (Outcome::Error, "PEER"),
+        | FacadeError::Io => (Outcome::Error, ErrorKind::Peer),
     }
 }
 /// Map a transport error, naming the peer and, when known, the cause.
 pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
-    let operation_id = match error {
-        PeerError::Unknown { operation_id } => Some(operation_id.clone()),
-        _ => None,
-    };
     let detail = match error {
         PeerError::Failed(cause) => Some(format!("{destination}: {cause}")),
         PeerError::Unavailable => Some(format!("{destination}: peer is unavailable")),
@@ -323,13 +318,7 @@ pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
         _ => None,
     };
     PeerFailure {
-        error: match error {
-            PeerError::ProtocolMismatch { peer, remote } => FacadeError::PeerProtocolMismatch {
-                peer: peer.clone(),
-                remote: *remote,
-            },
-            _ => FacadeError::from_code(error.code(), operation_id),
-        },
+        error: FacadeError::from(error),
         detail,
     }
 }
@@ -367,8 +356,14 @@ mod tests {
         assert_eq!(failure.error.code(), "peer_version");
         assert_eq!(
             failure.error.to_string(),
-            "peer workshop speaks protocol 1, this host speaks 2; upgrade both"
+            format!(
+                "peer workshop speaks protocol 1, this host speaks {}; upgrade both",
+                provenant_fabric_runtime::hosts::PROTOCOL
+            )
         );
-        assert_eq!(super::facade_outcome(&failure.error).1, "PEER_VERSION");
+        assert_eq!(
+            super::facade_outcome(&failure.error).1.code(),
+            "PEER_VERSION"
+        );
     }
 }

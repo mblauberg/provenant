@@ -30,6 +30,7 @@ pub struct PeerWorktree {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptPage {
+    #[serde(with = "attempts_wire")]
     pub items: Vec<AttemptRecord>,
     pub next_after: Option<AttemptTarget>,
     pub truncated: bool,
@@ -43,20 +44,109 @@ pub enum RunResult {
         page: AttemptPage,
     },
     Status {
+        #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
     Wait {
         condition: WaitCondition,
+        #[serde(with = "attempts_wire")]
         attempts: Vec<AttemptRecord>,
         satisfied: bool,
         timed_out: bool,
     },
     Cancel {
+        #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
     Resume {
+        #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
+}
+
+fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(record)?;
+    let seconds = record.provider_ms.map(|millis| millis as f64 / 1000.0);
+    let object = value.as_object_mut().ok_or_else(|| {
+        <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
+    })?;
+    object.remove("provider_ms");
+    object.insert("provider_seconds".into(), serde_json::to_value(seconds)?);
+    Ok(value)
+}
+
+fn decode_attempt(mut value: serde_json::Value) -> Result<AttemptRecord, String> {
+    let object = value.as_object_mut().ok_or("attempt must be an object")?;
+    if object.contains_key("provider_ms") {
+        return Err("provider_ms is not a wire field".into());
+    }
+    let seconds = object
+        .remove("provider_seconds")
+        .ok_or("missing provider_seconds")?;
+    let millis = if seconds.is_null() {
+        None
+    } else {
+        let seconds = seconds.as_f64().ok_or("invalid provider_seconds")?;
+        let millis = seconds * 1000.0;
+        if !millis.is_finite()
+            || millis < 0.0
+            || millis >= u64::MAX as f64
+            || (millis - millis.round()).abs() > 0.000001
+        {
+            return Err("provider_seconds must be non-negative with millisecond precision".into());
+        }
+        Some(millis.round() as u64)
+    };
+    object.insert(
+        "provider_ms".into(),
+        serde_json::to_value(millis).map_err(|error| error.to_string())?,
+    );
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+pub(crate) mod attempt_wire {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        record: &AttemptRecord,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        encode_attempt(record)
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<AttemptRecord, D::Error> {
+        decode_attempt(serde_json::Value::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+pub(crate) mod attempts_wire {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        records: &[AttemptRecord],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        records
+            .iter()
+            .map(encode_attempt)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<AttemptRecord>, D::Error> {
+        Vec::<serde_json::Value>::deserialize(deserializer)?
+            .into_iter()
+            .map(|value| decode_attempt(value).map_err(serde::de::Error::custom))
+            .collect()
+    }
 }
 
 /// Run events are paged by their monotonic sequence. `cursor` is the sequence

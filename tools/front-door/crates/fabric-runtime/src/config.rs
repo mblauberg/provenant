@@ -49,12 +49,12 @@ pub struct Limits {
     pub result_bytes: u64,
     pub lease_seconds: u64,
     pub peer_seconds: u64,
-    #[serde(default = "default_graph_timeout_ms")]
-    pub graph_timeout_ms: u64,
+    #[serde(default = "default_graph_timeout_seconds")]
+    pub graph_timeout_seconds: u64,
     pub bundle_bytes: u64,
 }
-fn default_graph_timeout_ms() -> u64 {
-    14_400_000
+fn default_graph_timeout_seconds() -> u64 {
+    14_400
 }
 
 impl DomainConfig for FabricConfig {
@@ -137,8 +137,8 @@ impl DomainConfig for FabricConfig {
                 reject(format!("limits.{field}"));
             }
         }
-        if l.graph_timeout_ms < 1000 || l.graph_timeout_ms > 14_400_000 {
-            reject("limits.graph_timeout_ms".into());
+        if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
+            reject("limits.graph_timeout_seconds".into());
         }
         errors
     }
@@ -188,7 +188,7 @@ mod tests {
                 result_bytes: 1048576,
                 lease_seconds: 3600,
                 peer_seconds: 30,
-                graph_timeout_ms: 14400000,
+                graph_timeout_seconds: 14400,
                 bundle_bytes: 67108864,
             },
         }

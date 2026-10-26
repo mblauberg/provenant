@@ -16,6 +16,7 @@ use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Sta
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
+use run::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -27,6 +28,7 @@ use std::{
 mod children;
 mod provider;
 mod remote;
+mod targets;
 pub use children::HostHolder;
 pub(crate) use provider::resolve_executable as provider_executable;
 #[cfg(feature = "fixture")]
@@ -49,41 +51,39 @@ pub struct Reply {
 /// A refused or failed owner call: envelope status, stable code and message.
 pub struct Fail {
     pub status: Status,
-    pub code: &'static str,
+    pub kind: ErrorKind,
     pub message: String,
 }
 impl Fail {
-    fn new(status: Status, code: &'static str, message: impl Into<String>) -> Self {
+    fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             status,
-            code,
+            kind,
             message: message.into(),
         }
     }
 }
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
-        use run::RunError as E;
-        let (status, code) = match &error {
-            E::WorktreeMissing(_) => (Status::Invalid, "WORKTREE_MISSING"),
-            E::WorktreeUnregistered(_) => (Status::Refused, "WORKTREE_UNREGISTERED"),
-            E::Writer(_) | E::Confinement(_) => (Status::Refused, "REFUSED"),
-            E::Validation(_) | E::InvalidBase(_) | E::TooLarge { .. } => {
-                (Status::Invalid, "INVALID")
-            }
-            E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),
-            E::NotFound => (Status::Invalid, "NOT_FOUND"),
-            E::Nonterminal => (Status::Refused, "NONTERMINAL"),
-            E::ProviderStateExpired => (Status::Refused, "PROVIDER_STATE_EXPIRED"),
-            E::Conflict => (Status::Refused, "CONFLICT"),
-            E::Cancelled => (Status::Error, "CANCELLED"),
-            E::Refused => (Status::Refused, "REFUSED"),
-            E::DepthExceeded { .. } | E::DepthOverflow => (Status::Refused, "LANE_DEPTH"),
-            E::Capacity => (Status::Refused, "QUEUE_FULL"),
-            E::Contention => (Status::Error, "CONTENTION"),
-            _ => (Status::Error, "IO"),
+        let kind = ErrorKind::from(&error);
+        let status = match kind {
+            ErrorKind::Invalid
+            | ErrorKind::OperationConflict
+            | ErrorKind::NotFound
+            | ErrorKind::WorktreeMissing => Status::Invalid,
+            ErrorKind::WorktreeUnregistered
+            | ErrorKind::Refused
+            | ErrorKind::Nonterminal
+            | ErrorKind::ProviderStateExpired
+            | ErrorKind::Conflict
+            | ErrorKind::LaneDepth
+            | ErrorKind::QueueFull
+            | ErrorKind::SecretInput
+            | ErrorKind::Unsupported
+            | ErrorKind::ContinuationUnsupported => Status::Refused,
+            _ => Status::Error,
         };
-        Self::new(status, code, error.to_string())
+        Self::new(status, kind, error.to_string())
     }
 }
 /// A reply whose reader deadline expired still reports what it saw.
@@ -110,7 +110,7 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
         Err(fail) => {
             let mut result = CommandResult::new(command, fail.status, Value::Null);
             result.error = Some(CommandError {
-                code: fail.code.into(),
+                code: fail.kind.code().into(),
                 message: fail.message,
                 cause: None,
                 repair: None,
@@ -145,7 +145,9 @@ impl Registry<'_> {
         if !matches!(prior.state, run::AttemptState::Terminal { .. }) {
             return Err(run::RunError::Nonterminal.into());
         }
-        let unsupported = |message: String| Fail::new(Status::Refused, "UNSUPPORTED", message);
+        let unsupported = |message: String| {
+            Fail::new(Status::Refused, ErrorKind::ContinuationUnsupported, message)
+        };
         let adapter = prior
             .applied_route
             .as_ref()
@@ -417,11 +419,16 @@ pub struct Session {
     pub store: run::RunStore,
     pub context: run::ExecutionContext,
 }
+impl Session {
+    pub fn service(&self) -> run::Service<'_> {
+        run::Service::new(&self.store)
+    }
+}
 fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::Request<'a>, Fail> {
     Ok(run::Request {
         clock,
         budget: WaitBudget::cli(clock.mono_now(), 30)
-            .map_err(|error| Fail::new(Status::Error, "TIME", error.to_string()))?,
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?,
         cancel,
     })
 }
@@ -438,7 +445,7 @@ pub fn execution_state(
     inputs.state_dir = Some(path.into());
     let state = inputs
         .resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(|error| Fail::new(Status::Refused, "LANE_CONTEXT", error.to_string()))?
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::LaneContext, error.to_string()))?
         .state;
     if !state
         .as_path()
@@ -446,7 +453,7 @@ pub fn execution_state(
     {
         return Err(Fail::new(
             Status::Refused,
-            "LANE_CONTEXT",
+            ErrorKind::LaneContext,
             "child Run store is outside the lane namespace",
         ));
     }
@@ -456,7 +463,7 @@ pub fn execution_state(
 fn execution_context(edge: &Edge<'_>) -> Result<run::ExecutionContext, Fail> {
     let (roots, project_id, actor_id) =
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
-            .map_err(|error| Fail::new(Status::Error, "IDENTITY", error.to_string()))?;
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error.to_string()))?;
     Ok(run::ExecutionContext {
         state_root: execution_state(&roots, edge.home, edge.assets)?,
         project_id,
@@ -485,12 +492,12 @@ fn open_read_only(
 fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
         .wall_now()
-        .map_err(|error| Fail::new(Status::Error, "TIME", error.to_string()))
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))
 }
 fn fresh<T>(make: fn([u8; 16]) -> T) -> Result<T, Fail> {
     entropy_128()
         .map(make)
-        .map_err(|error| Fail::new(Status::Error, "ENTROPY", error.to_string()))
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Entropy, error.to_string()))
 }
 
 /// Strict manifest: `{schema_version:1,tasks:[...]}`.
@@ -507,9 +514,7 @@ struct ManifestTask {
     task_id: Option<TaskId>,
     prompt: Option<String>,
     prompt_file: Option<PathBuf>,
-    model: Option<String>,
-    route: Option<String>,
-    effort: Option<String>,
+    route: run::RequestedRoute,
     #[serde(default)]
     fallback: Vec<String>,
     delivery_id: Option<DeliveryId>,
@@ -520,7 +525,7 @@ fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
         Fail::new(
             Status::Invalid,
-            "INVALID",
+            ErrorKind::Invalid,
             format!("{}: {error}", path.display()),
         )
     };
@@ -535,12 +540,16 @@ fn read_text(source: impl Read) -> Result<String, Fail> {
     source
         .take(PROMPT_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     if bytes.len() as u64 > PROMPT_LIMIT {
-        return Err(Fail::new(Status::Invalid, "INVALID", "input exceeds 1 MiB"));
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "input exceeds 1 MiB",
+        ));
     }
     String::from_utf8(bytes)
-        .map_err(|_| Fail::new(Status::Invalid, "INVALID", "input is not UTF-8"))
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "input is not UTF-8"))
 }
 /// Exactly one of `ADAPTER/ID` or a named route. `ADAPTER/ID@EFFORT`, the
 /// form route receipts print, is accepted when no separate effort is given.
@@ -553,7 +562,7 @@ pub fn requested(
         Some(_) if effort.is_some() => {
             return Err(Fail::new(
                 Status::Invalid,
-                "INVALID",
+                ErrorKind::Invalid,
                 "give the effort once: ADAPTER/ID@EFFORT or --effort",
             ));
         }
@@ -562,8 +571,13 @@ pub fn requested(
     };
     match (model, route) {
         (Some(model), None) => {
-            let id = ModelId::parse(model)
-                .map_err(|_| Fail::new(Status::Invalid, "INVALID", "model must be ADAPTER/ID"))?;
+            let id = ModelId::parse(model).map_err(|_| {
+                Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "model must be ADAPTER/ID",
+                )
+            })?;
             Ok(run::RequestedRoute::Model {
                 provider: id.as_str().split('/').next().unwrap_or_default().into(),
                 model: model.into(),
@@ -576,7 +590,7 @@ pub fn requested(
         }),
         _ => Err(Fail::new(
             Status::Invalid,
-            "INVALID",
+            ErrorKind::Invalid,
             "each task needs exactly one of model or route",
         )),
     }
@@ -585,7 +599,7 @@ fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
     if models.len() > 2 {
         return Err(Fail::new(
             Status::Invalid,
-            "INVALID",
+            ErrorKind::Invalid,
             "at most two fallback models",
         ));
     }
@@ -593,7 +607,11 @@ fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
         .iter()
         .map(|model| {
             ModelId::parse(model).map_err(|_| {
-                Fail::new(Status::Invalid, "INVALID", "fallback must be ADAPTER/ID")
+                Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "fallback must be ADAPTER/ID",
+                )
             })?;
             Ok(run::RouteRecord {
                 provider: model.split('/').next().map(Into::into),
@@ -609,7 +627,7 @@ fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
 /// same operation reproduces the same canonical request.
 pub fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fail> {
     let digest = CanonicalV1::record_digest("run-task-id", 1, &(operation.as_str(), index))
-        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     let mut bytes = [0; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);
     Ok(TaskId::from_bytes(bytes))
@@ -618,13 +636,7 @@ pub fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fai
 /// Refuse input that matches a secret pattern before any record exists. The
 /// message never repeats the input.
 fn scan(prompt: &str) -> Result<(), Fail> {
-    provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).map_err(|_| {
-        Fail::new(
-            Status::Refused,
-            "SECRET_INPUT",
-            "input matches a secret pattern; remove the secret and retry",
-        )
-    })
+    run::Service::scan(prompt).map_err(Fail::from)
 }
 /// Worktree access is explicit. Submission resolves and verifies the path;
 /// a worktree with read-only access is refused, never run read-only.
@@ -633,12 +645,12 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
         None if !writer => Ok(()),
         None => Err(Fail::new(
             Status::Invalid,
-            "WORKTREE_REQUIRED",
+            ErrorKind::WorktreeRequired,
             "worktree-write access needs --worktree, or --branch and --base with a peer --host",
         )),
         Some(_) if !writer => Err(Fail::new(
             Status::Invalid,
-            "WORKTREE_NOT_APPLICABLE",
+            ErrorKind::WorktreeNotApplicable,
             "--worktree requires --mode worktree-write",
         )),
         Some(_) => Ok(()),
@@ -649,7 +661,7 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
 /// existing directories, stored canonically, and clear of the state root;
 /// the confinement compiler refuses credential, broad and Git roots.
 fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
-    let invalid = |message: String| Fail::new(Status::Invalid, "INVALID", message);
+    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
     let mut postgres = false;
     for name in &access.capability {
         match name.as_str() {
@@ -744,156 +756,45 @@ pub fn submit_with_host(
     host: Option<&run::HostLaunchContext>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
-    // Reuse the originally resolved boundary before consulting Git. Retrying
-    // the same operation must work even after its caller-supplied ref vanishes.
-    let previous = match session.store.operation(&submission.operation_id, call)? {
-        Some(operation) => match session.store.request(operation.run_id, call) {
-            Ok(request) => Some(request),
-            // A prepared operation may have crashed before request publication;
-            // leave its existing adoption/repair path to RunStore::create.
-            Err(run::RunError::NotFound) if operation.state == run::OperationState::Prepared => {
-                None
-            }
-            Err(error) => return Err(error.into()),
-        },
-        None => None,
-    };
-    let mut requests = Vec::new();
-    let mut attempts = Vec::new();
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     let profile = |class: Option<&str>| {
         config
             .dispatch_profile(class, &submission.knobs)
-            .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))
+            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))
     };
     let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
-    for task in submission.tasks {
-        scan(&task.prompt)?;
-        // A lane's child launches outside the lane's sandbox, so it may not
-        // name access its parent never had.
-        if parent_attempt.is_some() && !task.access.is_default() {
-            return Err(Fail::new(
-                Status::Refused,
-                "UNSUPPORTED",
-                "a nested dispatch cannot set network, capability, read-root or write-root access",
-            ));
-        }
-        if task.deliver.is_some() && task.worktree.is_none() {
-            return Err(Fail::new(
-                Status::Invalid,
-                "INVALID",
-                "delivery requires a writer worktree",
-            ));
-        }
-        let writer = task
-            .worktree
-            .as_ref()
-            .map(|path| {
-                // A lane cannot read another worktree's registration; the host
-                // verifies the proposal before it launches the child.
-                let writer = if parent_attempt.is_some() {
-                    run::resolve_writer_proposal(
-                        session.context.state_root.as_path(),
-                        edge.cwd,
-                        path,
-                    )?
-                } else {
-                    run::resolve_writer(session.context.state_root.as_path(), edge.cwd, path)?
-                };
-                if parent_attempt.is_none() {
-                    run::prepare_writer(
-                        &writer,
-                        edge.roots.state.as_path(),
-                        session.context.project_id,
-                    )?;
-                }
-                Ok::<_, run::RunError>(writer)
+    let tasks = submission
+        .tasks
+        .into_iter()
+        .map(|task| {
+            Ok(run::DispatchTask {
+                profile: profile(task.task_class.as_deref())?,
+                task_id: task.task_id,
+                prompt: task.prompt,
+                base: task.base,
+                route: task.route,
+                account: task.account,
+                fallback: fallback(&task.fallback)?,
+                timeout_seconds: task.provider_timeout,
+                delivery_id: task.delivery_id,
+                deliver: task.deliver,
+                worktree: task.worktree,
+                access: task.access,
             })
-            .transpose()?;
-        let base_ref = task.base.clone();
-        let previous_base = previous.as_ref().and_then(|request| {
-            request.tasks.iter().find(|prior| {
-                base_ref.is_some() && prior.task_id == task.task_id && prior.base_ref == base_ref
-            })
-        });
-        let base = if let Some(prior) = previous_base {
-            prior.base.clone()
-        } else if parent_attempt.is_some() {
-            task.base
-        } else {
-            task.base
-                .as_deref()
-                .map(|base| {
-                    let git = provenant_os::git::git_executable()
-                        .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?;
-                    run::resolve_git_base(
-                        &git,
-                        writer.as_ref().map_or(edge.cwd, |writer| &writer.worktree),
-                        base,
-                    )
-                    .map_err(Fail::from)
-                })
-                .transpose()?
-        };
-        #[derive(serde::Serialize)]
-        struct RunAuthority<'a> {
-            writer: Option<&'a run::WriterRequest>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            deliver: Option<&'a run::WriterDeliveryRequest>,
-            cwd: &'a Path,
-            #[serde(skip_serializing_if = "run::LaneAccess::is_default")]
-            access: &'a run::LaneAccess,
-        }
-        let authority = CanonicalV1::record_digest(
-            "run-authority",
-            2,
-            &RunAuthority {
-                writer: writer.as_ref(),
-                deliver: task.deliver.as_ref(),
-                cwd: edge.cwd,
-                access: &task.access,
-            },
-        )
-        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
-
-        requests.push(run::TaskRequest {
-            profile: profile(task.task_class.as_deref())?,
-            task_id: task.task_id,
-            prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
-            base_ref,
-            base,
-            route: task.route,
-            account: task.account,
-            fallback: fallback(&task.fallback)?,
-            authority_digest: authority,
-            writer,
-            provider_timeout_seconds: task.provider_timeout,
-            delivery_id: task.delivery_id,
-            deliver: task.deliver,
-            access: task.access,
-        });
-        attempts.push(run::NewAttempt {
-            attempt_id: fresh(AttemptId::from_bytes)?,
-            task_id: task.task_id,
-            prompt: task.prompt,
-        });
-    }
-    let prepared = run::PreparedRun {
-        run_id: fresh(RunId::from_bytes)?,
-        operation_id: submission.operation_id,
-        request: run::CanonicalRequest {
-            schema_version: 1,
-            tasks: requests,
+        })
+        .collect::<Result<Vec<_>, Fail>>()?;
+    let record = run::Service::new(&session.store).dispatch(
+        run::DispatchRequest {
+            operation_id: submission.operation_id,
+            tasks,
             concurrency,
-            parent: None,
-            lane_depth: Some(lane_depth),
+            lane_depth,
             parent_attempt,
         },
-        attempts,
-        created_at: now(call.clock)?,
-    };
-    let record = session.store.create(&prepared, call)?;
+        edge.cwd,
+        call,
+    )?;
     let started = if parent_attempt.is_some() {
         Vec::new()
     } else if let Some(host) = host {
@@ -913,7 +814,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     if command.host.is_some() && crate::fabric::in_lane() {
         return Err(Fail::new(
             Status::Refused,
-            "lane_coordination_refused",
+            ErrorKind::LaneCoordinationRefused,
             "coordination mutations are not allowed inside a lane",
         ));
     }
@@ -921,7 +822,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     let unsupported = |what: &str| {
         Err(Fail::new(
             Status::Refused,
-            "UNSUPPORTED",
+            ErrorKind::Unsupported,
             format!("{what} is not available in this build"),
         ))
     };
@@ -946,7 +847,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     if command.branch.is_some() && new_worktree.is_none() {
         return Err(Fail::new(
             Status::Invalid,
-            "INVALID",
+            ErrorKind::Invalid,
             "--branch and --base create a writer worktree on a peer --host with \
              --mode worktree-write; on this host use `provenant worktree create` and --worktree",
         ));
@@ -983,11 +884,11 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 ..Default::default()
             },
         )
-        .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
         if manifest.schema_version != 1 || !(1..=64).contains(&manifest.tasks.len()) {
             return Err(Fail::new(
                 Status::Refused,
-                "INVALID",
+                ErrorKind::Invalid,
                 "manifest needs schema_version 1 and 1-64 tasks",
             ));
         }
@@ -1005,22 +906,19 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 (None, Some(_)) => {
                     return Err(Fail::new(
                         Status::Invalid,
-                        "INVALID",
+                        ErrorKind::Invalid,
                         "prompt_file must be relative to the manifest, without ..",
                     ));
                 }
                 _ => {
                     return Err(Fail::new(
                         Status::Invalid,
-                        "INVALID",
+                        ErrorKind::Invalid,
                         "each task needs exactly one prompt or prompt_file",
                     ));
                 }
             };
-            let (model, route) = match (task.model, task.route) {
-                (None, None) => (flag_route.0.clone(), flag_route.1.clone()),
-                other => other,
-            };
+            let route = run::Service::route(task.route)?;
             let fallback = if task.fallback.is_empty() {
                 flag_route.3.clone()
             } else {
@@ -1030,16 +928,10 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 Some(id) => id,
                 None => derived_task(&command.operation_id, index)?,
             };
-            let effort = task.effort.or(flag_route.2.clone());
             tasks.push((
                 task_id,
                 prompt,
-                requested(model.as_deref(), route.as_deref(), effort.clone())?,
-                remote::RouteText {
-                    model,
-                    route,
-                    effort,
-                },
+                route,
                 fallback,
                 task.delivery_id,
                 task.account,
@@ -1064,11 +956,6 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 flag_route.1.as_deref(),
                 flag_route.2.clone(),
             )?,
-            remote::RouteText {
-                model: flag_route.0.clone(),
-                route: flag_route.1.clone(),
-                effort: flag_route.2.clone(),
-            },
             flag_route.3.clone(),
             command.delivery_id,
             command.account.clone(),
@@ -1083,7 +970,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     };
     if let Some(host) = &command.host {
         let mut placed = Vec::new();
-        for (index, (task_id, prompt, _, route, fallback, delivery_id, account, deliver, base)) in
+        for (index, (task_id, prompt, route, fallback, delivery_id, account, deliver, base)) in
             tasks.into_iter().enumerate()
         {
             // The peer derives task IDs from the operation and has no fallback field.
@@ -1124,21 +1011,19 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, _, fallback, delivery_id, account, deliver, base)| {
-                Submitted {
-                    task_class: None,
-                    base,
-                    task_id,
-                    prompt,
-                    route,
-                    fallback,
-                    account,
-                    provider_timeout: command.provider_timeout,
-                    delivery_id,
-                    deliver,
-                    worktree: access.worktree.clone(),
-                    access: lane_access.clone(),
-                }
+            |(task_id, prompt, route, fallback, delivery_id, account, deliver, base)| Submitted {
+                task_class: None,
+                base,
+                task_id,
+                prompt,
+                route,
+                fallback,
+                account,
+                provider_timeout: command.provider_timeout,
+                delivery_id,
+                deliver,
+                worktree: access.worktree.clone(),
+                access: lane_access.clone(),
             },
         )
         .collect();
@@ -1161,7 +1046,7 @@ fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fa
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let max_depth = config
         .knobs
         .get("lanes.max_depth")
@@ -1169,7 +1054,7 @@ fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fa
         .ok_or_else(|| {
             Fail::new(
                 Status::Error,
-                "CONFIG",
+                ErrorKind::Config,
                 "lanes.max_depth is missing or invalid",
             )
         })?;
@@ -1190,7 +1075,7 @@ fn environment_text(name: &str) -> Result<Option<String>, Fail> {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(Fail::new(
             Status::Invalid,
-            "LANE_CONTEXT",
+            ErrorKind::LaneContext,
             "lane context environment value is not valid text",
         )),
     }
@@ -1209,7 +1094,7 @@ fn lane_dispatch_values(
         .map_err(|_| {
             Fail::new(
                 Status::Invalid,
-                "LANE_CONTEXT",
+                ErrorKind::LaneContext,
                 "lane depth environment value must be a non-negative integer",
             )
         })?;
@@ -1219,7 +1104,7 @@ fn lane_dispatch_values(
         .map_err(|_| {
             Fail::new(
                 Status::Invalid,
-                "PARENT_ATTEMPT",
+                ErrorKind::ParentAttempt,
                 "parent attempt environment value is invalid",
             )
         })?;
@@ -1227,7 +1112,7 @@ fn lane_dispatch_values(
         let invalid = || {
             Fail::new(
                 Status::Refused,
-                "LANE_CONTEXT",
+                ErrorKind::LaneContext,
                 "lane environment must match its child Run store path",
             )
         };
@@ -1257,14 +1142,14 @@ fn lane_dispatch_values(
         (Some(_), Some(_)) => {
             return Err(Fail::new(
                 Status::Refused,
-                "LANE_CONTEXT",
+                ErrorKind::LaneContext,
                 "nested lane context requires a depth of at least 1",
             ));
         }
         _ => {
             return Err(Fail::new(
                 Status::Refused,
-                "LANE_CONTEXT",
+                ErrorKind::LaneContext,
                 "lane depth and parent attempt must be supplied together",
             ));
         }
@@ -1313,7 +1198,7 @@ fn launch_on_host(
                 })
                 .collect(),
             git: provenant_os::git::git_executable()
-                .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?,
+                .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
@@ -1395,12 +1280,9 @@ fn launch_on_host(
             call,
         )?);
     }
-    Ok(match validated {
-        Some(request) => session
-            .store
-            .start_child(run, request, &registry, &holder, call)?,
-        None => session.store.start(run, &registry, &holder, call)?,
-    })
+    Ok(session
+        .service()
+        .start(run, &registry, &holder, validated, call)?)
 }
 fn launch_unknown(started: &[run::Started]) -> Vec<String> {
     started
@@ -1421,7 +1303,7 @@ fn report(
     call: &run::Request<'_>,
 ) -> Result<(Value, String, bool), Fail> {
     let target = Target {
-        run: record.run_id,
+        run: Some(record.run_id),
         task: None,
         attempt: None,
     };
@@ -1429,8 +1311,8 @@ fn report(
         Some(seconds) => wait_lanes(session, &[target], Condition::All, seconds, edge)?,
         None => {
             let page = session
-                .store
-                .lanes(&lane_query(&[target], true, 100, 0), call)?;
+                .service()
+                .lanes(&lane_query(session, &[target], true, 100, 0, call)?, call)?;
             let (data, human) =
                 render_lanes(&page.lanes, None, session.context.state_root.as_path());
             (data, human, false)
@@ -1445,23 +1327,26 @@ fn report(
     Ok((data, format!("run {}\n{human}", record.run_id), timed_out))
 }
 
-fn lane_query(targets: &[Target], all: bool, limit: u64, after: u64) -> run::LaneQuery {
-    run::LaneQuery {
+fn lane_query(
+    session: &Session,
+    targets: &[Target],
+    all: bool,
+    limit: u64,
+    after: u64,
+    call: &run::Request<'_>,
+) -> Result<run::LaneQuery, Fail> {
+    Ok(run::LaneQuery {
         targets: targets
             .iter()
-            .map(|t| run::LaneTarget {
-                run: t.run,
-                task: t.task,
-                attempt: t.attempt,
-            })
-            .collect(),
+            .map(|target| targets::local(session, target, call))
+            .collect::<Result<_, _>>()?,
         all,
         limit,
         after,
         newest_first: false,
         owner: None,
         unseen_after: None,
-    }
+    })
 }
 /// Artifact paths live under the session's execution root, which a nested
 /// lane keeps apart from the global configuration root.
@@ -1628,17 +1513,24 @@ fn select(
     let mut selected = Vec::new();
     let mut after = 0;
     loop {
-        let mut query = lane_query(targets, !targets.is_empty() || seen.is_some(), 100, after);
+        let mut query = lane_query(
+            session,
+            targets,
+            !targets.is_empty() || seen.is_some(),
+            100,
+            after,
+            call,
+        )?;
         query.owner = targets.is_empty().then_some(session.context.actor_id);
         query.unseen_after = seen;
-        let page = session.store.lanes(&query, call)?;
+        let page = session.service().lanes(&query, call)?;
         selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
         match page.next {
             Some(next) if selected.len() < 1000 => after = next,
             Some(_) => {
                 return Err(Fail::new(
                     Status::Invalid,
-                    "INVALID",
+                    ErrorKind::Invalid,
                     "selection exceeds 1000 lanes",
                 ));
             }
@@ -1654,7 +1546,7 @@ fn selection_key(targets: &[Target]) -> String {
             let part = |v: Option<String>| v.unwrap_or_else(|| "*".into());
             format!(
                 "{}/{}/{}",
-                t.run,
+                part(t.run.map(|v| v.to_string())),
                 part(t.task.map(|v| v.to_string())),
                 part(t.attempt.map(|v| v.to_string()))
             )
@@ -1696,7 +1588,7 @@ fn wait_lanes(
         let call = request(&clock, &cancel)?;
         let lanes = selected
             .iter()
-            .map(|id| session.store.record(*id, &call))
+            .map(|id| session.service().status(*id, &call))
             .collect::<Result<Vec<_>, _>>()?;
         let met = condition_met(&lanes, condition);
         let expired = Instant::now() >= deadline;
@@ -1747,25 +1639,34 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
                 return wait_lanes(&session, &command.id, command.condition, seconds, edge);
             }
             let after = match &command.cursor {
-                Some(cursor) => cursor
-                    .parse()
-                    .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid cursor"))?,
+                Some(cursor) => cursor.parse().map_err(|_| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor")
+                })?,
                 None => 0,
             };
-            let mut query = lane_query(&command.id, command.all, command.limit, after);
+            let mut query = lane_query(
+                &session,
+                &command.id,
+                command.all,
+                command.limit,
+                after,
+                &call,
+            )?;
             let filtered = !command.states.is_empty() || command.since.is_some();
             query.newest_first = filtered;
             let threshold = command
                 .since
                 .map(|since| WallTime::from_micros(since.as_microsecond()))
                 .transpose()
-                .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --since value"))?;
+                .map_err(|_| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value")
+                })?;
             let (lanes, next) = if filtered {
                 query.limit = 100;
                 let mut matches = Vec::new();
                 let mut next = None;
                 loop {
-                    let page = session.store.lanes(&query, &call)?;
+                    let page = session.service().lanes(&query, &call)?;
                     for lane in page.lanes {
                         let state_matches = command.states.is_empty()
                             || command
@@ -1779,7 +1680,11 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
                         if matches.len() > command.limit as usize {
                             let last =
                                 matches.get(command.limit as usize - 1).ok_or_else(|| {
-                                    Fail::new(Status::Error, "INTERNAL", "lane page invariant")
+                                    Fail::new(
+                                        Status::Error,
+                                        ErrorKind::Internal,
+                                        "lane page invariant",
+                                    )
                                 })?;
                             next = Some(session.store.attempt_sequence(last.attempt_id, &call)?);
                             matches.truncate(command.limit as usize);
@@ -1796,7 +1701,7 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
                 }
                 (matches, next)
             } else {
-                let page = session.store.lanes(&query, &call)?;
+                let page = session.service().lanes(&query, &call)?;
                 (page.lanes, page.next)
             };
             let (data, human) = render_lanes(&lanes, next, session.context.state_root.as_path());
@@ -1809,7 +1714,7 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }
 fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
-    if let Some(placement) = remote::find(edge.roots, command.attempt.0.run)? {
+    if let Some(placement) = targets::placement(edge, &command.attempt.0, false)? {
         return remote::output(&command, &placement, edge);
     }
     let clock = SystemClock::new();
@@ -1818,19 +1723,23 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     let (context, store) = open_read_only(edge, &call)?;
     let store = store.ok_or(Fail::new(
         Status::Invalid,
-        "NOT_FOUND",
+        ErrorKind::NotFound,
         "run store is not initialised",
     ))?;
     let session = Session { store, context };
     let target = command.attempt.0;
-    let id = target
-        .attempt
-        .ok_or(Fail::new(Status::Invalid, "INVALID", "attempt required"))?;
-    let record = session.store.record(id, &call)?;
-    if record.run_id != target.run || target.task.is_some_and(|task| task != record.task_id) {
+    let id = target.attempt.ok_or(Fail::new(
+        Status::Invalid,
+        ErrorKind::Invalid,
+        "attempt required",
+    ))?;
+    let record = session.service().status(id, &call)?;
+    if target.run.is_some_and(|run| record.run_id != run)
+        || target.task.is_some_and(|task| task != record.task_id)
+    {
         return Err(Fail::new(
             Status::Invalid,
-            "NOT_FOUND",
+            ErrorKind::NotFound,
             "attempt is not in that run/task",
         ));
     }
@@ -1858,7 +1767,9 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         Part::Stderr => run::ArtifactPart::Stderr,
         Part::Events => {
             // An attempt has a handful of revisions; offset is an event cursor.
-            let events = session.store.events(command.offset, 64, Some(id), &call)?;
+            let events = session
+                .service()
+                .events(command.offset, 64, Some(id), &call)?;
             let human = events
                 .iter()
                 .map(|e| format!("{} {}\n", e.revision, state_name(&e.change)))
@@ -1870,14 +1781,10 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         offset: command.offset,
         max_bytes: command.max_bytes,
     };
-    let mut chunk = session
-        .store
-        .read_output(id, part, range, &session.context, &call)?;
+    let mut chunk = session.service().output(id, part, range, &call)?;
     if let Some(lines) = command.tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
-        chunk = session
-            .store
-            .read_output(id, part, range, &session.context, &call)?;
+        chunk = session.service().output(id, part, range, &call)?;
         let text = &chunk.bytes;
         let body = text.strip_suffix(b"\n").unwrap_or(text);
         let start = body
@@ -1909,9 +1816,8 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
             "eof": chunk.eof,
             "clipped": chunk.clipped,
             "complete": chunk.complete,
-            "encoding": chunk.encoding,
             "digest": chunk.digest,
-            "text": text,
+            "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
         }),
         text,
     ))
@@ -1933,11 +1839,11 @@ fn trace_chain(
         if !seen.insert(parent) {
             return Err(Fail::new(
                 Status::Error,
-                "IO",
+                ErrorKind::Io,
                 format!("trace parents loop back to attempt {parent}"),
             ));
         }
-        match store.record(parent, call) {
+        match run::Service::new(store).status(parent, call) {
             Ok(record) => chain.push(record.trace),
             Err(run::RunError::NotFound) => {
                 chain.push(provenant_records::Trace {
@@ -2005,7 +1911,7 @@ fn trace_line(trace: &provenant_records::Trace) -> String {
 
 /// A clipped page that ends inside a UTF-8 character stops before it, so the
 /// next offset starts the character whole and paged text concatenates exactly.
-fn align_utf8_tail(chunk: &mut run::OutputChunk) {
+pub fn align_utf8_tail(chunk: &mut run::OutputChunk) {
     if !chunk.clipped {
         return;
     }
@@ -2023,14 +1929,14 @@ fn align_utf8_tail(chunk: &mut run::OutputChunk) {
 /// Cancel every attempt the target names. Queued work ends at once; started
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
-    match remote::find(edge.roots, command.target.run) {
+    match targets::placement(edge, &command.target, true) {
         Ok(Some(placement)) => {
             if crate::fabric::in_lane() {
                 return reply(
                     "cancel",
                     Err(Fail::new(
                         Status::Refused,
-                        "lane_coordination_refused",
+                        ErrorKind::LaneCoordinationRefused,
                         "coordination mutations are not allowed inside a lane",
                     )),
                 );
@@ -2054,18 +1960,19 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             if selected.is_empty() {
                 return Err(Fail::new(
                     Status::Invalid,
-                    "NOT_FOUND",
+                    ErrorKind::NotFound,
                     "no matching attempts",
                 ));
             }
             let target = &targets[0];
-            let bound = match (target.attempt, target.task) {
+            let resolved = targets::local(&session, target, &call)?;
+            let bound = match (resolved.attempt, resolved.task) {
                 (Some(attempt), _) => attempt.to_string(),
-                (None, Some(task)) => format!("{}/{task}", target.run),
-                (None, None) => target.run.to_string(),
+                (None, Some(task)) => format!("{}/{task}", resolved.run),
+                (None, None) => resolved.run.to_string(),
             };
             session
-                .store
+                .service()
                 .bind_cancel(&command.operation_id, &bound, &call)?;
             let mut receipts = Vec::new();
             let mut human = String::new();
@@ -2073,7 +1980,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             for id in selected {
                 // One failure must not hide the receipts already earned.
                 let receipt = request(&clock, &cancel)
-                    .and_then(|call| Ok(session.store.cancel(id, reason, &call)?));
+                    .and_then(|call| Ok(session.service().cancel(id, reason, &call)?));
                 let row = match receipt {
                     Ok(receipt) => {
                         if matches!(receipt, run::CancelReceipt::Unobservable { .. }) {
@@ -2089,7 +1996,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                     Err(fail) => {
                         status = Status::Failed;
                         human.push_str(&format!("{id} error: {}\n", fail.message));
-                        json!({ "attempt_id": id, "error": { "code": fail.code, "message": fail.message } })
+                        json!({ "attempt_id": id, "error": { "code": fail.kind.code(), "message": fail.message } })
                     }
                 };
                 receipts.push(row);
@@ -2108,8 +2015,11 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                     project_id: Some(session.context.project_id),
                     host: None,
                 };
-                let recovered = request(&clock, &cancel)
-                    .and_then(|call| Ok(session.store.reconcile(target.run, &registry, &call)?));
+                let recovered = request(&clock, &cancel).and_then(|call| {
+                    Ok(session
+                        .service()
+                        .reconcile(resolved.run, &registry, &call)?)
+                });
                 match recovered {
                     Ok(found) => {
                         let mut rows = Vec::new();
@@ -2187,8 +2097,8 @@ pub fn continue_attempt(
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     scan(&prompt)?;
-    (Registry::default()).check_continuable(&session.store.record(prior, call)?)?;
-    let run = session.store.resume(
+    (Registry::default()).check_continuable(&session.service().status(prior, call)?)?;
+    let run = session.service().resume(
         &run::Resume {
             prior,
             expected_generation,
@@ -2207,7 +2117,7 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     if crate::fabric::in_lane() {
         return Err(Fail::new(
             Status::Refused,
-            "UNSUPPORTED",
+            ErrorKind::Unsupported,
             "a lane cannot continue an attempt",
         ));
     }
@@ -2215,19 +2125,23 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let target = command.attempt.0;
-    let prior = target
-        .attempt
-        .ok_or(Fail::new(Status::Invalid, "INVALID", "attempt required"))?;
+    let prior = target.attempt.ok_or(Fail::new(
+        Status::Invalid,
+        ErrorKind::Invalid,
+        "attempt required",
+    ))?;
     let prompt = match &command.prompt.prompt_file {
         Some(path) => read_bounded(path)?,
         None => read_text(std::io::stdin().lock())?,
     };
     let session = open(edge, &call)?;
-    let record = session.store.record(prior, &call)?;
-    if record.run_id != target.run || target.task.is_some_and(|task| task != record.task_id) {
+    let record = session.service().status(prior, &call)?;
+    if target.run.is_some_and(|run| record.run_id != run)
+        || target.task.is_some_and(|task| task != record.task_id)
+    {
         return Err(Fail::new(
             Status::Invalid,
-            "NOT_FOUND",
+            ErrorKind::NotFound,
             "attempt is not in that run/task",
         ));
     }
@@ -2291,13 +2205,13 @@ fn reconcile_inner(
     for run in runs {
         // Each step gets a fresh budget; recovery waits on custody locks.
         let found = match request(&clock, &cancel)
-            .and_then(|call| Ok(session.store.reconcile(run, &registry, &call)?))
+            .and_then(|call| Ok(session.service().reconcile(run, &registry, &call)?))
         {
             Ok(found) => found,
             Err(fail) => {
                 *fenced = true;
                 human.push_str(&format!("{run} error: {}\n", fail.message));
-                rows.push(json!({ "run_id": run, "error": { "code": fail.code, "message": fail.message } }));
+                rows.push(json!({ "run_id": run, "error": { "code": fail.kind.code(), "message": fail.message } }));
                 continue;
             }
         };
@@ -2373,7 +2287,7 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let text = std::fs::read_to_string(&path).map_err(|error| {
         Fail::new(
             Status::Error,
-            "PRICES",
+            ErrorKind::Prices,
             format!("{}: {error}", path.display()),
         )
     })?;
@@ -2382,11 +2296,11 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         .and_then(|config| {
             provenant_telemetry::validate_prices(&config).map_err(|error| error.to_string())
         })
-        .map_err(|error| Fail::new(Status::Error, "PRICES", error))?;
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error))?;
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
             .transpose()
-            .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))
+            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
     };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -2413,14 +2327,14 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         .transpose()?
         .unwrap_or_default();
     let report = provenant_telemetry::stats(facts, &prices, window)
-        .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let cost = report.totals.cost.complete.as_ref().map_or_else(
         || format!("at least ${}", report.totals.cost.known_lower_bound.usd),
         |money| format!("${}", money.usd),
     );
     let human = format!("{} attempts, {cost}\n", report.totals.attempts);
     let data = serde_json::to_value(&report)
-        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     Ok((data, human))
 }
 
@@ -2434,7 +2348,7 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         .since
         .map(|t| WallTime::from_micros(t.as_microsecond()))
         .transpose()
-        .map_err(|error| Fail::new(Status::Invalid, "INVALID", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
@@ -2467,11 +2381,11 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let trace = provenant_telemetry::trace(&facts, &hosts, since);
     let events = trace["traceEvents"].as_array().map_or(0, Vec::len);
     let bytes = serde_json::to_vec(&trace)
-        .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     std::fs::write(&command.out, bytes).map_err(|error| {
         Fail::new(
             Status::Error,
-            "IO",
+            ErrorKind::Io,
             format!("{}: {error}", command.out.display()),
         )
     })?;
@@ -2503,7 +2417,7 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         clock: &clock,
         cancel: &cancel,
         budget: WaitBudget::cli(clock.mono_now(), 1)
-            .map_err(|e| Fail::new(Status::Error, "TIME", e.to_string()))?,
+            .map_err(|e| Fail::new(Status::Error, ErrorKind::Time, e.to_string()))?,
     };
     // A handoff only reads lanes. A fresh store has none; avoid paying for
     // database creation, WAL setup and schema migrations just to discover that.
@@ -2533,7 +2447,7 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         if lanes.len() > 1024 {
             return Err(Fail::new(
                 Status::Error,
-                "LIMIT",
+                ErrorKind::Limit,
                 "too many active lanes for a handoff",
             ));
         }
@@ -2563,7 +2477,7 @@ mod lane_depth_tests {
             panic!("depth above the configured maximum must be refused");
         };
         assert_eq!(failure.status, Status::Refused);
-        assert_eq!(failure.code, "LANE_DEPTH");
+        assert_eq!(failure.kind.code(), "LANE_DEPTH");
     }
 
     #[test]
@@ -2588,7 +2502,7 @@ mod lane_depth_tests {
         ] {
             let failure = lane_dispatch_values(depth, parent_attempt, 3, state, Some(&child))
                 .expect_err("stripped or forged lineage must be refused");
-            assert_eq!(failure.code, "LANE_CONTEXT");
+            assert_eq!(failure.kind.code(), "LANE_CONTEXT");
         }
         for (depth, parent_attempt) in [
             (Some("1"), None),
@@ -2598,7 +2512,7 @@ mod lane_depth_tests {
             let failure = lane_dispatch_values(depth, parent_attempt, 2, Path::new("/state"), None)
                 .expect_err("incomplete or zero nested context must be refused");
             assert_eq!(failure.status, Status::Refused);
-            assert_eq!(failure.code, "LANE_CONTEXT");
+            assert_eq!(failure.kind.code(), "LANE_CONTEXT");
         }
     }
 
@@ -2625,13 +2539,34 @@ mod tests {
         let manifest: Manifest = serde_json::from_value(json!({
             "schema_version": 1,
             "tasks": [
-                {"prompt": "review", "base": "main"},
-                {"prompt": "review"}
+                {"prompt": "review", "base": "main", "route": {"kind": "named", "name": "senior"}},
+                {"prompt": "review", "route": {"kind": "model", "provider": "codex", "model": "gpt-6-luna"}}
             ]
         }))
         .unwrap();
         assert_eq!(manifest.tasks[0].base.as_deref(), Some("main"));
         assert_eq!(manifest.tasks[1].base, None);
+        assert!(
+            matches!(&manifest.tasks[0].route, run::RequestedRoute::Named { name, .. } if name == "senior")
+        );
+        assert!(
+            matches!(&manifest.tasks[1].route, run::RequestedRoute::Model { provider, model, .. } if provider == "codex" && model == "gpt-6-luna")
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_flat_route_fields() {
+        for task in [
+            json!({"prompt": "review", "model": "codex/gpt-6-luna", "effort": "high"}),
+            json!({"prompt": "review", "route": "senior"}),
+            json!({"prompt": "review", "route": {"kind": "named", "name": "senior"}, "effort": "high"}),
+            json!({"prompt": "review"}),
+        ] {
+            assert!(
+                serde_json::from_value::<Manifest>(json!({"schema_version": 1, "tasks": [task]}))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -2787,7 +2722,7 @@ mod tests {
             );
         }
         assert!(
-            matches!(submit(&session, &edge, submission("HEAD"), &call), Err(fail) if fail.code == "OPERATION_CONFLICT")
+            matches!(submit(&session, &edge, submission("HEAD"), &call), Err(fail) if fail.kind == ErrorKind::OperationConflict)
         );
         Ok(())
     }
@@ -2974,7 +2909,7 @@ mod tests {
         let Err(fail) = trace_chain(&store, leaf, &call) else {
             return Err("a looping chain must fail".into());
         };
-        assert_eq!(fail.code, "IO");
+        assert_eq!(fail.kind.code(), "IO");
         assert!(fail.message.contains("loop back"), "{}", fail.message);
         Ok(())
     }
@@ -3008,7 +2943,7 @@ mod tests {
             }))?;
             let result = Registry::default().check_continuable(&prior);
             assert!(
-                matches!(result, Err(fail) if fail.code == "NONTERMINAL" && fail.status == Status::Refused),
+                matches!(result, Err(fail) if fail.kind == ErrorKind::Nonterminal && fail.status == Status::Refused),
                 "{state} attempt must be refused as nonterminal"
             );
         }
