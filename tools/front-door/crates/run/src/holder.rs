@@ -322,6 +322,25 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        // Failed headless tools can leave only stderr. Keep the recognised
+        // provider diagnostic alongside any partial answer before sealing it.
+        if decoded.outcome == Outcome::Failed
+            && let Some(route) = &record.applied_route
+            && let Some(note) = providers.failure_diagnostic(
+                route,
+                &read_sealed(attempt, "stderr.log", CAPTURE_LIMIT)?.unwrap_or_default(),
+            )
+        {
+            if !decoded.result.is_empty() {
+                decoded.result.push_str("\n\n");
+            }
+            decoded.result.push_str(&note);
+            decoded.result.push('\n');
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
+        }
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
