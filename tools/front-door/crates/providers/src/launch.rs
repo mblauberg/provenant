@@ -68,6 +68,10 @@ pub struct PrepareInput<'a> {
     pub home: &'a Path,
     /// The user's login name.
     pub user: &'a OsStr,
+    /// Reads one host environment variable. Production passes
+    /// `std::env::var_os`; tests pass a fixed lookup so the profiles do not
+    /// depend on the runner.
+    pub host_var: &'a dyn Fn(&str) -> Option<OsString>,
     /// Claude's login token, read by the host outside the sandbox.
     /// Selected registered identity. Absent preserves the default login source.
     pub account: Option<&'a crate::identity::RegisteredAccount>,

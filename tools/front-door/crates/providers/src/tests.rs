@@ -805,6 +805,7 @@ pub(super) fn fixture_input<'a>(
         executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
+        host_var: &|_| None,
         account: None,
         token,
         cwd,

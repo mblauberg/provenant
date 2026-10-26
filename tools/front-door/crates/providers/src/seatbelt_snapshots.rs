@@ -207,13 +207,6 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
 
 #[test]
 fn seatbelt_profiles_match_snapshots() -> Result<(), Box<dyn std::error::Error>> {
-    // OpenCode's grants follow these when set, so the snapshots would not hold.
-    for key in ["XDG_CONFIG_HOME", "XDG_DATA_HOME"] {
-        assert!(
-            std::env::var_os(key).is_none(),
-            "unset {key} to run the Seatbelt snapshots"
-        );
-    }
     let update = std::env::var(UPDATE_ENV).is_ok_and(|value| value == "1");
     let dir = snapshot_dir();
     let mut failures = Vec::new();
