@@ -185,7 +185,7 @@ impl RunStore {
                 }
                 prune_caches(&attempt, &record, dry_run, &mut report)?;
                 if age >= DAY_MICROS.saturating_mul(days as i64) {
-                    expire(&attempt, dry_run, &mut report)?;
+                    expire(&attempt, &record, dry_run, &mut report)?;
                 }
                 Ok(())
             })();
@@ -240,16 +240,9 @@ pub(crate) fn prune_caches(
     let candidates = candidates(&state)?;
     for name in &candidates {
         let candidate = subdir(&state, name, false)?;
-        let fallback = record.applied_route.as_ref().and_then(|route| {
-            route.provider.as_deref().filter(|_| {
-                candidates.len() == 1
-                    || record
-                        .session
-                        .as_deref()
-                        .is_some_and(|session| contains_session(&candidate, session))
-            })
-        });
-        let provider = candidate_provider(&candidate, fallback)?;
+        let provider = candidate_provider(&candidate, || {
+            candidate_provider_fallback(&candidate, record, candidates.len())
+        })?;
         let first = report.removed.len();
         let removal = (|| -> Result<()> {
             if let Some((_, caches)) = PROVIDER_CACHES.iter().find(|(id, _)| *id == provider) {
@@ -303,10 +296,29 @@ fn missing_directory(error: &RunError) -> bool {
     matches!(error, RunError::Filesystem(error) if error.is_not_found())
 }
 
-fn candidate_provider(candidate: &Directory, fallback: Option<&str>) -> Result<String> {
+fn candidate_provider_fallback<'a>(
+    candidate: &Directory,
+    record: &'a AttemptRecord,
+    candidate_count: usize,
+) -> Option<&'a str> {
+    record.applied_route.as_ref().and_then(|route| {
+        route.provider.as_deref().filter(|_| {
+            candidate_count == 1
+                || record
+                    .session
+                    .as_deref()
+                    .is_some_and(|session| contains_session(candidate, session))
+        })
+    })
+}
+
+fn candidate_provider<'a>(
+    candidate: &Directory,
+    fallback: impl FnOnce() -> Option<&'a str>,
+) -> Result<String> {
     match candidate.read_bounded(OsStr::new("provider.txt"), 64) {
         Ok(raw) => String::from_utf8(raw).map_err(|_| RunError::Validation("provider marker")),
-        Err(error) if error.is_not_found() => Ok(fallback.unwrap_or_default().into()),
+        Err(error) if error.is_not_found() => Ok(fallback().unwrap_or_default().into()),
         Err(error) => Err(error.into()),
     }
 }
@@ -370,7 +382,12 @@ fn transcript(name: &str) -> bool {
     })
 }
 
-fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> Result<()> {
+fn expire(
+    attempt: &Directory,
+    record: &AttemptRecord,
+    dry_run: bool,
+    report: &mut ProviderStateGc,
+) -> Result<()> {
     retry_tombstones(attempt, &["provider-state"], dry_run, report)?;
     let Some(state) = existing(attempt, "provider-state")? else {
         return Ok(());
@@ -378,10 +395,27 @@ fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> R
     if !dry_run {
         seal(attempt, EXPIRED, b"{}\n", 64)?;
         let history = subdir(attempt, OsStr::new("provider-history"), true)?;
-        let candidates = candidates(&state)?;
-        for name in &candidates {
+        let candidate_names = candidates(&state)?;
+        // Whole candidates may already be archived by an interrupted sweep.
+        let mut all_candidates = candidates(&history)?;
+        all_candidates.extend(candidate_names.iter().cloned());
+        all_candidates.sort();
+        all_candidates.dedup();
+        for name in &candidate_names {
             let candidate = subdir(&state, name, false)?;
-            let provider = candidate_provider(&candidate, None)?;
+            let provider = candidate_provider(&candidate, || {
+                candidate_provider_fallback(&candidate, record, all_candidates.len()).or_else(
+                    || {
+                        // A previous sweep may already have moved the session.
+                        history
+                            .open_verified_directory(name)
+                            .ok()
+                            .and_then(|archive| {
+                                candidate_provider_fallback(&archive, record, all_candidates.len())
+                            })
+                    },
+                )
+            })?;
             if !matches!(
                 provider.as_str(),
                 "codex" | "claude" | "cursor" | "opencode"
@@ -829,6 +863,75 @@ mod tests {
     }
 
     #[test]
+    fn candidate_provider_only_uses_fallback_for_a_missing_marker() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let candidate = Directory::open_anchor(temp.path())?;
+        let calls = std::cell::Cell::new(0);
+        let fallback = || {
+            calls.set(calls.get() + 1);
+            Some("claude")
+        };
+        fs::write(temp.path().join("provider.txt"), "codex")?;
+        assert_eq!(candidate_provider(&candidate, fallback)?, "codex");
+        fs::write(temp.path().join("provider.txt"), [0xff])?;
+        assert!(candidate_provider(&candidate, fallback).is_err());
+        assert_eq!(calls.get(), 0);
+        fs::remove_file(temp.path().join("provider.txt"))?;
+        assert_eq!(candidate_provider(&candidate, fallback)?, "claude");
+        assert_eq!(calls.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_expiry_keeps_legacy_candidate_classification() -> TestResult {
+        for whole_candidate in [false, true] {
+            let (_temp, _context, store, input, attempt) = seeded()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let mut record = withdraw(&store, &input, &call)?;
+            let mut applied = route();
+            applied.provider = Some("codex".into());
+            record.applied_route = Some(applied);
+            record.session = Some("legacy-session".into());
+            fs::rename(
+                attempt.join("provider-state/candidate-0/sessions/session.jsonl"),
+                attempt.join("provider-state/candidate-0/sessions/legacy-session.jsonl"),
+            )?;
+            let state = attempt.join("provider-state");
+            for name in ["candidate-0", "candidate-1"] {
+                fs::remove_file(state.join(name).join("provider.txt"))?;
+            }
+            let history = attempt.join("provider-history");
+            fs::DirBuilder::new().mode(0o700).create(&history)?;
+            if whole_candidate {
+                fs::rename(state.join("candidate-0"), history.join("candidate-0"))?;
+            } else {
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(history.join("candidate-0"))?;
+                fs::rename(
+                    state.join("candidate-0/sessions"),
+                    history.join("candidate-0/sessions"),
+                )?;
+            }
+            let directory = Directory::open_anchor(&attempt)?;
+            seal(&directory, EXPIRED, b"{}\n", 64)?;
+            expire(&directory, &record, false, &mut ProviderStateGc::default())?;
+            assert!(!state.exists());
+            assert!(
+                history
+                    .join("candidate-0/sessions/legacy-session.jsonl")
+                    .exists()
+            );
+            assert!(history.join("candidate-1/unknown-session").exists());
+            if !whole_candidate {
+                assert!(!history.join("candidate-0/other").exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn legacy_candidates_use_provider_of_candidate_holding_session() -> TestResult {
         let (_temp, _context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -841,7 +944,9 @@ mod tests {
         fs::create_dir(candidate1.join("cache"))?;
         fs::write(candidate0.join("cache/keep"), "first")?;
         fs::write(candidate1.join("cache/remove"), "applied")?;
-        fs::write(candidate1.join("sessions-legacy-session"), "session")?;
+        fs::create_dir(candidate1.join("sessions"))?;
+        fs::write(candidate1.join("sessions/legacy-session.jsonl"), "session")?;
+        fs::write(candidate1.join("config.toml"), "disposable")?;
 
         let mut record = store.record(input.attempts[0].attempt_id, &call)?;
         record.state = AttemptState::Terminal {
@@ -860,6 +965,16 @@ mod tests {
         prune_caches(&attempt_dir, &record, false, &mut report)?;
         assert!(candidate0.join("cache/keep").exists());
         assert!(!candidate1.join("cache").exists());
+
+        expire(&attempt_dir, &record, false, &mut report)?;
+        assert!(!attempt.join("provider-state").exists());
+        let history = attempt.join("provider-history");
+        assert!(history.join("candidate-0/cache/keep").exists());
+        assert_eq!(
+            fs::read_to_string(history.join("candidate-1/sessions/legacy-session.jsonl"))?,
+            "session"
+        );
+        assert!(!history.join("candidate-1/config.toml").exists());
         Ok(())
     }
 

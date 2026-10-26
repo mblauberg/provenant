@@ -190,8 +190,9 @@ existing attempts without a migration.
 Run owns retention in a separate module. Terminal settlement prunes the
 provider's proven regenerable caches; the initial table contains Codex's
 `cache/`, `plugins/`, `skills/` and `models_cache.json`. Candidate
-`provider.txt` records the adapter. A single existing candidate can use its
-attempt's applied provider when the marker is absent.
+`provider.txt` records the adapter. When the marker is absent, a single
+existing candidate or a candidate holding the recorded session can use its
+attempt's applied provider for cache pruning and expiry.
 
 Before full expiry, GC archives Codex session directories, history files and
 versioned state and thread-history SQLite files, including WAL, SHM and journal

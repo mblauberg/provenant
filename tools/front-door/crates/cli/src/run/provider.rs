@@ -729,11 +729,11 @@ fn find_session_state_within(
     Ok(None)
 }
 
-/// Copy regular files and directories within `RETAINED_STATE`. Symlinks and
-/// other entries are skipped: setup recreates the links a provider needs. A
-/// leftover process may still change the tree, so every entry is opened from
-/// its parent's handle without following a link, and the opened descriptor is
-/// checked and copied.
+/// Copy regular files and directories within `RETAINED_STATE`. GC tombstones,
+/// symlinks and other entries are skipped: setup recreates the links a provider
+/// needs. A leftover process may still change the tree, so every entry is
+/// opened from its parent's handle without following a link, and the opened
+/// descriptor is checked and copied.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
     copy_state_within(from, to, RETAINED_STATE)
 }
@@ -878,6 +878,9 @@ fn copy_tree(
     budget: &mut Budget,
 ) -> Result<(), CopyRefusal> {
     for name in listed(from, &mut budget.entries)?.ok_or(CopyRefusal::TooMany)? {
+        if name.as_encoded_bytes().starts_with(b".provider-gc-") {
+            continue;
+        }
         let metadata = match from.metadata_at(&name, false) {
             Ok(metadata) => metadata,
             Err(error) if error.is_not_found() => continue,
@@ -2399,6 +2402,21 @@ mod tests {
                 for cache in ["cache", "plugins", "skills", "models_cache.json"] {
                     assert!(!candidate.join(cache).exists());
                 }
+                use std::os::unix::fs::MetadataExt;
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(candidate.join("cache"))?;
+                std::fs::write(candidate.join("cache/payload"), "pending deletion")?;
+                let metadata = std::fs::metadata(candidate.join("cache"))?;
+                let tombstone = format!(
+                    ".provider-gc-{:016x}{:016x}-cache",
+                    metadata.dev(),
+                    metadata.ino()
+                );
+                std::fs::rename(candidate.join("cache"), candidate.join(&tombstone))?;
+                let nested_tombstone = "sessions/.provider-gc-interrupted";
+                std::fs::write(candidate.join(nested_tombstone), "pending deletion")?;
+
                 let copied = base.join("resumed-state");
                 let continuation = continuation_for(
                     &prior,
@@ -2408,6 +2426,9 @@ mod tests {
                     &copied,
                 )?;
                 assert_eq!(continuation.session(), "fixture-session");
+                assert!(!copied.join(&tombstone).exists());
+                assert!(!copied.join(nested_tombstone).exists());
+                assert!(candidate.join(&tombstone).exists());
                 assert_eq!(
                     std::fs::read_to_string(copied.join("sessions/fixture-session.jsonl"))?,
                     "transcript"

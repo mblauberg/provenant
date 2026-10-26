@@ -23,3 +23,9 @@
   The key is reread at each sweep. `--dry-run` previews provider-state
   removals; active attempts, retained reservations and pending
   continuations are protected (#1570).
+
+## Fixes
+
+- Resuming skips provider GC tombstones, including interrupted cache removals.
+  Legacy candidates infer their provider only when its marker is missing and
+  use the same inference for cache pruning and expiry (#1570).

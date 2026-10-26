@@ -41,7 +41,7 @@ pub(crate) enum Error {
     CacheGc(
         Box<provenant_confinement::permissions::CacheGcError>,
         Vec<PathBuf>,
-        provenant_run::ProviderStateGc,
+        Box<provenant_run::ProviderStateGc>,
         Vec<worktrees::WorktreeGcReport>,
         Vec<String>,
     ),
@@ -241,14 +241,20 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
             }
             emit(&result, globals, &human, command.dry_run)
         }
-        Err(Error::CacheGc(error, unobserved_projects, provider_state, worktree_cleanup, alerts)) => {
+        Err(Error::CacheGc(
+            error,
+            unobserved_projects,
+            provider_state,
+            worktree_cleanup,
+            alerts,
+        )) => {
             let error = *error;
             let failure = error.to_string();
             let data = GcData {
                 report: error.report,
                 idle_days: command.idle_days,
                 unobserved_projects,
-                provider_state,
+                provider_state: *provider_state,
                 worktree_cleanup,
                 alerts,
             };
@@ -549,7 +555,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             return Err(Error::CacheGc(
                 Box::new(error),
                 unobserved_projects,
-                provider_state,
+                Box::new(provider_state),
                 worktree_cleanup,
                 alerts,
             ));
