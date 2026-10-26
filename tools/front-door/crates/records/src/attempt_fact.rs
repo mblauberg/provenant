@@ -3,7 +3,7 @@ use provenant_core::{
 };
 use serde::Serialize;
 
-use crate::{FileDigest, PathWire};
+use crate::{FileDigest, PathWire, Trace};
 
 /// Terminal attempt outcomes published to workflow, telemetry and the CLI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -99,4 +99,5 @@ pub struct AttemptFact {
     pub verified_owner: Option<ActorId>,
     pub lineage: Vec<AttemptId>,
     pub reason: Option<String>,
+    pub trace: Trace,
 }

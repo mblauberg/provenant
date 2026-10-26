@@ -276,6 +276,15 @@ impl RunStore {
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, delivery: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
+                    trace: provenant_records::Trace {
+                        host: self.host,
+                        project: Some(run.project_id),
+                        run: Some(run.run_id),
+                        attempt: Some(new.attempt_id),
+                        operation: Some(run.operation_id.clone()),
+                        actor: Some(run.actor_id),
+                        parent: input.request.parent.or(input.request.parent_attempt),
+                    },
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
@@ -712,6 +721,7 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
         attempt_id: attempt.attempt_id,
         revision: attempt.revision,
         change: attempt.state.clone(),
+        trace: attempt.trace.clone(),
     };
     db.execute(
         "INSERT INTO events(project,attempt,revision,record) VALUES (?1,?2,?3,?4)",

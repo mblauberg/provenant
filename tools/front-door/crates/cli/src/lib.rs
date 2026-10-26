@@ -647,6 +647,9 @@ mod tests {
         invalid(&["output", &attempt, "--tail", "501"]);
         invalid(&["output", &attempt, "--max-bytes", "65537"]);
         invalid(&["output", &attempt, "--offset", "0", "--tail", "1"]);
+        valid(&["output", &attempt, "--trace"]);
+        invalid(&["output", &attempt, "--trace", "--part", "prompt"]);
+        invalid(&["output", &attempt, "--trace", "--tail", "1"]);
         invalid(&["output", &"11".repeat(16)]);
     }
     #[test]

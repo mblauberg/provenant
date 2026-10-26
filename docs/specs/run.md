@@ -52,7 +52,7 @@ and `provenant help <verb>` lists the flags.
 | --- | --- |
 | `dispatch` | One prompt (`--prompt-file` or `--prompt-stdin`) or `--manifest`. `--operation-id` is required and makes retries idempotent. Optional `--task-id`, `--delivery-id`, `--host`, `--base` and, for delivery, `--deliver-remote`, `--deliver-branch`, `--open-pr` and `--branch`. Detached unless `--wait` is given. It returns exact IDs, route, state and artifact paths. |
 | `lanes` | Lists lanes by `--id`, `--state`, `--since`, `--all`, `--limit` (1 to 100) and `--cursor`. With `--wait` it waits for `--condition any` (default) or `all`. Read-only otherwise; no implicit repair. |
-| `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. |
+| `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. `--trace` instead prints the attempt's trace and its parent chain, one hop per line (a `trace` array in `--json`). |
 | `cancel` | Target `RUN[/TASK[/ATTEMPT]]` with a required `--operation-id`, optional `--reason` and `--wait`. It returns requested, already terminal or unobservable, plus custody. Accepted cancellation does not prove exit. |
 | `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
 | `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. It never replays an uncertain launch. |
@@ -236,11 +236,17 @@ Stored records:
 - `AttemptRecord`: IDs, optional `delivery_id`, `retry_of`, requested, resolved,
   applied and observed route and effort, confinement, subject identity,
   deadlines, custody, timestamps, state, outcome, usage with source, artifact
-  paths and digests, and publication errors.
+  paths and digests, and publication errors. It also carries a `Trace`.
 - `AttemptFact`: a `Serialize`-only terminal projection built from validated
   records. It carries the resolved route and account label, usage, reviewer,
-  `delivery_id`, `queued_at`, optional `started_at` and `provider_ms`. It is
-  what telemetry and workflow read.
+  `delivery_id`, `queued_at`, optional `started_at`, `provider_ms` and the
+  `Trace`. It is what telemetry and workflow read.
+- `Trace`: `host`, `project`, `run`, `attempt`, `operation`, `actor` and
+  `parent`, each an existing ID and `None` where the write site does not know
+  it. `parent` is the continued attempt, else the attempt that submitted a
+  nested run. The run owner stamps it on each `AttemptRecord` at creation and
+  copies it to every `RunEvent`. The host stays unknown where the edge cannot
+  read the host binding.
 - `OperationRecord`: scope, kind, request digest and
   `prepared|accepted|terminal|launch_unknown`. The digest covers prompt, route,
   authority and execution controls, not reader waits.

@@ -486,6 +486,10 @@ pub struct AttemptRecord {
     /// Fallback candidates that did not launch before this attempt did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_routes: Vec<SkippedRoute>,
+    /// Stamped when the attempt is created; a record without one decodes as
+    /// all unknown.
+    #[serde(default)]
+    pub trace: crate::Trace,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -517,6 +521,8 @@ pub struct RunEvent {
     pub attempt_id: AttemptId,
     pub revision: u64,
     pub change: AttemptState,
+    #[serde(default)]
+    pub trace: crate::Trace,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

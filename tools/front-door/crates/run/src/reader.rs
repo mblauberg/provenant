@@ -141,6 +141,7 @@ impl AttemptReader for RunStore {
             verified_owner: r.verified_owner,
             lineage: r.retry_of.into_iter().collect(),
             reason,
+            trace: r.trace,
         })
     }
     fn attempts<'a>(

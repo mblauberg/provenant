@@ -1242,7 +1242,8 @@ impl BinaryRunOwner<'_> {
             read_prompts: false,
         };
         let store = provenant_run::RunStore::open(&context, &self.call(budget, cancel))
-            .map_err(run_error)?;
+            .map_err(run_error)?
+            .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
     fn store(
