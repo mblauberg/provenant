@@ -1,357 +1,180 @@
 # Execution: runs
 
-## Purpose and ownership
+Owner: `crates/run` (admission, attempts, publication, reconcile),
+`crates/records` (shared records and `AttemptFact`)
+Anchor: `crates/run/src/tests.rs`, `crates/run/src/dispatch_tests.rs`,
+`crates/run/src/delivery_tests.rs`
 
-This spec owns how a request becomes bounded provider attempts: admission,
-batch scheduling, retries, continuation, attempt lineage, cancellation and the
-publication of terminal facts. It retains the exact prompt, route and result of
-each attempt, so completion and cancellation survive a disconnected caller.
-The [cross-cutting decisions](README.md#cross-cutting-decisions) bind it.
+Run turns a request into bounded provider attempts and keeps the exact
+prompt, route and result of each, so completion and cancellation survive a
+disconnected caller. Routing resolves models ([routing](routing.md));
+supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
+keeps no second registry ([fabric](fabric.md)). Run starts no process
+itself. Grammar and bounds are in the generated [CLI
+reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
-| Crate | Owns |
-| --- | --- |
-| `run` | Operations, admission tickets, the run index, attempts, status, event and seen cursors in `run.sqlite3`, and the run directories. |
-| `records` | The shared typed records, caps and `AttemptFact`. |
+## Operation IDs
 
-Routing resolves models and effort, and providers build launches and decode
-their own wire formats ([routing](routing.md)). Supervisor owns every process,
-capture, observation and signal ([supervisor](supervisor.md)). Fabric owns
-identity, federation placement and MCP rendering, and keeps no second run
-registry ([fabric](fabric.md)). Run starts no process itself and keeps no
-second route catalogue. Workflow owns delivery acceptance; run reports
-`delivery_id` only as a correlation.
+An operation ID is 1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting
+alphanumeric. Run scopes it by caller and project and binds it to the
+operation kind and a digest of prompt, route, authority and execution
+controls, not reader waits. The same ID and digest returns the recorded
+outcome without repeating effects; a different digest is
+`operation_conflict`, exit 2.
+- Why: lost replies and concurrent duplicates, including resume, must never
+  launch twice.
+- Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;
+  `crates/run/src/service_tests.rs::dispatch_replay_output_and_cancel_share_the_service`
+- Owner: `crates/core/src/ids.rs`, `crates/run/src/store.rs`
 
-## Boundaries
+## Atomic admission
 
-- Admission and operation insertion are one transaction. No provider launch,
-  resource probe, wait or supervisor call happens inside a transaction.
-- Terminal attempts are immutable. A retry or a continued turn is a new
-  attempt, and the latest attempt of a task is the highest attempt number,
-  never the latest timestamp.
-- A lost reader, a cancelled wait or a dead scheduler never stops provider
-  work. Silence is an observation, never an outcome or a stop request.
-- Run reads no provider transcript for prompt, message or usage data. The one
-  allowed read is the post-exit identity projection for Codex (session ID,
-  model, effort). Missing identity stays unknown.
-- No old-root discovery, alias repair or record migration. Requests are strict
-  and IDs unambiguous.
-- Contained freedom (how a lane is confined and signalled) belongs to
-  [supervisor](supervisor.md) and
-  [ADR 0027](../adr/0027-rust-front-door.md); run only consumes its results.
+Admission and operation insertion are one transaction, and the immutable
+request is published before acknowledgement. No launch, probe, wait or
+supervisor call happens inside a transaction. Admission bounds active lanes
+at 64 per host and 16 per project and queued lanes at 256 per host, with
+memory and disk floors, startup spacing and a deadline.
+- Why: an accepted receipt must mean durable admission.
+- Test: `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
+  `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
+- Owner: `crates/run/src/admission.rs`
 
-## Contract
+## Immutable attempts, no writer replay
 
-### Commands
+Terminal attempts are immutable; a retry or continued turn is a new attempt
+linked by `retry_of`, and the latest is the highest attempt number, never
+the latest timestamp. Read-only fallback needs explicit opt-in and a typed
+transient failure. A writer is never replayed automatically, and two writers
+never share a worktree.
+- Why: evidence must not be rewritten, and replaying a writer clobbers edits.
+- Test: `crates/run/src/dispatch_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
+  `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`
+- Owner: `crates/run/src/store.rs`, `crates/run/src/launch.rs`
 
-The verbs are top-level: `dispatch`, `lanes`, `output`, `cancel`, `resume` and
-`reconcile`. There is no `run` or supervisor control subtree. All accept
-`--json`, `--state-dir` and `--project`; [cli](cli.md) owns the exact grammar
-and `provenant help <verb>` lists the flags.
+## Publication order
 
-| Verb | Behaviour |
-| --- | --- |
-| `dispatch` | One prompt (`--prompt-file` or `--prompt-stdin`) or `--manifest`. `--operation-id` is required and makes retries idempotent. Optional `--task-id`, `--delivery-id`, `--host`, `--base` and, for delivery, `--deliver-remote`, `--deliver-branch`, `--open-pr` and `--branch`. Detached unless `--wait` is given. It returns exact IDs, route, state and artifact paths. |
-| `lanes` | Lists lanes by `--id`, `--state`, `--since`, `--all`, `--limit` (1 to 100) and `--cursor`. With `--wait` it waits for `--condition any` (default) or `all`. Read-only otherwise; no implicit repair. |
-| `output` | Reads one attempt's `--part result` (default), `prompt`, `stderr` or `events`, by `--offset` or `--tail`, up to `--max-bytes` (default 65536). It reports offsets, EOF, clipping, encoding and completeness. `--trace` instead prints the attempt's trace and its parent chain, one hop per line (a `trace` array in `--json`), then the grants applied at launch: write grants, read-only exceptions and the Git grants digest (a `grants` object in `--json`). |
-| `cancel` | Target `RUN[/TASK[/ATTEMPT]]` with a required `--operation-id`, optional `--reason` and `--wait`. It returns requested, already terminal or unobservable, plus custody. Accepted cancellation does not prove exit. |
-| `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
-| `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. An uncertain reason is typed (`reason.kind`, for example `writer_custody_unconfirmed` or `guardian_not_observable`), with the underlying error text or path alongside. It never replays an uncertain launch. |
+1. One transaction reserves the operation, digest, IDs and tickets.
+2. The scheduler samples resources outside it, takes writer custody and
+   hands supervisor the plan. A lost acknowledgement records
+   `launch_unknown`, keeps capacity and the reservation, and is never
+   replayed.
+3. Result and exit evidence are sealed first; then one commit writes the
+   terminal attempt, summary, operation state, released capacity and event.
+4. Recovery retries a pending commit without replacing a committed outcome.
+5. A run closes only when every task and registered child is terminal.
 
-When a terminal attempt has no requested output, local and peer reads report
-`NOT_FOUND` (facade code `not_found`, exit 2). An active attempt still
-reports `NONTERMINAL`.
+If publication keeps failing, the attempt stays `settling` with
+`publication_pending: true` and keeps custody; run never reports success or
+frees a writer early to hide a bookkeeping failure.
+- Why: each step is the evidence the next recovers from.
+- Test: `crates/run/src/tests.rs::publication_crashes_preserve_committed_records_and_allow_retry`;
+  `::prelaunch_refusal_publishes_durable_never_launched_evidence`.
+  `launch_unknown` never being replayed has no run-level test (gap).
+- Owner: `crates/run/src/launch.rs`, `crates/run/src/store.rs`
 
-Route and access inputs on `dispatch`:
+## Success needs proof
 
-- Exactly one `--model ADAPTER/ID` or `--route NAME`, an optional `--effort`,
-  and an optional `--fallback` of at most two models. `--confidential` and
-  `--allow-free` are the routing filters in [routing](routing.md). Each
-  attempt records its resolved account label. `--account NAME` pins a
-  registered account key or label for the lane, like a manifest task's
-  `account`; it works with every access flag and conflicts with `--manifest`,
-  whose tasks name their own. An unknown or ineligible account fails as a
-  manifest task's does. With `--host`, the peer checks the account against its
-  own registrations.
-- `--mode read-only` (default) or `worktree-write` with `--worktree`. Optional
-  `--read-root` and `--write-root` (repeatable), `--network on|off` (on for
-  writers, off for read-only), `--capability` (postgres) and `--knob NAME=VALUE`.
-  Confinement checks the caller's authority; flags cannot grant it.
-- `--provider-timeout SECONDS`: default 3600, or 10800 for `worktree-write`,
-  range 1 to 14400. This is the provider budget, distinct from a reader wait.
-- `--base REF`: the host resolves a commit before launch and captures
-  `git log BASE..HEAD` and `git diff BASE..HEAD` from the lane's selected
-  checkout. Top-level submissions reject an unresolved base as invalid input;
-  nested submissions are validated on the host before provider launch.
-  Manifest and Fabric MCP submission tasks accept optional `base`; a manifest
-  task overrides the CLI default. With `--host`, read-only dispatch resolves
-  the base in the peer's clone. Peer writers use `--base` only to create
-  their branch; they receive no context field, history files or prompt prefix.
-  Each candidate's `tmp/candidate-N/` contains `git-log.txt`, `git-diff.patch`
-  and `git-context.json`; the generated prompt names their absolute paths.
-  Each text file is capped at 1 MiB, and the JSON records the resolved base,
-  captured HEAD, truncation flags and `timed_out` (also recorded per file).
-  The host disables fsmonitor, external diff, text conversion, signature
-  display, mailmap rewriting and rename detection, and forces text diffs.
-  Protocol denial prevents fetching on all supported Git versions;
-  `GIT_NO_LAZY_FETCH` additionally suppresses lazy fetches on Git 2.44+.
-  Each Git read has a 10-second budget. A log or diff timeout preserves
-  partial output, records the timeout and still launches the lane. Reviewers
-  must report incomplete coverage for truncated or timed-out captures.
-  These files cover committed changes only and share
-  the attempt's temporary cleanup. No history files are generated without a
-  base.
-  Every adapter's OS profile grants access to attempt scratch. When a lane
-  receives Git context, Claude and Agy also add scratch to their tool
-  workspace, and OpenCode explicitly permits reads and external-directory
-  access to scratch. Codex bypasses its inner sandbox
-  and approvals, and Cursor disables its inner sandbox, so their tools use
-  the OS grant directly. Context files are published through the directory
-  handle retained when scratch was created.
-  A host failure to read the stored prompt, or to stage or read back an input
-  it hands to the lane (the context files), ends the attempt Rejected before
-  launch, with the cause in its reason. Run cannot see a read that the provider's own
-  session denies or fails, so `lanes --json` carries no marker for it and such
-  a lane can still end Succeeded. Reviewers must say in their report which
-  inputs they could not read.
-- Manifest: strict JSON `{schema_version:1,tasks:[...]}` with 1 to 64 tasks,
-  unique optional task IDs (32 lowercase hex digits; omitted IDs are
-  generated), `--concurrency` 1 to 8 (default the `lanes.max_concurrency`
-  knob, 8). Overlapping writer scopes reject before launch; a task-local refusal does not suppress valid siblings.
+Success needs a supervisor-observed exit 0, a matching provider identity and
+a complete, validated, non-empty result; capture bytes are never completion
+evidence. A dead owner is not a failed provider. A completed writer whose
+protected changes need review ends `review_required`, and one with only
+uncommitted edits ends `uncommitted`; neither delivers. Run reads no provider
+transcript except Codex's post-exit identity projection.
+- Why: a crash, truncation or impostor must never read as success.
+- Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
+  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`
 
-### Waits
+## Host inputs fail before launch
 
-A CLI wait takes an explicit 1 to 14400 seconds and an MCP wait 1 to 55. There
-is no default, and zero is not a budget. `wait any` returns on the next unseen
-terminal or `input_required` lane. `wait all` returns when every lane is
-terminal or any is `input_required`, so attention never waits behind a running
-sibling. The selected set is fixed at entry and excludes the caller and its
-ancestors. Unreachable hosts stay unknown. Run stores seen cursors by actor and
-selection; only displayed rows are acknowledged, and clipped rows stay unseen.
+A host failure to read the stored prompt, or to stage or read back a context
+file, ends the attempt `rejected` before launch with its cause. `--base`
+context is captured on the host with fsmonitor, external diff, textconv,
+mailmap and fetching off, 10 s per read and 1 MiB per file; a timeout keeps
+partial output and is recorded. Reviewers must report inputs they could not
+read and truncated captures.
+- Why: repository config is hostile input, and a lane must not run on input
+  the host could not verify.
+- Test: `crates/run/src/dispatch_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
+  `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`
+- Owner: `crates/run/src/git_context.rs`
 
-Exit codes follow the [shared contract](README.md#cross-cutting-decisions). A
-satisfied wait exits 0, including `input_required` and unsuccessful terminal
-outcomes, and reports them in `data`. A provider timeout is recorded as
-`timed_out`, distinct from reader expiry (124).
+## Launch prompts
 
-### Records, layout and publication
+Launch prompts are bounded to 1 MiB. Argv adapters take up to 64 KiB; a
+larger top-level prompt is sealed as `prompt.md` behind a pointer, while
+nested argv attempts refuse it because the parent lane can write their
+directory. Prompt digests cover the full text in `prompt.txt`.
+- Why: a spill file a lane can rewrite would change its child's task.
+- Test: `crates/cli/src/run/provider.rs::launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
+  `::launch_prompt_refuses_symlinked_attempt_ancestors`
+- Owner: `crates/cli/src/run/provider.rs`
 
-The state root comes from [state](state.md). Paths are relative to it, and run
-IDs are opaque core IDs.
+## Read-only write exceptions
 
-```text
-run.sqlite3                    # operations, admission, runs, attempts, events, cursors
-runs/<RunId>/                  # ProjectId is recorded, not a parent directory
-  request.json                 # immutable canonical submission and prompt digests
-  attempts/<AttemptId>/
-    prompt.txt                 # run-owned immutable prompt
-    prompt.md                  # full launch prompt, only for top-level argv spills
-    result.md                  # run-owned sealed result, including failure
-    writer-terminal.json       # checked candidate head and protected paths
-    (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
-    provider-state/            # resumable private state with bounded retention
-    provider-history/          # transcripts archived when resume state expires
-    provider-state-expired.json # sealed expiry marker
-    quarantine/                # retained patches and blobs
-    scratch/                   # account probe staging; unknown contents retained
-    tmp/                       # attempt-private temporary data, mode 0700
-```
+`projects/<ProjectId>/read-only.json` may grant read-only runs write
+exceptions: existing directories relative to the verified repository root.
+Absolute paths, traversal, symlinks and Git or provider configuration are
+refused, and the attempt records every granted path.
+- Why: only the user widens a read-only lane.
+- Test: `crates/confinement/src/plan/read_only.rs::policy_defaults_and_refuses_escape_control_paths_and_symlinks`;
+  `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
+- Owner: `crates/confinement/src/plan/read_only.rs`
 
-The supervisor file names inside an attempt directory are the run and
-supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
+## Reconcile and temporary cleanup
 
-`AttemptFile` (in `records`) is the one typed list of the entries an attempt
-directory may hold. `output`, the disk report and provider-state retention name
-entries and classify them through it (temporary, provider state, retained
-captures and history, or sealed record) rather than by literal file name.
+`reconcile` recovers queued and orphaned work idempotently and never replays
+an uncertain launch. A start with no summary, held lock or recorded provider
+start settles as rejected; a held lock stays unobservable. Terminal `tmp/`
+removal runs only when no worktree reservation remains: reconcile checks
+reservations before taking the attempt's writer lock, and an unreadable
+reservation blocks removal. Deletion is no-follow and identity-checked, and
+symlinks are unlinked, never followed. Only below a terminal, unreserved
+`tmp/` are lock names disposable; owner locks such as `writer.lock`,
+`publication.lock` and the run store lock keep their inodes.
+- Why: unlinking an owner lock lets two owners lock different inodes, and
+  deleting under a reservation destroys a writer's work.
+- Test: `crates/run/src/dispatch_tests.rs::reconcile_preserves_protected_locks_outside_temporary`;
+  `::reconcile_leaves_temporary_data_behind_a_writer_reservation`;
+  `::reconcile_unreadable_reservation_only_retains_existing_temporary_data`;
+  `::reconcile_temporary_removal_never_follows_symlinks`
+- Owner: `crates/run/src/controls.rs`
 
-Launch prompts, including the durable-output preamble, are bounded to 1 MiB
-for every adapter. Claude, Codex and OpenCode receive the full launch text on
-stdin, without a spill file. Cursor and Agy receive prompts up to 64 KiB on
-argv unchanged. For larger top-level prompts, dispatch seals the full launch
-text as `prompt.md` and sends a short instruction to read that file first and
-treat its contents as the full task. The OS read grant covers that exact file;
-provider tool permissions may cover its containing directory. Nested Cursor
-and Agy attempts refuse launch prompts over 64 KiB before launch: route the
-child to a stdin adapter or shorten the prompt. Their attempt directories are
-writable by the parent lane, so a spill there could be rewritten before use.
-The submission and attempt prompt digests still cover the full submitted text
-in `prompt.txt`, never the pointer. Both files remain retained with the attempt.
+## Store
 
-Structured events live in SQLite, and provider parsing uses the live stream, not
-a second copy. Writer and read-only lanes stage provider temporary files in
-`tmp/candidate-N`, with a separate directory for each fallback candidate.
-Empty generated `scratch/` is deleted at settlement; unknown
-contents, history and transcripts stay retained. Terminal commit also attempts
-best-effort removal of attempt-private `tmp/`. `reconcile` includes terminal
-attempts and retries only when no reservation remains, using directory-relative,
-no-follow, identity-checked traversal. Symlinks are unlinked rather than followed.
-An unreadable worktree reservation blocks removal, including corrupt records
-and moved worktrees that fail the anchor check. Reconcile reports the leftover
-`tmp/` path and reason as `temporary_retained` without failing the whole
-reconcile. It omits terminal attempts with no `tmp/` and reports actual cleanup
-as `temporary_removed`. Non-terminal attempts keep their temporary data.
-Default scans prioritise non-terminal work, then retained reservations and
-terminal attempts indexed by a `tmp_retained` hint. Terminal commit sets the
-hint in its transaction and clears it after successful removal, so failed or
-interrupted cleanup stays discoverable. The hint is mutable bookkeeping;
-terminal records and their index fields remain immutable.
+The run store is SQLite with WAL, foreign keys and `synchronous=FULL`.
+Unknown or newer versions fail closed without modification, unsafe
+companions are refused, and caps (1 MiB record or prompt, 64 MiB stream,
+4 MiB result) make an oversized result a typed failure, never a truncation.
+- Why: a corrupt or foreign store must never be repaired into evidence.
+- Test: `crates/run/src/tests.rs::opens_refuse_unsafe_database_companions`;
+  `::oversize_is_refused_before_publication_or_read`
+- Owner: `crates/run/src/db.rs`
 
-The version 4 database upgrade checks existing terminal paths once, before its
-migration transaction, and clears the hint only for absent `tmp/`. Existing
-and unreadable paths remain flagged. The conservative default also covers
-in-flight attempts committed by an older connection. This backfill avoids a
-runtime discovery cursor and repeated scans of settled history. Provider
-state has the bounded retention described in [state](state.md). There is no
-general state deletion command.
+## Reads and waits
 
-Only this terminal, unreserved retry treats names below `tmp/`, including
-rustc incremental `*.lock` files, as disposable payload. Ordinary deletion
-still refuses lock names outside that subtree. Stable owner locks such as
-`writer.lock`, `publication.lock` and the run store lock must keep their inodes:
-unlinking and recreating them could let concurrent owners lock different inodes.
-Settlement keeps the ordinary lock-name protection until reconciliation can
-establish that no reservation remains.
-Reconcile checks worktree reservations before taking the attempt's writer lock.
-That attempt lock excludes read-only guardians and stays held during deletion;
-the worktree writer lock is not held during deletion.
+`output` offsets count original bytes and reads are lossless; prompt reads
+need dispatch-equivalent authority. A terminal attempt with no requested
+output is `NOT_FOUND`. `wait any` returns on the next unseen terminal or
+`input_required` lane, and `wait all` when all are terminal or any needs
+input. The set is fixed at entry and excludes the caller and its ancestors.
+- Why: attention must never wait behind a running sibling.
+- Test: `crates/run/src/tests.rs::create_publish_and_read_exact_bounded_facts`;
+  `crates/fabric-runtime/src/runs.rs::input_required_wakes_all_without_waiting_for_a_sibling`
+- Owner: `crates/run/src/reader.rs`
 
-Nested submission uses a dedicated store under the submitting attempt, selected
-by `PROVENANT_RUN_STATE_DIR`, while identity and config stay on the original
-root. A host-side worker launches only runs whose operation is accepted. A
-child may use a different adapter or account from its parent, by design; the
-host does not bind the two. See
-[nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
+## Nested submission
 
-A project may grant write exceptions to a read-only run in
-`projects/<ProjectId>/read-only.json` (`{"readOnlyWritable": []}` by default).
-Entries name existing directories relative to the verified repository root;
-absolute paths, traversal, symlinked components and Git or provider
-configuration components are refused, and the attempt records every granted path.
+Nested submission uses a dedicated store under the submitting attempt,
+selected by `PROVENANT_RUN_STATE_DIR`; identity and config stay on the
+original root. The host launches only accepted operations, under the rules
+in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
+- Why: a lane must not reach the parent's database or other runs.
+- Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`
+- Owner: `crates/run/src/plan.rs`
 
-The database is rusqlite with WAL, foreign keys and `synchronous=FULL`. Records
-use `schema_version:1`, strict fields and tagged enums; unknown versions fail
-closed without modification. Caps: a JSON record or a prompt 1 MiB, an attempt's
-encoded write grants 256 KiB, a captured stream 64 MiB, a result 4 MiB, an
-`output` read 64 KiB. An oversized result is
-a typed failure, never a certified truncation. Every terminal attempt has a
-`result.md`, possibly empty, with a completeness flag and digest.
+## Not provided
 
-Stored records:
-
-- `RunRecord`: run, project and actor, operation ID, request digest, task IDs,
-  continuation links, optional nested `parent_attempt`, and closure state
-  `open|closing|closed`.
-- `AttemptRecord`: IDs, optional `delivery_id`, `retry_of`, requested, resolved,
-  applied and observed route and effort, confinement, subject identity,
-  deadlines, custody, timestamps, state, outcome, usage with source, artifact
-  paths and digests, and publication errors. It also carries a `Trace`.
-  Writers retain their candidate `head` and `protected_paths` (contained
-  `PathWire` values) when terminal checks complete. CLI lane JSON and MCP run
-  records expose both fields.
-- `AttemptFact`: a `Serialize`-only terminal projection built from validated
-  records. It carries the resolved route and account label, usage, reviewer,
-  `delivery_id`, `queued_at`, optional `started_at`, `provider_ms` and the
-  `Trace`. It is what telemetry and workflow read.
-- `Trace`: `host`, `project`, `run`, `attempt`, `operation`, `actor` and
-  `parent`, each an existing ID and `None` where the write site does not know
-  it. `parent` is the continued attempt, else the attempt that submitted a
-  nested run. The run owner stamps it on each `AttemptRecord` at creation and
-  copies it to every `RunEvent`. The host stays unknown where the edge cannot
-  read the host binding.
-- `OperationRecord`: scope, kind, request digest and
-  `prepared|accepted|terminal|launch_unknown`. The digest covers prompt, route,
-  authority and execution controls, not reader waits.
-- `AdmissionTicket`: operation, attempt and project IDs, sequence, holder
-  custody, reserved counts, memory and disk floors, startup spacing and the
-  admission deadline.
-
-Host admission bounds active lanes at 64 per host and 16 per project, and
-queued lanes at 256 per host. The defaults are a 5 per cent memory floor, a
-500 MiB disk floor, 20 s startup spacing and a one-hour admission deadline.
-
-Attempt states run `queued`, `starting`, `running`, `settling`, `terminal`;
-refusal, queued cancellation and spawn failure can end before `running`. The
-outcomes are `succeeded`, `failed`, `rejected`, `cancelled`, `timed_out`,
-`rate_limited`, `quota_limited`, `auth_required`, `model_unavailable`,
-`permission_denied`, `quarantined`, `review_required`, `lost`, `uncommitted` and
-`input_required`. A completed writer whose protected changes need review ends
-as `review_required`, retains its candidate head and protected paths, and skips
-automatic delivery. It is terminal for lane waits and accepts the
-`lanes --state review_required` filter. A writer that succeeds with edits left
-uncommitted and no new commit ends `uncommitted`, naming the dirty paths, and
-skips host delivery. A dead owner
-is not a failed provider: unresolved custody stays an observation until
-supervisor proves exit or loss. A natural completion wins over a late
-cancellation or deadline. Success needs supervisor-observed exit 0, a matching
-provider identity and a complete, non-empty, validated result.
-
-Publication order is load-bearing:
-
-1. One transaction reserves the operation and digest, IDs and admission tickets.
-   The same key and digest returns the receipt; a different request is
-   `operation_conflict`. Queue overflow rejects before acceptance, and the
-   immutable request is published before acknowledgement.
-2. The scheduler samples resources outside the transaction, rechecks capacity
-   while claiming a ticket, takes writer custody and hands supervisor the
-   plan. A lost acknowledgement records `launch_unknown`, and capacity and
-   writer reservations stay held.
-3. Result and exit evidence are sealed first. Then one commit writes the
-   terminal attempt, run summary, operation state, released capacity and event.
-   Capture bytes are never completion evidence.
-4. Recovery retries a pending commit from sealed artifacts and supervisor facts
-   without replacing a committed outcome.
-5. A run closes only when every task and registered child is terminal. Closure
-   neither prunes evidence nor decides delivery acceptance.
-
-Reserve terminal-publication capacity before launch. If publication keeps
-failing, the attempt stays `settling` with `publication_pending:true`, and
-custody and writer reservations stay held. Run never reports success or
-releases a writer early to hide a bookkeeping failure.
-
-## External contracts
-
-- Provider wire formats, accounts and continuation are the provider modules'
-  ([routing](routing.md)); run stores what they report and never guesses a
-  model or effort.
-- Read-only fallback is explicit and needs a typed transient failure within the
-  retry budget. A writer is never replayed automatically, and every changed
-  route or effort is visible as a new attempt.
-- `fabric` MCP tools render the same run API; MCP waits cap at 55 seconds.
-
-## Failure and recovery semantics
-
-- A scheduler that dies leaves queued work; `reconcile` recovers it, reattaches
-  or checks holders, finishes pending publication and repairs summaries.
-- A starting attempt with no launch summary, no held custody lock and no
-  recorded provider start is settled as rejected ("launch interrupted") and its
-  writer reservation released. A held lock stays unobservable.
-- Refusals and conflicts are typed and exit 1 or 2; setup, I/O and contention
-  exit 3. Invalid or unknown fields, negative values and range overflow fail
-  validation.
-- Output byte offsets count original bytes; lossy text is labelled `utf8-lossy`
-  and diagnostics are redacted stderr only.
-
-## Deliberate cuts
-
-| Cut | Why |
-| --- | --- |
-| Direct `cf_dispatch`, `--chain`, `--plan-only`, `--doctor` | Replaced by routing and provider library calls. |
-| Run-directory scaffolding, `RUN_RECEIPT.json`, `MANIFEST.md`, manual finaliser | One typed attempt record replaces them. |
-| `inspect`, `show`, `prompt`, `result`, `diagnostic-log` verbs | Folded into `lanes` and `output --part`. |
-| `reduce` and synthetic reduction prompts | Dispatch a normal read-only task with explicit result references. |
-| Arbitrary detached commands and PID markers | Supervisor-owned typed completion replaces them. |
-| `fallback:any`, silent effort downgrade, automatic writer replay | Routing supplies a bounded plan; changes are visible. |
-| Alias coercion, typo repair, old-root scan, migration | Strict typed requests; new state starts empty. |
-| `--context-ceiling` and assurance dispatch flags | Workflow owns assurance; routing owns eligibility. |
-| Watchdog silence as an outcome | Only supervisor's closed stop reasons can signal a lane. |
-
-## Verification
-
-- Store and publication invariants (idempotent operations, immutable terminal
-  attempts, `launch_unknown`, pending publication) are tested in
-  `tools/front-door/crates/run/src/tests.rs` and `dispatch_tests.rs`.
-- Admission and delivery are covered by `delivery_tests.rs` and the admission
-  module's unit tests.
-- CLI grammar, ranges and exit codes are checked in the `cli` crate tests.
-- Run `provenant help <verb>` to confirm the flags above. CI runs the full
-  suites; do not run them locally.
+- Watchdog silence as an outcome, `fallback:any` or silent effort downgrade.
+- Alias coercion, old-root scans, record migration or a state deletion
+  command.

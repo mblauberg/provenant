@@ -1,464 +1,233 @@
 # State and config
 
-State publishes the frozen paths, identities, record codecs, configuration
-and managed-installation contract that the other area specs cite. The
-[cross-cutting decisions](README.md#cross-cutting-decisions) govern it, the
-[Rust workspace rules](rust-workspace.md) bound its crates, and
-[CLI](cli.md) owns command rendering and exit codes.
+Owner: `crates/core` (IDs, roots, time), `crates/records` (codecs, digests),
+`crates/config` (config, release, managed install)
+Anchor: `crates/core/src/roots.rs`, `crates/records/tests/contracts.rs`,
+`crates/config/src/tests.rs`, `crates/config/src/managed_tests.rs`
 
-## Purpose and ownership
+State owns root selection, identities, record codecs, typed configuration and
+the managed installation. The [cross-cutting
+decisions](README.md#cross-cutting-decisions) fix the root, layout and
+environment. Config keys are generated reference in the [config
+reference](../reference/config-keys.md); the attempt layout is `AttemptFile`
+in `crates/records/src/attempt_file.rs`. Operator steps are in the [install
+runbook](../runbooks/install.md) and [GC runbook](../runbooks/gc.md). Paths
+are relative to `tools/front-door/`.
 
-Three crates share the area:
+## Roots and identities
 
-- `provenant-core` supplies identities, paths and explicit time and
-  cancellation values. It has no filesystem, environment, clock, entropy or
-  process access.
-- `provenant-records` supplies bounded codecs, canonical bytes, digests and
-  shared transport models.
-- `provenant-config` loads typed configuration, binds projects and hosts, and
-  installs the binary, assets and harness entries.
+### Root selection never falls back
 
-Binary composition connects them to supervisor, confinement, run and Fabric.
-Config has no dependency on those runtimes.
+The root is `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then
+`~/.local/share/provenant/v1`; empty or relative explicit values fail.
+Roots equal to home or `/`, within the product checkout or a pre-1.0 root,
+or containing `.agent-run` are refused, after resolving existing ancestor
+aliases. Old-root contents are never opened. Reads, help and `root` create no
+state; mutations create directories 0700 and files 0600.
+- Why: a wrong root mixes or destroys another installation's state.
+- Test: `crates/core/src/roots.rs::roots_refuse_home_checkout_old_roots_and_any_agent_run_component`;
+  `tests/parser.rs::root_uses_release_location_and_explicit_state_without_creating_it`
+- Owner: `crates/core/src/roots.rs`, `src/roots.rs`
 
-## Boundaries
+### Exact identifiers and time
 
-| State owns | Delegated to |
-| --- | --- |
-| Root selection, path layout, host and project identity | Supervisor: safe no-follow filesystem, locks, publication, entropy and the production clock |
-| Record header rules, canonical bytes, digests, bounded JSON, JSONC and YAML readers | Each domain owner: record bodies, retention, which fields enter a digest |
-| Typed `config.toml`, compiled profiles, `config show` and `check config` | Domain owners: policy types, defaults and semantic validation |
-| Release identity, `install`, `check install`, `uninstall`, harness registrations | CLI: the `HookSpec` table and accepted MCP startup arguments |
-| `bind_project` | Confinement: Git discovery. Fabric-runtime: the cross-host project key |
-| Run's `AttemptFact` model (in records) | Run: constructs it from its store. Telemetry: reduces it. CLI composes the two |
+IDs are newtypes over 16 random bytes, shown as 32 lowercase hex digits.
+`GitOid` accepts only complete 40 or 64 digit names. `RelativePath` rejects
+absolute components, `.` and `..`, and durable paths use tagged `PathWire`,
+never lossy text. `WallTime` is UTC integer microseconds with one rendering,
+durations use checked arithmetic, and `CancelToken` is never serialised or a
+provider signal.
+- Why: a value that normalises two ways lets one record alias another.
+- Test: `crates/core/src/ids.rs::identifiers_are_validated_at_the_wire_boundary`;
+  `crates/core/src/paths.rs::relative_paths_reject_normalisation_and_parent_traversal`
+- Owner: `crates/core/src/`
 
-State owns no run registry, no telemetry ledger and no Fabric import. Routing
-owns account eligibility, and run records the resolved account label.
+## Records
 
-## Contract
-
-### Paths and root selection
-
-| Input or path | Contract |
-| --- | --- |
-| Default root | `~/.local/share/provenant/v1`, one root per host |
-| Override | Global `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then the default. Empty or relative explicit values fail. |
-| Environment | State owns `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (separate inboxes for agents of one provider). Provider and harness variables pass through under their own contracts. No other `PROVENANT_*` inputs. |
-| Uninstalled binary | Requires an explicit absolute `PROVENANT_ROOT` for assets. Installed binaries use their release location and ignore it. |
-| User config | `<state>/config.toml`; optional, user-owned |
-| Host identity | `<state>/host-id` |
-| Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/install.lock` |
-| Immutable release | `<state>/releases/<SourceDigest>/` holding `bin/provenant`, `release.json` and the bundled asset directories (`skills`, `library`, `config`, `instructions`, `scripts`) |
-| Scheduled GC logs | `<state>/gc/stdout.log`, `<state>/gc/stderr.log` (macOS default-state installation) |
-| Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
-| Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
-| Read-only write exceptions | `<state>/projects/<ProjectId>/read-only.json`; confinement-owned `readOnlyWritable` list, default empty. Not a config overlay. |
-| Provider resume state | `runs/<run>/attempts/<attempt>/provider-state/`; expires under `retention.provider_state_days` |
-| Provider history | Attempt `provider-history/`; transcripts retained after resume expiry |
-| Runs | `<state>/runs/<RunId>/` and run's top-level registry store |
-| Worktree custody | `<state>/worktrees/<ProjectId>/`; supervisor and confinement own locks, leases and reservations |
-| Fabric | `<state>/fabric/`; fabric-store owns its database |
-| Other owners | `<state>/workflow/projects/<ProjectId>/{deliveries,sessions}`, `<state>/quota/` |
-| Usage counters | `<state>/usage.jsonl`, `usage.jsonl.1` and `usage.lock`; appended only when the root already exists |
-| Scratch | `<state>/tmp/`; operation-scoped, never a whole-root purge |
-
-There is no telemetry ledger subtree. `telemetry stats` reduces run's terminal
-records using the bundled TOML price asset.
-
-Capture home and environment once. Reject roots equal to home or the
-filesystem root, equal to or beneath the product checkout, or equal to or
-beneath a pre-1.0 root (`~/.agents`, `~/.local/state/agent-harness`,
-`~/.local/state/provenant`, a workspace's `.agent-run`) or any `.agent-run`
-path component. Resolve existing ancestor aliases and append only a normal
-missing tail, because lexical checks cannot protect filesystem access. Do not
-open old-root contents to test containment.
-
-Reads, help and `root` create no state, though they still append to an
-existing root's usage log. Mutations initialise explicitly with directories
-0700, files 0600 and executables 0755. Config never opens SQLite. Each owner
-uses supervisor's locks and publication; no whole-root sweeper exists.
-
-### Identities and time
-
-IDs are distinct newtypes over 16 supplied random bytes, shown as 32 lowercase
-hex digits. State initialisation persists `HostId` once under lock.
-`ProjectId` is host-local, allocated per canonical Git common directory.
-Linked worktrees share it but have separate `WorkspaceId` bindings and writer
-leases. Non-Git workspaces bind their canonical directory. It is never a
-federation key; Fabric-runtime owns `bind_federated_project` and the
-cross-host key, and equal remote URLs never merge identities silently.
-Rebinding needs an explicit project operation.
-
-`ActorId` names an attributed actor, not authority or a route. `WorkScope` is
-a closed enum over project, workspace and run, and domain boundaries validate
-membership. `CancelToken` is an in-memory cooperative flag that is never
-serialised and never a provider signal.
-
-`WallTime` is UTC integer microseconds with one RFC 3339 `Z` rendering.
-Monotonic values and durations use checked integer arithmetic and are never
-persisted as cross-process deadlines. Core owns the `Clock` trait; supervisor
-owns the production clock; tests inject a fake. Supervisor's state machine
-receives sampled values and never reads the clock.
-
-`GitOid` accepts only complete 40 or 64 digit hexadecimal object names and
-emits lowercase. It is distinct from Provenant's SHA-256 `Digest`.
-
-Paths stay `PathBuf` or `OsString`. Durable Unix paths use tagged `PathWire`
-(UTF-8 or lowercase hex bytes), never lossy conversion. `RelativePath`
-rejects absolute components, `.` and `..`.
-
-### Records and codecs
+### Strict, bounded records
 
 Stored records are typed serde models with `schema_version`, closed enums and
-`deny_unknown_fields`. Unknown major versions fail before mutation. Facts
-built only by trusted edge code (workflow validation facts, run's
-`AttemptFact`) derive `Serialize` only. Decode a separate stored record and
-validate it before constructing a fact, so deserialisation cannot manufacture
-evidence.
+`deny_unknown_fields`; unknown major versions fail before mutation. The
+reader rejects duplicate members, invalid UTF-8, trailing input, non-finite
+numbers and out-of-range integers, bounds bytes while reading (1 MiB config,
+8 MiB records, depth 64) and never echoes the rejected value. Edge-built
+facts are `Serialize` only, so deserialisation cannot manufacture evidence.
+- Why: ambiguous JSON parses differently in different readers, and a forged
+  file must not become evidence.
+- Test: `crates/records/tests/contracts.rs::bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow`;
+  `::typed_decode_errors_do_not_disclose_rejected_values`
+- Owner: `crates/records/src/`
 
-The records reader rejects duplicate object members, invalid UTF-8, trailing
-input, non-finite numbers and integers outside i64 and u64 before typed
-deserialisation. Default limits: 1 MiB per config or metadata file, 8 MiB per
-general JSON record, nesting depth 64 and 100,000 collection members. Callers
-may request a smaller or an explicit larger bound. Bytes are bounded while
-reading. Errors carry code, path and location, never the rejected value.
+### Digest preimage
 
-`CanonicalV1` defines digest-bearing bytes: UTF-8 JSON with no whitespace,
-keys sorted recursively by UTF-8 bytes, array order preserved, minimal string
-escapes, no Unicode normalisation, shortest decimal integers, and no floats
-(owners use integer units or decimal strings). It is a Provenant contract, not
-RFC 8785. `record_digest(kind, version, bytes)` hashes a fixed domain prefix,
-kind, version and canonical bytes, and renders `sha256:<64 hex>`. File digests
-hash raw bytes under a separate `FileDigest` type. Domain owners choose which
-fields enter each digest.
+`CanonicalV1` is UTF-8 JSON with no whitespace, keys sorted recursively by
+UTF-8 bytes, array order preserved, minimal string escapes, no Unicode
+normalisation, shortest decimal integers and no floats; it is not RFC 8785.
+`record_digest(kind, version, bytes)` hashes a fixed domain prefix, kind,
+version and canonical bytes as `sha256:<64 hex>`. `FileDigest` hashes raw
+bytes as a separate type. Domain owners choose which fields enter a digest.
+- Why: a digest is an identity only if every writer computes the same bytes.
+- Test: `crates/records/tests/contracts.rs::canonical_v1_sorts_keys_uses_required_escapes_and_separates_digest_domains`;
+  `crates/records/src/canonical.rs::record_digest_uses_exact_domain_framing_and_canonical_input_bytes`
+- Owner: `crates/records/src/canonical.rs`
 
-The YAML reader is a bounded subset for Agent Skills frontmatter and
-`agents/*.yaml` sidecars (ADR 0028). It returns typed maps, sequences, strings
-and booleans with line and column spans. It refuses anchors, aliases, tags,
-flow maps, multiple documents, tabs, duplicate keys and multiline plain
-scalars, naming the construct and line. Plain scalars resolve only `true` and
-`false`; ambiguous words need quoting. Limits: 256 KiB, depth 32, 10,000
-nodes. The workflow skill validator owns allowed metadata keys.
+### YAML subset
 
-### Configuration
+Skill frontmatter and `agents/*.yaml` use a bounded YAML subset (ADR 0028)
+that refuses anchors, aliases, tags, flow maps, multiple documents, tabs,
+duplicate keys and multiline plain scalars; only `true` and `false` resolve.
+- Why: YAML's implicit typing and references are a parsing hazard.
+- Test: `crates/records/tests/contracts.rs::yaml_subset_parses_frontmatter_and_sidecars_and_refuses_ambiguous_values`;
+  `crates/records/tests/external_yaml.rs::skill_frontmatter_and_agent_sidecars_use_the_subset`
+- Owner: `crates/records/src/`
 
-One strict typed `<state>/config.toml` declares `schema_version = 1`. Unknown
-keys, duplicates, bad types or ranges and unsupported versions fail. Absent
-means compiled defaults, and unreadable or malformed means error. There is no
-include, interpolation, executable configuration or automatic migration.
+## Configuration
 
-The optional `profile = "balanced" | "economy" | "rigorous"` selects a
-compiled profile; omission selects `balanced`. Domain crates export a
-`DomainSection` entry and their own per-profile TOML assets, which config
-nests under `[domains.<name>]`. Config holds no domain policy. Domain owners
-validate values and enforce their minima, and a preset never grants authority.
-The config crate loads user sections over the selected defaults once, with no
-profile layering, project overlay or per-request selector.
+### Strict typed config
 
-Every allowed key appears in the section's complete default asset. Tables
-merge recursively and arrays replace as a whole. Knobs resolve through the
-embedded registry: default, profile preset, then the user's `[knobs]`
-override. `config set` edits `profile` or a registry knob (a user decision,
-#1118) and `config unset` removes a knob override. There is no
-`config reset`, profile listing, project `.provenant.toml`, `PROVENANT_PROFILE`
-or per-knob environment variable.
+`config.toml` declares `schema_version = 1`; unknown keys, duplicates, bad
+types or ranges and unsupported versions fail, absence means defaults, and a
+symlinked or unreadable file is an error. There is no include,
+interpolation, migration, profile layering or per-knob environment
+variable, and a preset never grants authority. `config set` writes
+atomically and refuses to rewrite an invalid file; `config show` redacts
+secret leaves and never mutates.
+- Why: implicit or executable configuration cannot be audited.
+- Test: `crates/config/src/tests.rs::closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_without_echoing_input`;
+  `::knob_edit_refuses_to_rewrite_an_invalid_config`
+- Owner: `crates/config/src/`
 
-`check config` collects unknown-key, type, range and semantic findings,
-ordered by source line, column, dotted path and rule, with a limit of 1 to
-100, a total count and a truncation flag. CLI paginates and maps findings to
-exit 1. Malformed TOML is a distinct syntax error mapped to exit 2. Diagnostics
-keep one-based line and column, the dotted key and an origin; an invalid
-compiled asset is attributed to the compiled origin, never the user's file.
-`Redacted<T>` serialises as `[redacted]` for secret-bearing leaves.
+### Provider-state retention
 
-The root `[gc]` section configures lane cache collection: `schedule` is a
-boolean (default true), `idle_days` is 1 to 3650 (default 7), and `free_floor`
-is an optional size string (default unset). Whole binary sizes accept `B`,
-`K`, `M`, `G`, `T` and `KiB` through `TiB`; plain numbers mean GiB.
-The installer renders idle days and an optional floor into the macOS agent's
-arguments. Scheduled runs reread `schedule` before collection, so false
-prevents subsequent automatic collections. Reinstall updates the other agent
-arguments and removes the unchanged owned plist when scheduling is disabled.
+Settlement prunes only proven regenerable provider caches. GC expires
+credential entries after 24 hours and resumable state after
+`retention.provider_state_days`, archiving history first and leaving result,
+captures, exit evidence and digests untouched; resume then fails
+`PROVIDER_STATE_EXPIRED` before spending. GC takes locks without waiting,
+spares reservations and pending continuations, disposes through
+identity-checked tombstones, never follows links and writes nothing on a dry
+run (ADR 0031).
+- Why: freeing credentials and space must not destroy evidence or a session
+  in use.
+- Test: `crates/run/src/retention.rs::gc_spares_nonterminal_attempts_and_contention_and_reservations`;
+  `::gc_retries_only_authorised_tombstones_and_never_follows_links`
+- Owner: `crates/run/src/retention.rs`
 
-The root `[retention]` section sets `provider_state_days`, an integer from 1
-to 3650, default 7. GC rereads it for every sweep, independently of cache idle
-days and free-space pressure. Terminal `finished_at` starts the age.
-Known credential entries expire after 24 hours; resumable provider state
-expires after the configured days. The first sweep applies the policy to
-existing attempts without a migration.
+## Release identity
 
-Run owns retention in a separate module. Terminal settlement prunes the
-provider's proven regenerable caches; the initial table contains Codex's
-`cache/`, `plugins/`, `skills/` and `models_cache.json`. Candidate
-`provider.txt` records the adapter. When the marker is absent, a single
-existing candidate or a candidate holding the recorded session can use its
-attempt's applied provider for cache pruning and expiry.
-Resume copies skip GC tombstones at every depth and, when `provider.txt` is
-`codex`, the candidate's top-level cache names, including caches still being
-pruned at settlement.
+### Source digest preimage
 
-Before full expiry, GC archives Codex session directories, history files and
-versioned state and thread-history SQLite files, including WAL, SHM and journal
-companions, under `provider-history/candidate-N/`. Claude's private
-`claude-config/projects/` is also archived. Unclassified provider payloads
-are kept conservatively as history after known credential removal. Result,
-captures, exit evidence, records and digests stay unchanged. An expiry marker
-makes resume return `PROVIDER_STATE_EXPIRED` before spending a continuation.
-
-GC scans only indexed terminal attempts, including child stores. It checks
-held directory identities, takes publication and existing attempt writer
-locks without waiting, and spares retained or unreadable reservations.
-Resume holds shared publication exclusion through continuation acceptance;
-a nonterminal continuation protects its source. Whole-directory disposal
-uses an identity-bearing tombstone rename and `PayloadTree`; retries validate
-the original path and identity. Symlinks are unlinked without following their
-targets. Dry runs make no retention writes. See the [GC runbook](../runbooks/gc.md)
-and [ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md).
-
-The catalogue, adapter table and prices ship as TOML release assets and are
-never copied into mutable state. Routing, providers, quota and workflow
-validate their semantics, and telemetry owns the price schema. `config show`
-returns effective non-secret values with their origins. Neither command
-mutates state or contacts a provider, and there are no config or install MCP
-tools. Processes use an immutable startup snapshot.
-
-## Commands and installation
-
-CLI supplies the JSON envelope, the 1 MiB result cap and exit mapping. Install
-success or no-op is `ok`, drift is findings, a foreign selector is refused,
-malformed input is invalid, and I/O or lock contention means cannot proceed.
-After a partial write, `data` lists completed and remaining actions and a
-re-apply instruction. Harness changes are printed before they are applied
-(stderr preview in JSON mode), and a failed preview stream prevents writes.
-
-| Command | Behaviour |
-| --- | --- |
-| `root` | Prints the absolute release root as one line, so `$(provenant root)/skills/...` works. No Git, SQLite, state creation or provider probes. |
-| `config show\|set\|unset`, `check config` | Effective configuration and origins, knob edits, and validation findings. |
-| `install [--dry-run]` | Requires `--source ABS` (a staged release) and one or more `--harness NAME` (`claude`, `codex`, `cursor`, `agy`, `opencode`). Optional `--bin-dir`, `--hooks on\|off` (omission preserves hook ownership; disabled on first install), `--adopt-existing`. Validates every destination and prints every replace, remove and create before writing. Dry-run creates no root, lock or receipt. |
-| `check install` | Optional `--source ABS`. Compares the installed binary, assets, receipt and owned harness selectors without repair. |
-| `uninstall` | Explicit `--harness NAME`. Removes unchanged owned entries only and keeps state, release assets, user skills, config and the running binary. |
-
-### Release identity and bootstrap
-
-`cargo build --release --locked` in `tools/front-door` runs a workspace
-`build.rs` that computes a source digest with records' pure digest module. It
-covers shipped workspace source (each member's `src/`, `assets/` and `build.rs`),
-manifests, the lockfile, the toolchain, Cargo configuration, the release packager
-(`examples/package-release.rs`) and the bundled assets.
-Cargo watches existing input paths and the checkout's Git index, including in
-linked worktrees. Newly created optional inputs, such as a member's `build.rs`
-or `assets/`, are picked up once tracked because the index changes. Names are
-sorted workspace-relative POSIX paths, framed by lengths, under the prefix
+The source digest covers shipped workspace source (each member's `src/`,
+`assets/` and `build.rs`), manifests, the lockfile, the toolchain, Cargo
+configuration, the release packager and bundled assets. Names are sorted
+workspace-relative POSIX paths, framed by lengths, under the prefix
 `provenant-source-v1`. Duplicate, missing, symlinked or escaping inputs are
-rejected, and there is no digest environment override. Release builds trim
-source paths so checkout paths do not affect binary bytes.
+rejected and there is no override; test-only edits do not change it.
+- Why: the digest is the installed binary's identity.
+- Test: `crates/records/src/source.rs::hashes_sorted_framed_names_and_exact_contents`;
+  `build.rs::member_test_edits_do_not_change_the_source_digest`
+- Owner: `build.rs`, `crates/records/src/source.rs`
 
-Packaging emits a typed `release.json` beside `bin/provenant` with the source
-digest, target triple, toolchain and a bounded file inventory with digests.
-`--version --json` reports the embedded digest and record and config
-versions. Executable assets keep mode 0700 and other assets 0600.
+### Immutable releases
 
-An installed binary resolves its own location to the release root holding
-`release.json`, and `provenant root` prints it. A digest proves identity, not
-publisher trust. Install verifies the manifest, platform, file bytes and
-modes, then runs bounded version and help smoke checks through supervisor
-(30 s, capped output, no provider access).
+Install verifies manifest, platform, bytes and modes and smoke-tests the
+binary before trusting a release. `release.json` is published last; the
+release is then immutable and never repaired. Equal digests with different
+manifests fail `ReleaseConflict`. A digest proves identity, not publisher
+trust.
+- Why: a partial or swapped release must never run.
+- Test: `crates/config/src/managed_tests.rs::bytes_and_modes_are_verified_and_existing_release_is_immutable`;
+  `::interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_staging_file`
+- Owner: `crates/config/src/release.rs`
 
-Install copies verified files into the immutable release directory, then
-atomically publishes the stable binary link and per-entry skill and
-instruction links. Re-application accepts exact desired bytes and links as
-no-ops, including writes completed before a crash. `release.json` is published
-after all other release entries, and afterwards the release is immutable. Equal
-source digests with different manifest bytes fail with a typed
-`ReleaseConflict` naming both digests. Upgrades remove unchanged owned entries
-a target no longer ships and leave changed or unmanaged entries. The only lock
-is `<state>/install/install.lock`.
+## Managed install
 
-The receipt records the release identity, resolved targets, selectors and
-expected owned values. It is published last. A target is a harness plus its
-resolved skills directory, so one receipt may hold several targets of a harness
-(for example one per `CLAUDE_CONFIG_DIR`). Targets never share a destination.
-Install replaces only the selected targets and carries the rest over, and
-`check install` verifies every recorded target. Uninstall selects the target
-matching the environment's home, or else every recorded target of the harness.
-No cross-file or cross-host atomicity is claimed.
+### Preview before every write
 
-After a home or state-root move, the recorded binary link identifies the old
-state root. Old-home candidates come from the current bin-directory tail, the
-recorded default bin directory, the moved default state root, and recorded
-harness skills directories compared with defaults. The first candidate that
-neither contains nor sits within the current home identifies the
-old home, independently of the current bin setting or state layout. Detection
-is heuristic: an unchanged external harness directory with a default name, such
-as `/data/profile/.codex`, can resemble an old home through its `skills` path.
-Stale entries produce
-`relocated_stale_entry` findings without inspecting or changing their paths;
-a moved state root also produces `state_root_moved`. These findings remain
-visible when no target is selected. Uninstall forgets selected stale ownership
-and retains unselected entries and the binary record. Selectors outside the old
-home retain their existing behaviour. Reinstall drops stale targets from the
-fresh receipt and requires manual cleanup of dangling links; see the
-[install runbook](../runbooks/install.md).
+Every harness-config change is printed before it is applied, a failed
+preview prevents writes, and `--dry-run` creates no root, lock or receipt.
+Identity and bytes are rechecked before each atomic publication, and drift
+stops the install. Locks serialise cooperating installers only, so quit
+harness clients first.
+- Why: the user's harness config changes only in view.
+- Test: `crates/config/src/managed_tests.rs::dry_run_and_broken_preview_create_nothing`;
+  `::drift_between_preview_and_apply_refuses_before_file_writes`
+- Owner: `crates/config/src/managed.rs`
 
-Omitting `--hooks` on re-install retains and refreshes the selected target's
-unchanged owned hook registrations. Edited hooks are preserved, relinquished
-from the receipt and reported. Missing hooks also leave the receipt. Explicit
-`--hooks on` refuses edited Claude hooks and names `--hooks off` as recovery.
-Explicit `--hooks off` removes exact owned
-matches, relinquishes modified entries and reports them.
+### Only unchanged owned entries are removed
 
-On macOS, installation into the account's default state root also owns
-`~/Library/LaunchAgents/dev.provenant.peer.plist`. The plist participates in
-the preview, receipt and `check install`. Publication refuses symlinks at
-the plist or any parent, stages with `O_NOFOLLOW | O_EXCL`, then renames.
-Its PATH starts with `/usr/bin:/bin:/usr/sbin:/sbin`, followed by the absolute
-install bin directory and existing absolute directories holding resolved
-Claude, Codex and Git executables, when known. Empty and relative entries are
-excluded. A Claude or Codex directory inside a project's Git worktree is
-skipped with a note and the search continues, so a project-local entry such
-as direnv's `PATH_add` cannot lend the agent its other executables. Each
-enclosing worktree is found by an ancestor `.git` file or directory and
-resolved, through `gitdir:` and `commondir`, to its common directory. It is
-a project's when its top level or common directory matches a Git-backed
-binding (`<root>/.git`), when it lies under such a project's `.worktrees/`,
-or when the worktree registry lists it. Unreadable bindings are noted and
-leave only the registry to match. Other clones, such as `~/.nvm`,
-`/opt/homebrew` or a `$HOME` kept in Git, stay eligible, and non-Git bindings
-never match. Uninstall of
-the last recorded target boots out the service before removing an exact
-receipt match. A modified plist and its service are kept and reported;
-failed bootout leaves the plist owned for retry.
-The earlier installer's unreceipted plist is recognised only when its complete
-bytes match the historical template for the validated receipt's binary path
-and state root, with mode 0600 or 0644. Upgrade replaces it with the sanitised
-rendering and records ownership; uninstall can remove it directly. Unknown
-or modified historical plists are preserved.
+Removal unlinks only entries whose current value matches the receipt, never
+recursively; edited entries, unmanaged siblings, state, user skills, config
+and the running binary stay. `--adopt-existing` never authorises deletion
+and refuses symlinked executables, foreign directories and inline secret
+environment. Protected destinations and mount descendants are refused before
+any read.
+- Why: install must never delete what it cannot prove it wrote.
+- Test: `crates/config/src/managed_tests.rs::uninstall_keeps_edited_links_and_unmanaged_siblings_and_binary`;
+  `::mcp_conflict_does_not_adopt_foreign_env_or_create_state`
+- Owner: `crates/config/src/managed.rs`
 
-The same macOS default-state installation owns
-`~/Library/LaunchAgents/dev.provenant.gc.plist` with selector `gc-agent` and
-mode 0600. It uses the same preview, receipt, symlink refusal and exact-match
-removal rules as the peer agent, and is removed only with the last harness
-target or when scheduling is disabled on reinstall. `StartInterval = 21600`
-runs cache GC every six hours, without `KeepAlive` or an immediate install-time
-collection. The agent passes `--scheduled` to discover registered projects
-without a checkout as its working directory. Stdout and stderr are under
-`<state>/gc/`. Custom-state and non-macOS installs leave this agent alone.
+### Editors preserve foreign bytes
 
-### Harness registry
+TOML edits use `toml_edit`; JSON and JSONC edits splice owned leaves and
+reparse, keeping comments, trailing commas and order. Malformed, duplicate
+or ambiguous containers are rejected unchanged, the full user config is
+never logged, and symlinked configs are refused. Each MCP entry runs the
+absolute stable binary with `--state-dir ABS fabric mcp --client NAME` and
+no secret environment, matching the recorded client contracts.
+- Why: a harness config holds the user's other tools and secrets.
+- Test: `crates/config/src/managed_tests.rs::five_client_install_preserves_foreign_hooks_comments_and_reapplies`;
+  `::mcp_registry_matches_recorded_client_config_contracts`
+- Owner: `crates/config/src/splice.rs`, `crates/config/src/harness.rs`
 
-Defaults derive from each harness home. Typed user-only
-`[install.targets.<harness>]` may override absolute home and config paths, and
-`[install]` may set `bin_dir`. Precedence is explicit flag, then config, then
-`CLAUDE_CONFIG_DIR` or `CODEX_HOME`, then defaults. Paths are resolved once
-and shown in the preview and receipt; a project or request cannot change them.
+### Hook ownership
 
-| Harness | MCP file and owned selector | Hooks | Skills directory | Instruction path |
-| --- | --- | --- | --- | --- |
-| Claude Code | `~/.claude.json`: `mcpServers.fabric` | `~/.claude/settings.json`: owned command leaves in `hooks.<event>[]` | `~/.claude/skills/` | `~/.claude/CLAUDE.md`, companion `HARNESS.md` |
-| Codex | `~/.codex/config.toml`: `[mcp_servers.fabric]` | `[features] hooks = true` plus `~/.codex/hooks.json` | `~/.codex/skills/` | `~/.codex/AGENTS.md`, companion `HARNESS.md` |
-| Cursor | `~/.cursor/mcp.json`: `mcpServers.fabric` | none supported | `~/.cursor/skills/` | none supported |
-| Agy | `~/.gemini/config/mcp_config.json`: `mcpServers.fabric` | none supported | `~/.gemini/skills/` | `~/.gemini/GEMINI.md`, companion `HARNESS.md` |
-| OpenCode | `~/.config/opencode/opencode.jsonc`: `mcp.fabric` (`type="local"`) | none supported | `~/.config/opencode/skills/` | `~/.config/opencode/AGENTS.md`, companion `HARNESS.md` |
+Omitting `--hooks` refreshes unchanged owned hooks and relinquishes edited
+ones; a first install leaves hooks off. `--hooks on` refuses edited Claude
+hooks and names `--hooks off` as recovery, which removes exact owned
+matches. A user's own Codex `hooks = true` is kept.
+- Why: a user's hook edits outrank the installer's.
+- Test: `crates/config/src/managed_tests.rs::edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery`;
+  `tests/install.rs::hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it`
+- Owner: `crates/config/src/hooks.rs`
 
-Every MCP entry executes the absolute stable binary with
-`--state-dir ABS fabric mcp --client NAME`, with no checkout, interpreter or
-secret environment. CLI owns the `HookSpec` table (harness, protocol event,
-matcher, timeout, handler) that the installer reads, and binary composition
-passes it to config. Unsupported hooks refuse before writes, and no hook is
-registered without a fixture and policy. Removing Codex hooks removes only an
-unchanged installer-owned feature value and preserves a user's own
-`hooks = true`.
+### Moved homes are reported, never acted on
 
-Editors preserve unrelated bytes. TOML uses `toml_edit` document mutation.
-JSON and JSONC use records' bounded span parser to splice owned leaves and
-reparse, keeping comments, trailing commas and array order. A comment-free
-Claude `settings.json` is reformatted only when Provenant's hook edits change
-it, using its own two- or four-space indent; an unchanged file is never
-rewritten. Malformed, duplicate or ambiguous containers are rejected unchanged,
-and the full user config is never serialised or logged. Config files must be
-regular; a symlinked config refuses with its path. `~/.claude.json` has a 16
-MiB bound and other configs 1 MiB. Quit Claude Code before installing, because
-it rewrites its file while running. Identity and bytes are rechecked
-immediately before publication. A harness write between that recheck and
-publication is lost, so quit the harness before installing. Links are inspected
-with `readlink` and never opened through the old target.
+After a home or state-root move, stale entries produce findings without
+their paths being inspected or changed; uninstall forgets selected stale
+ownership and reinstall leaves dangling links for manual cleanup.
+- Why: an old path may now belong to something else.
+- Test: `crates/config/src/managed_tests.rs::uninstall_after_home_rename_never_acts_on_old_paths`;
+  `::check_after_home_rename_never_inspects_old_config_paths`
+- Owner: `crates/config/src/managed.rs`
 
-`--adopt-existing` covers only an occupied destination selector or the stable
-regular executable, pinning its identity and digest. It never authorises
-deletion, refuses symlinked executables and foreign directories, and refuses
-inline secret environment values so neither preview nor receipt becomes a
-credential store. Existing regular user instructions are preserved, and if no
-owned link can be installed the preview reports a manual include.
+### LaunchAgents
 
-## External contracts
+On macOS with the default root, install owns the peer and GC LaunchAgents.
+They join the preview and receipt; publication refuses symlinks at the plist
+or any parent and stages with `O_NOFOLLOW | O_EXCL`. The peer agent's PATH
+never includes a directory inside a registered project's worktree. A failed
+bootout keeps the plist owned, and a historical plist is adopted only on
+exact template bytes.
+- Why: a LaunchAgent runs unattended at login with the user's authority.
+- Test: `crates/config/src/managed_tests.rs::peer_agent_refuses_symlinked_plist_and_parent_before_writes`;
+  `crates/fabric-runtime/src/peer_agent.rs::provider_path_skips_a_registered_project_and_clones_nested_in_it`
+- Owner: `crates/config/src/managed.rs`, `src/gc_agent.rs`
 
-- Harness configuration files and their MCP and hook shapes are owned by each
-  client. Sanitised real-client captures live in
-  `tools/front-door/tests/fixtures/contracts/`, with client and version,
-  platform, capture method and redactions. They use isolated homes and fake
-  MCP executables.
-- Agent Skills frontmatter and `agents/*.yaml` are external inputs that the
-  YAML subset reads (ADR 0028).
-- Git object formats (SHA-1 and SHA-256) arrive through confinement's
-  discovery. State does no Git work.
+### Re-apply is the recovery
 
-## Failure and recovery
+Each update is atomic and parent-synced. A partial install lists applied and
+remaining actions, and re-running the same `install` recovers it, even with
+no receipt published. There are no rollback journals, saved binaries or
+displaced user files, and ENOSPC or uncertain publication is a typed
+failure.
+- Why: one idempotent path is easier to trust than a rollback engine.
+- Test: `crates/config/src/managed_tests.rs::crash_after_any_publication_reapplies_without_a_receipt`;
+  `::receipt_publish_failure_reports_partial_actions_and_reapplies`
+- Owner: `crates/config/src/managed.rs`
 
-Locks cover the install root and selected destination parents in stable
-order, and all proposals are validated before writing. Identity and content
-are rechecked before each atomic publication, and on drift install stops and
-reports the selector. The locks serialise cooperating installers; an
-uncooperative editor racing the final recheck is not excluded, so quiesce
-harness clients and config editors before installing. No compare-and-swap or
-exchange semantics are claimed.
+## Not provided
 
-Each file or link update is atomic and parent-fsynced. On failure, the outcome
-lists applied and remaining actions, and re-running the same `install` after
-resolving conflicts is the recovery path. Exact-desired matching makes it
-idempotent even when no receipt was published. There are no automatic
-inverses, saved binaries or displaced user files. Removal compares current
-values with the receipt and unlinks only unchanged owned entries, never
-recursively. ENOSPC, broken output and uncertain publication are typed
-failures, never silent success.
-
-A receipt's `legacy` member is decoded and ignored whatever its value; the next
-install write drops it, and newly written receipts omit the key. For reinstall
-steps and link conflicts, see the
-[install runbook](../runbooks/install.md#receipt-recovery).
-Obsolete pre-1.0 entries and Git launchers require manual cleanup and are not
-owned or audited by install, uninstall or `check install`.
-
-## Deliberate cuts
-
-| Cut | Reason |
-| --- | --- |
-| Fused or split roots, root pointers, seeded defaults, three-way refresh | Fresh state and immutable release assets remove copied-catalogue reconciliation. No `AGENTS_HOME` or `AGENT_FABRIC_*` root fallback and no stale-checkout probe. |
-| `config reset`, profile listing, project overlays, task classes, per-knob environment variables | Never used in the usage audit. Domain policy still enforces authority, confinement and review minima. |
-| Advisory knobs and the root `[routing]` alias | No code read the advisory knobs; their defaults are chair judgement in the `orchestrate` skill. Routing config lives only under `[domains.routing]`. |
-| Generic installer transactions (bundle, plan, apply, recover, rollback journal, binary backup) | Re-applying `install` is the recovery path. |
-| Kiro registration | No observed use. |
-| `_shared`, JavaScript workflows, old link layouts | Retained skills are replaced individually. Obsolete links require manual cleanup; custom skill contents and old receipts are not read. |
-| Runtime provisioning and Codex skill overrides | The product needs no Python, Node or daemon. Another tool's skill preferences are left alone. |
-| Telemetry ledger and generic import | Telemetry reduces run records. Nothing imports old state; an old Fabric store is left untouched. |
-| Configuration includes, interpolation, automatic migration | Executable or implicit configuration cannot be audited. |
-
-## Verification
-
-- Core and records unit tests (`crates/core`, `crates/records`) cover ID, path,
-  version and time overflow, canonical bytes and digest separation,
-  integer, duplicate and bound refusal, YAML and JSONC syntax, and
-  `Serialize`-only fact construction.
-- Config tests (`crates/config/src/tests.rs`, `release_tests.rs`,
-  `managed_tests.rs`) cover typed TOML, presets, knob resolution, origins,
-  editor byte preservation, first install, no-op, partial failure then
-  re-apply, drift, malformed config, adoption and
-  `uninstall`.
-- `tools/front-door/tests/install.rs` and `checks.rs` drive the real commands
-  with synthetic release, provider and MCP fixtures, and assert that help and
-  `root` create nothing and that unowned spans stay byte-identical.
-- Process tests on Linux and macOS use handshake barriers for lock contention,
-  deadlines, edits detected before publication, crash at each write and
-  ENOSPC, fsync and rename errors. All process access is supervisor-owned,
-  with no sleeps. Tests point HOME, state and harness paths at temporary
-  roots. Full workspace and platform runs happen in CI.
+- Root pointers, seeded defaults and old-root fallbacks.
+- `config reset`, project overlays and per-knob environment variables.
+- A telemetry ledger or import of old state.

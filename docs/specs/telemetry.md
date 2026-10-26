@@ -1,234 +1,84 @@
 # Telemetry
 
-## Purpose and ownership
+Owner: `crates/telemetry` (reducer, prices, trace, usage log)
+Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
+`tests/usage.rs`
 
-`provenant-telemetry` reduces run's terminal attempt records with the bundled
-price table. It reports supervised usage, API-equivalent cost estimates, route
-outcomes, route comparison and measurement coverage. It owns no store, writer lock, background collection or
-provider operation, so a report failure cannot signal a provider or change a
-published outcome.
+Telemetry reduces run's terminal attempt records with the bundled price table
+into per-route outcomes, usage and API-equivalent cost, and exports a trace.
+There is no ledger, store or collector. Grammar is in the generated [CLI
+reference](../reference/cli.md); quota belongs to [routing](routing.md).
+Paths are relative to `tools/front-door/`.
 
-The reader is the user improving the harness and evaluating configurations,
-efficiency, performance and cost-effectiveness. That needs per-route outcomes,
-usage and cost, not raw OTel streams or a second store. Every report reduces
-run's terminal attempt records on demand. The command edge also keeps a bounded
-local demand log; the reducer stays pure.
+## A report cannot touch a lane
 
-The [cross-cutting decisions](README.md#cross-cutting-decisions) bind state
-root, command envelope and exit codes.
+Telemetry owns no store, lock, background collection or provider operation,
+and run does not depend on it. It reads only through run's `AttemptReader`.
+An absent run store gives an empty report and creates nothing; a corrupt one
+is an error.
+- Why: measurement must never perturb what it measures.
+- Test: `tests/workspace_policy.rs::internal_edges_obey_the_layering_table`;
+  `crates/telemetry/src/tests.rs::empty_reader_has_complete_zero_cost`
+- Owner: `crates/telemetry/src/`
 
-## Boundaries
+## Bounded, honest totals
 
-| Area | Owns | Delegates |
-|---|---|---|
-| Telemetry | Reducer, report shape, price schema, trace export, demand counter record kinds | Records, admission, terminal publication (run) |
-| [Run](run.md) | Durable attempt facts and the `AttemptReader` | Nothing to telemetry; there is no run to telemetry dependency |
-| [CLI](cli.md) | clap grammar, root and project selection, rendering, composing run, workflow and telemetry | Reduction |
-| [State](state.md) | Loading the bundled price asset | Price schema validation |
-| [Routing](routing.md) | Account eligibility, quota windows, reset semantics, probes | Reading the resolved label from run's fact |
+Reduction is bounded to 100,000 attempts, 10,000 groups and 1 MiB of keys,
+checked before insertion; a bound returns `TooLarge`, never partial totals.
+Sums add known values and count the rest as missing; `cost.complete` is null
+when any cost is unknown, with the known lower bound reported. An unpriced
+subscription is not free, and the latest task outcome is the
+highest-numbered attempt.
+- Why: a partial or zero-filled total reads as a real one.
+- Test: `crates/telemetry/src/tests.rs::attempt_and_group_limits_are_enforced_before_insertion`;
+  `::missing_usage_and_prices_preserve_known_lower_bounds`
+- Owner: `crates/telemetry/src/`
 
-Telemetry depends only on `core`, `records` and `config`. CLI composes the
-crates. Core supplies IDs and timestamps; providers normalise usage; run owns
-reader consistency and decoding limits.
+## Exact money and prices
 
-## Contract
+Telemetry never re-subtracts provider-normalised counts. Cost accumulates in
+checked integers, divides by 10^6 once and rounds half-up once; floating
+point is never used. Prices are keyed by exact provider and model; an omitted
+rate is unknown, zero needs a verified zero, and there is no runtime fetch,
+regex or alias. Cost is an estimate, not a bill.
+- Why: rounding drift or a guessed price corrupts route comparison.
+- Test: `crates/telemetry/src/tests.rs::rounding_occurs_once_across_categories_attempts_and_groups`;
+  `::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
+- Owner: `crates/telemetry/src/`, `config/telemetry-prices.toml`
 
-### Commands
+## Trace export
 
-```text
-provenant telemetry stats [--usage] [--since D] [--until D] [--run-id ID] [--detail] [--json]
-provenant telemetry trace [--out FILE] [--since D] [--run ID] [--peers] [--json]
-provenant quota show | display [--headline auto|5h|weekly] [--icon ID] | tick
-```
+`telemetry trace` writes Chrome Trace Event JSON, one process per host and
+one thread per attempt, with flow arrows to `Trace.parent` across hosts. An
+unreadable peer is listed with its error and the rest of the export stands.
+- Why: one peer outage must not hide the local picture.
+- Test: `crates/telemetry/src/tests.rs::trace_groups_hosts_and_links_a_child_to_its_parent_across_them`;
+  `crates/cli/src/run/remote.rs::peer_export_asks_every_configured_peer_for_its_lanes`
+- Owner: `crates/telemetry/src/`
 
-`provenant help telemetry` and `provenant help quota` own the flags. Dates mean
-midnight UTC and timestamps require an offset; `--since` also takes a whole
-number of seconds ago, such as `604800`. Terminal times are selected on
-`finished_at` in `[since, until)`. Invalid bounds or `since >= until` are
-refused. Selection is host-local and respects the project scope. There is no
-telemetry MCP tool and no `--account` flag.
+## Demand counters are lossy and private
 
-### Report
+`usage.jsonl` records are appended best-effort under an existing root, never
+creating one. They carry the verb or tool, time, duration and outcome, never
+argument, prompt or result text. Each line is one bounded `O_APPEND` write;
+only rotation takes a non-blocking lock, and I/O errors drop the event.
+Project attribution is opt-in and records only the `ProjectId` hash.
+- Why: counting demand must not leak work content or slow a command.
+- Test: `tests/usage.rs::cli_and_mcp_usage_records_exclude_arguments_prompts_and_results`;
+  `crates/telemetry/src/usage/tests.rs::recording_on_a_missing_root_creates_nothing`
+- Owner: `crates/telemetry/src/usage.rs`, `src/usage.rs`
 
-The JSON result uses the CLI envelope and its 1 MiB cap. `data` holds
-`scope`, the `window`, the price table identity and review date (`prices`),
-`totals`, `routes`, `latest_task_outcomes` and `coverage`. `--detail` adds
-`daily_accounts`, the same totals grouped by UTC day and route. Human output is
-one line: the attempt count and the cost, or "at least" the known lower bound
-when any cost is unknown. JSON never truncates silently: an oversized report
-returns the CLI's bounded error with advice to narrow the interval.
+## Quota display stays honest
 
-Routes key on the exact resolved (provider, model, effort, account label),
-with missing values last. Every totals block (overall, per route and per day)
-carries the attempt count, per-category token usage as known and missing
-counts, cost, and exact outcome counts. `latest_task_outcomes` counts the
-highest-numbered selected terminal attempt per task. Conventions:
+A failed refresh keeps the last snapshot, marked stale, and the menu bar
+never reads staleness as zero usage. An unregistered icon account falls back
+to `most_constrained` with a warning and leaves config unchanged.
+- Why: stale data must not look like free headroom.
+- Test: `tests/quota.rs::failed_auth_refresh_shows_last_known_usage_age_and_stale_marker`;
+  `::show_warns_when_display_icon_account_is_not_registered`
+- Owner: `crates/cli/src/quota.rs`
 
-- Outcome counts are exact, one per terminal state, so readers can derive
-  success and failure rates.
-- Sums add known values only; `missing` counts the rest. Missing data never
-  means zero.
-- Money is a six-place decimal string with the integer microdollar value.
-  `cost.complete` is null when any attempt's cost is unknown;
-  `known_lower_bound` and `missing_attempts` are always present.
+## Not provided
 
-Coverage states `scope = supervised_terminal_attempts`, the selected attempt
-count and the counts missing usage, per-category usage, price and account.
-Unsupervised interactive
-sessions, other hosts and account-level consumption are outside coverage;
-quota snapshots carry the latter.
-
-An absent or uninitialised run store gives an empty report and creates no
-state. An existing unreadable, corrupt or incompatible store is an error.
-
-### Run input
-
-Telemetry reads only through run's `AttemptReader`; it never opens the
-database, crawls `runs/` or reads output paths. Reduction is bounded to
-100,000 attempts, 10,000 groups and 1 MiB of group-key bytes, checked before
-insertion; a bound returns `TooLarge`, never partial totals. Accumulators are
-fixed numeric values.
-
-### Trace export
-
-`telemetry trace` writes retained attempts as Chrome Trace Event JSON (default
-`provenant-trace.json`) for ui.perfetto.dev or chrome://tracing. It uses one
-process per host and one thread per attempt, with microsecond `ts` and `dur`,
-the outcome as the slice name, a `queued` instant event and the attempt's
-`Trace` in the slice args. A fact belongs to the host in its `Trace`; one with
-no host belongs to the local host when known, else to an unknown host. A flow
-arrow joins an attempt to its `Trace.parent` when the export holds both, even
-across hosts. `--run` is applied by the store because attempt facts carry no
-run ID. `--since` filters on `finished_at`.
-
-By default the export reads only this host's store and needs no collector.
-`--peers` also reads the terminal attempts of every configured peer, however
-the run reached it (`dispatch --host` or a Fabric submission). It asks each
-peer for its newest 100 lanes, as `lanes --host` does, over the usual SSH
-transport, and names each peer by its configured label. A peer that cannot be
-read is listed under `peers` with its error and the rest of the export stands.
-
-### Prices and arithmetic
-
-Telemetry owns the price schema; state loads the asset
-`config/telemetry-prices.toml`, installed under
-`releases/<SourceDigest>/assets/config/`. It has `schema_version`,
-`reviewed_at` and `[[models]]` entries keyed by exact provider and model, each
-with source references, a billing kind (API, subscription or explicitly free)
-and optional `u64` rates in USD microdollars per million tokens for uncached
-input, cache read, cache write and output. Reasoning uses the output rate once.
-An omitted rate is unknown; zero needs an explicitly verified zero rate.
-Duplicate keys, unknown versions and invalid units are refused. There is no
-runtime fetch, model regex or inferred alias, and stats writes no price copy.
-
-Providers normalise inclusive wire counts once; telemetry never subtracts
-again or clamps an inconsistent breakdown. Token sums use checked `u64`
-addition. Cost accumulates `tokens * rate` in a checked `u128` numerator across
-categories, attempts and groups, divides by 10^6 once at output and rounds
-half-up once. Totals come from unrounded numerators. Floating point is never
-used.
-
-A complete estimate is null if any included attempt lacks required usage or a
-positive-count rate; the known-cost lower bound and the missing-cost count are
-reported separately. Verified-free routes cost exactly zero even with missing
-usage. Zero tokens need no rate. An unpriced subscription is not free. Cost is
-an API-equivalent estimate, not a bill.
-
-### Local demand counters
-
-The binary edge writes a best-effort `usage.jsonl` under an existing state
-root (it never creates one), shared by CLI completion and the Fabric MCP
-transport. Records have kind `cli.verb` or `mcp.tool`, the canonical verb or
-installed tool name (`unknown` for unrecognised tools), a timestamp, a
-duration in milliseconds, and the CLI exit code or MCP outcome. Argument,
-prompt and result text never enter the log, and skill loads and scripts are
-not counted.
-
-Each line is at most 512 bytes and is one `O_APPEND` write with no lock, tail
-read or sync. Only rotation takes an exclusive nonblocking lock, and a busy
-lock still permits appends. CLI completion and existing MCP workers rotate at
-about 5,000,000 bytes into the single `usage.jsonl.1`; the MCP event loop never
-rotates or locks. Concurrent writes can briefly exceed the cap. I/O errors
-discard the event without changing the call.
-
-`telemetry stats --usage` reads both files without locks, skips torn lines and
-tolerates a missing backup, then sorts units by call count. The CLI grammar and
-MCP catalogue supply zero-call rows. Retention is bounded by size, not days, so
-counts are observed demand, not proof of inactivity beyond the retained logs.
-The `usage.project_attribution` knob is off by default; when enabled, events
-include the existing `ProjectId` hash, rather than a path or name, and reports
-include per-project rows. This reveals which projects use Provenant to anyone
-who can read the local logs. Each per-project row is a subset of the aggregate
-row for its kind and unit; summing them with the aggregate double-counts calls.
-Text output labels per-project rows with `project=<id>`. JSON includes
-`project_id` and `scope: "project"` on these rows; aggregate rows omit both
-fields.
-
-### Quota display
-
-`quota show` reads cached observations, `quota tick` refreshes due accounts
-and records a pacing tick, and `quota display` stores the menu bar choices
-(`--headline`, `--icon` taking `most_constrained` or an account entry ID or
-unique label) and then shows quota. With no option nothing changes. Probe
-plans, windows, reset semantics, cooldowns and Claude identity attribution
-belong to [routing](routing.md). An authentication failure retains the last
-snapshot and marks its row stale; the menu bar projects retained deadlines
-against the current time and never reads staleness as zero usage.
-
-If the stored `display.icon` account ID is no longer registered, `quota show`
-returns `display.icon = "most_constrained"` and a `display_icon_warning` field
-in the JSON report. Human output includes one warning line. Resolution uses
-all registrations, regardless of the adapter filter, and does not change config.
-Reports omit `display_icon_warning` when the icon choice is valid.
-
-## External contracts
-
-- Chrome Trace Event format for the trace file, opened in a third-party viewer.
-- Provider usage counts as normalised by providers; telemetry trusts the
-  disjoint categories run records.
-- OTel prompt and tool logging stays off; telemetry reads no OTel data.
-
-## Failure and recovery semantics
-
-Exit codes follow the CLI contract. A successful report exits 0, including
-partial coverage in `data`. Invalid arguments, malformed input and unsupported
-record versions exit 2. Setup, I/O or contention exits 3. Typed reducer errors
-are `TooLarge`, `InvalidFact`, `InvalidWindow`, `InvalidPrice` and `Overflow`;
-`stats` maps every one of them to an invalid result (exit 2). An unreadable or
-invalid bundled price file is a setup error (exit 3). Run read errors keep
-their own version and I/O classification. No
-successful totals accompany a failed reduction. Stats does not wait for
-attempts. Diagnostics are bounded, redacted stderr.
-
-Counters are lossy by design: a failed write, torn line or racing rotation
-makes a count approximate and never fails the command.
-
-## Deliberate cuts
-
-| Cut | Reason |
-|---|---|
-| SQLite ledger, writer lock, `record_attempt`, ingest and sources commands | Duplicated run's durable facts and had no product reader. |
-| Importing or deleting the previous ledger | The binary never opens it; a second history invites double counting. |
-| Transcript and receipt discovery, OTel ingest, export and collector | No reader for raw collection (about 0.5 GB a day); run's records serve the comparison. |
-| Delivery telemetry writes and a delivery report | Workflow keeps acceptance evidence; telemetry does not read it. |
-| Accepted and unaccepted cost, cost per accepted delivery, `missing_receipts` | Needs a join from attempts to workflow's acceptance reader that was never built; the report has no delivery columns. |
-| Wall, admission-wait and provider timing with p50 and p90 percentiles | Attempt facts feed no timing columns into the reducer; the trace export carries attempt timing instead. |
-| Retry and task counts, success, partial and failure rates in basis points | Outcome counts and `latest_task_outcomes` let a reader derive them. |
-| Changes and retro reports | No product reader; the route comparison is the product view. |
-| Cross-host summaries, top-level `stats` and `retro` aliases, read-time refresh | Stats is local and read-only. |
-| Weekly quota history and ledger fallback | Routing owns any window history; costs never reconstruct it. |
-| Model heuristics, parent rollups, compaction telemetry | Exact recorded identity suffices; parent references never add a second usage total. |
-| An account selector in telemetry | The account label comes from the resolved route and `dispatch --account` pins it at dispatch, so reports need no selector. |
-| Telemetry MCP tool | Reports are an operator command, not an agent surface. |
-
-## Verification
-
-- `crates/telemetry/src/tests.rs` covers grouping, the attempt, group and key bounds, overflow and exact rounding, and
-  missingness against unknown prices and usage.
-- `tools/front-door/tests/usage.rs` covers the demand log: record kinds,
-  rotation and torn lines.
-- `tools/front-door/tests/quota.rs` covers `quota show`, `display` and `tick`.
-- Evaluations of two configurations run both arms through run, then read
-  `telemetry stats --since START --json` once for the project and window.
-  Quality comes from the evaluate skill's graders, not telemetry, and the
-  report carries no timing, so elapsed time comes from the trace export.
+- A ledger, OTel ingest or collector; prompt and tool logging stays off.
+- Delivery cost columns, a telemetry MCP tool or an `--account` selector.

@@ -1,35 +1,56 @@
 # Specifications
 
-This directory is Provenant requirements doctrine, not a live work tracker or
-globally applied cross-project harness policy. Each linked file is the
-independent normative owner of one subsystem. Git owns content integrity and
-history. GitHub issues and their Project Status fields own current delivery
-state, owner, dependencies and user gates. Operator procedures live in the
-[runbooks](../runbooks/).
+Owner: the chairs, per
+[ADR 0017](../adr/0017-specifications-own-non-derivable-intent.md)
+Anchor: `tools/front-door/tests/workspace_policy.rs`
+
+This directory holds Provenant's durable requirements: what must hold, what
+must never happen, and why. Code and tests own what exists and that it
+behaves. GitHub issues own current delivery state. Operator procedures live
+in the [runbooks](../runbooks/).
+
+## How a spec reads
+
+Each spec starts with an `Owner:` line naming the owning crates and an
+`Anchor:` line naming the main test files that pin it. Each rule then gives:
+
+- the rule, as a must or must-never statement;
+- **Why**, the reason it exists;
+- **Test**, the enforcing test as `path::name`, with paths relative to
+  `tools/front-door/`. `none (gap)` marks a rule that no test enforces yet;
+- **Owner**, the code that implements it.
+
+Specs do not restate flags, schemas, tables or file layouts. Link or
+generate them instead:
+
+- CLI grammar: [`docs/reference/cli.md`](../reference/cli.md), from
+  `provenant help --json`.
+- MCP tools: [`docs/reference/mcp-tools.md`](../reference/mcp-tools.md),
+  from `crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
+- Config keys: [`docs/reference/config-keys.md`](../reference/config-keys.md),
+  from `config/harness-knobs.json`.
+- Seatbelt profiles: `docs/reference/seatbelt/<provider>-<mode>.sb`.
+
+`scripts/generate-reference` writes them and `--check` diffs them in CI.
 
 ## Area specs
 
-- [CLI](cli.md): command tree, envelope, exit codes, hooks and checks
-- [Disk](disk.md): read-only storage inventory and measurement limits
-- [State](state.md): core, records, config, release and managed install
-- [Supervisor](supervisor.md): process supervision, confinement, worktrees and Git evidence
-- [Routing](routing.md): routing, providers and quota
-- [Run](run.md): runs, admission, attempts and reconcile
-- [Fabric](fabric.md): Fabric store, runtime, MCP and graphs
-- [Telemetry](telemetry.md): stats, trace, counters and prices
-- [Workflow](workflow.md): review coverage, receipts, session checkpoints and writing checks
-- [Rust workspace rules](rust-workspace.md): crate layering, dependencies, errors, unsafe and tests
+- [CLI](cli.md): envelope, exits, waits, hooks and checks
+- [Disk](disk.md): read-only storage inventory
+- [State](state.md): roots, records, config and managed install
+- [Supervisor](supervisor.md): custody, confinement and worktrees
+- [Routing](routing.md): routes, providers, accounts and quota
+- [Run](run.md): admission, attempts, publication and reconcile
+- [Fabric](fabric.md): coordination store, MCP, graphs and peer hosts
+- [Telemetry](telemetry.md): stats, trace and demand counters
+- [Workflow](workflow.md): review coverage, receipts and sessions
+- [Rust workspace rules](rust-workspace.md): layering, dependencies,
+  errors, unsafe and tests
 
-Fabric across the user's own hosts is specified in
-[fabric.md](fabric.md#peer-hosts); setup is in the
-[host runbook](../runbooks/fabric-hosts.md). The [landing lease
+Peer hosts are specified in [fabric.md](fabric.md#peer-hosts); setup is in
+the [host runbook](../runbooks/fabric-hosts.md). The [landing lease
 runbook](../runbooks/landing-lease.md) covers acquiring a lease and fencing a
 push with it.
-
-## Harness
-
-- [Supervisor and confinement](supervisor.md): run supervision, custody and permission policy
-- [Switching and comparing profiles](../runbooks/configuration.md)
 
 ## Cross-cutting decisions
 
