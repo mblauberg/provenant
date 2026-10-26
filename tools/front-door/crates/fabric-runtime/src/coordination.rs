@@ -3,7 +3,6 @@
 
 pub mod facade;
 pub mod input;
-pub mod storage;
 pub use crate::home::CoordinationService;
 
 use input::bounded_input;
@@ -252,12 +251,19 @@ fn bounded_page<T: Serialize>(
     Ok(page)
 }
 
+// Claims and landings share the `fabric_lease` tool, so each op names its kind
+// on every wire.
 bounded_input! {
     pub enum ClaimInput as WireClaimInput {
+        #[serde(rename = "claim_acquire")]
         Acquire { scope: WorkScope, lease_seconds: u64 },
+        #[serde(rename = "claim_renew")]
         Renew { proof: ClaimProof, lease_seconds: u64 },
+        #[serde(rename = "claim_verify")]
         Verify { proof: ClaimProof },
+        #[serde(rename = "claim_release")]
         Release { proof: ClaimProof },
+        #[serde(rename = "claim_list")]
         List { after: Option<ClaimId>, limit: u64 },
     }
 }
@@ -274,15 +280,20 @@ pub enum ClaimResult {
 
 bounded_input! {
     pub enum LandingInput as WireLandingInput {
+        #[serde(rename = "landing_acquire")]
         Acquire {
             reference: String,
             expected: GitOid,
             candidate: GitOid,
             lease_seconds: u64,
         },
+        #[serde(rename = "landing_renew")]
         Renew { proof: LandingProof, lease_seconds: u64 },
+        #[serde(rename = "landing_verify")]
         Verify { proof: LandingProof },
+        #[serde(rename = "landing_release")]
         Release { proof: LandingProof },
+        #[serde(rename = "landing_wait")]
         Wait { reference: String, generation: u64, wait_seconds: u64 },
     }
 }
@@ -977,11 +988,15 @@ impl LocalCoordination<'_> {
         } else {
             None
         };
-        let frozen_input = input.clone();
-        let frozen = storage::StoredMutation::from(&frozen_input);
+        let frozen = input.clone();
         self.store
-            .coordination_operation(self.project, self.actor, id, &frozen, &request, || {
-                let result = match input {
+            .coordination_operation(
+                self.project,
+                self.actor,
+                id,
+                &frozen,
+                &request,
+                || match input {
                     Mutation::Mail(value) => match value {
                         MailInput::Read { .. } => {
                             Err(CoordinationError::InvalidInput("read is an observation"))
@@ -1020,10 +1035,8 @@ impl LocalCoordination<'_> {
                             _ => Err(CoordinationError::InvalidInput("landing lock required")),
                         }
                     }
-                }?;
-                Ok::<_, CoordinationError>(storage::StoredMutationResult::from(result))
-            })
-            .map(MutationResult::from)
+                },
+            )
     }
 }
 

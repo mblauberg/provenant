@@ -846,9 +846,7 @@ fn submit_accepts_optional_bounded_git_base() {
     });
     assert!(accepts(schema, schema, &input));
     assert!(ToolCall::parse("fabric_run", input.clone()).is_ok());
-    let mut peer_input = input.clone();
-    peer_input["op"] = json!("submission");
-    let SubmitInput::Submission { tasks, .. } = serde_json::from_value(peer_input).unwrap();
+    let SubmitInput::Submit { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
     assert_eq!(tasks[0].base.as_deref(), Some("main"));
     input["tasks"][0]["base"] = json!("a".repeat(1025));
     assert!(!accepts(schema, schema, &input));
@@ -874,9 +872,7 @@ fn peer_worktree_requests_are_not_mcp_submit_inputs() {
             }]
         });
         // Peer ingress still deserialises the shared wire type.
-        let mut peer_input = input.clone();
-        peer_input["op"] = json!("submission");
-        assert!(serde_json::from_value::<SubmitInput>(peer_input).is_ok());
+        assert!(serde_json::from_value::<SubmitInput>(input.clone()).is_ok());
         assert!(!accepts(schema, schema, &input));
         assert!(matches!(
             ToolCall::parse("fabric_run", input),

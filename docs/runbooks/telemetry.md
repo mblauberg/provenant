@@ -1,25 +1,26 @@
 # Telemetry and quota
 
 `provenant telemetry stats` reduces retained terminal attempt facts with prices
-from `config/telemetry-prices.toml`. Optional `--since DATE`, `--until DATE`,
-`--run-id ID` and `--detail` bound or extend the report. Use `--json` for
+from `config/telemetry-prices.toml`. Optional `--since`, `--until DATE`,
+`--run-id ID` and `--detail` bound or extend the report. `--since` takes a
+number of seconds ago, a date or an RFC3339 timestamp. Use `--json` for
 structured output. The contract is in the [telemetry spec](../specs/telemetry.md).
 
 ## Offline timeline
 
-`provenant telemetry trace [--out FILE] [--since 7d] [--run ID]` writes retained
-attempts as Chrome Trace Event JSON (default `provenant-trace.json`), with one
-process per task and one thread per attempt. Open the file in ui.perfetto.dev
-or chrome://tracing; no collector is needed.
+`provenant telemetry trace [--out FILE] [--since 604800] [--run ID]` writes
+retained attempts as Chrome Trace Event JSON (default `provenant-trace.json`),
+with one process per task and one thread per attempt. Open the file in
+ui.perfetto.dev or chrome://tracing; no collector is needed.
 
 ## Local usage counters
 
-`provenant telemetry stats --usage --since 30d` counts CLI verbs and Fabric MCP
-tools, including installed units with zero calls. Omit `--since` for all retained
-calls; dates and RFC3339 timestamps also work. Counts cover this host's
-`usage.jsonl` and `usage.jsonl.1` under the selected Provenant state directory.
-A fresh host counts nothing until the state root exists. The report includes its
-own call on the next invocation.
+`provenant telemetry stats --usage --since 2592000` counts CLI verbs and Fabric
+MCP tools over the last 30 days, including installed units with zero calls.
+Omit `--since` for all retained calls. Counts cover this host's `usage.jsonl`
+and `usage.jsonl.1` under the selected Provenant state directory. A fresh host
+counts nothing until the state root exists. The report includes its own call
+on the next invocation.
 
 Each CLI invocation records `cli.verb`, its canonical verb path, exit code,
 duration in milliseconds and UTC timestamp. Parse failures use `parse`, help

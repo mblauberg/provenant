@@ -421,7 +421,7 @@ pub struct Lanes {
     #[arg(long = "state", conflicts_with = "wait")]
     pub states: Vec<LaneState>,
     /// Keep lanes queued within this many seconds, or since an RFC3339 time.
-    #[arg(long, value_parser = lanes_since, conflicts_with = "wait")]
+    #[arg(long, value_parser = since, conflicts_with = "wait")]
     pub since: Option<jiff::Timestamp>,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -506,8 +506,8 @@ pub struct Trace {
     /// Output file (default `provenant-trace.json`)
     #[arg(long, default_value = "provenant-trace.json")]
     pub out: std::path::PathBuf,
-    /// Include attempts finished from this date, timestamp or day count such as `7d`
-    #[arg(long, value_parser = stats_timestamp)]
+    /// Include attempts finished from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Restrict the trace to one run.
     #[arg(long)]
@@ -518,8 +518,8 @@ pub struct Stats {
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,
-    /// Count from this date, timestamp or day count such as `7d`
-    #[arg(long, value_parser = stats_timestamp)]
+    /// Count from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Count up to this date or timestamp
     #[arg(long, value_parser = timestamp)]
@@ -530,20 +530,6 @@ pub struct Stats {
     /// Include per-attempt detail
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,
-}
-fn stats_timestamp(value: &str) -> Result<jiff::Timestamp, String> {
-    if let Some(days) = value.strip_suffix('d') {
-        let seconds = days
-            .parse::<i64>()
-            .ok()
-            .filter(|days| *days > 0)
-            .and_then(|days| days.checked_mul(86_400))
-            .ok_or_else(|| "since must be a positive day count or timestamp".to_owned())?;
-        return jiff::Timestamp::now()
-            .checked_sub(jiff::SignedDuration::from_secs(seconds))
-            .map_err(|error| error.to_string());
-    }
-    timestamp(value).map_err(str::to_owned)
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
@@ -695,7 +681,8 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
         .parse()
         .map_err(|_| "expected a date or RFC3339 timestamp with an offset")
 }
-fn lanes_since(value: &str) -> Result<jiff::Timestamp, String> {
+/// A positive whole number of seconds ago, a date or an RFC3339 timestamp.
+fn since(value: &str) -> Result<jiff::Timestamp, String> {
     if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
         let seconds = value
             .parse::<i64>()
@@ -712,24 +699,30 @@ fn lanes_since(value: &str) -> Result<jiff::Timestamp, String> {
 
 #[cfg(test)]
 mod target_tests {
-    use super::{Attempt, Target, lanes_since};
+    use super::{Attempt, Target, since};
     use provenant_core::{AttemptId, RunId, TaskId};
 
     #[test]
-    fn lanes_since_accepts_seconds_and_timestamps() {
+    fn since_accepts_whole_seconds_only() {
         let before = jiff::Timestamp::now();
-        let since = lanes_since("86400").unwrap();
+        let start = since("86400").unwrap();
         let after = jiff::Timestamp::now();
         let duration = jiff::SignedDuration::from_secs(86_400);
-        assert!(since >= before.checked_sub(duration).unwrap());
-        assert!(since <= after.checked_sub(duration).unwrap());
-        assert_eq!(
-            lanes_since("2026-10-26T10:00:00Z").unwrap(),
-            "2026-10-26T10:00:00Z".parse::<jiff::Timestamp>().unwrap()
-        );
-        for invalid in ["0", "24h", "5s", "1m", "2d", "-1", ""] {
-            assert!(lanes_since(invalid).is_err(), "{invalid}");
+        assert!(start >= before.checked_sub(duration).unwrap());
+        assert!(start <= after.checked_sub(duration).unwrap());
+        for invalid in ["0", "24h", "5s", "1m", "2d", "7d", "-1", ""] {
+            assert!(since(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn since_accepts_timestamps() {
+        // Parsed only, never compared with the clock.
+        let fixed = "2026-10-26T10:00:00Z"; // timebomb: allow parse-only fixture
+        assert_eq!(
+            since(fixed).unwrap(),
+            fixed.parse::<jiff::Timestamp>().unwrap()
+        );
     }
 
     #[test]

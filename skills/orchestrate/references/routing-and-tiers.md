@@ -98,8 +98,8 @@ access. Prefer per-dispatch controls over global provider configuration edits.
 
 ## Default stack & fallback chains
 
-Use `fabric_run` (`op: submit`) with an `operation_id` and `tasks`; each task takes
-`prompt` (the brief inline), `route`, `timeout_seconds` (1 to 14400), and
+Use `fabric_run` (`op: submit`) with an `operation_id` and `tasks`; each task
+takes `prompt` (the brief inline), `route`, `timeout_seconds` (1 to 14400), and
 optionally `access` and `worktree`. A writer needs a registered linked worktree
 and one active writer. Do not launch providers directly to bypass confinement.
 The tool schema is the authority for fields and timeout limits.

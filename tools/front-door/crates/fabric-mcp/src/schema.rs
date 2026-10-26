@@ -155,10 +155,10 @@ fn build_strict() -> Vec<Value> {
     let artifacts = array(reference("Artifact"), 0, 100);
     let mut recipients = array(reference("Id"), 1, 100);
     recipients["uniqueItems"] = json!(true);
-    let tools: [(&str, Value); 11] = [
+    let tools: [(&str, Value); 8] = [
         (
-            "Inspect the authenticated Fabric identity.",
-            json!({"inspect":{}}),
+            "Inspect the authenticated Fabric identity or list peer hosts.",
+            json!({"inspect":{},"hosts":{"after?":nullable(reference("Id")),"limit":page.clone()}}),
         ),
         (
             "Send and read mail with explicit cursors.",
@@ -185,30 +185,20 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Manage advisory work claims.",
+            "Manage advisory work claims and landing leases.",
             json!({
-                "acquire":{"scope":reference("Scope"),"lease_seconds":lease.clone()},"renew":{"proof":reference("ClaimProof"),"lease_seconds":lease.clone()},
-                "verify":{"proof":reference("ClaimProof")},"release":{"proof":reference("ClaimProof")},"list":{"after?":nullable(reference("Id")),"limit":page.clone()}
+                "claim_acquire":{"scope":reference("Scope"),"lease_seconds":lease.clone()},"claim_renew":{"proof":reference("ClaimProof"),"lease_seconds":lease.clone()},
+                "claim_verify":{"proof":reference("ClaimProof")},"claim_release":{"proof":reference("ClaimProof")},"claim_list":{"after?":nullable(reference("Id")),"limit":page.clone()},
+                "landing_acquire":{"reference":text(MAX_REFERENCE_BYTES),"expected":reference("GitOid"),"candidate":reference("GitOid"),"lease_seconds":lease.clone()},
+                "landing_renew":{"proof":reference("LandingProof"),"lease_seconds":lease},"landing_verify":{"proof":reference("LandingProof")},"landing_release":{"proof":reference("LandingProof")},
+                "landing_wait":{"reference":text(MAX_REFERENCE_BYTES),"generation":count.clone(),"wait_seconds":wait.clone()}
             }),
         ),
         (
-            "Manage landing leases and observe a generation.",
+            "Submit, list, inspect, wait for, cancel or resume runs.",
             json!({
-                "acquire":{"reference":text(MAX_REFERENCE_BYTES),"expected":reference("GitOid"),"candidate":reference("GitOid"),"lease_seconds":lease.clone()},
-                "renew":{"proof":reference("LandingProof"),"lease_seconds":lease},"verify":{"proof":reference("LandingProof")},"release":{"proof":reference("LandingProof")},
-                "wait":{"reference":text(MAX_REFERENCE_BYTES),"generation":count.clone(),"wait_seconds":wait.clone()}
-            }),
-        ),
-        (
-            "Submit one batch to the run service.",
-            json!({
-                "submission":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"task_class?":nullable(text(MAX_ROUTE_BYTES)),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))}
-            }),
-        ),
-        (
-            "List, inspect, wait for, cancel or resume runs.",
-            json!({
-                "list":{"after?":nullable(reference("AttemptTarget")),"limit":page.clone()},"status":{"target":reference("AttemptTarget")},
+                "submit":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"task_class?":nullable(text(MAX_ROUTE_BYTES)),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,8)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
+                "list":{"after?":nullable(reference("AttemptTarget")),"limit":page},"status":{"target":reference("AttemptTarget")},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId")},
                 "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone()}
@@ -228,35 +218,7 @@ fn build_strict() -> Vec<Value> {
                 "fetch":{"target":reference("AttemptTarget"),"artifact":reference("Artifact"),"max_bytes":integer(1,MAX_FETCH_BYTES)}
             }),
         ),
-        (
-            "List peer hosts and readiness observations.",
-            json!({"list":{"after?":nullable(reference("Id")),"limit":page}}),
-        ),
     ];
-    let mut tools = Vec::from(tools);
-    let (_, hosts) = tools.remove(10);
-    tools[0].0 = "Inspect the authenticated Fabric identity or list peer hosts.";
-    tools[0].1["hosts"] = hosts["list"].clone();
-    let (_, submission) = tools.remove(6);
-    tools[6].0 = "Submit, list, inspect, wait for, cancel or resume runs.";
-    tools[6].1["submit"] = submission["submission"].clone();
-    let (_, landing) = tools.remove(5);
-    let claims = tools[4].1.as_object().cloned().unwrap_or_default();
-    let mut leases = serde_json::Map::new();
-    for (name, fields) in claims {
-        leases.insert(format!("claim_{name}"), fields);
-    }
-    for (name, fields) in landing
-        .as_object()
-        .into_iter()
-        .flat_map(|fields| fields.iter())
-    {
-        leases.insert(format!("landing_{name}"), fields.clone());
-    }
-    tools[4] = (
-        "Manage advisory work claims and landing leases.",
-        Value::Object(leases),
-    );
     TOOL_NAMES
         .iter()
         .zip(tools)

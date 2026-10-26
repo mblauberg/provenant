@@ -619,8 +619,8 @@ fn peer_frames_a_local_run_event_failure() -> Result {
     assert_eq!(serde_json::to_value(response.project)?, *key);
     assert!(matches!(
         response.result,
-        provenant_fabric_runtime::hosts::PeerResult::Error { error, operation_id }
-            if error == provenant_fabric_runtime::coordination::facade::FacadeError::Io && operation_id.is_none()
+        provenant_fabric_runtime::hosts::PeerResult::Error { error }
+            if error == provenant_fabric_runtime::coordination::facade::FacadeError::Io
     ));
     rig.assert_legacy_unchanged()
 }
@@ -1290,15 +1290,13 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     );
 
     for (returned, expected) in [
-        (Some("local-stop"), "launch_unknown"),
-        (None, "launch_unknown"),
-        (Some("unrelated"), "state_corrupt"),
+        ("local-stop", "launch_unknown"),
+        ("unrelated", "state_corrupt"),
     ] {
         response.result = provenant_fabric_runtime::hosts::PeerResult::Error {
             error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
-                operation_id: OperationId::parse("local-stop")?,
+                operation_id: OperationId::parse(returned)?,
             },
-            operation_id: returned.map(OperationId::parse).transpose()?,
         };
         std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
         let replies = mcp(
@@ -1572,37 +1570,20 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (
             PeerResult::Error {
                 error: provenant_fabric_runtime::coordination::facade::FacadeError::Busy,
-                operation_id: None,
-            },
-            Some("QUEUE_FULL"),
-        ),
-        (
-            PeerResult::Error {
-                error: provenant_fabric_runtime::coordination::facade::FacadeError::Busy,
-                operation_id: Some(OperationId::parse("landing-local")?),
             },
             Some("QUEUE_FULL"),
         ),
         (
             PeerResult::Error {
                 error: provenant_fabric_runtime::coordination::facade::FacadeError::StaleFence,
-                operation_id: Some(OperationId::parse("landing-local")?),
             },
             Some("landing_refused"),
         ),
         (
             PeerResult::Error {
                 error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
-                    operation_id: OperationId::parse("landing-local")?,
+                    operation_id: OperationId::parse("unrelated")?,
                 },
-                operation_id: Some(OperationId::parse("unrelated")?),
-            },
-            Some("state_corrupt"),
-        ),
-        (
-            PeerResult::Error {
-                error: provenant_fabric_runtime::coordination::facade::FacadeError::StaleFence,
-                operation_id: Some(OperationId::parse("unrelated")?),
             },
             Some("state_corrupt"),
         ),
@@ -1611,16 +1592,6 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
                     operation_id: OperationId::parse("landing-local")?,
                 },
-                operation_id: Some(OperationId::parse("landing-local")?),
-            },
-            Some("launch_unknown"),
-        ),
-        (
-            PeerResult::Error {
-                error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
-                    operation_id: OperationId::parse("landing-local")?,
-                },
-                operation_id: None,
             },
             Some("launch_unknown"),
         ),

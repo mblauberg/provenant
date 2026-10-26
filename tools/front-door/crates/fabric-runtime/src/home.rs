@@ -175,8 +175,10 @@ impl RemoteCoordination<'_> {
                     {
                         Ok(response) => {
                             if let PeerResult::Error {
-                                operation_id: Some(response_id),
-                                ..
+                                error:
+                                    facade::FacadeError::LaunchUnknown {
+                                        operation_id: response_id,
+                                    },
                             } = &response.result
                                 && response_id != &id
                             {
@@ -191,7 +193,7 @@ impl RemoteCoordination<'_> {
                             }
                             let commit = match &response.result {
                                 PeerResult::Coordination(_) => true,
-                                PeerResult::Error { error, .. } if is_retryable_refusal(error) => {
+                                PeerResult::Error { error } if is_retryable_refusal(error) => {
                                     // Resending is safe here: the owner records a receipt per
                                     // operation id, so a late-applied mutation replays, not repeats.
                                     self.journal
@@ -201,9 +203,7 @@ impl RemoteCoordination<'_> {
                                         })?;
                                     false
                                 }
-                                PeerResult::Error { error, .. } if is_definitive_refusal(error) => {
-                                    true
-                                }
+                                PeerResult::Error { error } if is_definitive_refusal(error) => true,
                                 _ => {
                                     let _ = self.journal.peer_phase(
                                         self.project,
@@ -263,18 +263,13 @@ impl RemoteCoordination<'_> {
         match response.result {
             PeerResult::Coordination(value) => Ok(value),
             PeerResult::Error {
-                error,
-                operation_id,
-            } if matches!(error, facade::FacadeError::LaunchUnknown { .. })
-                || operation_id
-                    .as_ref()
-                    .is_some_and(|id| Some(id) != request.operation().as_ref()) =>
-            {
+                error: facade::FacadeError::LaunchUnknown { .. },
+            } => {
                 // Uncertain mutations returned above with their locally frozen
-                // ID. A read cannot have an uncertain launch or any operation ID.
+                // ID. A read cannot have an uncertain launch.
                 Err(PeerError::Frame.into())
             }
-            PeerResult::Error { error, .. } => Err(PeerError::Refused { error }.into()),
+            PeerResult::Error { error } => Err(PeerError::Refused { error }.into()),
             _ => Err(PeerError::Frame.into()),
         }
     }
@@ -527,7 +522,6 @@ mod tests {
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
                         error: self.error.clone(),
-                        operation_id: request.operation(),
                     },
                 });
             }
@@ -732,7 +726,6 @@ mod tests {
     fn remote_coordination_read_rejects_forged_operation_errors() {
         struct ErrorPeer {
             error: facade::FacadeError,
-            operation_id: Option<OperationId>,
         }
         impl PeerTransport for ErrorPeer {
             fn exchange(
@@ -750,7 +743,6 @@ mod tests {
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
                         error: self.error.clone(),
-                        operation_id: self.operation_id.clone(),
                     },
                 })
             }
@@ -758,17 +750,9 @@ mod tests {
         let launch_unknown = facade::FacadeError::LaunchUnknown {
             operation_id: OperationId::parse("forged").unwrap(),
         };
-        for (error, id, corrupt) in [
-            (launch_unknown.clone(), Some("forged"), true),
-            (launch_unknown, None, true),
-            (facade::FacadeError::Busy, Some("forged"), true),
-            (facade::FacadeError::Busy, None, false),
-        ] {
+        for (error, corrupt) in [(launch_unknown, true), (facade::FacadeError::Busy, false)] {
             let fixture = RemoteFixture::new();
-            let remote = fixture.remote(Box::new(ErrorPeer {
-                error,
-                operation_id: id.map(|id| OperationId::parse(id).unwrap()),
-            }));
+            let remote = fixture.remote(Box::new(ErrorPeer { error }));
             let error = remote
                 .call(
                     CoordinationInput::Events(EventsInput::Read {
@@ -812,45 +796,39 @@ mod tests {
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
                         error: self.0.clone(),
-                        operation_id: Some(OperationId::parse("forged").unwrap()),
                     },
                 })
             }
         }
-        for error in [
-            facade::FacadeError::Conflict,
-            facade::FacadeError::Busy,
-            facade::FacadeError::LaunchUnknown {
-                operation_id: OperationId::parse("forged").unwrap(),
-            },
-        ] {
-            let fixture = RemoteFixture::new();
-            let remote = fixture.remote(Box::new(ForgedPeer(error)));
-            let operation = OperationId::parse("real-operation").unwrap();
-            let error = remote
-                .call(
-                    note("forged refusal"),
-                    Some(operation.clone()),
-                    fixture.budget,
-                    &fixture.cancel,
-                )
-                .unwrap_err();
-            assert!(matches!(error, CoordinationError::Peer(PeerError::Frame)));
-            assert_eq!(error.code(), "state_corrupt");
-            let request = Request {
-                clock: &fixture.clock,
-                budget: fixture.budget,
-                cancel: &fixture.cancel,
-                backoff: &fixture.backoff,
-            };
-            let pending = remote
-                .journal
-                .lookup_peer(fixture.project, fixture.actor, &operation, &request)
-                .unwrap()
-                .unwrap();
-            assert_eq!(pending.phase, PeerPhase::Unknown);
-            assert!(pending.response.is_none());
-        }
+        let error = facade::FacadeError::LaunchUnknown {
+            operation_id: OperationId::parse("forged").unwrap(),
+        };
+        let fixture = RemoteFixture::new();
+        let remote = fixture.remote(Box::new(ForgedPeer(error)));
+        let operation = OperationId::parse("real-operation").unwrap();
+        let error = remote
+            .call(
+                note("forged refusal"),
+                Some(operation.clone()),
+                fixture.budget,
+                &fixture.cancel,
+            )
+            .unwrap_err();
+        assert!(matches!(error, CoordinationError::Peer(PeerError::Frame)));
+        assert_eq!(error.code(), "state_corrupt");
+        let request = Request {
+            clock: &fixture.clock,
+            budget: fixture.budget,
+            cancel: &fixture.cancel,
+            backoff: &fixture.backoff,
+        };
+        let pending = remote
+            .journal
+            .lookup_peer(fixture.project, fixture.actor, &operation, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, PeerPhase::Unknown);
+        assert!(pending.response.is_none());
     }
 
     #[test]

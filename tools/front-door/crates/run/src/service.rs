@@ -257,15 +257,17 @@ impl<'a> Service<'a> {
         self.store
             .read_output(id, part, range, &self.store.context, call)
     }
-    pub fn cancel(
+    /// Bind a cancel operation to its target once per command, before any
+    /// attempt is asked to stop.
+    pub fn bind_cancel(
         &self,
-        id: AttemptId,
         operation: &OperationId,
         target: &str,
-        reason: &str,
         call: &Request<'_>,
-    ) -> Result<CancelReceipt> {
-        self.store.bind_cancel(operation, target, call)?;
+    ) -> Result<()> {
+        self.store.bind_cancel(operation, target, call)
+    }
+    pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         self.store.cancel(id, reason, call)
     }
     pub fn start(
@@ -419,6 +421,7 @@ impl From<&RunError> for ErrorKind {
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,
             RunError::Contention => Self::Contention,
+            RunError::Decode(_) | RunError::ArtifactMismatch => Self::StateCorrupt,
             _ => Self::Io,
         }
     }

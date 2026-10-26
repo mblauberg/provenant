@@ -15,9 +15,6 @@ pub struct AttemptTarget {
     pub host: Option<HostId>,
 }
 
-/// The same tagged route request used by CLI dispatch and run records.
-pub use provenant_records::run::RequestedRoute as RoutePreference;
-
 /// One task in an MCP submission. Project, actor, authority and cwd come from
 /// the service's authenticated identity rather than request supplied paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +29,7 @@ pub struct SubmittedTask {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    pub route: RoutePreference,
+    pub route: provenant_records::run::RequestedRoute,
     #[serde(default)]
     pub task_class: Option<String>,
     pub timeout_seconds: u64,
@@ -62,7 +59,7 @@ bounded_input! {
 
 bounded_input! {
     pub enum SubmitInput as WireSubmitInput {
-        Submission {
+        Submit {
             operation_id: OperationId,
             tasks: Vec<SubmittedTask>,
             #[serde(default)]
@@ -142,7 +139,7 @@ bounded_input! {
 
 bounded_input! {
     pub enum HostsInput as WireHostsInput {
-        List {
+        Hosts {
             #[serde(default)]
             after: Option<HostId>,
             limit: u16,

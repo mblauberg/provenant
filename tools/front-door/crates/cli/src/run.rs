@@ -922,18 +922,6 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 }
             };
             let route = run::Service::route(task.route)?;
-            let route_text = match &route {
-                run::RequestedRoute::Model { model, effort, .. } => remote::RouteText {
-                    model: Some(model.clone()),
-                    route: None,
-                    effort: effort.clone(),
-                },
-                run::RequestedRoute::Named { name, effort } => remote::RouteText {
-                    model: None,
-                    route: Some(name.clone()),
-                    effort: effort.clone(),
-                },
-            };
             let fallback = if task.fallback.is_empty() {
                 flag_route.3.clone()
             } else {
@@ -947,7 +935,6 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 task_id,
                 prompt,
                 route,
-                route_text,
                 fallback,
                 task.delivery_id,
                 task.account,
@@ -972,11 +959,6 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 flag_route.1.as_deref(),
                 flag_route.2.clone(),
             )?,
-            remote::RouteText {
-                model: flag_route.0.clone(),
-                route: flag_route.1.clone(),
-                effort: flag_route.2.clone(),
-            },
             flag_route.3.clone(),
             command.delivery_id,
             command.account.clone(),
@@ -991,7 +973,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     };
     if let Some(host) = &command.host {
         let mut placed = Vec::new();
-        for (index, (task_id, prompt, _, route, fallback, delivery_id, account, deliver, base)) in
+        for (index, (task_id, prompt, route, fallback, delivery_id, account, deliver, base)) in
             tasks.into_iter().enumerate()
         {
             // The peer derives task IDs from the operation and has no fallback field.
@@ -1032,21 +1014,19 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, _, fallback, delivery_id, account, deliver, base)| {
-                Submitted {
-                    task_class: None,
-                    base,
-                    task_id,
-                    prompt,
-                    route,
-                    fallback,
-                    account,
-                    provider_timeout: command.provider_timeout,
-                    delivery_id,
-                    deliver,
-                    worktree: access.worktree.clone(),
-                    access: lane_access.clone(),
-                }
+            |(task_id, prompt, route, fallback, delivery_id, account, deliver, base)| Submitted {
+                task_class: None,
+                base,
+                task_id,
+                prompt,
+                route,
+                fallback,
+                account,
+                provider_timeout: command.provider_timeout,
+                delivery_id,
+                deliver,
+                worktree: access.worktree.clone(),
+                access: lane_access.clone(),
             },
         )
         .collect();
@@ -1795,9 +1775,7 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
-    if command.tail.is_some() {
-        align_utf8_tail(&mut chunk);
-    }
+    align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     Ok((
         json!({
@@ -1871,7 +1849,7 @@ fn trace_line(trace: &provenant_records::Trace) -> String {
 
 /// A clipped page that ends inside a UTF-8 character stops before it, so the
 /// next offset starts the character whole and paged text concatenates exactly.
-fn align_utf8_tail(chunk: &mut run::OutputChunk) {
+pub fn align_utf8_tail(chunk: &mut run::OutputChunk) {
     if !chunk.clipped {
         return;
     }
@@ -1931,20 +1909,16 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                 (None, Some(task)) => format!("{}/{task}", resolved.run),
                 (None, None) => resolved.run.to_string(),
             };
+            session
+                .service()
+                .bind_cancel(&command.operation_id, &bound, &call)?;
             let mut receipts = Vec::new();
             let mut human = String::new();
             let mut requested = false;
             for id in selected {
                 // One failure must not hide the receipts already earned.
-                let receipt = request(&clock, &cancel).and_then(|call| {
-                    Ok(session.service().cancel(
-                        id,
-                        &command.operation_id,
-                        &bound,
-                        reason,
-                        &call,
-                    )?)
-                });
+                let receipt = request(&clock, &cancel)
+                    .and_then(|call| Ok(session.service().cancel(id, reason, &call)?));
                 let row = match receipt {
                     Ok(receipt) => {
                         if matches!(receipt, run::CancelReceipt::Unobservable { .. }) {

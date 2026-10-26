@@ -126,7 +126,7 @@ impl ToolCall {
             | Self::Claim(ClaimInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
             Self::Landing(LandingInput::Acquire { lease_seconds, .. }, _)
             | Self::Landing(LandingInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
-            Self::Submit(SubmitInput::Submission { tasks, .. }) => {
+            Self::Submit(SubmitInput::Submit { tasks, .. }) => {
                 for (index, task) in tasks.iter().enumerate() {
                     body(&task.prompt, &format!("tasks[{index}].prompt"))?;
                 }
@@ -136,7 +136,7 @@ impl ToolCall {
             Self::Run(RunInput::Resume { prompt, .. }) => body(prompt, "prompt"),
             Self::Output(OutputInput::Read { max_bytes, .. })
             | Self::Output(OutputInput::Fetch { max_bytes, .. }) => output(*max_bytes),
-            Self::Hosts(HostsInput::List { limit, .. }) => page(u64::from(*limit)),
+            Self::Hosts(HostsInput::Hosts { limit, .. }) => page(u64::from(*limit)),
             _ => Ok(()),
         }
     }
@@ -228,7 +228,6 @@ impl ToolCall {
                 },
                 _ => None,
             };
-        let original_arguments = arguments.clone();
         macro_rules! parse {
             ($ty:ty, $variant:ident $(, $metadata:expr)?) => {
                 serde_json::from_value::<$ty>(arguments.clone())
@@ -239,7 +238,7 @@ impl ToolCall {
                         Ok(Self::$variant(input $(, $metadata)?))
                     })
                     .map_err(|error| InvalidInput::Arguments {
-                        path: schema::invalid_path(name, &original_arguments).unwrap_or_else(|| {
+                        path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
                             let message = error.to_string();
                             message
                                 .strip_prefix("invalid input field `")
@@ -250,34 +249,22 @@ impl ToolCall {
                     })
             };
         }
-        let operation = arguments["op"].as_str().unwrap_or("").to_owned();
+        // Merged tools route each op to the input type that owns it.
+        let operation = arguments["op"].as_str().unwrap_or("");
         let call = match schema::tool_kind(name) {
-            Some(schema::ToolKind::Identity) if operation == "hosts" => {
-                arguments["op"] = Value::String("list".to_owned());
-                parse!(HostsInput, Hosts)
-            }
+            Some(schema::ToolKind::Identity) if operation == "hosts" => parse!(HostsInput, Hosts),
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
             Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
             Some(schema::ToolKind::Task) => parse!(TaskInput, Task, operation_id.clone()),
             Some(schema::ToolKind::Events) => parse!(EventsInput, Events, operation_id.clone()),
-            Some(schema::ToolKind::Claim) if operation.starts_with("claim_") => {
-                arguments["op"] = Value::String(operation["claim_".len()..].to_owned());
-                parse!(ClaimInput, Claim, operation_id.clone())
-            }
             Some(schema::ToolKind::Claim) if operation.starts_with("landing_") => {
-                arguments["op"] = Value::String(operation["landing_".len()..].to_owned());
                 parse!(LandingInput, Landing, operation_id.clone())
             }
-            Some(schema::ToolKind::Run) if operation == "submit" => {
-                arguments["op"] = Value::String("submission".to_owned());
-                parse!(SubmitInput, Submit)
-            }
+            Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim, operation_id.clone()),
+            Some(schema::ToolKind::Run) if operation == "submit" => parse!(SubmitInput, Submit),
             Some(schema::ToolKind::Run) => parse!(RunInput, Run),
             Some(schema::ToolKind::Output) => parse!(OutputInput, Output),
             Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
-            Some(_) => Err(InvalidInput::Arguments {
-                path: "arguments.op".to_owned(),
-            }),
             None => Err(InvalidInput::UnknownTool),
         }?;
         if operation_id.is_some() && !call.is_mutation() {
@@ -325,7 +312,7 @@ impl ToolCall {
                     | Self::Claim(..)
                     | Self::Landing(..)
                     | Self::Graph(..)
-                    | Self::Submit(SubmitInput::Submission { host: Some(_), .. })
+                    | Self::Submit(SubmitInput::Submit { host: Some(_), .. })
             )
         {
             return Err(CoordinationError::LaneMutation.into());

@@ -235,23 +235,12 @@ impl Context {
             .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
-            PeerResult::Error {
-                error,
-                operation_id: returned_operation,
-            } => {
-                let operation_id = request.operation();
-                // Busy and other generic refusals may omit the ID. Any ID the
-                // peer supplies must agree with this locally frozen request.
-                if returned_operation
-                    .as_ref()
-                    .is_some_and(|id| Some(id) != operation_id.as_ref())
-                {
-                    return Err(peer_failure(&peer.destination, &PeerError::Frame));
-                }
+            PeerResult::Error { error } => {
+                // An uncertain launch must name this locally frozen request.
                 if let FacadeError::LaunchUnknown {
                     operation_id: returned,
                 } = &error
-                    && Some(returned) != operation_id.as_ref()
+                    && Some(returned) != request.operation().as_ref()
                 {
                     return Err(peer_failure(&peer.destination, &PeerError::Frame));
                 }

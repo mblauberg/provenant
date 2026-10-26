@@ -20,7 +20,7 @@ fn recording_on_a_missing_root_creates_nothing() -> Result {
     let temp = crate::worktree_tests::support::tempdir()?;
     let roots = roots(temp.path())?;
     record_cli(&roots, "root", 0, 4, None);
-    record_tool(&roots, "fabric_identity", "ok", 1, None);
+    record_tool(&roots, "fabric_context", "ok", 1, None);
     assert!(!roots.state.as_path().exists());
     Ok(())
 }
@@ -63,7 +63,7 @@ fn unattributed_events_omit_project_id_from_json() -> Result {
     let roots = roots(temp.path())?;
     std::fs::create_dir(roots.state.as_path())?;
     record_cli(&roots, "root", 0, 4, None);
-    record_tool(&roots, "fabric_identity", "ok", 1, None);
+    record_tool(&roots, "fabric_context", "ok", 1, None);
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
@@ -81,7 +81,7 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     std::fs::create_dir(roots.state.as_path())?;
     let expected_id = ProjectId::from_bytes([1; 16]);
     record_cli(&roots, "root", 0, 4, Some(expected_id));
-    record_tool(&roots, "fabric_identity", "ok", 1, Some(expected_id));
+    record_tool(&roots, "fabric_context", "ok", 1, Some(expected_id));
 
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
@@ -112,7 +112,7 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
             && unit.scope == Some("project")
     }));
     assert!(report.units.iter().any(|unit| {
-        unit.unit == "fabric_identity" && unit.calls == 1 && unit.project_id == Some(expected_id)
+        unit.unit == "fabric_context" && unit.calls == 1 && unit.project_id == Some(expected_id)
     }));
     assert!(
         report
@@ -163,7 +163,7 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
     assert_eq!(count(report(&roots, &stats)?), Some(2));
     drop(lock);
     // MCP logging only appends; existing workers perform rotation.
-    record_tool(&roots, "fabric_identity", "ok", 1, None);
+    record_tool(&roots, "fabric_context", "ok", 1, None);
     assert!(!roots.state.as_path().join(BACKUP).exists());
     maintain_tools(&roots);
     // Rotation is permitted again; the old log is retained as the backup.

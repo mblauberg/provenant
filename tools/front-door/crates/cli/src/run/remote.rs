@@ -15,7 +15,7 @@ use provenant_core::{
 use provenant_fabric_runtime::{
     coordination::facade::{
         AttemptTarget, FacadeError, NewWorktree, OutputBytes, OutputInput, OutputPart,
-        OutputResult, RoutePreference, RunInput, SubmitInput, SubmittedTask,
+        OutputResult, RunInput, SubmitInput, SubmittedTask,
     },
     graph::AccessMode,
     hosts::{PeerAction, PeerResult},
@@ -41,16 +41,10 @@ const PLACEMENT_LIMIT: u64 = 64 * 1024;
 /// Each poll is one SSH round trip, so waits poll less often than local ones.
 const POLL: Duration = Duration::from_secs(2);
 
-/// Route text exactly as given, so the peer resolves it as the CLI would.
-pub(super) struct RouteText {
-    pub(super) model: Option<String>,
-    pub(super) route: Option<String>,
-    pub(super) effort: Option<String>,
-}
 pub(super) struct Task {
     pub(super) base: Option<String>,
     pub(super) prompt: String,
-    pub(super) route: RouteText,
+    pub(super) route: run::RequestedRoute,
     pub(super) account: Option<String>,
     pub(super) delivery_id: Option<DeliveryId>,
     pub(super) deliver: Option<run::WriterDeliveryRequest>,
@@ -496,20 +490,7 @@ fn submitted_task(
         worktree: None,
         new_worktree,
         prompt: task.prompt,
-        route: match task.route.model {
-            Some(model) => {
-                let (provider, _) = model.split_once('/').unwrap_or(("", ""));
-                RoutePreference::Model {
-                    provider: provider.into(),
-                    model,
-                    effort: task.route.effort,
-                }
-            }
-            None => RoutePreference::Named {
-                name: task.route.route.unwrap_or_default(),
-                effort: task.route.effort,
-            },
-        },
+        route: task.route,
         timeout_seconds,
         delivery_id: task.delivery_id,
         deliver: task.deliver,
@@ -544,7 +525,7 @@ pub(super) fn dispatch(
         .map(u16::try_from)
         .transpose()
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "concurrency"))?;
-    let input = SubmitInput::Submission {
+    let input = SubmitInput::Submit {
         operation_id: batch.operation_id.clone(),
         tasks,
         concurrency,
@@ -895,16 +876,17 @@ mod tests {
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     #[test]
-    fn peer_writer_keeps_the_pre_context_wire_payload() -> Result {
+    fn peer_writer_moves_its_base_into_the_new_worktree() -> Result {
+        let route = run::RequestedRoute::Model {
+            provider: "fixture".into(),
+            model: "fixture/model".into(),
+            effort: None,
+        };
         let task = submitted_task(
             Task {
                 base: Some("main".into()),
                 prompt: "write the change".into(),
-                route: RouteText {
-                    model: Some("fixture/model".into()),
-                    route: None,
-                    effort: None,
-                },
+                route: route.clone(),
                 account: None,
                 delivery_id: None,
                 deliver: None,
@@ -915,29 +897,23 @@ mod tests {
             }),
             60000,
         );
-        let actual = serde_json::to_value(SubmitInput::Submission {
+        let actual = serde_json::to_value(SubmitInput::Submit {
             operation_id: OperationId::parse("peer-writer")?,
             tasks: vec![task],
             concurrency: Some(1),
             knobs: vec![],
             host: None,
         })?;
-        // Main's writer payload before bounded Git context. Comparing bytes
-        // after object ordering also catches prompt prefixes and extra fields.
-        let previous_task = json!({
-            "account": null, "access": "worktree_write", "worktree": null,
-            "new_worktree": {"base": "main", "branch": "writer/change"},
-            "prompt": "write the change",
-            "route": {"adapter": null, "model": "fixture/model", "route": null,
-                      "role": null, "task_class": null, "effort": null},
-            "timeout_seconds": 60000, "delivery_id": null, "deliver": null
-        });
-        let previous = json!({
-            "op": "submission", "operation_id": "peer-writer",
-            "tasks": [previous_task], "concurrency": 1, "knobs": []
-        });
-        assert!(actual["tasks"][0].get("base").is_none());
-        assert_eq!(serde_json::to_vec(&actual)?, serde_json::to_vec(&previous)?);
+        let task = &actual["tasks"][0];
+        assert_eq!(actual["op"], "submit");
+        assert!(task.get("base").is_none());
+        assert_eq!(task["access"], "worktree_write");
+        assert_eq!(
+            task["new_worktree"],
+            json!({"base": "main", "branch": "writer/change"})
+        );
+        assert_eq!(task["route"], serde_json::to_value(route)?);
+        assert_eq!(task["timeout_seconds"], 60000);
         Ok(())
     }
 
@@ -947,9 +923,8 @@ mod tests {
             Task {
                 base: Some("main".into()),
                 prompt: "review".into(),
-                route: RouteText {
-                    model: None,
-                    route: Some("utility".into()),
+                route: run::RequestedRoute::Named {
+                    name: "utility".into(),
                     effort: None,
                 },
                 account: None,

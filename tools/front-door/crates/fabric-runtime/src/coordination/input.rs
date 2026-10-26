@@ -1,10 +1,9 @@
-use super::facade::{
-    GraphInput, HostsInput, IdentityInput, OutputInput, RoutePreference, RunInput, SubmitInput,
-};
+use super::facade::{GraphInput, HostsInput, IdentityInput, OutputInput, RunInput, SubmitInput};
 use super::{
     ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, TaskInput, TaskState, WorkScope,
 };
 use provenant_core::WaitTransport;
+use provenant_records::run::RequestedRoute;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -27,6 +26,7 @@ macro_rules! bounded_input {
     (
         $vis:vis enum $name:ident as $wire:ident {
             $(
+                $(#[$variant_attr:meta])*
                 $variant:ident {
                     $( $(#[$field_attr:meta])* $field:ident : $field_type:ty ),* $(,)?
                 }
@@ -36,13 +36,14 @@ macro_rules! bounded_input {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
         #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
         $vis enum $name {
-            $( $variant { $( $(#[$field_attr])* $field: $field_type ),* } ),*
+            $( $(#[$variant_attr])* $variant { $( $(#[$field_attr])* $field: $field_type ),* } ),*
         }
 
         #[derive(serde::Deserialize)]
         #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
         enum $wire {
             $(
+                $(#[$variant_attr])*
                 $variant {
                     $( $(#[$field_attr])* $field: $field_type ),*
                 }
@@ -163,9 +164,9 @@ fn landing_reference(reference: &str, path: &str) -> Result<(), InputError> {
     bounded_text(reference, path, MAX_REFERENCE_BYTES)
 }
 
-fn route(route: &RoutePreference, path: &str) -> Result<(), InputError> {
+fn route(route: &RequestedRoute, path: &str) -> Result<(), InputError> {
     let effort = match route {
-        RoutePreference::Model {
+        RequestedRoute::Model {
             provider,
             model,
             effort,
@@ -174,7 +175,7 @@ fn route(route: &RoutePreference, path: &str) -> Result<(), InputError> {
             bounded_text(model, &format!("{path}.model"), MAX_ROUTE_BYTES)?;
             effort
         }
-        RoutePreference::Named { name, effort } => {
+        RequestedRoute::Named { name, effort } => {
             bounded_text(name, &format!("{path}.name"), MAX_ROUTE_BYTES)?;
             effort
         }
@@ -352,7 +353,7 @@ impl ValidateInput for GraphInput {
 impl ValidateInput for SubmitInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::Submission {
+            Self::Submit {
                 tasks,
                 concurrency,
                 knobs,
@@ -448,7 +449,7 @@ impl ValidateInput for OutputInput {
 impl ValidateInput for HostsInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::List { limit, .. } => page(u64::from(*limit), "limit"),
+            Self::Hosts { limit, .. } => page(u64::from(*limit), "limit"),
         }
     }
 }
@@ -475,16 +476,36 @@ mod tests {
     }
 
     #[test]
+    fn receipts_freeze_the_public_request() {
+        let proof = super::super::ClaimProof {
+            id: provenant_core::ClaimId::from_bytes([1; 16]),
+            generation: 2,
+            token: [0xab; 16],
+        };
+        let mutation = super::super::Mutation::Claim(ClaimInput::Renew {
+            proof,
+            lease_seconds: 3,
+        });
+        assert_eq!(
+            serde_json::to_value(mutation).unwrap(),
+            json!({"domain":"claim","input":{
+                "op":"claim_renew","lease_seconds":3,
+                "proof":{"id":"01".repeat(16),"generation":2,"token":"ab".repeat(16)}
+            }})
+        );
+    }
+
+    #[test]
     fn submission_omits_absent_host() {
         let input = json!({
-            "op":"submission",
+            "op":"submit",
             "operation_id":"place",
             "tasks":[{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
         });
         let local: SubmitInput = serde_json::from_value(input).unwrap();
         assert!(serde_json::to_value(&local).unwrap().get("host").is_none());
         let placed: SubmitInput = serde_json::from_value(json!({
-            "op":"submission",
+            "op":"submit",
             "operation_id":"place",
             "tasks":[{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1}],
             "host":"07070707070707070707070707070707"
@@ -511,7 +532,7 @@ mod tests {
     fn serde_rejects_bounds_on_nested_string_fields() {
         rejects::<LandingInput>(
             json!({
-                "op":"acquire",
+                "op":"landing_acquire",
                 "reference":"r".repeat(1_025),
                 "expected":"0123456789012345678901234567890123456789",
                 "candidate":"abcdefabcdefabcdefabcdefabcdefabcdefabcd",
@@ -520,20 +541,20 @@ mod tests {
             "reference",
         );
         rejects::<ClaimInput>(
-            json!({"op":"acquire","scope":{"kind":"issue","key":"k".repeat(1_025)},"lease_seconds":1}),
+            json!({"op":"claim_acquire","scope":{"kind":"issue","key":"k".repeat(1_025)},"lease_seconds":1}),
             "scope.key",
         );
         rejects::<ClaimInput>(
-            json!({"op":"acquire","scope":{"kind":"worktree","path":"/".to_owned() + &"p".repeat(4_096)},"lease_seconds":1}),
+            json!({"op":"claim_acquire","scope":{"kind":"worktree","path":"/".to_owned() + &"p".repeat(4_096)},"lease_seconds":1}),
             "scope.path",
         );
         rejects::<ClaimInput>(
-            json!({"op":"acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_seconds":1}),
+            json!({"op":"claim_acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_seconds":1}),
             "scope.paths[0]",
         );
         let task = json!({"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1});
         rejects::<SubmitInput>(
-            json!({"op":"submission","operation_id":"work-1","tasks":vec![task; 65]}),
+            json!({"op":"submit","operation_id":"work-1","tasks":vec![task; 65]}),
             "tasks",
         );
         for name in ["provider", "model", "effort"] {
@@ -541,14 +562,14 @@ mod tests {
             route[name] = json!("m".repeat(129));
             rejects::<SubmitInput>(
                 json!({
-                    "op":"submission","operation_id":"work-1","concurrency":1,
+                    "op":"submit","operation_id":"work-1","concurrency":1,
                     "tasks":[{"prompt":"do work","route":route,"timeout_seconds":1}]
                 }),
                 &format!("tasks[0].route.{name}"),
             );
         }
         rejects::<SubmitInput>(
-            json!({"op":"submission","operation_id":"work-1","tasks":[{
+            json!({"op":"submit","operation_id":"work-1","tasks":[{
                 "prompt":"do work","route":{"kind":"named","name":"m".repeat(129)},"timeout_seconds":1
             }]}),
             "tasks[0].route.name",
@@ -563,7 +584,7 @@ mod tests {
         );
         rejects::<LandingInput>(
             json!({
-                "op":"verify","proof":{"reference":"r".repeat(1_025),"id":"00000000000000000000000000000001",
+                "op":"landing_verify","proof":{"reference":"r".repeat(1_025),"id":"00000000000000000000000000000001",
                     "generation":0,"token":"00000000000000000000000000000000"}
             }),
             "proof.reference",
@@ -630,7 +651,7 @@ mod tests {
     #[test]
     fn submission_rejects_old_duration_and_route_shapes() {
         let valid = json!({
-            "op":"submission","operation_id":"submit",
+            "op":"submit","operation_id":"submit",
             "tasks":[{"prompt":"work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
         });
         assert!(serde_json::from_value::<SubmitInput>(valid.clone()).is_ok());

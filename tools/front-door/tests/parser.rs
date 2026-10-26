@@ -217,7 +217,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     );
     let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
-    assert_eq!(value["data"]["text"], "hello");
+    assert_eq!(value["data"]["bytes"]["data"], "hello");
 
     let trace = rig.command(&["output", &attempt, "--trace", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&trace.stdout.bytes)?;

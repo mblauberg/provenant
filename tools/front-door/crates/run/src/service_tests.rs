@@ -61,7 +61,12 @@ fn dispatch_replay_output_and_cancel_share_the_service() -> TestResult {
         b"review this code"
     );
     let operation = OperationId::parse("service-cancel")?;
-    service.cancel(id, &operation, &id.to_string(), "stop", &call)?;
+    service.bind_cancel(&operation, &id.to_string(), &call)?;
+    service.cancel(id, "stop", &call)?;
+    assert!(matches!(
+        service.bind_cancel(&operation, "another target", &call),
+        Err(RunError::OperationConflict)
+    ));
     assert!(matches!(
         service.status(id, &call)?.state,
         AttemptState::Terminal {

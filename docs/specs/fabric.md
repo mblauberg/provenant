@@ -216,7 +216,7 @@ independent of the standard MCP transport protocol date.
 | `fabric_mail` | send, read, mark_read |
 | `fabric_task` | create, list, claim, update, finish, release |
 | `fabric_events` | read, note |
-| `fabric_lease` | claim_acquire, claim_renew, claim_verify, claim_release, claim_list, landing_acquire, landing_renew, landing_verify, landing_release, landing_wait |
+| `fabric_lease` | `claim_` acquire, renew, verify, release, list; `landing_` acquire, renew, verify, release, wait |
 | `fabric_run` | submit, list, status, wait, cancel, resume |
 | `fabric_graph` | run, status, cancel, resume |
 | `fabric_output` | read, fetch |
@@ -258,18 +258,21 @@ Mutating mail, task, events and lease operations accept an optional
 reject it. Responses carry typed `structuredContent` and a short text digest
 of IDs, state, route and the next cursor. Fencing proof tokens are 32 lower-case
 hex digits. Output is UTF-8 text when valid, otherwise standard padded base64
-with `encoding: "base64"` and the encoded string in `data`. Neither representation
-is lossy.
+with `encoding: "base64"` and the encoded string in `data`. Neither
+representation is lossy. A clipped page stops before a split UTF-8 character,
+so its `next_offset` starts the character whole. An `events` page holds as
+many whole events as fit `max_bytes`; a single larger event is
+`output_too_large`.
 
 All request durations use seconds: `lease_seconds` (1 to 3,600),
 `wait_seconds` (1 to 55 over MCP), and submission `timeout_seconds` (1 to
 14,400). Observed provider durations use `provider_seconds` (nullable,
-fractional seconds retain millisecond precision). Output parts are `prompt`, `result`, `stderr` and `events`, matching
-the CLI. `result` and `stderr` have no combined ordering. `fetch` copies only
-run-exported regular files, refuses symlinks and traversal, enforces byte and
-file caps and verifies a manifest digest before atomic publication under
-`fetch/<host>/<run>/`. Output tools accept no arbitrary source or destination
-path.
+fractional seconds retain millisecond precision). Output parts are `prompt`,
+`result`, `stderr` and `events`, matching the CLI. `result` and `stderr` have
+no combined ordering. `fetch` copies only run-exported regular files, refuses
+symlinks and traversal, enforces byte and file caps and verifies a manifest
+digest before atomic publication under `fetch/<host>/<run>/`. Output tools
+accept no arbitrary source or destination path.
 
 Submission tasks carry a prompt and the shared tagged route request:
 `{"kind":"model","provider":"codex","model":"...","effort":"high"}` or
@@ -297,7 +300,7 @@ provider account, with the same meaning as `dispatch --account`; each fallback
 route can select a different account. Limits are 8 routes per node, 64 nodes,
 256 edges, 64 KiB per prompt and 256 KiB of prompt in total. `run` and `resume`
 take a project-local document path, and `status` and `cancel` take the graph
-`id`. Each graph attempt is bounded by `limits.graph_timeout_ms`.
+`id`. Each graph attempt is bounded by `limits.graph_timeout_seconds`.
 
 `run` starts ready nodes and returns. After a run settles, its existing
 supervisor advances pending graphs in the same project, after releasing
@@ -549,18 +552,19 @@ Fabric does not own these wire forms.
   `not_terminal` identifies an active attempt; `operation_conflict` identifies
   an operation ID reused with different input. Both retain their code over the
   peer wire. The CLI reports `NONTERMINAL`, `OPERATION_CONFLICT` and, for
-  `owner_unavailable`, `OWNER_UNAVAILABLE`. `UNSUPPORTED` remains specific to
-  the operation's origin: continuation refusal on resume, confinement refusal
-  on submission.
+  `owner_unavailable`, `OWNER_UNAVAILABLE`. A resume the adapter cannot
+  continue is `CONTINUATION_UNSUPPORTED`; `UNSUPPORTED` is a confinement
+  refusal on submission. The CLI and MCP render one typed category per run
+  error, so a run error has the same meaning at both edges.
   Uncertain mutations include their `operation_id`. Oversized read responses
   return `result_too_large`, while committed mutation receipts keep the
   transport ceiling so a lowered read limit cannot hide them. Health checks do
   not repair, prune or acquire claims.
 
-Peer errors use the locally frozen request's operation ID. A supplied peer ID
-must match it; generic refusals may omit the ID. A mismatch is a protocol error
-(`state_corrupt`). A remote status snapshot must name the requested attempt,
-as must each record returned to a wait or cancel. A resume receipt must name
+A peer error reply carries only its typed error. Only `launch_unknown` names
+an operation ID, which must match the locally frozen request's; a mismatch is
+a protocol error (`state_corrupt`). A remote status snapshot must name the
+requested attempt, as must each record returned to a wait or cancel. A resume receipt must name
 the requested continuation operation. Submission receipts must name the
 requested operation and placement; a peer writer must return the requested
 branch, and a read-only submission cannot return a worktree. Landing push and

@@ -262,7 +262,7 @@ impl PeerRequest {
             PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
             PeerAction::Submit {
-                input: facade::SubmitInput::Submission { operation_id, .. },
+                input: facade::SubmitInput::Submit { operation_id, .. },
             }
             | PeerAction::Run {
                 input:
@@ -343,7 +343,6 @@ pub enum PeerResult {
     SessionHandoff(crate::handoff::HandoffReceipt),
     Error {
         error: facade::FacadeError,
-        operation_id: Option<OperationId>,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -371,7 +370,6 @@ pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError>
         project: request.project.key,
         result: PeerResult::Error {
             error: facade::FacadeError::PeerVersion,
-            operation_id: None,
         },
     }))
 }
@@ -623,7 +621,6 @@ mod tests {
         };
         let value = serde_json::to_value(PeerResult::Error {
             error: error.clone(),
-            operation_id: None,
         })
         .unwrap();
         assert_eq!(value["data"]["error"]["code"], "launch_unknown");
@@ -651,7 +648,7 @@ mod tests {
                 Path::new("/home/a/repo/.git"),
             )
             .unwrap(),
-            result: serde_json::json!({"result": "error", "data": {"code": "busy", "operation_id": null}}),
+            result: serde_json::json!({"result": "error", "data": {"error": {"code": "busy"}}}),
         };
         assert!(matches!(
             decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
@@ -681,7 +678,7 @@ mod tests {
                 result_bytes: 1048576,
                 lease_seconds: 3600,
                 peer_seconds: 30,
-                graph_timeout_ms: 14400000,
+                graph_timeout_seconds: 14400,
                 bundle_bytes: 67108864,
             },
         };

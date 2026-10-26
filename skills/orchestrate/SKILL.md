@@ -30,9 +30,9 @@ cancel ATTEMPT`. The full RUN/TASK/ATTEMPT form is also accepted.
    same branch-derived string. Before submission, [confirm the connection's
    project](references/fabric-identity.md), then acquire and verify an advisory
    `fabric_lease` `claim_acquire` (`scope` names the issue or path set, with an
-   `operation_id` and `lease_seconds`); keep its generation/token proof, renew it while work
-   continues and release it when finished. Do not submit against a conflicting live claim; submission does not
-   enforce claims. One supervisor writer lease excludes a second writer;
+   `operation_id` and `lease_seconds`); keep its generation/token proof, renew
+   it while work continues and release it when finished. Do not submit against
+   a conflicting live claim; submission does not enforce claims. One supervisor writer lease excludes a second writer;
    terminal Git sequencer state fails the lane. If custody is lost, keep the
    worktree reserved and follow [chair recovery](../../docs/worktrees.md#writer-custody-recovery).
 5. After submission, keep one `provenant lanes --wait N` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A submitted sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
@@ -90,11 +90,12 @@ cancel ATTEMPT`. The full RUN/TASK/ATTEMPT form is also accepted.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
   it, and call `fabric_lease` `landing_acquire` with the integration
-  reference, expected remote OID, candidate OID, `lease_seconds` and operation ID. See the
-  [landing lease runbook](../../docs/runbooks/landing-lease.md). Verify pinned
-  candidate and integration OIDs through Rust confinement before merging. Do
-  not infer a protected-tip release from an advisory claim. Renew or release
-  the lease with `fabric_lease` and its generation/token proof and an operation ID.
+  reference, expected remote OID, candidate OID, `lease_seconds` and operation
+  ID. See the [landing lease runbook](../../docs/runbooks/landing-lease.md).
+  Verify pinned candidate and integration OIDs through Rust confinement before
+  merging. Do not infer a protected-tip release from an advisory claim. Renew
+  or release the lease with `fabric_lease`, its generation/token proof and an
+  operation ID.
   A project whose landing tool owns the lease leaves it to that tool.
 - Keep full worker output in run files and return only the digest and path;
   brief native subagents to the [~150-word result

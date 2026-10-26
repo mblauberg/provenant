@@ -14,7 +14,7 @@ fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
     let mut client = McpClient::default();
     client.initialise("2025-11-25")?;
     client.initialised()?;
-    client.call("fabric_identity", json!({"op":"inspect"}))?;
+    client.call("fabric_context", json!({"op":"inspect"}))?;
     client.call("fabric_mail", json!({"op":"send","body":"secret-body"}))?;
     client.call("secret-unknown-tool", json!({"secret":"secret-value"}))?;
     client.call("fabric_run", json!({"op":"list","limit":1,"cursor":null}))?;
@@ -52,7 +52,7 @@ fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
         }));
     }
     for (tool, outcome) in [
-        ("fabric_identity", "ok"),
+        ("fabric_context", "ok"),
         ("fabric_mail", "error"),
         ("unknown", "error"),
         ("fabric_run", "error"),
@@ -109,7 +109,14 @@ fn project_usage_is_captured_before_commands_and_labels_subset_rows() -> Result 
 #[test]
 fn usage_report_includes_zero_count_cli_verbs_and_mcp_tools() -> Result {
     let rig = TestRig::new()?;
-    let report = rig.command(&["telemetry", "stats", "--usage", "--since", "30d", "--json"])?;
+    let report = rig.command(&[
+        "telemetry",
+        "stats",
+        "--usage",
+        "--since",
+        "2592000",
+        "--json",
+    ])?;
     assert_eq!(
         code(&report),
         0,
@@ -127,7 +134,7 @@ fn usage_report_includes_zero_count_cli_verbs_and_mcp_tools() -> Result {
     assert!(
         units
             .iter()
-            .any(|v| v["kind"] == "mcp.tool" && v["unit"] == "fabric_identity")
+            .any(|v| v["kind"] == "mcp.tool" && v["unit"] == "fabric_context")
     );
     rig.assert_legacy_unchanged()
 }

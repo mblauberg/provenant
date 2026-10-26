@@ -106,7 +106,8 @@ lane cache.
 
 ## Writer dispatch
 
-Agents use `fabric_run` (`op: submit`); this is the terminal path for a shell without MCP.
+Agents use `fabric_run` (`op: submit`); this is the terminal path for a shell
+without MCP.
 
 ```sh
 provenant dispatch --operation-id OP --model ADAPTER/MODEL \

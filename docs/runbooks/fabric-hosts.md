@@ -228,8 +228,8 @@ checkout of the same project, at the same path under its home directory, with
 its own provider sign-ins; a `--account` pin is checked against the peer's registrations. The calling host keeps only a placement record under
 `fabric/remote-runs/` in its state directory. `lanes --id`, `output` and `cancel` find that record and forward to
 the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
-keep running after the SSH call returns. The Fabric MCP `fabric_run` (`op: submit`) tool
-takes the same placement as an optional `host` field.
+keep running after the SSH call returns. Fabric MCP `fabric_run`
+(`op: submit`) takes the same placement as an optional `host` field.
 
 A writer on a peer names a new branch and its base instead of `--worktree`,
 which is a path on the calling host. This is the terminal path; agents use
