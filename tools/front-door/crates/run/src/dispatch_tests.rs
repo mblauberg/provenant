@@ -2319,56 +2319,81 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     Ok(())
 }
 
-/// Stages a host-owned input the way provider preparation does, over a file
-/// the host cannot vouch for.
-struct Unreadable;
-impl Providers for Unreadable {
-    fn prepare(
-        &self,
-        _: &TaskRequest,
-        _: &str,
-        paths: &LaunchPaths,
-        _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
-        use std::os::unix::fs::PermissionsExt;
-        let file = paths.scratch.join("git-log.txt");
-        std::fs::write(&file, b"context").map_err(|error| error.to_string())?;
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
-            .map_err(|error| error.to_string())?;
-        let scratch = Directory::open_anchor(&paths.scratch).map_err(|error| error.to_string())?;
-        artifacts::seal(&scratch, "git-log.txt", b"context", RECORD_LIMIT)
-            .map_err(|error| error.to_string())?;
-        unreachable!("an unreadable input must stop preparation")
-    }
-    fn decode(
-        &self,
-        _: &RouteRecord,
-        _: &[u8],
-        _: &ExitObservation,
-        _: &std::path::Path,
-    ) -> std::result::Result<Decoded, String> {
-        unreachable!("a refused attempt never runs")
-    }
-}
-
-#[test]
-fn unreadable_staged_input_ends_the_attempt_rejected_not_succeeded() -> TestResult {
+/// Starts a one-task run after `damage` has altered its stored prompt, and
+/// asserts the attempt ends Rejected before preparation with `cause` recorded.
+fn assert_unreadable_prompt_rejected(
+    damage: impl FnOnce(&std::path::Path) -> TestResult,
+    cause: &str,
+) -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let started = store.start(run.run_id, &Unreadable, &|_, _| unreachable!(), &call)?;
+    let id = run.attempts[0].attempt_id;
+    let prompt = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/prompt.txt", run.run_id));
+    damage(&prompt)?;
+    let fake = Fake::default();
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    // Restore access so the tempdir can be removed whatever the outcome.
+    if prompt.exists() {
+        std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o600))?;
+    }
     assert!(matches!(
         &started[..],
-        [Started::Refused { reason, kind: RefusalKind::Preparation, .. }]
-            if reason.contains("not private")
+        [Started::Refused { attempt, reason, kind: RefusalKind::Preparation }]
+            if *attempt == id && reason.contains("stored prompt unreadable")
     ));
-    let id = run.attempts[0].attempt_id;
+    assert_eq!(fake.prepared.get(), 0);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
-    assert!(store.attempt(id, &call)?.started_at.is_none());
+    let fact = store.attempt(id, &call)?;
+    assert_eq!(
+        fact.terminal_state,
+        provenant_records::AttemptOutcome::Rejected
+    );
+    assert!(fact.started_at.is_none());
+    assert!(
+        fact.reason.as_deref().is_some_and(
+            |reason| reason.starts_with("stored prompt unreadable") && reason.contains(cause)
+        ),
+        "{:?}",
+        fact.reason
+    );
+    assert!(
+        store
+            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .is_empty()
+    );
     Ok(())
+}
+
+#[test]
+fn missing_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
+    assert_unreadable_prompt_rejected(
+        |prompt| {
+            std::fs::remove_file(prompt)?;
+            Ok(())
+        },
+        "fstatat failed",
+    )
+}
+
+#[test]
+fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    assert_unreadable_prompt_rejected(
+        |prompt| {
+            std::fs::set_permissions(prompt, std::fs::Permissions::from_mode(0o000))?;
+            Ok(())
+        },
+        "openat read failed",
+    )
 }
 
 #[test]
