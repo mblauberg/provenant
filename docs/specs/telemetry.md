@@ -102,8 +102,9 @@ across hosts. `--run` is applied by the store because attempt facts carry no
 run ID. `--since` filters on `finished_at`.
 
 By default the export reads only this host's store and needs no collector.
-`--peers` also reads the terminal attempts of this project's runs placed on
-peers (`dispatch --host`), one batched status read per peer over the usual SSH
+`--peers` also reads the terminal attempts of every configured peer, however
+the run reached it (`dispatch --host` or a Fabric submission). It asks each
+peer for its newest 100 lanes, as `lanes --host` does, over the usual SSH
 transport, and names each peer by its configured label. A peer that cannot be
 read is listed under `peers` with its error and the rest of the export stands.
 

@@ -11,8 +11,9 @@ structured output. The contract is in the [telemetry spec](../specs/telemetry.md
 retained attempts as Chrome Trace Event JSON (default `provenant-trace.json`),
 with one process per host and one thread per attempt; arrows join a child
 attempt to its parent, across hosts too. Open the file in ui.perfetto.dev or
-chrome://tracing; no collector is needed. Add `--peers` to read the runs you
-placed on peers as well; an unreachable peer is reported and skipped.
+chrome://tracing; no collector is needed. Add `--peers` to read each configured
+peer's newest 100 lanes as well, whoever placed them; an unreachable peer is
+reported and skipped.
 
 ## Local usage counters
 
