@@ -1,4 +1,4 @@
-# ADR 0007 — Defer universal retention classes and typed deletion
+# ADR 0007: Defer universal retention classes and typed deletion
 
 **Status:** Accepted 2026-07-13; amended 2026-07-15 and 2026-10-26
 
