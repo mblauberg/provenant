@@ -35,8 +35,9 @@ removed worktree's own cache while holding its writer lock. Other orphaned
 caches remain until `provenant gc [--dry-run] [--idle-days N]`, which also
 removes caches idle for N days (default 7) for the selected project's
 worktrees, sparing live or unobservable writers. Idle removal takes the existing
-writer lock without waiting and holds it across the tombstone rename. A held
-lock keeps the cache as live; a missing or unsafe lock keeps it as unobservable.
+writer lock without waiting and releases it immediately after the tombstone
+rename. A held lock keeps the cache as live; a missing or unsafe lock, a
+reservation, or unverifiable registration keeps it as unobservable.
 V1 owner markers support orphan cleanup and foreign-owner reporting, but never
 idle cleanup because they lack device and inode identity. Existing owners
 outside that project are reported as kept (foreign). Before deletion, GC
