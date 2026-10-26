@@ -115,6 +115,32 @@
           "engineering-docs"
         ]
       }
+    },
+    {
+      "id": "q176136",
+      "relation": "negative",
+      "prompt": "Review this UI backend source diff for transaction correctness.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176137",
+      "relation": "negative",
+      "prompt": "Diagnose the cause of this server-side checkout crash.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
     }
   ]
 }

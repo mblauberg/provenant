@@ -51,8 +51,10 @@ third-party content.
    missing procedures may justify skill text; existing-rule misses belong in
    fixtures or execution checks, and local preferences remain local. Literal
    search can confirm known residue; it cannot establish semantic coverage.
-5. Use balanced, frozen routing evals for undertrigger and overtrigger
-   claims. A raw keyword match is only a candidate, not ground truth.
+5. Use balanced, frozen routing evals for undertrigger and overtrigger claims.
+   Check fixtures and with-and-without evidence per the shared doctrine in
+   [../SKILL.md](../SKILL.md). A raw keyword match is only a candidate, not
+   ground truth.
 6. Report all dimensions from [method.md](method.md); mark missing evidence
    `N/A` and keep static facts separate from behavioural estimates.
 

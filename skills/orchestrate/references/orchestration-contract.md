@@ -84,6 +84,8 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
+Independent review briefs follow the [review outcome](../../code-review/references/finding-contract.md#review-outcome) rule.
+
 ### Native result digest
 
 A native subagent's final message lands whole in the chair's context, so its

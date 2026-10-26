@@ -115,6 +115,32 @@
           "legal-writing"
         ]
       }
+    },
+    {
+      "id": "q176120",
+      "relation": "negative",
+      "prompt": "Rewrite this API README and error messages for developers without changing their meaning.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176121",
+      "relation": "negative",
+      "prompt": "Condense these Australian legal submissions while preserving authorities and legal effect.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "legal-writing",
+        "companion_skills": []
+      }
     }
   ]
 }
