@@ -199,7 +199,7 @@ pub mod resources;
 
 /// Construct the fixture binary's only child command through the same strict
 /// post-fork boundary used by the supervisor.
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 #[allow(clippy::disallowed_methods)]
 pub fn fixture_command(
     argv: &[OsString],
@@ -224,7 +224,7 @@ pub fn fixture_command(
 }
 
 /// Accept a fixture connection with one bounded poll of a held Unix listener.
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn fixture_accept(
     listener: &std::os::unix::net::UnixListener,
     timeout: std::time::Duration,
@@ -270,7 +270,7 @@ pub fn fixture_accept(
 }
 
 /// Read one fixture handshake byte with a bounded readiness wait.
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn fixture_read_byte(
     stream: &mut std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
@@ -334,7 +334,7 @@ pub fn replace_process(
 
 /// Read a fixture's inherited secret directly, without opening `/dev/fd/N`
 /// through a filesystem policy. Duplicate it so the caller keeps its reader.
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn fixture_read_secret_pipe(fd: i32) -> io::Result<Vec<u8>> {
     use std::io::Read;
     use std::os::fd::FromRawFd;
@@ -359,7 +359,7 @@ pub fn fixture_read_secret_pipe(fd: i32) -> io::Result<Vec<u8>> {
 }
 
 /// Create deliberately inheritable state only in the isolated fixture process.
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let file = std::fs::File::open("/dev/null")?;
@@ -390,7 +390,7 @@ pub fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {
     Ok(fd)
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result<()> {
     // SAFETY: F_GETFD inspects an integer fd without taking ownership.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -427,7 +427,7 @@ pub fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result<()> {
 
 /// Enter a sandbox that denies every Mach lookup except the attempt's own
 /// name, the shape of the production profile for this purpose. Irreversible.
-#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[cfg(all(any(test, feature = "fixture"), target_os = "macos"))]
 pub fn fixture_enter_attempt_sandbox(lookup_name: &str) -> io::Result<()> {
     unsafe extern "C" {
         fn sandbox_init(
@@ -449,7 +449,7 @@ pub fn fixture_enter_attempt_sandbox(lookup_name: &str) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn fixture_ignore_term() -> io::Result<()> {
     // SAFETY: the dedicated fixture changes only its own disposition; SIG_IGN
     // is a valid platform handler constant, no resource or pointer transfers,
@@ -461,7 +461,7 @@ pub fn fixture_ignore_term() -> io::Result<()> {
 }
 
 /// Used only in a dedicated, single-threaded fixture process before any spawn.
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn fixture_wait_policy(mode: &str) -> io::Result<()> {
     extern "C" fn handler(_: libc::c_int) {}
     // SAFETY: libc's sigaction record permits zeroed integers, pointer-sized

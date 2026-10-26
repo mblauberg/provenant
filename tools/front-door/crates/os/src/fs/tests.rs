@@ -92,10 +92,10 @@ fn require_durable_preserves_the_original_sync_error() {
 }
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Barrier};
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 use std::time::{Duration, Instant};
 
 fn names(dir: &Directory) -> Vec<OsString> {
@@ -975,12 +975,12 @@ fn directory_sync_fault_reports_new_complete_file_as_visible() {
     assert_eq!(names(&dir), [OsString::from("receipt.json")]);
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 struct PauseAtAtomicWritePhase {
     phase: AtomicWritePhase,
     socket: PathBuf,
 }
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 impl PauseAtAtomicWritePhase {
     fn pause(&mut self, phase: AtomicWritePhase) -> Result<()> {
         if self.phase == phase {
@@ -996,7 +996,7 @@ impl PauseAtAtomicWritePhase {
         Ok(())
     }
 }
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 impl AtomicWriteOperations for PauseAtAtomicWritePhase {
     fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()> {
         self.pause(AtomicWritePhase::Write)?;
@@ -1022,7 +1022,7 @@ impl AtomicWriteOperations for PauseAtAtomicWritePhase {
     }
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 #[test]
 fn atomic_write_crash_fixture() {
     let (Some(root), Some(socket), Some(phase)) = (
@@ -1054,7 +1054,7 @@ fn atomic_write_crash_fixture() {
     panic!("fixture passed its requested crash boundary");
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 fn kill_fixture(
     child: &mut crate::sys::raw_exec::OwnedPid,
     reaper: &crate::sys::reaper::Reaper,
@@ -1084,7 +1084,7 @@ fn kill_fixture(
     }
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 #[test]
 fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
     for (phase, expected) in [

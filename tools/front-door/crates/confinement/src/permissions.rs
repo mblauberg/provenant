@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::ffi::OsString;
+#[cfg(target_os = "macos")]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]

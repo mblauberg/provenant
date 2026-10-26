@@ -271,7 +271,7 @@ impl Drop for OwnedPid {
     }
 }
 
-#[cfg(all(test, feature = "fixture"))]
+#[cfg(test)]
 pub fn reap_pid_for_test(pid: u32) -> io::Result<i32> {
     let mut status = 0;
     // SAFETY: callers pass the PID returned by this test process's own spawn;
@@ -284,7 +284,7 @@ pub fn reap_pid_for_test(pid: u32) -> io::Result<i32> {
     }
 }
 
-#[cfg(all(test, feature = "fixture"))]
+#[cfg(test)]
 pub fn pid_is_absent_for_test(pid: u32) -> io::Result<bool> {
     // SAFETY: signal zero only checks the status of the just-reaped fixture
     // PID and sends no signal; no pointer or ownership crosses the call.

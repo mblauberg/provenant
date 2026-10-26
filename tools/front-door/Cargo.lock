@@ -563,7 +563,6 @@ dependencies = [
  "jiff",
  "libc",
  "provenant-core",
- "provenant-os",
  "serde",
  "tempfile",
  "thiserror",

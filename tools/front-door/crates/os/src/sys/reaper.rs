@@ -1,9 +1,9 @@
 //! Fixed-capacity utility cleanup. One process-wide worker, no destructor signalling.
 use std::io;
 use std::process::Child;
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 use std::sync::Condvar;
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar as WakeCondvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -26,9 +26,9 @@ struct State {
     worker: Weak<Worker>,
     #[cfg(test)]
     unknown_outcomes: AtomicUsize,
-    #[cfg(feature = "fixture")]
+    #[cfg(any(test, feature = "fixture"))]
     paused: AtomicBool,
-    #[cfg(feature = "fixture")]
+    #[cfg(any(test, feature = "fixture"))]
     changed: Condvar,
 }
 impl State {
@@ -80,23 +80,23 @@ impl Worker {
                 let mut index = 0;
                 while index < states.len() {
                     let state = &states[index];
-                    #[cfg(feature = "fixture")]
+                    #[cfg(any(test, feature = "fixture"))]
                     if state.paused.load(Ordering::Acquire) {
                         index += 1;
                         continue;
                     }
                     let mut slots = state.slots();
-                    #[cfg(feature = "fixture")]
+                    #[cfg(any(test, feature = "fixture"))]
                     let mut released = false;
                     for slot in slots.iter_mut() {
                         if let Slot::Child(child) = slot {
                             match child.try_wait() {
                                 Ok(None) => has_child = true,
                                 Ok(Some(_status)) => {
-                                    #[cfg(feature = "fixture")]
+                                    #[cfg(any(test, feature = "fixture"))]
                                     record_exit_status(child.id(), _status);
                                     *slot = Slot::Free;
-                                    #[cfg(feature = "fixture")]
+                                    #[cfg(any(test, feature = "fixture"))]
                                     {
                                         released = true;
                                     }
@@ -108,7 +108,7 @@ impl Worker {
                                     #[cfg(test)]
                                     state.unknown_outcomes.fetch_add(1, Ordering::Relaxed);
                                     *slot = Slot::Free;
-                                    #[cfg(feature = "fixture")]
+                                    #[cfg(any(test, feature = "fixture"))]
                                     {
                                         released = true;
                                     }
@@ -119,7 +119,7 @@ impl Worker {
                     let has_child_here = slots.iter().any(|slot| matches!(slot, Slot::Child(_)));
                     drop(slots);
                     has_child |= has_child_here;
-                    #[cfg(feature = "fixture")]
+                    #[cfg(any(test, feature = "fixture"))]
                     if released {
                         state.changed.notify_all();
                     }
@@ -183,14 +183,14 @@ impl Reaper {
             worker: Arc::downgrade(&worker),
             #[cfg(test)]
             unknown_outcomes: AtomicUsize::new(0),
-            #[cfg(feature = "fixture")]
+            #[cfg(any(test, feature = "fixture"))]
             paused: AtomicBool::new(false),
-            #[cfg(feature = "fixture")]
+            #[cfg(any(test, feature = "fixture"))]
             changed: Condvar::new(),
         });
         Ok(Self(state))
     }
-    #[cfg(feature = "fixture")]
+    #[cfg(any(test, feature = "fixture"))]
     pub fn new_paused(capacity: usize) -> io::Result<Self> {
         let reaper = Self::new(capacity)?;
         reaper.0.paused.store(true, Ordering::Release);
@@ -214,7 +214,7 @@ impl Reaper {
             .filter(|slot| !matches!(slot, Slot::Free))
             .count()
     }
-    #[cfg(feature = "fixture")]
+    #[cfg(any(test, feature = "fixture"))]
     pub fn occupied_fixture(&self) -> usize {
         self.0
             .slots()
@@ -222,14 +222,14 @@ impl Reaper {
             .filter(|slot| !matches!(slot, Slot::Free))
             .count()
     }
-    #[cfg(feature = "fixture")]
+    #[cfg(any(test, feature = "fixture"))]
     pub fn resume(&self) {
         self.0.paused.store(false, Ordering::Release);
         if let Some(worker) = self.0.worker.upgrade() {
             worker.notify();
         }
     }
-    #[cfg(feature = "fixture")]
+    #[cfg(any(test, feature = "fixture"))]
     pub fn wait_for_occupied(&self, maximum: usize, timeout: Duration) -> io::Result<usize> {
         let deadline = Instant::now()
             .checked_add(timeout)
@@ -318,7 +318,7 @@ impl Drop for Permit {
                 }
             };
             if freed {
-                #[cfg(feature = "fixture")]
+                #[cfg(any(test, feature = "fixture"))]
                 self.state.changed.notify_all();
             }
         }
@@ -326,11 +326,11 @@ impl Drop for Permit {
 }
 
 // Test-only, bounded observations from the actual owning wait path.
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 static EXIT_STATUSES: Mutex<std::collections::VecDeque<(u32, std::process::ExitStatus)>> =
     Mutex::new(std::collections::VecDeque::new());
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 fn record_exit_status(pid: u32, status: std::process::ExitStatus) {
     let mut statuses = EXIT_STATUSES
         .lock()
@@ -341,7 +341,7 @@ fn record_exit_status(pid: u32, status: std::process::ExitStatus) {
     statuses.push_back((pid, status));
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub fn take_exit_status(pid: u32) -> Option<std::process::ExitStatus> {
     let mut statuses = EXIT_STATUSES
         .lock()

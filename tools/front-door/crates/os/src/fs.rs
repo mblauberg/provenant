@@ -136,10 +136,10 @@ mod atomic_write_operations {
         fn sync_directory(&mut self, directory: &Directory) -> Result<()>;
     }
 }
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 #[doc(hidden)]
 pub use atomic_write_operations::AtomicWriteOperations;
-#[cfg(not(feature = "fixture"))]
+#[cfg(not(any(test, feature = "fixture")))]
 use atomic_write_operations::AtomicWriteOperations;
 
 struct LocalAtomicWriteOperations;
@@ -819,7 +819,7 @@ impl Directory {
     }
     /// Fixture entry for other crates' fault tests; the trait is public only
     /// under `fixture`, so this cannot take the private method's place.
-    #[cfg(feature = "fixture")]
+    #[cfg(any(test, feature = "fixture"))]
     #[doc(hidden)]
     pub fn atomic_write_with_faults(
         &self,

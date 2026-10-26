@@ -50,7 +50,7 @@ fn reaper_worker_is_shared_between_executor_states() {
     assert!(first.shares_process_worker(&second));
 }
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 #[test]
 fn post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot() {
     use std::ffi::OsString;

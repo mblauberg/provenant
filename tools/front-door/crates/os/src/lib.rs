@@ -14,5 +14,5 @@ pub mod scratch;
 #[allow(unsafe_code, clippy::disallowed_methods)]
 pub mod sys;
 
-#[cfg(feature = "fixture")]
+#[cfg(any(test, feature = "fixture"))]
 pub mod fixture;
