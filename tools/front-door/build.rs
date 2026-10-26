@@ -816,6 +816,9 @@ fn watch(paths: &mut BTreeSet<PathBuf>, path: PathBuf) -> BuildResult<()> {
     if fs::symlink_metadata(&path).is_err() {
         return Ok(());
     }
+    if fs::metadata(&path).is_err() {
+        return Ok(());
+    }
     path.to_str()
         .ok_or_else(|| invalid("Cargo rerun path is not UTF-8"))?;
     paths.insert(path);
@@ -871,13 +874,26 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use super::{
         BuildResult, Inputs, TrackedFiles, collect_external_tree, collect_member_inputs,
-        discover_members, index_path_from_output, invalid, parse_toml, source_digest,
+        discover_members, index_path_from_output, invalid, parse_toml, source_digest, watch,
     };
     use provenant_records::{SourceDigest, SourceInput};
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+
+    #[test]
+    fn dangling_untracked_symlink_is_not_watched() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let link = temporary.path().join("rustfmt.toml");
+        std::os::unix::fs::symlink("missing-target", &link)?;
+        let mut watched = BTreeSet::new();
+
+        watch(&mut watched, link.clone())?;
+
+        assert!(!watched.contains(&link));
+        Ok(())
+    }
 
     #[test]
     fn git_index_output_requires_one_existing_absolute_path() -> BuildResult<()> {
