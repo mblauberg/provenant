@@ -192,44 +192,21 @@ fn main() -> BuildResult<()> {
         &mut inputs,
     )?;
 
-    let members = discover_members(&workspace, &workspace_document, &mut watched, &tracked)?;
+    // Cargo.lock covers member additions without recursively watching crates/.
+    let members = discover_members(&workspace, &workspace_document, &tracked)?;
     for member in &members {
-        let manifest = member.directory.join("Cargo.toml");
-        let logical_manifest = join_logical(&member.logical_directory, "Cargo.toml");
-        watch(&mut watched, manifest.clone())?;
-        if logical_manifest != "Cargo.toml" {
-            add_required_file(
-                &workspace,
-                &manifest,
-                logical_manifest,
-                &tracked,
-                &mut inputs,
-            )?;
-        }
-
-        let build_script = member.directory.join("build.rs");
-        let logical_build_script = join_logical(&member.logical_directory, "build.rs");
-        watch(&mut watched, build_script.clone())?;
-        add_optional_file(
-            &workspace,
-            &build_script,
-            logical_build_script,
-            &tracked,
-            &mut inputs,
-        )?;
-
-        for source_directory in SHIPPED_MEMBER_DIRS {
-            let directory = member.directory.join(source_directory);
-            watch(&mut watched, directory.clone())?;
-            collect_workspace_tree(
-                &workspace,
-                &directory,
-                &mut inputs,
-                source_directory == "src",
-                &tracked,
-            )?;
-        }
+        collect_member_inputs(&workspace, member, &mut watched, &tracked, &mut inputs)?;
     }
+
+    let packager = workspace.join("examples/package-release.rs");
+    watch(&mut watched, packager.clone())?;
+    add_required_file(
+        &workspace,
+        &packager,
+        "examples/package-release.rs".to_owned(),
+        &tracked,
+        &mut inputs,
+    )?;
 
     // External product inputs are assigned their release asset names so the
     // pure digest API only sees normal relative POSIX paths (never ../ paths).
@@ -359,10 +336,48 @@ fn release_asset_inputs(inputs: &Inputs) -> BuildResult<Vec<(String, Vec<u8>)>> 
     Ok(result)
 }
 
+fn collect_member_inputs(
+    workspace: &Path,
+    member: &Member,
+    watched: &mut BTreeSet<PathBuf>,
+    tracked: &TrackedFiles,
+    inputs: &mut Inputs,
+) -> BuildResult<()> {
+    let manifest = member.directory.join("Cargo.toml");
+    let logical_manifest = join_logical(&member.logical_directory, "Cargo.toml");
+    watch(watched, manifest.clone())?;
+    if logical_manifest != "Cargo.toml" {
+        add_required_file(workspace, &manifest, logical_manifest, tracked, inputs)?;
+    }
+
+    let build_script = member.directory.join("build.rs");
+    let logical_build_script = join_logical(&member.logical_directory, "build.rs");
+    watch(watched, build_script.clone())?;
+    add_optional_file(
+        workspace,
+        &build_script,
+        logical_build_script,
+        tracked,
+        inputs,
+    )?;
+
+    for source_directory in SHIPPED_MEMBER_DIRS {
+        let directory = member.directory.join(source_directory);
+        watch(watched, directory.clone())?;
+        collect_workspace_tree(
+            workspace,
+            &directory,
+            inputs,
+            source_directory == "src",
+            tracked,
+        )?;
+    }
+    Ok(())
+}
+
 fn discover_members(
     workspace: &Path,
     manifest: &DocumentMut,
-    watched: &mut BTreeSet<PathBuf>,
     tracked: &TrackedFiles,
 ) -> BuildResult<Vec<Member>> {
     let members = manifest
@@ -387,7 +402,6 @@ fn discover_members(
             }
             "crates/*" => {
                 let crates = workspace.join("crates");
-                watch(watched, crates.clone())?;
                 let metadata = optional_metadata(&crates)?
                     .ok_or_else(|| invalid("workspace crates directory is missing"))?;
                 if !metadata.is_dir() {
@@ -786,6 +800,9 @@ fn join_logical(directory: &str, child: &str) -> String {
 }
 
 fn watch(paths: &mut BTreeSet<PathBuf>, path: PathBuf) -> BuildResult<()> {
+    if optional_metadata(&path)?.is_none() {
+        return Ok(());
+    }
     path.to_str()
         .ok_or_else(|| invalid("Cargo rerun path is not UTF-8"))?;
     paths.insert(path);
@@ -825,10 +842,11 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildResult, Inputs, SHIPPED_MEMBER_DIRS, TrackedFiles, collect_external_tree,
-        collect_workspace_tree, invalid, source_digest,
+        BuildResult, Inputs, TrackedFiles, collect_external_tree, collect_member_inputs,
+        discover_members, invalid, parse_toml, source_digest,
     };
     use provenant_records::{SourceDigest, SourceInput};
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -878,9 +896,11 @@ mod tests {
     }
 
     #[test]
-    fn member_source_edits_change_the_source_digest() -> BuildResult<()> {
-        let (initial, after_edit) = digests_after_member_edit("src/lib.rs")?;
-        assert_ne!(initial, after_edit);
+    fn member_shipped_input_edits_change_the_source_digest() -> BuildResult<()> {
+        for relative in ["src/lib.rs", "Cargo.toml", "build.rs", "assets/data.txt"] {
+            let (initial, after_edit) = digests_after_member_edit(relative)?;
+            assert_ne!(initial, after_edit, "{relative}");
+        }
         Ok(())
     }
 
@@ -891,13 +911,27 @@ mod tests {
         let member = workspace.join("crates/member");
         fs::create_dir_all(member.join("src"))?;
         fs::create_dir_all(member.join("tests"))?;
+        fs::write(
+            workspace.join("Cargo.toml"),
+            b"[workspace]\nmembers = [\"crates/*\"]\n",
+        )?;
+        fs::write(member.join("Cargo.toml"), b"[package]\nname = \"member\"\n")?;
         fs::write(member.join("src/lib.rs"), b"// source\n")?;
         fs::write(member.join("tests/integration.rs"), b"// test\n")?;
+        let edited = member.join(relative);
+        if !edited.exists() {
+            fs::create_dir_all(
+                edited
+                    .parent()
+                    .ok_or_else(|| invalid("fixture has no parent"))?,
+            )?;
+            fs::write(&edited, b"// optional input\n")?;
+        }
         run_git(&repository, &["init", "--quiet"])?;
         run_git(&repository, &["add", "tools/front-door/crates/member"])?;
 
         let initial = digest_member_sources(&workspace, &repository, &member)?;
-        fs::write(member.join(relative), b"// edited\n")?;
+        fs::write(edited, b"// edited\n")?;
         let after_edit = digest_member_sources(&workspace, &repository, &member)?;
         Ok((initial, after_edit))
     }
@@ -909,15 +943,22 @@ mod tests {
     ) -> BuildResult<SourceDigest> {
         let tracked = TrackedFiles::load(workspace, repository)?;
         let mut inputs = Inputs::default();
-        for source_directory in SHIPPED_MEMBER_DIRS {
-            collect_workspace_tree(
-                workspace,
-                &member.join(source_directory),
-                &mut inputs,
-                source_directory == "src",
-                &tracked,
-            )?;
+        let document = parse_toml(&fs::read(workspace.join("Cargo.toml"))?, "fixture manifest")?;
+        let mut watched = BTreeSet::new();
+        for member in discover_members(workspace, &document, &tracked)? {
+            collect_member_inputs(workspace, &member, &mut watched, &tracked, &mut inputs)?;
         }
+        assert!(
+            watched.iter().all(|path| path.exists()),
+            "missing watch: {watched:?}"
+        );
+        let tests = member.join("tests");
+        assert!(
+            watched
+                .iter()
+                .all(|path| !tests.starts_with(path) && !path.starts_with(&tests)),
+            "member tests are recursively watched: {watched:?}"
+        );
         let borrowed: Vec<SourceInput<'_>> = inputs
             .iter()
             .map(|(name, bytes, _)| SourceInput { name, bytes })

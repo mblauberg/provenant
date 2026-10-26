@@ -45,7 +45,8 @@ identity and process-level setup. `help` and root resolution stay cheap: no
 threads, no SQLite, no provider probes. Break cycles with typed events and
 decisions, never by importing `run` into `providers` or `routing`. The
 install digest covers shipped workspace source (each member's `src/`, `assets/`
-and `build.rs`), manifests, the lockfile, the toolchain and Cargo configuration.
+and `build.rs`), manifests, the lockfile, the toolchain, Cargo configuration,
+the release packager (`examples/package-release.rs`) and the bundled assets.
 CLI composes run's `AttemptReader` with telemetry's `stats`; run has no
 telemetry dependency. Their shared `AttemptFact` lives in records.
 
