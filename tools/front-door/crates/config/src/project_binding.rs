@@ -177,6 +177,27 @@ pub fn lookup_project(
     location: &ProjectLocation,
     fs: &dyn SafeFs,
 ) -> Result<Option<ProjectBinding>, ConfigError> {
+    match existing_projects(roots, fs)? {
+        Some(projects) => find_binding(&*projects, location.common_dir()),
+        None => Ok(None),
+    }
+}
+
+/// Lookup only: every registered binding, Git-backed or not.
+pub fn registered_projects(
+    roots: &Roots,
+    fs: &dyn SafeFs,
+) -> Result<Vec<ProjectBinding>, ConfigError> {
+    match existing_projects(roots, fs)? {
+        Some(projects) => bindings(&*projects),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn existing_projects(
+    roots: &Roots,
+    fs: &dyn SafeFs,
+) -> Result<Option<Box<dyn SafeDir>>, ConfigError> {
     let state = match fs.open_anchor(roots.state.as_path()) {
         Ok(state) => state,
         Err(error) if error.is_not_found() => return Ok(None),
@@ -189,15 +210,28 @@ pub fn lookup_project(
         Err(error) => return Err(error.into()),
     };
     verify_directory(&*projects, true)?;
-    find_binding(&*projects, location.common_dir())
+    Ok(Some(projects))
 }
 
 fn find_binding(
     projects: &dyn SafeDir,
     target: &Path,
 ) -> Result<Option<ProjectBinding>, ConfigError> {
-    let mut count = 0;
     let mut found = None;
+    for binding in bindings(projects)? {
+        if binding.common_dir() == target {
+            if found.is_some() {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            found = Some(binding);
+        }
+    }
+    Ok(found)
+}
+
+fn bindings(projects: &dyn SafeDir) -> Result<Vec<ProjectBinding>, ConfigError> {
+    let mut count = 0;
+    let mut found = Vec::new();
     for entry in projects.entries()? {
         let entry = entry?;
         if entry == OsStr::new(BINDING_LOCK) {
@@ -220,19 +254,10 @@ fn find_binding(
         if record.schema_version != 1 || record.project != project {
             return Err(ConfigError::InvalidProjectBinding);
         }
-        let common_dir = decode_location(&record.canonical_common_dir)?;
-        if found
-            .as_ref()
-            .is_some_and(|binding: &ProjectBinding| binding.common_dir() == common_dir)
-        {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
-        if common_dir == target {
-            found = Some(ProjectBinding {
-                project,
-                canonical_common_dir: common_dir,
-            });
-        }
+        found.push(ProjectBinding {
+            project,
+            canonical_common_dir: decode_location(&record.canonical_common_dir)?,
+        });
     }
     Ok(found)
 }

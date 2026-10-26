@@ -4347,6 +4347,7 @@ mod tests {
             provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
             provenant_supervisor::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/usr/bin/perl"))?,
         ];
 
         let profile = ProviderProfile {
@@ -4495,11 +4496,25 @@ mod tests {
             "(allow process-exec (subpath \"{}\"))",
             project_locks.display()
         )));
+        // A read-only lane over the same grants, for the agent socket probe.
+        let read_only_plan = PlanPermissions {
+            mode: AccessMode::ReadOnly,
+            ..plan.clone()
+        };
+        let read_only_anchors = Anchors {
+            worktree: None,
+            ..anchors
+        };
+        let read_only_sbpl = String::from_utf8(
+            backend
+                .compile(&read_only_plan, &profile, &read_only_anchors)?
+                .profile,
+        )?;
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
             ("HOME".into(), home.into_os_string()),
-            ("PROVENANT_STATE_DIR".into(), state.into_os_string()),
+            ("PROVENANT_STATE_DIR".into(), state.clone().into_os_string()),
             ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
@@ -4521,11 +4536,11 @@ mod tests {
             );
             return Ok(());
         }
-        let run = |program: &Path, args: &[&Path]| {
+        let run_in = |sbpl: &str, program: &Path, args: &[&Path]| {
             let mut argv = vec![
                 OsString::from(SANDBOX_EXEC),
                 OsString::from("-p"),
-                OsString::from(&sbpl),
+                OsString::from(sbpl),
                 OsString::from(program.as_os_str()),
             ];
             argv.extend(args.iter().map(|path| path.as_os_str().to_owned()));
@@ -4538,6 +4553,43 @@ mod tests {
             options.reap_timeout = CLEANUP_TIMEOUT;
             executor.execute(options).expect("bounded sandbox child")
         };
+        let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
+
+        // The per-user peer agent relays to fresh `fabric peer` children in
+        // the login session, so no lane may connect to its socket. The
+        // unconfined connection proves the listener; the system DNS socket
+        // proves the confined client runs and can connect where allowed.
+        let agent = state.join("peer-agent");
+        std::fs::create_dir_all(&agent)?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let peer_socket = agent.join("peer.sock");
+        let _peer_listener = std::os::unix::net::UnixListener::bind(&peer_socket)?;
+        std::os::unix::net::UnixStream::connect(&peer_socket)?;
+        let connect = |sbpl: &str, socket: &Path| {
+            run_in(
+                sbpl,
+                &executables[6],
+                &[
+                    Path::new("-MIO::Socket::UNIX"),
+                    Path::new("-e"),
+                    Path::new("IO::Socket::UNIX->new(Peer => $ARGV[0]) or die \"connect: $!\\n\""),
+                    socket,
+                ],
+            )
+        };
+        let system_socket = Path::new("/private/var/run/mDNSResponder");
+        for (name, sbpl) in [("writer", &sbpl), ("read-only", &read_only_sbpl)] {
+            let outcome = connect(sbpl, system_socket);
+            assert!(
+                successful_probe(&outcome),
+                "{name} system socket: {:?}; {}",
+                outcome.termination,
+                String::from_utf8_lossy(&outcome.stderr.bytes)
+            );
+        }
 
         let shell_outcome = run(&executables[3], &[Path::new("-c"), Path::new("printf ok")]);
         assert!(
@@ -4649,6 +4701,11 @@ mod tests {
             );
         }
         let mut probes = vec![
+            ("writer peer agent socket", connect(&sbpl, &peer_socket)),
+            (
+                "read-only peer agent socket",
+                connect(&read_only_sbpl, &peer_socket),
+            ),
             ("undeclared target exec", run(&undeclared_script, &[])),
             (
                 "parent signal probe",

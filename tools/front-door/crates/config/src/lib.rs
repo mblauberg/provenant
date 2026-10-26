@@ -30,7 +30,7 @@ pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config, edit_config_docume
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{
-    ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_project,
+    ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_project, registered_projects,
 };
 pub use provenant_records::Finding;
 
@@ -184,7 +184,8 @@ pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
     ReleaseSmoke, SelectorChange, Snapshots, Targets, inspect_install, install, installed_binary,
-    peer_agent_plist, plan_and_install, plan_install, private_directory, uninstall,
+    peer_agent_plist, plan_and_install, plan_install, private_directory, recorded_hook_checkout,
+    uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};
