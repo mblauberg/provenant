@@ -2319,6 +2319,58 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     Ok(())
 }
 
+/// Stages a host-owned input the way provider preparation does, over a file
+/// the host cannot vouch for.
+struct Unreadable;
+impl Providers for Unreadable {
+    fn prepare(
+        &self,
+        _: &TaskRequest,
+        _: &str,
+        paths: &LaunchPaths,
+        _: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let file = paths.scratch.join("git-log.txt");
+        std::fs::write(&file, b"context").map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+        let scratch = Directory::open_anchor(&paths.scratch).map_err(|error| error.to_string())?;
+        artifacts::seal(&scratch, "git-log.txt", b"context", RECORD_LIMIT)
+            .map_err(|error| error.to_string())?;
+        unreachable!("an unreadable input must stop preparation")
+    }
+    fn decode(
+        &self,
+        _: &RouteRecord,
+        _: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        unreachable!("a refused attempt never runs")
+    }
+}
+
+#[test]
+fn unreadable_staged_input_ends_the_attempt_rejected_not_succeeded() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let started = store.start(run.run_id, &Unreadable, &|_, _| unreachable!(), &call)?;
+    assert!(matches!(
+        &started[..],
+        [Started::Refused { reason, kind: RefusalKind::Preparation, .. }]
+            if reason.contains("not private")
+    ));
+    let id = run.attempts[0].attempt_id;
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    assert!(store.attempt(id, &call)?.started_at.is_none());
+    Ok(())
+}
+
 #[test]
 fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() -> TestResult {
     let temp = tempfile::tempdir()?;

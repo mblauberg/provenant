@@ -106,6 +106,12 @@ Route and access inputs on `dispatch`:
   and approvals, and Cursor disables its inner sandbox, so their tools use
   the OS grant directly. Context files are published through the directory
   handle retained when scratch was created.
+  A host failure to stage or read back an input it hands to the lane (the
+  prompt file, the context files) ends the attempt Rejected before launch,
+  with the cause in its reason. Run cannot see a read that the provider's own
+  session denies or fails, so `lanes --json` carries no marker for it and such
+  a lane can still end Succeeded. Reviewers must say in their report which
+  inputs they could not read.
 - Manifest: strict JSON `{schema_version:1,tasks:[...]}` with 1 to 64 tasks,
   unique optional task IDs (32 lowercase hex digits; omitted IDs are
   generated), `--concurrency` 1 to 8 (default the `lanes.max_concurrency`
