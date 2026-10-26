@@ -314,20 +314,8 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             let stop_reason = *reason
                 .lock()
                 .map_err(|_| "child launcher stop state poisoned")?;
-            if matches!(
-                stop_reason,
-                Some(
-                    StopReason::ExplicitCancellation
-                        | StopReason::WallDeadline
-                        | StopReason::SupervisorSignal
-                )
-            ) {
-                for error in session
-                    .store
-                    .stop_children(accepted, "host parent stopped", &call)
-                {
-                    launch_error = Some(error);
-                }
+            for error in finish_children(&session.store, accepted, stop_reason, &call) {
+                launch_error = Some(error);
             }
             return match launch_error {
                 Some(error) => Err(error),
@@ -335,5 +323,252 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             };
         }
         std::thread::park_timeout(Duration::from_millis(100));
+    }
+}
+
+/// Finish the last scan without leaving deferred attempts for a worker that
+/// has stopped. Normal completion preserves children already in custody.
+fn finish_children(
+    store: &run::RunStore,
+    accepted: std::collections::BTreeSet<(AttemptId, u64)>,
+    reason: Option<StopReason>,
+    call: &run::Request<'_>,
+) -> Vec<String> {
+    if matches!(
+        reason,
+        Some(
+            StopReason::ExplicitCancellation
+                | StopReason::WallDeadline
+                | StopReason::SupervisorSignal
+        )
+    ) {
+        return store.stop_children(accepted, "host parent stopped", call);
+    }
+    let mut processed = std::collections::BTreeSet::new();
+    let mut errors = Vec::new();
+    loop {
+        let queued = match store.queued_runs(call) {
+            Ok(queued) => queued,
+            Err(error) => {
+                errors.push(error.to_string());
+                return errors;
+            }
+        };
+        if queued.is_empty() {
+            return errors;
+        }
+        // Discovery is bounded to 256 non-terminal rows, including launched
+        // children. Refusing a batch exposes queued runs beyond that window.
+        for id in queued {
+            // Lane-writable rows must not make shutdown revisit an unchanged
+            // run forever when their run IDs disagree with the index.
+            if !processed.insert(id) {
+                errors.push("child queue did not drain after parent completion".into());
+                continue;
+            }
+            if let Err(error) =
+                store.refuse_queued(id, "parent finished before held child custody freed", call)
+            {
+                errors.push(error.to_string());
+            }
+        }
+        if !errors.is_empty() {
+            return errors;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs, RunId, TaskId};
+    use provenant_records::CanonicalV1;
+
+    #[test]
+    fn final_scan_refuses_deferred_children_after_normal_parent_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Prepare and admit without spawning a guardian or provider.
+        struct Ready;
+        impl run::Providers for Ready {
+            fn prepare(
+                &self,
+                _: &run::TaskRequest,
+                _: &str,
+                _: &run::LaunchPaths,
+                _: Option<&run::AttemptRecord>,
+            ) -> Result<run::PreparedLaunch, String> {
+                Ok(run::PreparedLaunch {
+                    argv: vec!["fixture".into()],
+                    environment: vec![],
+                    stdin: vec![],
+                    secret_input: None,
+                    cwd: "/".into(),
+                    route: run::RouteRecord::default(),
+                    skipped_routes: vec![],
+                    observed_head: None,
+                    confinement: None,
+                })
+            }
+            fn decode(
+                &self,
+                _: &run::RouteRecord,
+                _: &[u8],
+                _: &custody::ExitObservation,
+                _: &Path,
+            ) -> Result<run::Decoded, String> {
+                unreachable!("no provider runs in this fixture")
+            }
+        }
+        struct Available;
+        impl run::Resources for Available {
+            fn memory(
+                &self,
+            ) -> std::io::Result<provenant_supervisor::sys::resources::MemorySample> {
+                Ok(provenant_supervisor::sys::resources::MemorySample {
+                    total_bytes: 1,
+                    available_bytes: 1,
+                })
+            }
+            fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+                Ok(u64::MAX)
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let home = base.join("home");
+        let checkout = base.join("checkout");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&checkout)?;
+        let mut inputs = RootInputs::new(home, checkout);
+        inputs.state_dir = Some(base.join("state"));
+        let context = run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+            project_id: ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let mut store =
+            run::RunStore::open(&context, &call)?.with_sealed_requester(context.actor_id);
+        store.set_admission_policy(run::AdmissionPolicy {
+            startup_spacing_ms: 0,
+            ..Default::default()
+        });
+        let task_id = TaskId::from_bytes([3; 16]);
+        let id = AttemptId::from_bytes([6; 16]);
+        let mut child = run::PreparedRun {
+            run_id: RunId::from_bytes([4; 16]),
+            operation_id: OperationId::parse("deferred-child")?,
+            created_at: clock.wall_now()?,
+            request: run::CanonicalRequest {
+                schema_version: 1,
+                tasks: vec![run::TaskRequest {
+                    task_id,
+                    prompt_digest: CanonicalV1::file_digest(b"child"),
+                    route: run::RequestedRoute::Model {
+                        provider: "fixture".into(),
+                        model: "fixture/model".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    profile: Default::default(),
+                    authority_digest: Digest::from_bytes([5; 32]),
+                    provider_timeout_seconds: 3600,
+                    writer: None,
+                    delivery_id: None,
+                    deliver: None,
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                parent: None,
+                lane_depth: Some(2),
+                parent_attempt: Some(AttemptId::from_bytes([9; 16])),
+            },
+            attempts: vec![run::NewAttempt {
+                task_id,
+                attempt_id: id,
+                prompt: "child".into(),
+            }],
+        };
+        store.create(&child, &call)?;
+        let running = id;
+        // Admit in the context callback, then stop handoff before custody.
+        // The launcher's stale Starting withdrawal must leave Running intact.
+        assert!(matches!(
+            store.start_child(
+                child.run_id,
+                &child.request,
+                &Ready,
+                &|record, _| {
+                    let directory = Directory::open_anchor(&context.state_root.as_path().join(
+                        format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+                    ))?;
+                    store.admit(record.attempt_id, &directory, &Available, &clock, &cancel)?;
+                    Err(run::RunError::Validation(
+                        "fixture admitted without handoff",
+                    ))
+                },
+                &call
+            ),
+            Err(run::RunError::Conflict)
+        ));
+        assert_eq!(
+            store.record(running, &call)?.state,
+            run::AttemptState::Running
+        );
+
+        // Admission permits 256 queued attempts in addition to active ones.
+        // Put the last queued run beyond queued_runs' 256-row scan window.
+        let template = child.request.tasks[0].clone();
+        let mut deferred = Vec::new();
+        for batch in 0_u8..4 {
+            child.run_id = RunId::from_bytes([batch + 10; 16]);
+            child.operation_id = OperationId::parse(&format!("queued-batch-{batch}"))?;
+            child.request.tasks.clear();
+            child.attempts.clear();
+            let first = u128::from(batch) * 64 + 1;
+            for index in first..(first + 64).min(256) {
+                let task_id = TaskId::from_bytes(index.to_be_bytes());
+                child.request.tasks.push(run::TaskRequest {
+                    task_id,
+                    ..template.clone()
+                });
+                child.attempts.push(run::NewAttempt {
+                    task_id,
+                    attempt_id: AttemptId::from_bytes(index.to_be_bytes()),
+                    prompt: "child".into(),
+                });
+            }
+            store.create(&child, &call)?;
+            deferred.extend(child.attempts.iter().map(|attempt| attempt.attempt_id));
+        }
+        child.run_id = RunId::from_bytes([8; 16]);
+        child.operation_id = OperationId::parse("queued-tail")?;
+        child.request.tasks = vec![template];
+        child.attempts = vec![run::NewAttempt {
+            task_id,
+            attempt_id: AttemptId::from_bytes([9; 16]),
+            prompt: "child".into(),
+        }];
+        store.create(&child, &call)?;
+        deferred.push(child.attempts[0].attempt_id);
+        assert!(!store.queued_runs(&call)?.contains(&child.run_id));
+        assert!(finish_children(&store, [(running, 1)].into(), None, &call).is_empty());
+        for id in deferred {
+            let record = store.record(id, &call)?;
+            assert!(matches!(record.state, run::AttemptState::Terminal {
+                outcome: run::Outcome::Rejected, reason: Some(reason), ..
+            } if reason == "parent finished before held child custody freed"));
+            assert_eq!(record.generation, 0);
+        }
+        assert_eq!(
+            store.record(running, &call)?.state,
+            run::AttemptState::Running
+        );
+        assert!(store.queued_runs(&call)?.is_empty());
+        Ok(())
     }
 }
