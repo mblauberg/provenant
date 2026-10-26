@@ -26,10 +26,11 @@ fn fixture() -> Result {
     }
     if args.get(1).is_some_and(|v| v == "-p") {
         let dir = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").ok_or("CLAUDE_CONFIG_DIR")?);
-        assert_eq!(
+        // Shell lanes get a private config directory; others use the account's.
+        assert!(matches!(
             dir.file_name().and_then(|s| s.to_str()),
-            Some(".claude-pro")
-        );
+            Some(".claude-pro" | "claude-config")
+        ));
         if args.iter().any(|v| v == "provenant-refresh-probe") {
             let expiry =
                 u64::try_from(jiff::Timestamp::now().as_millisecond())?.saturating_add(3_600_000);
