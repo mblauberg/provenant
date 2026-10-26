@@ -165,6 +165,17 @@ impl Registry<'_> {
     }
 }
 impl run::Providers for Registry<'_> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+        let Some(writer) = &task.writer else {
+            return Ok(());
+        };
+        let roots = self.roots.ok_or("routing context is unavailable")?;
+        let home = self.home.ok_or("home directory is unavailable")?;
+        let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+            .map_err(|error| error.to_string())?;
+        check_writer_disk(&config.gc, roots.state.as_path(), &writer.worktree, home)
+    }
+
     fn prepare(
         &self,
         task: &run::TaskRequest,
@@ -749,18 +760,47 @@ fn check_writer_disk(
     settings: &provenant_config::GcSettings,
     state: &Path,
     worktree: &Path,
+    home: &Path,
+) -> Result<(), String> {
+    check_writer_disk_with(settings, state, worktree, home, |mut path| {
+        loop {
+            match provenant_os::fs::Directory::open_anchor(path) {
+                Ok(directory) => {
+                    return directory
+                        .available_bytes()
+                        .map_err(|error| error.to_string());
+                }
+                Err(error) if error.is_not_found() => {
+                    path = path.parent().ok_or_else(|| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    })
+}
+
+fn check_writer_disk_with(
+    settings: &provenant_config::GcSettings,
+    state: &Path,
+    worktree: &Path,
+    home: &Path,
+    mut available: impl FnMut(&Path) -> Result<u64, String>,
 ) -> Result<(), String> {
     let floor = settings
         .free_floor_bytes(state)
         .map_err(|error| error.to_string())?;
-    let available = provenant_os::fs::Directory::open_anchor(worktree)
-        .map_err(|error| error.to_string())?
-        .available_bytes()
-        .map_err(|error| error.to_string())?;
-    if available < floor {
+    let cache = home.join("Library/Caches/provenant-lane-cargo");
+    let (mut limiting, mut minimum) = (worktree, u64::MAX);
+    for path in [worktree, state, cache.as_path()] {
+        let bytes = available(path)?;
+        if bytes < minimum {
+            (limiting, minimum) = (path, bytes);
+        }
+    }
+    if minimum < floor {
         return Err(format!(
-            "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; run `provenant gc` before dispatching a writer",
-            worktree.display()
+            "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; run `provenant gc` before dispatching a writer",
+            limiting.display()
         ));
     }
     Ok(())
@@ -783,8 +823,13 @@ pub fn submit_with_host(
         for task in &submission.tasks {
             if let Some(path) = &task.worktree {
                 let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
-                check_writer_disk(&config.gc, edge.roots.state.as_path(), &writer.worktree)
-                    .map_err(|message| Fail::new(Status::Refused, ErrorKind::Refused, message))?;
+                check_writer_disk(
+                    &config.gc,
+                    edge.roots.state.as_path(),
+                    &writer.worktree,
+                    edge.home,
+                )
+                .map_err(|message| Fail::new(Status::Refused, ErrorKind::Refused, message))?;
             }
         }
     }
@@ -1289,7 +1334,7 @@ fn launch_on_host(
     // taken against the same key as on the lane-launch path of the test host.
     #[cfg(feature = "fixture")]
     if host.fixture_state_write {
-        return Ok(session.store.start_with_writer_lease(
+        let started = session.store.start_with_writer_lease(
             run,
             &registry,
             &holder,
@@ -1305,11 +1350,15 @@ fn launch_on_host(
             },
             validated,
             call,
-        )?);
+        )?;
+        check_launch_policy(&started)?;
+        return Ok(started);
     }
-    Ok(session
+    let started = session
         .service()
-        .start(run, &registry, &holder, validated, call)?)
+        .start(run, &registry, &holder, validated, call)?;
+    check_launch_policy(&started)?;
+    Ok(started)
 }
 fn launch_unknown(started: &[run::Started]) -> Vec<String> {
     started
@@ -1319,6 +1368,32 @@ fn launch_unknown(started: &[run::Started]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
+    // Preserve the receipt for existing unknown-handoff recovery, including
+    // Fabric's operation replay, even when another task was refused.
+    if started
+        .iter()
+        .any(|started| matches!(started, run::Started::Unknown { .. }))
+    {
+        return Ok(());
+    }
+    if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            attempt,
+            reason,
+            kind: run::RefusalKind::Policy,
+        } => Some((attempt, reason)),
+        _ => None,
+    }) {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::Refused,
+            format!("{attempt}: {reason}"),
+        ));
+    }
+    Ok(())
 }
 /// The lanes of a just-accepted run, optionally after waiting for all of them.
 fn report(
@@ -2484,6 +2559,80 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         }
     }
     Ok((context.project_id, lanes))
+}
+
+#[cfg(test)]
+mod writer_disk_tests {
+    use super::*;
+
+    #[test]
+    fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
+        let refused = || run::Started::Refused {
+            attempt: AttemptId::from_bytes([1; 16]),
+            kind: run::RefusalKind::Policy,
+            reason: "insufficient disk space".into(),
+        };
+        let error = check_launch_policy(&[refused()])
+            .err()
+            .ok_or("policy refusal was ignored")?;
+        assert_eq!(error.status, Status::Refused);
+        assert_eq!(error.kind, ErrorKind::Refused);
+        // Let the existing unknown-handoff handling retain the full receipt.
+        check_launch_policy(&[
+            refused(),
+            run::Started::Unknown {
+                attempt: AttemptId::from_bytes([2; 16]),
+                error: "handoff unconfirmed".into(),
+            },
+        ])
+        .map_err(|error| error.message)?;
+        Ok(())
+    }
+
+    #[test]
+    fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
+        let settings = provenant_config::GcSettings {
+            free_floor: Some("100B".into()),
+            ..Default::default()
+        };
+        let state = Path::new("/state");
+        let worktree = Path::new("/worktree");
+        let home = Path::new("/home");
+        let cache = home.join("Library/Caches/provenant-lane-cargo");
+        for low in [worktree, state, cache.as_path()] {
+            let mut observed = Vec::new();
+            let result = check_writer_disk_with(&settings, state, worktree, home, |path| {
+                observed.push(path.to_path_buf());
+                Ok(if path == low { 99 } else { 1000 })
+            });
+            let error = result
+                .err()
+                .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
+            assert!(
+                error.contains("99 bytes available") && error.contains("floor 100 bytes"),
+                "{error}"
+            );
+            assert!(observed.contains(&low.to_path_buf()));
+        }
+        check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
+        Ok(())
+    }
+
+    #[test]
+    fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let settings = provenant_config::GcSettings {
+            free_floor: Some("1B".into()),
+            ..Default::default()
+        };
+        let state = base.join("missing/state");
+        let home = base.join("missing/home");
+        check_writer_disk(&settings, &state, &base, &home)?;
+        assert!(!base.join("missing").exists());
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -2175,13 +2175,51 @@ impl Resources for Host {
 #[derive(Default)]
 struct Fake {
     refuse: bool,
+    policy_task: Option<TaskId>,
     observed: Option<RouteRecord>,
     decoded: Cell<usize>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
 }
+
+#[test]
+fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let batch = two_tasks(2);
+    store.create(&batch, &call)?;
+    let providers = Fake {
+        refuse: true,
+        policy_task: Some(batch.request.tasks[0].task_id),
+        ..Default::default()
+    };
+    let started = store.start(batch.run_id, &providers, &|_, _| unreachable!(), &call)?;
+    assert_eq!(providers.prepared.get(), 1);
+    assert!(matches!(started.as_slice(), [
+        Started::Refused { attempt: first, kind: RefusalKind::Policy, reason },
+        Started::Refused { attempt: second, kind: RefusalKind::Preparation, .. },
+    ] if *first == batch.attempts[0].attempt_id && *second == batch.attempts[1].attempt_id
+        && reason.contains("provenant gc")));
+    for attempt in &batch.attempts {
+        assert_eq!(
+            terminal(&store, attempt.attempt_id, &call)?,
+            Outcome::Rejected
+        );
+    }
+    Ok(())
+}
+
 impl Providers for Fake {
+    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
+        if self.policy_task == Some(task.task_id) {
+            return Err("insufficient disk space; run `provenant gc`".into());
+        }
+        Ok(())
+    }
+
     fn prepare(
         &self,
         _: &TaskRequest,

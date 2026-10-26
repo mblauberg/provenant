@@ -107,9 +107,12 @@ Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
 
-Writer dispatch refuses to launch when available space on the worktree's
-volume is below the floor. The error reports available bytes and the floor
-and directs you to `provenant gc`. Read-only dispatch remains available.
+Writer dispatch and resume refuse to launch when the minimum available space
+across the worktree, state and lane-cache volumes is below the floor. The error
+names the limiting path, available bytes and the floor and directs you to
+`provenant gc`. Read-only dispatch remains available. This is a point-in-time
+check with no space reservation: concurrent writers can each pass and then
+consume the same free space.
 
 Bare `provenant gc` deletes eligible caches and previews merged worktree and
 declared output cleanup. Pass `--apply` to delete those entries too, or

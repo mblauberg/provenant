@@ -68,7 +68,15 @@ fn collect_store(
             budget: WaitBudget::cli(clock.mono_now(), 5)?,
             cancel: &cancel,
         };
-        if let Some(store) = RunStore::open_read_only(&context, &call)? {
+        if let Some(reader) = RunStore::open_read_only(&context, &call)? {
+            // Applied cleanup updates the temporary-retained hint. Keep previews
+            // read-only and never create a run store just to collect it.
+            let store = if dry_run {
+                reader
+            } else {
+                drop(reader);
+                RunStore::open(&context, &call)?
+            };
             let mut collected = store
                 .with_writer_registry(host.state.as_path())
                 .gc_provider_state(&directory, days, clock.wall_now()?, dry_run, &call)?;

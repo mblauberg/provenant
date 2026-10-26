@@ -46,7 +46,7 @@ pub struct ProviderStateGc {
 #[derive(Debug, Serialize)]
 pub struct AttemptTmpRemoval {
     pub path: PathBuf,
-    /// Observed allocated bytes, estimated during a dry run.
+    /// Best-effort observed allocated bytes; measurement errors leave a partial estimate.
     pub bytes: u64,
 }
 
@@ -83,7 +83,7 @@ impl RunStore {
     }
 
     /// Host maintenance: only indexed terminal attempts, across projects in
-    /// this store. No records or digests are rewritten by retention.
+    /// this store. Only the temporary cleanup hint changes, never records or digests.
     pub fn gc_provider_state(
         &self,
         expected: &Directory,
@@ -188,7 +188,28 @@ impl RunStore {
                 }
                 let age = now.as_micros().saturating_sub(finished_at.as_micros());
                 if age >= DAY_MICROS {
-                    collect_temporary(&attempt, &path.with_file_name("tmp"), dry_run, &mut report)?;
+                    let temporary = path.with_file_name("tmp");
+                    let collection = (|| -> Result<()> {
+                        collect_temporary(&attempt, &temporary, dry_run, &mut report)?;
+                        if !dry_run {
+                            let update = Request {
+                                budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 5)
+                                    .map_err(|_| RunError::Contention)?,
+                                ..observation
+                            };
+                            self.write(&update, |tx| {
+                                tx.execute(
+                                    "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
+                                    rusqlite::params![id, record.run_id.to_string(), record.project_id.to_string()],
+                                )?;
+                                Ok(())
+                            })?;
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = collection {
+                        record_issue(&mut report, temporary, &error);
+                    }
                 }
                 if continuing {
                     return Err(RunError::Validation(
@@ -211,25 +232,29 @@ impl RunStore {
             );
             if let Err(error) = result {
                 let cancelled = matches!(error, RunError::Cancelled);
-                let issue = ProviderStateIssue {
-                    path,
-                    reason: error.to_string(),
-                };
-                if matches!(
-                    error,
-                    RunError::Validation(_)
-                        | RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
-                ) {
-                    report.kept.push(issue);
-                } else {
-                    report.errors.push(issue);
-                }
+                record_issue(&mut report, path, &error);
                 if cancelled {
                     break;
                 }
             }
         }
         Ok(report)
+    }
+}
+
+fn record_issue(report: &mut ProviderStateGc, path: PathBuf, error: &RunError) {
+    let issue = ProviderStateIssue {
+        path,
+        reason: error.to_string(),
+    };
+    if matches!(
+        error,
+        RunError::Validation(_)
+            | RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
+    ) {
+        report.kept.push(issue);
+    } else {
+        report.errors.push(issue);
     }
 }
 
@@ -247,10 +272,11 @@ fn collect_temporary(
     }
     let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
     measured.measure_at("attempt_tmp", attempt, name, path);
-    if !measured.errors.is_empty() {
-        return Err(RunError::Validation(
-            "cannot measure attempt temporary directory",
-        ));
+    for error in measured.errors {
+        report.errors.push(ProviderStateIssue {
+            path: error.path,
+            reason: format!("temporary size estimate incomplete: {}", error.reason),
+        });
     }
     let bytes = measured.entries.iter().fold(0_u64, |sum, entry| {
         sum.saturating_add(entry.allocated_bytes)
@@ -824,6 +850,165 @@ mod tests {
                 .attempt_tmp
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_incomplete_tmp_measurement_does_not_block_removal_or_provider_retention() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let temporary = attempt.join("tmp");
+        fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+        fs::write(temporary.join("payload"), vec![1; 8192])?;
+        // Exceed the measurement depth budget without a million-entry fixture.
+        let mut deepest = temporary.clone();
+        for _ in 0..258 {
+            deepest.push("d");
+            fs::create_dir(&deepest)?;
+        }
+        let candidate = attempt.join("provider-state/candidate-0");
+        fs::create_dir(candidate.join("cache"))?;
+        fs::write(candidate.join("cache/payload"), "regenerable")?;
+        let preview = sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        assert_eq!(preview.attempt_tmp.len(), 1);
+        assert!(preview.attempt_tmp[0].bytes >= 8192);
+        assert!(!preview.errors.is_empty());
+        assert!(temporary.exists());
+        let applied = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert_eq!(applied.attempt_tmp.len(), 1);
+        assert!(applied.attempt_tmp[0].bytes >= 8192);
+        assert!(!applied.errors.is_empty());
+        assert!(!temporary.exists());
+        assert!(!candidate.join("auth.json").exists());
+        assert!(!candidate.join("cache").exists());
+        assert_eq!(
+            fs::read(candidate.join("sessions/session.jsonl"))?,
+            b"transcript"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_refreshes_the_hint_update_budget_after_collection() -> TestResult {
+        use provenant_core::{Clock, MonoTime, TimeError, WaitBudget};
+        // Each DB observation completes within its own five-second budget,
+        // while time between observations exceeds the original deadline.
+        struct AdvancingClock(std::cell::Cell<u64>);
+        impl Clock for AdvancingClock {
+            fn mono_now(&self) -> MonoTime {
+                let now = self.0.get();
+                self.0.set(now + 2_000_000);
+                MonoTime::from_micros(now)
+            }
+            fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
+                WallTime::from_micros(200 + DAY_MICROS)
+            }
+            fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), TimeError> {
+                self.0.set(self.0.get().max(deadline.as_micros()));
+                Ok(())
+            }
+        }
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let id = input.attempts[0].attempt_id;
+        withdraw(&store, &input, &call)?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(attempt.join("tmp"))?;
+        store.set_temporary_retained(id, true, &call)?;
+        let slow = AdvancingClock(std::cell::Cell::new(0));
+        let call = Request {
+            clock: &slow,
+            cancel: &cancel,
+            budget: WaitBudget::cli(MonoTime::from_micros(0), 100)?,
+        };
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.kept.is_empty(), "{:?}", report.kept);
+        assert!(!attempt.join("tmp").exists());
+        let retained: bool = store.db.query_row(
+            "SELECT tmp_retained FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert!(!retained);
+        Ok(())
+    }
+
+    #[test]
+    fn gc_tmp_removal_refusal_does_not_block_credentials_caches_or_expiry() -> TestResult {
+        for days in [1, 7] {
+            let (_temp, context, store, input, attempt) = seeded()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            withdraw(&store, &input, &call)?;
+            let id = input.attempts[0].attempt_id;
+            store.set_temporary_retained(id, true, &call)?;
+            // Payload disposal refuses a root accessible to other users.
+            let temporary = attempt.join("tmp");
+            fs::DirBuilder::new().mode(0o755).create(&temporary)?;
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
+            let candidate = attempt.join("provider-state/candidate-0");
+            fs::create_dir(candidate.join("cache"))?;
+            fs::write(candidate.join("cache/payload"), "regenerable")?;
+            let report = sweep(&store, &context, days, DAY_MICROS, false, &call)?;
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .chain(&report.kept)
+                    .any(|issue| issue.path == temporary)
+            );
+            assert!(temporary.exists());
+            assert!(!candidate.join("auth.json").exists());
+            assert!(!candidate.join("cache").exists());
+            assert_eq!(attempt.join(EXPIRED).exists(), days == 1);
+            let retained: bool = store.db.query_row(
+                "SELECT tmp_retained FROM attempts WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?;
+            assert!(retained);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gc_clears_temporary_retained_only_after_applied_removal_across_projects() -> TestResult {
+        let (_temp, mut context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let id = input.attempts[0].attempt_id;
+        let terminal = withdraw(&store, &input, &call)?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(attempt.join("tmp"))?;
+        store.set_temporary_retained(id, true, &call)?;
+        drop(store);
+        // Host GC covers all indexed projects, not just the opening project.
+        context.project_id = provenant_core::ProjectId::from_bytes([99; 16]);
+        let store = RunStore::open(&context, &call)?;
+        let retained = || -> crate::Result<bool> {
+            Ok(store.db.query_row(
+                "SELECT tmp_retained FROM attempts WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?)
+        };
+        sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        assert!(retained()?);
+        sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(!attempt.join("tmp").exists());
+        assert!(!retained()?);
+        let raw: Vec<u8> = store.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(decode::<AttemptRecord>(&raw)?, terminal);
         Ok(())
     }
 

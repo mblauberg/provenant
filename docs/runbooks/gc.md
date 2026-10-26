@@ -46,6 +46,11 @@ in place. Resume then returns `PROVIDER_STATE_EXPIRED`; start a fresh lane
 with the retained result or transcripts as context.
 
 Inspect `data.provider_state.removed`, `kept` and `errors` in the GC JSON.
+Temporary-directory byte counts are best-effort estimates. Incomplete
+measurement is reported in `errors` without blocking temporary removal.
+A temporary cleanup failure does not block credential expiry, provider-cache
+pruning or provider-state expiry. Applied removal clears the attempt's
+temporary-retained hint without rewriting its durable records or evidence.
 Dry runs report planned paths without deleting or archiving them or creating
 lock files. GC skips held locks, reservations and pending continuations.
 An unreadable reservation prevents deletion. Resolve custody through normal

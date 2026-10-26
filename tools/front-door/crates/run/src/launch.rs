@@ -69,6 +69,11 @@ pub struct LaunchPaths {
     pub temporary: PathBuf,
 }
 pub trait Providers {
+    /// Host policy checks before provider preparation. A refusal is task-local;
+    /// no provider is prepared and siblings remain eligible to launch.
+    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), String> {
+        Ok(())
+    }
     /// Prepare one task, trying its fallback routes in order. An error is a
     /// task-local refusal reason; siblings still launch. `resume` is the prior
     /// terminal attempt of a continuation, whose exact session must be used:
@@ -114,6 +119,7 @@ pub enum Started {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefusalKind {
+    Policy,
     Preparation,
     WorktreeBusy,
 }
@@ -638,9 +644,17 @@ impl RunStore {
                 provider_state: base.join("provider-state"),
                 temporary: base.join("tmp"),
             };
-            let mut plan = match providers.prepare(task, &prompt, &paths, resume.as_ref()) {
+            let prepared = providers
+                .check_policy(task)
+                .map_err(|reason| (RefusalKind::Policy, reason))
+                .and_then(|()| {
+                    providers
+                        .prepare(task, &prompt, &paths, resume.as_ref())
+                        .map_err(|reason| (RefusalKind::Preparation, reason))
+                });
+            let mut plan = match prepared {
                 Ok(plan) => plan,
-                Err(reason) => {
+                Err((kind, reason)) => {
                     match self.withdraw(
                         id,
                         AttemptState::Queued,
@@ -659,7 +673,7 @@ impl RunStore {
                     started.push(Started::Refused {
                         attempt: id,
                         reason,
-                        kind: RefusalKind::Preparation,
+                        kind,
                     });
                     continue;
                 }

@@ -104,9 +104,6 @@ fn prepare_with(
             .map_err(|e| e.to_string())?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?;
-    if writer.is_some() {
-        super::check_writer_disk(&config.gc, roots.state.as_path(), &cwd)?;
-    }
     let request = route_request(task)?;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
