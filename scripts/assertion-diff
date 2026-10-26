@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Advisory CI signal: flag test assertions removed or loosened in a diff.
+
+  assertion-diff --base <ref> [--head <ref>]   diff two git refs
+  assertion-diff [patch-file]                  read a unified diff (default stdin)
+
+Findings, per hunk of a Rust test file:
+  assertion.loosened  assert_eq!/assert_ne! replaced by assert!, a specific
+                      variant check replaced by is_err()/is_ok(), or a removed
+                      #[should_panic]
+  assertion.removed   an assertion or #[test] removed with no replacement
+It is a line heuristic and only warns. It always exits 0 unless the diff cannot
+be read. --annotate adds GitHub warning annotations; --github-summary appends a
+markdown table to $GITHUB_STEP_SUMMARY.
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from typing import List, NamedTuple, Tuple
+
+RE_EQ = re.compile(r"\bassert_(?:eq|ne)!")
+RE_ASSERT = re.compile(r"\bassert(?:_eq|_ne)?!")
+RE_PLAIN = re.compile(r"\bassert!")
+RE_SPECIFIC = re.compile(r"\.unwrap_err\(\)|\bErr\(|\bOk\(")
+RE_GENERIC = re.compile(r"\.(?:is_err|is_ok)\(\)")
+RE_SHOULD_PANIC = re.compile(r"#\[\s*should_panic\b")
+RE_TEST_ATTR = re.compile(r"#\[\s*(?:\w+::)*test\b")
+RE_TEST_FILE = re.compile(r"(?:^|/)(?:tests/.*|tests\.rs|[^/]*_tests?\.rs)$")
+RE_FILE = re.compile(r"^(?:\+\+\+|---) (?:[ab]/)?(.+)$")
+RE_HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+class Finding(NamedTuple):
+    path: str
+    line: int
+    rule: str
+    message: str
+
+
+class Hunk:
+    def __init__(self, path: str):
+        self.path = path
+        self.removed: List[Tuple[int, str]] = []
+        self.added: List[Tuple[int, str]] = []
+
+
+def parse_hunks(diff: str) -> List[Hunk]:
+    hunks: List[Hunk] = []
+    hunk = None
+    path = old_path = ""
+    old = new = 0
+    for raw in diff.splitlines():
+        if raw.startswith("diff --git "):
+            hunk = None
+        elif hunk is None and raw.startswith("--- "):
+            m = RE_FILE.match(raw)
+            old_path = m.group(1) if m and m.group(1) != "/dev/null" else ""
+        elif hunk is None and raw.startswith("+++ "):
+            m = RE_FILE.match(raw)
+            # A deleted file has no new path, so report against the old one.
+            path = m.group(1) if m and m.group(1) != "/dev/null" else old_path
+        elif m := RE_HUNK.match(raw):
+            old, new = int(m.group(1)), int(m.group(2))
+            hunk = Hunk(path)
+            hunks.append(hunk)
+        elif hunk is not None:
+            if raw.startswith("-"):
+                hunk.removed.append((old, raw[1:].strip()))
+                old += 1
+            elif raw.startswith("+"):
+                hunk.added.append((new, raw[1:].strip()))
+                new += 1
+            elif raw.startswith(" "):
+                old += 1
+                new += 1
+    return hunks
+
+
+def analyse(hunk: Hunk) -> List[Finding]:
+    out: List[Finding] = []
+
+    def add(line: int, rule: str, message: str) -> None:
+        out.append(Finding(hunk.path, line, rule, message))
+
+    panics = [n for n, t in hunk.removed if RE_SHOULD_PANIC.search(t)]
+    re_added = sum(1 for _, t in hunk.added if RE_SHOULD_PANIC.search(t))
+    for n in panics[re_added:]:
+        add(n, "assertion.loosened", "#[should_panic] removed")
+
+    removed = [(n, t) for n, t in hunk.removed if RE_ASSERT.search(t)]
+    added = [(n, t) for n, t in hunk.added if RE_ASSERT.search(t)]
+    for i, (n, old) in enumerate(removed):
+        if i >= len(added):
+            add(n, "assertion.removed", "Assertion removed without replacement")
+            continue
+        new_n, new = added[i]
+        if RE_EQ.search(old) and RE_PLAIN.search(new) and not RE_EQ.search(new):
+            add(new_n, "assertion.loosened", "assert_eq!/assert_ne! replaced by assert!")
+        elif RE_SPECIFIC.search(old) and RE_GENERIC.search(new) and not RE_SPECIFIC.search(new):
+            add(new_n, "assertion.loosened", "Specific variant check replaced by is_err()/is_ok()")
+
+    tests_gone = sum(1 for _, t in hunk.removed if RE_TEST_ATTR.search(t)) - sum(
+        1 for _, t in hunk.added if RE_TEST_ATTR.search(t)
+    )
+    if tests_gone > 0:
+        first = next(n for n, t in hunk.removed if RE_TEST_ATTR.search(t))
+        add(first, "assertion.removed", "Test removed (check it moved rather than was dropped)")
+    return out
+
+
+def findings_for(diff: str) -> List[Finding]:
+    found: List[Finding] = []
+    for hunk in parse_hunks(diff):
+        if hunk.path.endswith(".rs") and RE_TEST_FILE.search(hunk.path):
+            found.extend(analyse(hunk))
+    return sorted(found, key=lambda f: (f.path, f.line))
+
+
+def summary(found: List[Finding]) -> str:
+    if not found:
+        return "### Test assertion signals (advisory)\n\nNo loosened or removed assertions found.\n"
+    rows = "\n".join(f"| `{f.path}` | {f.line} | `{f.rule}` | {f.message} |" for f in found)
+    return (
+        "### Test assertion signals (advisory)\n\n"
+        f"{len(found)} possible weakening(s) in this diff. These warn only.\n\n"
+        f"| File | Line | Rule | Message |\n| --- | --- | --- | --- |\n{rows}\n"
+    )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("patch_file", nargs="?", default="-")
+    ap.add_argument("--base")
+    ap.add_argument("--head", default="HEAD")
+    ap.add_argument("--annotate", action="store_true")
+    ap.add_argument("--github-summary", action="store_true")
+    args = ap.parse_args()
+
+    if args.base:
+        res = subprocess.run(
+            ["git", "diff", f"{args.base}...{args.head}", "--", "*.rs"],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0:
+            sys.stderr.write(f"assertion-diff: git diff failed: {res.stderr}")
+            return 1
+        diff = res.stdout
+    elif args.patch_file == "-":
+        diff = sys.stdin.read()
+    else:
+        with open(args.patch_file, encoding="utf-8") as f:
+            diff = f.read()
+
+    found = findings_for(diff)
+    if not found:
+        print("No loosened or removed assertions found.")
+    for f in found:
+        print(f"{f.path}:{f.line}: {f.rule}: {f.message}")
+        if args.annotate:
+            print(f"::warning file={f.path},line={f.line},title={f.rule}::{f.message}")
+
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if args.github_summary and path:
+        with open(path, "a", encoding="utf-8") as out:
+            out.write("\n" + summary(found))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

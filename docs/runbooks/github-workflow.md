@@ -288,6 +288,25 @@ Both Rust cache steps cache `tools/front-door/target`, including Cargo's
 nested build-dir layout. A `build.build-dir` outside that tree is not cached
 unless its path is added to the action's `cache-directories`.
 
+### Advisory test signals
+
+`.github/workflows/test-signals.yml` reports test strength on pull requests.
+It never joins `ci-status` and its scripts exit 0, so everything warns and
+nothing blocks a merge. Read the warning annotations and job summaries; the
+signals run in CI only.
+
+- **Assertion diff:** flags `assert_eq!` replaced by `assert!`, a specific
+  variant check replaced by `is_err()`, and removed assertions, tests or
+  `#[should_panic]` in test files. A line heuristic, so expect some noise.
+- **Stress run:** runs only the tests the pull request added or changed, with
+  nextest `--stress-count 20` and no retries, to expose flakiness.
+- **Mutants:** `cargo-mutants --in-diff` runs nightly, and on a pull request
+  carrying the `mutants` label. It skips files that mention `unsafe` and runs at
+  most 40 mutants. Surviving mutants are warnings.
+
+`--in-diff` mutates only changed source lines, so a diff that touches only
+tests runs no mutants and gets no mutation signal.
+
 ### Reproducing a CI failure locally
 
 When a suite passes locally but fails in CI, the difference is usually developer

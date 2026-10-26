@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Print the Rust tests added or changed between two git refs.
+
+Default output is a nextest filterset expression, empty when no test changed:
+  find-changed-tests --base <ref> [--head <ref>] [--format nextest-expr|list]
+A test counts as changed when a changed line falls inside its attributes or
+body. Bodies are delimited by indentation, so the source must be rustfmt-clean.
+"""
+
+import argparse
+import re
+import subprocess
+import sys
+
+RE_TEST_ATTR = re.compile(r"^\s*#\[\s*(?:\w+::)*test(?:\s*\(.*\))?\s*\]")
+RE_ATTR = re.compile(r"^\s*(?:#\[|//)")
+RE_FN = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
+RE_FILE = re.compile(r"^\+\+\+ b/(.+)$")
+RE_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def test_spans(lines):
+    """Return (name, first_line, last_line) for each test fn, 1-indexed."""
+    spans = []
+    for i, line in enumerate(lines):
+        if not RE_TEST_ATTR.match(line):
+            continue
+        j = i + 1
+        while j < len(lines) and RE_ATTR.match(lines[j]):
+            j += 1
+        fn = RE_FN.match(lines[j]) if j < len(lines) else None
+        if not fn:
+            continue
+        start = i
+        while start > 0 and RE_ATTR.match(lines[start - 1]):
+            start -= 1
+        end = j
+        if not lines[j].rstrip().endswith("}"):
+            closer = fn.group(1) + "}"
+            end = next((k for k in range(j + 1, len(lines)) if lines[k].rstrip() == closer), None)
+            if end is None:
+                continue
+        spans.append((fn.group(2), start + 1, end + 1))
+    return spans
+
+
+def changed_lines(diff_text):
+    """Map path -> changed line numbers in the new file, from a -U0 diff."""
+    changed = {}
+    path = None
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            m = RE_FILE.match(line)
+            path = m.group(1) if m else None  # None for /dev/null
+            if path:
+                changed.setdefault(path, set())
+        elif path and (m := RE_HUNK.match(line)):
+            start, count = int(m.group(1)), int(m.group(2) or 1)
+            if count:
+                changed[path].update(range(start, start + count))
+            else:  # pure deletion between lines start and start + 1
+                changed[path].update((start, start + 1))
+    return changed
+
+
+def git(*args):
+    res = subprocess.run(["git", *args], capture_output=True, text=True)
+    if res.returncode != 0:
+        sys.exit(f"find-changed-tests: git {' '.join(args)}: {res.stderr.strip()}")
+    return res.stdout
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--base", required=True)
+    ap.add_argument("--head", default="HEAD")
+    ap.add_argument("--format", choices=["nextest-expr", "list"], default="nextest-expr")
+    args = ap.parse_args()
+
+    diff = git("diff", "-U0", f"{args.base}...{args.head}", "--", "*.rs")
+    names = set()
+    for path, touched in changed_lines(diff).items():
+        source = git("show", f"{args.head}:{path}").splitlines()
+        names.update(n for n, a, b in test_spans(source) if any(a <= t <= b for t in touched))
+
+    if args.format == "list":
+        for n in sorted(names):
+            print(n)
+    elif names:
+        # Nextest test names are module paths, so match the final segment.
+        print(" | ".join(f"test(/(^|::){n}$/)" for n in sorted(names)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

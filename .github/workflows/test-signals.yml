@@ -1,0 +1,116 @@
+name: Test signals
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # Nightly run at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+# Advisory test-strength signals. Nothing here joins ci-status in ci.yml, and
+# every script exits 0, so these only warn.
+permissions: {}
+
+concurrency:
+  group: test-signals-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action }}
+  cancel-in-progress: true
+
+jobs:
+  assertion-diff:
+    name: Assertion diff signals
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run script tests
+        run: |
+          scripts/test-assertion-diff
+          scripts/test-find-changed-tests
+      - name: Check PR test assertions
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/assertion-diff --base "$BASE_SHA" --head "$HEAD_SHA" --annotate --github-summary
+
+  stress-tests:
+    name: Changed-test stress signals
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: front-door-ci
+          add-job-id-key: false
+          save-if: false
+      - name: Install nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Stress-run changed tests
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/run-stress-tests "$BASE_SHA" "$HEAD_SHA"
+
+  mutation-tests:
+    name: Advisory mutation signals
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'mutants') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'mutants'))
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: front-door-ci
+          add-job-id-key: false
+          save-if: false
+      - name: Install nextest and cargo-mutants
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest@0.9.149,cargo-mutants@25.3.1
+      - name: Run mutation testing
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || 'HEAD' }}
+        run: scripts/run-mutants "$BASE_SHA" "$HEAD_SHA"

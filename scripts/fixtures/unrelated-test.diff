@@ -1,0 +1,19 @@
+diff --git a/tools/front-door/crates/records/src/tests.rs b/tools/front-door/crates/records/src/tests.rs
+index 5555555..6666666 100644
+--- a/tools/front-door/crates/records/src/tests.rs
++++ b/tools/front-door/crates/records/src/tests.rs
+@@ -12,3 +12,3 @@ fn test_digest_stability() {
+     // Updated test input to match canonical spec
+-    let input = b"old test fixture";
++    let input = b"new canonical test fixture";
+     let digest = CanonicalV1::file_digest(input);
+@@ -30,2 +30,10 @@ fn test_digest_stability() {
+     assert_eq!(digest.as_bytes().len(), 32);
+ }
++
++#[test]
++fn test_new_record_validation() {
++    let record = Record::new("test");
++    assert!(record.is_valid());
++    assert_eq!(record.name(), "test");
++}

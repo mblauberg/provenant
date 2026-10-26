@@ -1,0 +1,74 @@
+#!/bin/sh
+# Advisory CI signal: mutation-test the source lines a diff changed.
+#   run-mutants [<base> [<head>]]
+# Without a base it covers the last 24 hours of HEAD (the nightly run). Uses
+# cargo-mutants --in-diff with nextest, skips every file that mentions unsafe,
+# and runs at most MUTANT_CAP mutants (default 40) by taking one shard of the
+# list. Surviving mutants become warning annotations; the script always exits 0.
+# --in-diff finds nothing in a diff that only touches tests.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+base=${1:-}
+head=${2:-HEAD}
+cap=${MUTANT_CAP:-40}
+ws=$root/tools/front-door
+
+note() { # markdown for the job summary
+  echo "$1"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '### Mutation run (advisory)\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+if [ -z "$base" ]; then
+  oldest=$(git -C "$root" log --since='24 hours ago' --format=%H "$head" | tail -n 1)
+  [ -n "$oldest" ] && base=$(git -C "$root" rev-parse -q --verify "$oldest^" || true)
+  [ -n "$base" ] || { note "No commits in the last 24 hours."; exit 0; }
+fi
+
+# Paths relative to the workspace, which is where cargo-mutants looks.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-mutants.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+git -C "$ws" diff --relative "$base...$head" -- . > "$tmp/in.diff" 2>/dev/null ||
+  git -C "$ws" diff --relative "$base" "$head" -- . > "$tmp/in.diff"
+
+# cargo-mutants cannot skip unsafe blocks, so skip the files that hold them.
+set --
+for f in $(cd "$ws" && grep -rlw --include='*.rs' unsafe crates src 2>/dev/null); do
+  set -- "$@" --exclude "**/$f"
+done
+
+cd "$ws"
+common="--in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --features provenant-providers/recording --cargo-arg=--locked"
+# shellcheck disable=SC2086
+total=$(cargo mutants $common "$@" --list | grep -c . || true)
+if [ "$total" -eq 0 ]; then
+  note "No mutants in the changed source lines. Test-only diffs produce none."
+  exit 0
+fi
+
+shards=$(( (total + cap - 1) / cap ))
+out=$ws/target/mutants-report
+rm -rf "$out"
+status=0
+# shellcheck disable=SC2086
+cargo mutants $common "$@" --shard "0/$shards" --output "$out" || status=$?
+
+missed=$out/mutants.out/missed.txt
+if [ -s "$missed" ]; then
+  while IFS= read -r line; do
+    echo "::warning title=Surviving mutant::$line"
+  done < "$missed"
+  note "$total mutants in the diff; ran shard 1 of $shards (cap $cap). Surviving mutants:
+
+\`\`\`
+$(cat "$missed")
+\`\`\`"
+elif [ "$status" -eq 0 ]; then
+  note "$total mutants in the diff; ran shard 1 of $shards (cap $cap). All were caught."
+else
+  echo "::warning title=Mutation run incomplete::cargo-mutants exited $status with no missed.txt (baseline failure or error)."
+  note "cargo-mutants exited $status without a survivor report (baseline failure or error)."
+fi
+exit 0
