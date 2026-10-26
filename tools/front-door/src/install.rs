@@ -49,8 +49,9 @@ fn prepare_peer_agent(targets: &mut Targets) -> Result<(), EdgeError> {
         let previous = provenant_config::installed_binary(targets, &LocalFs)
             .map_err(EdgeError::Install)?
             .unwrap_or_else(|| program.clone());
-        targets.peer_agent =
-            Some(super::peer_agent::install_plist(&program, state).map_err(EdgeError::Peer)?);
+        targets.peer_agent = Some(
+            super::peer_agent::install_plist(&program, &targets.roots).map_err(EdgeError::Peer)?,
+        );
         targets.peer_agent_previous =
             super::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;

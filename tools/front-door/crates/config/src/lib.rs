@@ -30,7 +30,7 @@ pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config, edit_config_docume
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{
-    ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_project,
+    ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_project, registered_projects,
 };
 pub use provenant_records::Finding;
 
