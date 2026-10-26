@@ -720,6 +720,8 @@ mod tests {
             request: run::CanonicalRequest {
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    base: None,
+                    base_ref: None,
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"child"),
                     route: run::RequestedRoute::Model {

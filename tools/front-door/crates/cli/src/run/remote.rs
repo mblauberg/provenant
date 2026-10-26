@@ -47,6 +47,7 @@ pub(super) struct RouteText {
     pub(super) effort: Option<String>,
 }
 pub(super) struct Task {
+    pub(super) base: Option<String>,
     pub(super) prompt: String,
     pub(super) route: RouteText,
     pub(super) account: Option<String>,
@@ -418,6 +419,38 @@ pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
     })
 }
 
+fn submitted_task(task: Task, new_worktree: Option<NewWorktree>, timeout_ms: u64) -> SubmittedTask {
+    SubmittedTask {
+        // A writer's base belongs only to new_worktree. Older peers reject
+        // tasks[].base, and writer dispatch must retain its existing wire shape.
+        base: if new_worktree.is_none() {
+            task.base
+        } else {
+            None
+        },
+        account: task.account,
+        access: if new_worktree.is_some() {
+            AccessMode::WorktreeWrite
+        } else {
+            AccessMode::ReadOnly
+        },
+        worktree: None,
+        new_worktree,
+        prompt: task.prompt,
+        route: RoutePreference {
+            adapter: None,
+            model: task.route.model,
+            route: task.route.route,
+            role: None,
+            task_class: None,
+            effort: task.route.effort,
+        },
+        timeout_ms,
+        delivery_id: task.delivery_id,
+        deliver: task.deliver,
+    }
+}
+
 pub(super) fn dispatch(
     edge: &Edge<'_>,
     host: &str,
@@ -434,31 +467,15 @@ pub(super) fn dispatch(
         .provider_timeout
         .checked_mul(1000)
         .ok_or_else(|| Fail::new(Status::Invalid, "INVALID", "provider timeout"))?;
-    let access = match batch.new_worktree {
-        Some(_) => AccessMode::WorktreeWrite,
-        None => AccessMode::ReadOnly,
+    let access = if batch.new_worktree.is_some() {
+        AccessMode::WorktreeWrite
+    } else {
+        AccessMode::ReadOnly
     };
     let tasks = batch
         .tasks
         .into_iter()
-        .map(|task| SubmittedTask {
-            account: task.account,
-            access,
-            worktree: None,
-            new_worktree: batch.new_worktree.clone(),
-            prompt: task.prompt,
-            route: RoutePreference {
-                adapter: None,
-                model: task.route.model,
-                route: task.route.route,
-                role: None,
-                task_class: None,
-                effort: task.route.effort,
-            },
-            timeout_ms,
-            delivery_id: task.delivery_id,
-            deliver: task.deliver,
-        })
+        .map(|task| submitted_task(task, batch.new_worktree.clone(), timeout_ms))
         .collect();
     let concurrency = batch
         .concurrency
@@ -806,6 +823,76 @@ mod tests {
     use provenant_supervisor::fs::LocalFs;
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn peer_writer_keeps_the_pre_context_wire_payload() -> Result {
+        let task = submitted_task(
+            Task {
+                base: Some("main".into()),
+                prompt: "write the change".into(),
+                route: RouteText {
+                    model: Some("fixture/model".into()),
+                    route: None,
+                    effort: None,
+                },
+                account: None,
+                delivery_id: None,
+                deliver: None,
+            },
+            Some(NewWorktree {
+                base: "main".into(),
+                branch: "writer/change".into(),
+            }),
+            60000,
+        );
+        let actual = serde_json::to_value(SubmitInput::Submission {
+            operation_id: OperationId::parse("peer-writer")?,
+            tasks: vec![task],
+            concurrency: Some(1),
+            knobs: vec![],
+            host: None,
+        })?;
+        // Main's writer payload before bounded Git context. Comparing bytes
+        // after object ordering also catches prompt prefixes and extra fields.
+        let previous_task = json!({
+            "account": null, "access": "worktree_write", "worktree": null,
+            "new_worktree": {"base": "main", "branch": "writer/change"},
+            "prompt": "write the change",
+            "route": {"adapter": null, "model": "fixture/model", "route": null,
+                      "role": null, "task_class": null, "effort": null},
+            "timeout_ms": 60000, "delivery_id": null, "deliver": null
+        });
+        let previous = json!({
+            "op": "submission", "operation_id": "peer-writer",
+            "tasks": [previous_task], "concurrency": 1, "knobs": []
+        });
+        assert!(actual["tasks"][0].get("base").is_none());
+        assert_eq!(serde_json::to_vec(&actual)?, serde_json::to_vec(&previous)?);
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_peer_forwards_the_context_ref_and_original_prompt() {
+        let task = submitted_task(
+            Task {
+                base: Some("main".into()),
+                prompt: "review".into(),
+                route: RouteText {
+                    model: None,
+                    route: Some("utility".into()),
+                    effort: None,
+                },
+                account: None,
+                delivery_id: None,
+                deliver: None,
+            },
+            None,
+            60000,
+        );
+        assert_eq!(task.base.as_deref(), Some("main"));
+        assert_eq!(task.prompt, "review");
+        assert_eq!(task.access, AccessMode::ReadOnly);
+    }
 
     struct Scratch(std::path::PathBuf);
     impl Drop for Scratch {

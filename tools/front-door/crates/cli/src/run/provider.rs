@@ -85,6 +85,12 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
+    let git_context = task
+        .base
+        .as_deref()
+        .map(|base| run::GitContext::capture(&git, &cwd, base))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -274,13 +280,6 @@ fn prepare_with(
             reasons.push(skip(&label, SkipKind::Unavailable, error));
             continue;
         }
-        let prompt = match launch_prompt(prompt_text, paths, state_root, adapter.id()) {
-            Ok(prompt) => prompt,
-            Err(error) => {
-                reasons.push(skip(&label, SkipKind::Refused, error));
-                continue;
-            }
-        };
         let entry = entries
             .iter()
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
@@ -315,18 +314,23 @@ fn prepare_with(
         let staging = &paths.temporary;
         let scratch = staging.join(format!("candidate-{candidate}"));
         let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
-        if let Err(error) = apply_setup(&[SetupStep::CreateDir(scratch.clone())], &[staging], None)
-            .and_then(|()| {
+        // Retain the handle opened while creating scratch: a parent lane can
+        // rename tmp and redirect its pathname before context is published.
+        let scratch_directory =
+            match apply_setup_directory(&[staging], &scratch).and_then(|directory| {
                 apply_setup(
                     &[SetupStep::CreateDir(private_state.clone())],
                     &[&paths.provider_state],
                     None,
-                )
-            })
-        {
-            reasons.push(skip(&label, SkipKind::Setup, error));
-            continue;
-        }
+                )?;
+                Ok(directory)
+            }) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    reasons.push(skip(&label, SkipKind::Setup, error));
+                    continue;
+                }
+            };
         let continuation = match resume {
             Some(prior) => match continuation_for(
                 prior,
@@ -344,6 +348,22 @@ fn prepare_with(
             None => None,
         };
         let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        let text = match &git_context {
+            Some(context) => {
+                let location = context
+                    .write_to(&scratch_directory, scratch)
+                    .map_err(|error| error.to_string())?;
+                format!("{location}\n{prompt_text}")
+            }
+            None => prompt_text.to_owned(),
+        };
+        let prompt = match launch_prompt(&text, paths, state_root, adapter.id()) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                reasons.push(skip(&label, SkipKind::Refused, error));
+                continue;
+            }
+        };
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
@@ -414,7 +434,7 @@ fn prepare_with(
         let provider_route = adapter_route(&route);
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let spec = match adapter.prepare(PrepareInput {
+        let mut spec = match adapter.prepare(PrepareInput {
             route: &provider_route,
             confined: &plan,
             prompt: &prompt,
@@ -444,6 +464,12 @@ fn prepare_with(
                 continue;
             }
         };
+        if git_context.is_some() && adapter.id() == "claude" {
+            // Scratch is already granted by the outer profile. Claude's file
+            // tools also need it in their working directories to read context.
+            spec.argv
+                .splice(1..1, ["--add-dir".into(), scratch.as_os_str().to_owned()]);
+        }
         let transcript_account = account
             .as_ref()
             .filter(|_| adapter.id() == "claude")
@@ -1418,11 +1444,10 @@ fn apply_setup(
             SetupStep::CreateDir(path) => {
                 let transcript_root =
                     claude_account.filter(|directory| path.starts_with(directory.join("projects")));
-                let (parent, name) = match transcript_root {
-                    Some(directory) => setup_parent(&[directory], path, true)?,
-                    None => setup_parent(roots, path, true)?,
+                match transcript_root {
+                    Some(directory) => apply_setup_directory(&[directory], path)?,
+                    None => apply_setup_directory(roots, path)?,
                 };
-                setup_directory(&parent, name)?;
             }
             SetupStep::WriteFile { path, bytes } => write_setup_file(roots, path, bytes, false)?,
             SetupStep::WriteExecutable { path, bytes } => {
@@ -1490,6 +1515,11 @@ fn write_setup_file(
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn apply_setup_directory(roots: &[&Path], path: &Path) -> Result<Directory, String> {
+    let (parent, name) = setup_parent(roots, path, true)?;
+    setup_directory(&parent, name)
 }
 
 fn setup_parent<'a>(
@@ -1724,6 +1754,8 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                base: None,
+                base_ref: None,
                 task_id: provenant_core::TaskId::from_bytes([3; 16]),
                 profile: Default::default(),
                 prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
@@ -1930,6 +1962,8 @@ mod tests {
         }
         let prompt = "é".repeat(75_000);
         let task = run::TaskRequest {
+            base: Some("HEAD".into()),
+            base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
@@ -2016,6 +2050,11 @@ mod tests {
             Some("cursor/gpt-5.3-codex-low")
         );
         assert_eq!(launch.argv[0], executable.as_os_str());
+        let scratch = paths.temporary.join("candidate-0");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.join("git-context.json"))?)?;
+        assert_eq!(metadata["base"], metadata["head"]);
+        assert_eq!(std::fs::read(scratch.join("git-diff.patch"))?, b"");
         let pointer = launch
             .argv
             .last()
@@ -2025,7 +2064,12 @@ mod tests {
         assert!(pointer.len() < 1024);
         let spilled = attempt.join("prompt.md");
         assert!(pointer.contains(spilled.to_str().ok_or("path UTF-8")?));
-        assert_eq!(std::fs::read_to_string(&spilled)?, full);
+        let spilled_text = std::fs::read_to_string(&spilled)?;
+        let location = spilled_text
+            .strip_suffix(&full)
+            .ok_or("spilled prompt lost the task text")?;
+        assert!(location.contains("Host-written Git context"));
+        assert!(location.contains(&scratch.display().to_string()));
         assert_eq!(
             store.record(attempt_id, &call)?.prompt.digest,
             task.prompt_digest
@@ -2051,6 +2095,18 @@ mod tests {
             confinement.plan.permissions().scratch.path,
             paths.temporary.join("candidate-0")
         );
+        let mut bad_task = task;
+        bad_task.base = Some("absent-base".into());
+        let result = prepare_with(
+            &registry,
+            &bad_task,
+            "fixture prompt",
+            &paths,
+            None,
+            |_| Err("provider lookup must not happen for an invalid base".into()),
+            None,
+        );
+        assert!(matches!(result, Err(error) if error.contains("invalid Git base \"absent-base\"")));
         Ok(())
     }
 

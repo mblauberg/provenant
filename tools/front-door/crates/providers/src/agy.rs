@@ -65,6 +65,9 @@ fn prepare(
     ]
     .map(OsString::from)
     .to_vec();
+    // Headless reads are auto-approved inside workspace directories.
+    // https://www.agy.dev/docs/cli/reference/ (--add-dir)
+    argv.extend(["--add-dir".into(), plan.scratch.path.as_os_str().to_owned()]);
     if access == Access::WorktreeWrite {
         argv.push("--dangerously-skip-permissions".into());
     }

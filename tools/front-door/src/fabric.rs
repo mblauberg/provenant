@@ -1122,6 +1122,7 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     use provenant_run::RunError;
     match error {
         RunError::NotFound => FacadeError::NotFound,
+        RunError::InvalidBase(_) => FacadeError::InvalidInput,
         RunError::Refused => FacadeError::ConfinementRefused,
         RunError::DepthExceeded { .. } | RunError::DepthOverflow => FacadeError::LaneDepth,
         RunError::Writer(_) | RunError::Confinement(_) => FacadeError::ConfinementRefused,
@@ -1508,6 +1509,7 @@ impl BinaryRunOwner<'_> {
                     .or(route.task_class.as_deref()),
             };
             submitted.push(Submitted {
+                base: task.base,
                 task_class: route.task_class.clone(),
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
@@ -2133,6 +2135,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let input = SubmitInput::Submission {
                 operation_id,
                 tasks: vec![SubmittedTask {
+                    base: None,
                     account: None,
                     access,
                     worktree: worktree.map(str::to_owned),

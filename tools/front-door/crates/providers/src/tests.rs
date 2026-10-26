@@ -1271,6 +1271,26 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
 }
 
 #[test]
+fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "fixture-model");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("keychain"), false);
+        let spec = agy::Agy.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        assert!(spec.argv.windows(2).any(|pair| {
+            pair[0] == "--add-dir" && pair[1] == plan.permissions().scratch.path.as_os_str()
+        }));
+    }
+    Ok(())
+}
+
+#[test]
 fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("cursor", "fixture-model");
@@ -1360,6 +1380,12 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
         };
         assert_eq!(config["permission"]["edit"], permission);
         assert_eq!(config["permission"]["bash"], permission);
+        let scratch = format!("{}/**", plan.permissions().scratch.path.display());
+        assert_eq!(
+            config["permission"]["external_directory"],
+            serde_json::json!({ scratch.clone(): "allow" })
+        );
+        assert_eq!(config["permission"]["read"][&scratch], "allow");
         assert_eq!(
             spec.profile.spec.tool_exec_roots.is_empty(),
             access == Access::ReadOnly
