@@ -1,7 +1,6 @@
 # Specifications
 
-Owner: the chairs, per
-[ADR 0017](../adr/0017-specifications-own-non-derivable-intent.md)
+Owner: the chairs, per [`MAINTAINING.md`](../../MAINTAINING.md#specifications)
 Anchor: `tools/front-door/tests/workspace_policy.rs`
 
 This directory holds Provenant's durable requirements: what must hold, what
