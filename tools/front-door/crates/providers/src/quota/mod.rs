@@ -8,6 +8,20 @@ use serde_json::Value;
 #[cfg(test)]
 mod tests;
 
+fn effect_kind(adapter: &str) -> Result<QuotaEffectKind, QuotaError> {
+    use provenant_records::{AdapterSpec, QuotaProbeKind};
+    Ok(
+        match AdapterSpec::get(adapter)
+            .ok_or(QuotaError::Disabled)?
+            .quota_probe
+        {
+            QuotaProbeKind::HttpGet => QuotaEffectKind::HttpGet,
+            QuotaProbeKind::Command => QuotaEffectKind::Command,
+            QuotaProbeKind::LocalLedger => QuotaEffectKind::LocalLedger,
+        },
+    )
+}
+
 pub fn plan(
     adapter: &str,
     account: &AccountScope,
@@ -17,12 +31,7 @@ pub fn plan(
     if account.adapter != adapter {
         return Err(QuotaError::Invalid("quota adapter identity"));
     }
-    let kind = match adapter {
-        "claude" | "cursor" => QuotaEffectKind::HttpGet,
-        "codex" | "agy" => QuotaEffectKind::Command,
-        "opencode" => QuotaEffectKind::LocalLedger,
-        _ => return Err(QuotaError::Disabled),
-    };
+    let kind = effect_kind(adapter)?;
     Ok(QuotaProbePlan {
         kind,
         account: account.clone(),
@@ -40,12 +49,9 @@ pub fn decode(
         return Err(QuotaError::Invalid("provider quota capture"));
     }
     let adapter = account.adapter.as_str();
-    let effect_matches = match adapter {
-        "claude" | "cursor" => plan.kind == QuotaEffectKind::HttpGet,
-        "codex" | "agy" => plan.kind == QuotaEffectKind::Command && capture.exit_code == Some(0),
-        "opencode" => plan.kind == QuotaEffectKind::LocalLedger,
-        _ => return Err(QuotaError::Disabled),
-    };
+    let kind = effect_kind(adapter)?;
+    let effect_matches =
+        plan.kind == kind && (kind != QuotaEffectKind::Command || capture.exit_code == Some(0));
     if !effect_matches {
         return Err(QuotaError::Invalid("provider quota effect"));
     }
@@ -507,7 +513,8 @@ fn snapshot_status(
         .iter()
         .any(|window| window.used_basis_points >= 10_000)
     {
-        let provider_credits = matches!(adapter, "claude" | "codex" | "opencode")
+        let provider_credits = provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|spec| spec.quota_credits)
             && details.is_some_and(|details| positive_balance(details.credit_balance.as_deref()));
         let credit_blocked = adapter == "codex" && codex_credit_blocked(payload);
         if provider_credits && !credit_blocked {

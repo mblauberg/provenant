@@ -147,7 +147,9 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
     prompt.md                  # full launch prompt, only for top-level argv spills
     result.md                  # run-owned sealed result, including failure
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
-    provider-state/            # retained provider history; no credentials
+    provider-state/            # resumable private state with bounded retention
+    provider-history/          # transcripts archived when resume state expires
+    provider-state-expired.json # sealed expiry marker
     quarantine/                # retained patches and blobs
     scratch/                   # account probe staging; unknown contents retained
     tmp/                       # attempt-private temporary data, mode 0700
@@ -192,8 +194,9 @@ The version 4 database upgrade checks existing terminal paths once, before its
 migration transaction, and clears the hint only for absent `tmp/`. Existing
 and unreadable paths remain flagged. The conservative default also covers
 in-flight attempts committed by an older connection. This backfill avoids a
-runtime discovery cursor and repeated scans of settled history. No general
-retention or clean command exists.
+runtime discovery cursor and repeated scans of settled history. Provider
+state has the bounded retention described in [state](state.md). There is no
+general state deletion command.
 
 Only this terminal, unreserved retry treats names below `tmp/`, including
 rustc incremental `*.lock` files, as disposable payload. Ordinary deletion

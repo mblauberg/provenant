@@ -27,15 +27,7 @@ impl AbsolutePath {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Harness {
-    Claude,
-    Codex,
-    Cursor,
-    Agy,
-    Opencode,
-}
+pub use crate::adapters::Harness;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

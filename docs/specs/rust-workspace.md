@@ -18,7 +18,7 @@ responsibility or edges lands in this table in the same PR.
 | Crate | Owns | Allowed internal dependencies |
 |---|---|---|
 | core | Pure IDs, roots, paths, clocks as values, shared enums | None |
-| records | Versioned serde records, canonical byte encoders, digest contracts | core |
+| records | Versioned serde records, canonical byte encoders, digest contracts, closed adapter specs | core |
 | config | Config loading/precedence, profiles, installation and managed-file rules | core, records, supervisor's safe filesystem API |
 | supervisor | Sans-IO process state machine, syscall boundary, capture, custody-safe OS handles | core, records |
 | confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, supervisor's safe OS API |
@@ -34,6 +34,13 @@ responsibility or edges lands in this table in the same PR.
 | workflow | Delivery/review validators, session, tracker and writing tools | core, records, supervisor's safe filesystem API |
 | cli | Argument parsing and output/exit rendering for all commands | core, records, config, confinement, providers, quota, telemetry, routing, run, fabric-runtime, workflow, supervisor |
 | provenant | Binary composition, install identity and process-level setup | core, records, config, supervisor, confinement, providers, quota, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
+
+`records::ADAPTER_SPECS` is the compiled, closed adapter fact table. Config names,
+CLI values, executable aliases and shared capability lookups use those rows.
+`providers::REGISTRY` binds execution and quota mechanics to the same names;
+argv builders and protocol decoding stay in the provider modules. Model effort
+controls remain evidence-backed entries in the routing catalogue. Dispatch
+probes only adapters named by its route, pool and explicit fallbacks.
 
 The workspace policy test enforces these edges for normal, build and dev
 dependencies, including target-specific tables. Dev-dependencies may also name

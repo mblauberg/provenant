@@ -1432,3 +1432,71 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
     assert_eq!(selected.account_key.as_deref(), Some("other-provider"));
     Ok(())
 }
+
+#[test]
+fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    let mut query = request("codex/fixture")?;
+    let names = |query: &RouteRequest, config: &RoutingConfig| {
+        probe_adapters(query, &catalogue, config)
+            .map(|specs| specs.into_iter().map(|spec| spec.name).collect::<Vec<_>>())
+    };
+    assert_eq!(names(&query, &config)?, ["codex"]);
+    query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("agy/fixture")?])?);
+    assert_eq!(names(&query, &config)?, ["codex", "agy"]);
+    config.routes.insert(
+        "fixture".into(),
+        NamedRoute {
+            model: ModelId::parse("cursor/fixture")?,
+            effort: None,
+        },
+    );
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("fixture")?);
+    assert_eq!(names(&query, &config)?, ["cursor", "agy"]);
+    // Configured pools take precedence over a named route and bundled pools.
+    let member = |name: &str| -> Result<RoutePoolMember, RoutingError> {
+        Ok(RoutePoolMember {
+            model: ModelId::parse(name)?,
+            weight: 1,
+            effort: None,
+            efforts: vec![],
+            free: false,
+        })
+    };
+    config.pools.insert(
+        "fixture".into(),
+        vec![member("claude/fixture")?, member("claude/other")?],
+    );
+    assert_eq!(names(&query, &config)?, ["claude", "agy"]);
+    query.fallback = Fallback::None;
+    let pool = catalogue
+        .pools
+        .keys()
+        .next()
+        .ok_or("bundled pool missing")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
+    let expected: std::collections::BTreeSet<_> = catalogue.pools[pool]
+        .iter()
+        .map(|member| member.model.adapter())
+        .collect();
+    assert_eq!(
+        names(&query, &config)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    config
+        .pools
+        .insert(pool.clone(), vec![member("opencode/fixture")?]);
+    assert_eq!(names(&query, &config)?, ["opencode"]);
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("absent")?);
+    assert!(matches!(
+        probe_adapters(&query, &catalogue, &config),
+        Err(RoutingError::UnknownRoute)
+    ));
+    query = request("unknown/fixture")?;
+    assert!(names(&query, &config)?.is_empty());
+    Ok(())
+}

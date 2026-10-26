@@ -93,7 +93,7 @@ impl RegisteredAccount {
         directory: std::path::PathBuf,
     ) -> Result<Self, crate::ProviderError> {
         use std::path::Component;
-        if !matches!(adapter, "claude" | "codex" | "agy" | "cursor" | "opencode")
+        if provenant_records::AdapterSpec::get(adapter).is_none()
             || key == "unknown"
             || key.is_empty()
             || key.len() > 64

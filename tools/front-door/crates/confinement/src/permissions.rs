@@ -176,7 +176,7 @@ pub enum Availability {
 pub enum PermissionError {
     #[error("invalid read-only project write policy")]
     InvalidReadOnlyPolicy,
-    #[error("path is not an absolute, normalised path: {0:?}")]
+    #[error("path is not a permitted absolute, normalised path: {0:?}")]
     InvalidPath(PathBuf),
     #[error("permission root is too broad")]
     BroadRoot,
@@ -3225,7 +3225,7 @@ mod tests {
             let error = validate_absolute(Path::new(path)).unwrap_err();
             assert_eq!(
                 error.to_string(),
-                format!("path is not an absolute, normalised path: {path:?}")
+                format!("path is not a permitted absolute, normalised path: {path:?}")
             );
         }
     }

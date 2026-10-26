@@ -40,8 +40,12 @@ pub struct Uninstall {
 }
 
 pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = Harness> {
-    clap::builder::PossibleValuesParser::new(["claude", "codex", "cursor", "agy", "opencode"])
-        .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
+    clap::builder::PossibleValuesParser::new(
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.name),
+    )
+    .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
 }
 
 /// Config values are applied before explicit harness environment overrides;
@@ -90,4 +94,60 @@ pub fn execute_uninstall(
     reporter: &mut dyn InstallReporter,
 ) -> Result<InstallOutcome, InstallError> {
     config::uninstall(targets, context, reporter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_records::{ADAPTER_SPECS, AdapterSpec};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn adapter_specs_cover_config_routing_and_cli_names() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let specs: BTreeSet<_> = ADAPTER_SPECS.iter().map(|spec| spec.name).collect();
+        assert_eq!(specs.len(), ADAPTER_SPECS.len());
+        let parser = harness_parser();
+        let cli: BTreeSet<_> = parser
+            .possible_values()
+            .ok_or("CLI values missing")?
+            .map(|value| value.get_name().to_owned())
+            .collect();
+        assert_eq!(cli, specs.iter().map(|name| (*name).to_owned()).collect());
+        let harnesses = [
+            Harness::Claude,
+            Harness::Codex,
+            Harness::Cursor,
+            Harness::Agy,
+            Harness::Opencode,
+        ];
+        for harness in harnesses {
+            let name = serde_json::to_value(harness)?;
+            let name = name.as_str().ok_or("harness name missing")?;
+            assert_eq!(
+                AdapterSpec::get(name).ok_or("harness spec missing")?.id,
+                harness
+            );
+            assert_eq!(
+                serde_json::from_value::<Harness>(serde_json::json!(name))?,
+                harness
+            );
+        }
+        for model in provenant_routing::Catalogue::bundled()?.models() {
+            assert_eq!(
+                ADAPTER_SPECS
+                    .iter()
+                    .filter(|spec| spec.name == model.model.adapter())
+                    .count(),
+                1
+            );
+        }
+        let providers: BTreeSet<_> = provenant_providers::REGISTRY
+            .iter()
+            .map(|entry| entry.adapter.id())
+            .collect();
+        assert_eq!(providers, specs);
+        assert_eq!(providers.len(), provenant_providers::REGISTRY.len());
+        Ok(())
+    }
 }

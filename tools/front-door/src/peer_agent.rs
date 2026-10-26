@@ -699,7 +699,11 @@ fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
     // shell entry into an absolute agent search directory by canonicalising it.
     // A project-local directory (direnv's `PATH_add`) would lend the agent
     // everything it holds, so it is skipped and the search continues.
-    for name in ["claude", "codex"] {
+    for name in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.peer_bootstrap)
+        .map(|spec| spec.binary)
+    {
         if let Some(program) = std::env::split_paths(search)
             .filter(|dir| dir.is_absolute())
             .filter(|dir| {

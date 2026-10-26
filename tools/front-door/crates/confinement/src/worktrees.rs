@@ -2357,13 +2357,34 @@ mod lifecycle_tests {
     #[test]
     fn gc_skips_unmanaged_worktrees_and_their_output() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
         let test_context = TestContext::new(&fixture)?;
         let context = test_context.context();
-        let mut lane = gc_merged_worktree(&fixture, &context, "gc-unmanaged")?;
         let unmanaged = fixture._temp.path().join("unmanaged");
-        std::fs::create_dir(&unmanaged)?;
-        std::fs::write(unmanaged.join("artifact"), "keep")?;
-        lane.path = unmanaged.clone();
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "gc-unmanaged",
+            unmanaged.to_str().ok_or("non-UTF8 worktree path")?,
+        ])?;
+        run_in_worktree(
+            &fixture,
+            &unmanaged,
+            &["commit", "--allow-empty", "-m", "gc-unmanaged"],
+        )?;
+        fixture.run(&["merge", "--no-ff", "gc-unmanaged", "-m", "merge GC fixture"])?;
+        let target = unmanaged.join("target");
+        fs::create_dir(&target)?;
+        fs::write(target.join("artifact"), "keep")?;
+        let canonical = canonicalize(&unmanaged)?;
+        let mut lane = list(&context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == canonical)
+            .ok_or("missing unmanaged fixture worktree")?;
+        lane.dirty = WorktreeCondition::Ignored;
         let report = collect(
             &context,
             &[lane],
@@ -2378,7 +2399,9 @@ mod lifecycle_tests {
             },
             &cancel(),
         )?;
-        assert!(unmanaged.join("artifact").is_file());
+        assert!(target.join("artifact").is_file());
+        assert!(unmanaged.is_dir());
+        assert!(branch_exists(&fixture, "gc-unmanaged"));
         assert!(report.worktrees.removed.is_empty());
         assert!(report.worktrees.retained.is_empty());
         assert!(report.output.is_empty());
@@ -2411,6 +2434,41 @@ mod lifecycle_tests {
             RetainReason::UnknownWriter
         );
         assert!(report.worktrees.removed.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "cache/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore cache"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let mut lane = gc_merged_worktree(&fixture, &context, "gc-dry-dirty")?;
+        // Ignored content outside the regenerable output keeps the worktree
+        // dirty once the preview has pruned.
+        fs::create_dir(lane.path.join("cache"))?;
+        fs::write(lane.path.join("cache/artifact"), "keep")?;
+        lane.dirty = WorktreeCondition::Ignored;
+        let report = collect(
+            &context,
+            &[lane.clone()],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| true,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".to_owned()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: true,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(report.worktrees.retained.len(), 1);
+        assert_eq!(report.worktrees.retained[0].reason, RetainReason::Dirty);
+        assert!(report.worktrees.removed.is_empty());
+        assert!(lane.path.join("cache/artifact").is_file());
         Ok(())
     }
 
