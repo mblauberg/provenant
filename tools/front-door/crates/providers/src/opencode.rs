@@ -350,6 +350,9 @@ mod tests {
         }
     }
 
+    // Anchors are real host paths; on Linux `/bin` links to `/usr/bin`, and
+    // only the macOS backend confines OpenCode.
+    #[cfg(target_os = "macos")]
     #[test]
     fn homebrew_launch_plan_anchors_with_default_xdg_homes() {
         use provenant_confinement::permissions::{AnchoredDirectory, required_anchors};
