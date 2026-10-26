@@ -92,6 +92,19 @@ pub struct ReadOnlyGrants {
     relative: Vec<String>,
 }
 impl ReadOnlyGrants {
+    #[cfg(test)]
+    pub(crate) fn for_test(root: std::path::PathBuf, writes: Vec<PathGrant>) -> Self {
+        Self {
+            git_reads: [PathGrant {
+                path: root.join(".git"),
+                scope: PathScope::Subtree,
+            }],
+            root,
+            writes,
+            relative: Vec::new(),
+        }
+    }
+
     pub fn writable_paths(&self) -> &[String] {
         &self.relative
     }

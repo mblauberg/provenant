@@ -380,6 +380,7 @@ byte-path encoding. Edge-built facts are `Serialize` only.
 
 | Record | Write rule |
 |---|---|
+| `AttemptRecord` | At starting, records the applied plan's explicit write allowances in `write_grants`, with their source, byte-encoded absolute path and scope, plus project-relative `read_only_writable`. Writers also carry `git_grants_digest`; concrete Git paths stay out of the record. Deny rules still restrict these allowances. Missing fields in older records default to an empty list and no digest. Older binaries with strict attempt decoding reject populated new fields, including peer reads through `lanes --host`, as they did for `read_only_writable`. |
 | `ProcessIdentity` | Host and boot identity, PID and native start stamp, plus group leader identity. Display time grants no authority, and absence, denial and unsupported stay distinct. |
 | `LaunchSummary` | Resolved route, executable identity, permission-plan digest, worktree identity, environment names and budgets, with sensitive argv redacted and no prompt or values. It is never replayable launch authority. |
 | `ProcessObservation` | Atomic replace. A stale observation cannot establish death. |

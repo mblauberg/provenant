@@ -644,6 +644,16 @@ impl RunStore {
         })
     }
 }
+pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
+    grants.len() <= provenant_confinement::MAX_WRITE_GRANTS
+        && grants.iter().all(|grant| {
+            grant
+                .path
+                .to_path_buf()
+                .is_ok_and(|path| path.is_absolute())
+        })
+}
+
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     if let Some(delivery) = &r.delivery
         && (delivery.schema_version != 1
@@ -662,6 +672,9 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     }
     if !valid_read_only_writable(&r.read_only_writable) {
         return Err(RunError::Validation("invalid read-only writable paths"));
+    }
+    if !valid_write_grants(&r.write_grants) {
+        return Err(RunError::Validation("invalid write grants"));
     }
     if r.schema_version != 1 || r.attempt_number == 0 || r.revision == 0 {
         return Err(RunError::Validation("attempt version/ordinal"));

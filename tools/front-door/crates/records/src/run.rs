@@ -396,6 +396,34 @@ pub struct ArtifactRecord {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WriteGrantRecord {
+    pub source: WriteSource,
+    pub path: crate::AbsolutePath,
+    pub scope: PathScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathScope {
+    Exact,
+    Subtree,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteSource {
+    WriteRoot,
+    ToolWrite,
+    StateWrite,
+    CredentialWrite,
+    Scratch,
+    PrivateState,
+    ReadOnlyException,
+    LaneCache,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
@@ -418,6 +446,12 @@ pub struct AttemptRecord {
     /// Project-relative write exceptions actually granted before launch.
     #[serde(default)]
     pub read_only_writable: Vec<String>,
+    /// Explicit write allowances from the plan handed to confinement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_grants: Vec<WriteGrantRecord>,
+    /// Writers only; concrete Git paths stay out of the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_grants_digest: Option<Digest>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

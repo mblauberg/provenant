@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::repo::{GitRefName, VerifiedWorktree};
-pub use provenant_records::run::NetworkAccess;
+pub use provenant_records::run::{NetworkAccess, PathScope, WriteSource};
 
 const MAX_PATH_BYTES: usize = 4096;
 pub(crate) const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
@@ -35,8 +35,9 @@ pub(crate) const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-
 pub(crate) const LEGACY_CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v1\n";
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 const MAX_CACHE_DIRECTORY_ENTRIES: usize = 100_000;
-#[cfg(any(target_os = "macos", test))]
 const MAX_PATH_GRANTS: usize = 128;
+/// Bound each of the eight recorded write sources by the profile path limit.
+pub const MAX_WRITE_GRANTS: usize = MAX_PATH_GRANTS * 8;
 #[cfg(any(target_os = "macos", test))]
 const MAX_NETWORK_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
@@ -215,13 +216,6 @@ pub enum PermissionError {
     },
     #[error("lane cache contents exceed the sweep depth bound")]
     CacheSweepDepth,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PathScope {
-    Exact,
-    Subtree,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1248,6 +1242,65 @@ pub struct PlanPermissions {
     pub write_roots: Vec<PathGrant>,
     pub network: NetworkAccess,
     pub nested_confinement: bool,
+}
+
+/// An explicit write allowance, subject to the rendered profile's deny rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteGrant {
+    pub source: WriteSource,
+    pub path: PathBuf,
+    pub scope: PathScope,
+}
+
+/// List explicit write allowances in rendering order. Baseline `/dev/null`
+/// access and concrete worktree/Git paths are omitted; writer records carry
+/// the existing Git grants digest instead. This list grants no authority.
+pub fn write_grants(plan: &PlanPermissions, profile: &ProviderProfile) -> Vec<WriteGrant> {
+    let mut grants = Vec::new();
+    let mut push = |source, grant: &PathGrant, scope| {
+        grants.push(WriteGrant {
+            source,
+            path: grant.path.clone(),
+            scope,
+        });
+    };
+    for grant in &profile.spec.state_writes {
+        push(WriteSource::StateWrite, grant, grant.scope);
+    }
+    if let Some(selected) = plan.selected_authentication.as_ref().and_then(|mechanism| {
+        profile
+            .spec
+            .authentication
+            .iter()
+            .find(|auth| &auth.mechanism == mechanism)
+    }) {
+        for grant in &selected.in_place_writes {
+            push(WriteSource::CredentialWrite, grant, PathScope::Exact);
+        }
+    }
+    for grant in &plan.write_roots {
+        push(WriteSource::WriteRoot, grant, grant.scope);
+    }
+    for grant in &profile.spec.tool_writes {
+        push(WriteSource::ToolWrite, grant, grant.scope);
+    }
+    push(WriteSource::Scratch, &plan.scratch, PathScope::Subtree);
+    if let Some(grant) = &plan.private_state {
+        push(WriteSource::PrivateState, grant, PathScope::Subtree);
+    }
+    if let Some(read_only) = &plan.read_only {
+        for grant in &read_only.writes {
+            push(WriteSource::ReadOnlyException, grant, grant.scope);
+        }
+    }
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+        push(
+            WriteSource::LaneCache,
+            &authority.cargo_cache,
+            PathScope::Subtree,
+        );
+    }
+    grants
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2887,6 +2940,188 @@ mod tests {
     use super::*;
     use provenant_supervisor::exec::SystemExecutor;
     use provenant_supervisor::fs::LocalFs;
+
+    fn write_grants_fixture() -> (PlanPermissions, ProviderProfile) {
+        let grant = |path: &str, scope| PathGrant {
+            path: path.into(),
+            scope,
+        };
+        let plan = PlanPermissions {
+            read_only: Some(crate::plan::ReadOnlyGrants::for_test(
+                "/fixture/repo".into(),
+                vec![grant("/fixture/repo/locks", PathScope::Subtree)],
+            )),
+            mode: AccessMode::ReadOnly,
+            scratch: grant("/fixture/scratch", PathScope::Subtree),
+            private_state: Some(grant("/fixture/private", PathScope::Subtree)),
+            read_roots: Vec::new(),
+            protected_roots: Vec::new(),
+            secret_roots: Vec::new(),
+            selected_authentication: Some("selected".into()),
+            include_continuation: false,
+            write_roots: vec![grant("/fixture/shared", PathScope::Subtree)],
+            network: NetworkAccess::Provider,
+            nested_confinement: false,
+        };
+        let profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                state_writes: vec![grant("/fixture/state/session", PathScope::Exact)],
+                tool_writes: vec![grant("/fixture/tools", PathScope::Subtree)],
+                authentication: ["unselected", "selected"]
+                    .map(|mechanism| {
+                        let credential =
+                            grant(&format!("/fixture/auth/{mechanism}"), PathScope::Exact);
+                        AuthenticationProfile {
+                            mechanism: mechanism.into(),
+                            roots: vec![credential.clone()],
+                            in_place_writes: vec![credential],
+                        }
+                    })
+                    .into(),
+                ..ProviderProfileSpec::default()
+            },
+            observations: BTreeMap::new(),
+        };
+        (plan, profile)
+    }
+
+    #[test]
+    fn write_grants_list_every_write_source() {
+        let (mut plan, profile) = write_grants_fixture();
+        let grant = |source, path: &str, scope| WriteGrant {
+            source,
+            path: path.into(),
+            scope,
+        };
+        let mut expected = vec![
+            grant(
+                WriteSource::StateWrite,
+                "/fixture/state/session",
+                PathScope::Exact,
+            ),
+            grant(
+                WriteSource::CredentialWrite,
+                "/fixture/auth/selected",
+                PathScope::Exact,
+            ),
+            grant(
+                WriteSource::WriteRoot,
+                "/fixture/shared",
+                PathScope::Subtree,
+            ),
+            grant(WriteSource::ToolWrite, "/fixture/tools", PathScope::Subtree),
+            grant(WriteSource::Scratch, "/fixture/scratch", PathScope::Subtree),
+            grant(
+                WriteSource::PrivateState,
+                "/fixture/private",
+                PathScope::Subtree,
+            ),
+        ];
+        let mut read_only_expected = expected.clone();
+        read_only_expected.push(grant(
+            WriteSource::ReadOnlyException,
+            "/fixture/repo/locks",
+            PathScope::Subtree,
+        ));
+        assert_eq!(write_grants(&plan, &profile), read_only_expected);
+
+        plan.read_only = None;
+        plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
+            git_grants_digest: [7; 32],
+            cargo_cache: PathGrant {
+                path: "/fixture/cache".into(),
+                scope: PathScope::Subtree,
+            },
+        }));
+        expected.push(grant(
+            WriteSource::LaneCache,
+            "/fixture/cache",
+            PathScope::Subtree,
+        ));
+        assert_eq!(write_grants(&plan, &profile), expected);
+
+        plan.selected_authentication = None;
+        assert!(
+            !write_grants(&plan, &profile)
+                .iter()
+                .any(|g| g.source == WriteSource::CredentialWrite)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut plan, profile) = write_grants_fixture();
+        let exact = |name: &str| PathGrant {
+            path: Path::new("/fixture/git").join(name),
+            scope: PathScope::Exact,
+        };
+        let subtree = |path: &str| PathGrant {
+            path: path.into(),
+            scope: PathScope::Subtree,
+        };
+        let git = WorktreeWriteGrants {
+            worktree: subtree("/fixture/repo"),
+            private_git_dir: subtree("/fixture/git/private"),
+            common_git_dir: subtree("/fixture/git"),
+            index: [exact("index"), exact("index.lock")],
+            next_index: exact(NEXT_INDEX_SAMPLE),
+            common_exclude: exact("info/exclude"),
+            fetch_heads: [exact("FETCH_HEAD"), exact("private/FETCH_HEAD")],
+            packed_refs_lock: exact("packed-refs.lock"),
+            head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
+            objects: subtree("/fixture/git/objects"),
+            selected_ref: std::array::from_fn(|i| exact(&format!("ref-{i}"))),
+        };
+        for writer in [false, true] {
+            if writer {
+                plan.read_only = None;
+                plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
+                    git_grants_digest: [7; 32],
+                    cargo_cache: subtree("/fixture/cache"),
+                }));
+            }
+            let credentials = &profile.spec.authentication[1].in_place_writes;
+            let rendered = String::from_utf8(render_profile(
+                &plan,
+                &profile,
+                &[],
+                credentials,
+                writer.then_some(&git),
+                Path::new("/fixture/home"),
+            )?)?;
+            let grants = write_grants(&plan, &profile);
+            let mut checked = 0;
+            for line in rendered.lines().filter(|line| {
+                line.starts_with("(allow ")
+                    && (line.contains("file-write*") || line.contains("file-write-data"))
+            }) {
+                // Git's temporary index family is represented by the Git digest.
+                if writer && line.starts_with("(allow file-write* (regex #\"") {
+                    assert!(line.contains("/next-index-[0-9]+"));
+                    continue;
+                }
+                let (scope, tail) = if let Some((_, tail)) = line.split_once("(subpath \"") {
+                    (PathScope::Subtree, tail)
+                } else if let Some((_, tail)) = line.split_once("(literal \"") {
+                    (PathScope::Exact, tail)
+                } else {
+                    return Err(format!("unrecognised write rule: {line}").into());
+                };
+                let path = Path::new(tail.split('"').next().ok_or("write rule path")?);
+                if path == Path::new("/dev/null") || writer && git.iter().any(|g| g.path == path) {
+                    continue;
+                }
+                assert!(
+                    grants.iter().any(|g| g.path == path && g.scope == scope),
+                    "unrecorded rule: {line}"
+                );
+                checked += 1;
+            }
+            assert_eq!(checked, 7);
+        }
+        Ok(())
+    }
 
     #[test]
     fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), PermissionError> {

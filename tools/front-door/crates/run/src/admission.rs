@@ -16,6 +16,13 @@ use provenant_supervisor::{
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Duration;
 
+/// Write evidence from the prepared confinement plan, never launch authority.
+#[derive(Default)]
+pub(crate) struct AppliedWriteGrants {
+    pub grants: Vec<WriteGrantRecord>,
+    pub git_grants_digest: Option<provenant_core::Digest>,
+}
+
 /// Hard host limits, independent of batch concurrency.
 pub const HOST_ACTIVE: u64 = 64;
 pub const PROJECT_ACTIVE: u64 = 16;
@@ -146,12 +153,16 @@ impl RunStore {
         expected: &AttemptRecord,
         route: &RouteRecord,
         writable: &[String],
+        write_grants: &AppliedWriteGrants,
         head: Option<GitOid>,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = expected.attempt_id;
         if !valid_read_only_writable(writable) {
             return Err(RunError::Validation("invalid read-only writable paths"));
+        }
+        if !crate::reader::valid_write_grants(&write_grants.grants) {
+            return Err(RunError::Validation("invalid write grants"));
         }
         self.write(call, |tx| {
             let old = self.record(id, call)?;
@@ -167,6 +178,8 @@ impl RunStore {
             next.generation = next.generation.checked_add(1).ok_or(RunError::Conflict)?;
             next.state = AttemptState::Starting;
             next.read_only_writable = writable.to_vec();
+            next.write_grants = write_grants.grants.clone();
+            next.git_grants_digest = write_grants.git_grants_digest;
             next.head = head;
             next.resolved_route = Some(route.clone());
             next.applied_route = Some(route.clone());
