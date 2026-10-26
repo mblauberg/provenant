@@ -46,12 +46,6 @@ impl InstalledOutput {
     pub fn digest(&self) -> FileDigest {
         self.digest
     }
-    pub fn device(&self) -> u64 {
-        self.device
-    }
-    pub fn inode(&self) -> u64 {
-        self.inode
-    }
     pub fn size(&self) -> u64 {
         self.size
     }
