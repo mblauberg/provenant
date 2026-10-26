@@ -282,7 +282,7 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == first_attempt),
         "{started:?}"
     );
-    wait_for_path(&ready, Duration::from_secs(8))?;
+    wait_for_path(&ready, Duration::from_secs(8), "first writer hold point")?;
 
     let second = writer_run(relative, "writer-contender", 52, "contend for writer lease")?;
     let second_attempt = second.attempts[0].attempt_id;
@@ -424,7 +424,11 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
         "{started:?}"
     );
-    wait_for_path(&path.join(".writer-fixture-ready"), Duration::from_secs(8))?;
+    wait_for_path(
+        &path.join(".writer-fixture-ready"),
+        Duration::from_secs(8),
+        "sequencer writer hold point",
+    )?;
     git(&rig, &["-C", path_text, "reset", "--mixed", "HEAD^"])?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
@@ -582,6 +586,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     wait_for_path(
         &attempt_path.join("process-exit.json"),
         Duration::from_secs(8),
+        "reconciled writer process exit",
     )?;
     assert!(!matches!(
         store.record(attempt, &call)?.state,
@@ -942,11 +947,11 @@ pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result
     Ok(())
 }
 
-fn wait_for_path(path: &Path, timeout: Duration) -> Result {
+fn wait_for_path(path: &Path, timeout: Duration, label: &str) -> Result {
     let deadline = Instant::now() + timeout;
     while !path.exists() {
         if Instant::now() >= deadline {
-            return Err("writer provider did not reach its hold point".into());
+            return Err(format!("timed out waiting for {label}: {}", path.display()).into());
         }
         thread::yield_now();
     }
@@ -1976,6 +1981,11 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 1,
                 "lane launched its own child"
             );
+            // This depth probe must not consume startup spacing when the
+            // confined fixture raises the host limit again.
+            for run in queued.queued_runs(&call)? {
+                queued.refuse_queued(run, "depth probe only", &call)?;
+            }
             fs::write(rig.state.join("config.toml"), config(1))?;
         }
         let parent_context = provenant_run::HolderContext {
@@ -2449,6 +2459,7 @@ fn verify_lane_profile(
                 "runs/{run}/attempts/{attempt_id}/provider-state/candidate-0/fake-child-launched"
             )),
             Duration::from_secs(8),
+            "confined child launch",
         )?;
         // The lane can write its child's store and attempt directory. It
         // marks the child finished, renames the requester in its launch
@@ -2554,7 +2565,11 @@ fn verify_lane_profile(
         );
         // The forged terminal record stands, so the guardian's own exit is
         // the evidence. Unstopped, the child would run to its wall deadline.
-        wait_for_path(&attempt.join("process-exit.json"), Duration::from_secs(8))?;
+        wait_for_path(
+            &attempt.join("process-exit.json"),
+            Duration::from_secs(8),
+            "cancelled child process exit",
+        )?;
         let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
         assert_eq!(exit["stop_reason"], "explicit_cancellation", "{exit}");
         let Err(provenant_supervisor::custody::CustodyError::Io(reported)) = reported else {
