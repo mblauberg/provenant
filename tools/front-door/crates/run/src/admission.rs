@@ -161,7 +161,7 @@ impl RunStore {
         if !valid_read_only_writable(writable) {
             return Err(RunError::Validation("invalid read-only writable paths"));
         }
-        if !crate::reader::valid_write_grants(&write_grants.grants) {
+        if !crate::reader::write_grants_fit(&write_grants.grants) {
             return Err(RunError::Validation("invalid write grants"));
         }
         self.write(call, |tx| {

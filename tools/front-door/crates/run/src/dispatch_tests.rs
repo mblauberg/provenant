@@ -2,6 +2,7 @@
 //! Fake providers and resources stand in for adapters and the host.
 use super::tests::{call, clock, context, exit, input, route};
 use super::*;
+use provenant_confinement::permissions::{PathGrant, PathScope};
 use provenant_core::{AttemptId, CancelToken, RunId, TaskId, WallTime};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::{
@@ -1019,6 +1020,195 @@ impl Providers for Ready {
     ) -> std::result::Result<Decoded, String> {
         unreachable!("no guardian runs a provider in these tests")
     }
+}
+
+/// Carries a real permission plan through launch, stopping before compilation.
+struct Confined {
+    writer: bool,
+    tool_writes: Vec<PathGrant>,
+}
+impl Providers for Confined {
+    fn prepare(
+        &self,
+        task: &TaskRequest,
+        prompt: &str,
+        paths: &LaunchPaths,
+        resume: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        use provenant_confinement::permissions::{
+            AccessMode, NetworkAccess, PlanPermissions, ProviderProfile, ProviderProfileSpec,
+            WorktreeWriteAuthority,
+        };
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+        let grant = |path: &str, scope| PathGrant {
+            path: path.into(),
+            scope,
+        };
+        let mode = if self.writer {
+            let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
+                "git_grants_digest": vec![7; 32],
+                "cargo_cache": {"path": "/fixture/cache", "scope": "subtree"}
+            }))
+            .map_err(|e| e.to_string())?;
+            AccessMode::WorktreeWrite(Box::new(authority))
+        } else {
+            AccessMode::ReadOnly
+        };
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes(
+                [1; 16],
+            )),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                read_only: None,
+                mode,
+                scratch: grant("/fixture/scratch", PathScope::Subtree),
+                private_state: Some(grant("/fixture/private", PathScope::Subtree)),
+                read_roots: vec![grant("/fixture/repo", PathScope::Subtree)],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![grant("/fixture/shared", PathScope::Subtree)],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+        })
+        .map_err(|e| e.to_string())?;
+        let mut launch = Ready.prepare(task, prompt, paths, resume)?;
+        launch.confinement = Some(LaunchConfinement {
+            plan,
+            profile: ProviderProfile {
+                spec: ProviderProfileSpec {
+                    state_writes: vec![grant("/fixture/state/session", PathScope::Exact)],
+                    tool_writes: self.tool_writes.clone(),
+                    ..ProviderProfileSpec::default()
+                },
+                observations: Default::default(),
+            },
+            writer: None,
+            home: "/fixture/home".into(),
+        });
+        Ok(launch)
+    }
+    fn decode(
+        &self,
+        _: &RouteRecord,
+        _: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        unreachable!("no guardian runs a provider in these tests")
+    }
+}
+
+#[test]
+fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
+    use provenant_records::run::WriteSource;
+    for writer in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let prepared = input();
+        store.create(&prepared, &call)?;
+        let id = prepared.attempts[0].attempt_id;
+        assert!(matches!(
+            store.start(
+                prepared.run_id,
+                &Confined { writer, tool_writes: vec![] },
+                &|_, _| Err(RunError::Validation("fixture holder")),
+                &call,
+            )?.as_slice(),
+            [Started::Refused { attempt, kind: RefusalKind::Preparation, reason }]
+                if *attempt == id && reason.contains("fixture holder")
+        ));
+        drop(store);
+        let store = RunStore::open(&context, &call)?;
+        let record = store.record(id, &call)?;
+        let mut expected = vec![
+            (
+                WriteSource::StateWrite,
+                "/fixture/state/session",
+                PathScope::Exact,
+            ),
+            (
+                WriteSource::WriteRoot,
+                "/fixture/shared",
+                PathScope::Subtree,
+            ),
+            (WriteSource::Scratch, "/fixture/scratch", PathScope::Subtree),
+            (
+                WriteSource::PrivateState,
+                "/fixture/private",
+                PathScope::Subtree,
+            ),
+        ];
+        if writer {
+            expected.push((WriteSource::LaneCache, "/fixture/cache", PathScope::Subtree));
+        }
+        let expected = expected
+            .into_iter()
+            .map(|(source, path, scope)| {
+                Ok(WriteGrantRecord {
+                    source,
+                    path: provenant_records::AbsolutePath::new(std::path::Path::new(path))?,
+                    scope,
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        assert_eq!(record.write_grants, expected);
+        assert_eq!(
+            record.git_grants_digest,
+            writer.then(|| provenant_core::Digest::from_bytes([7; 32]))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let prepared = input();
+    store.create(&prepared, &call)?;
+    let id = prepared.attempts[0].attempt_id;
+    let provider = Confined {
+        writer: false,
+        tool_writes: (0..128)
+            .map(|i| PathGrant {
+                path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
+                scope: PathScope::Subtree,
+            })
+            .collect(),
+    };
+    assert!(matches!(
+        store.start(prepared.run_id, &provider, &|_, _| unreachable!("oversized grants must be refused before handoff"), &call)?.as_slice(),
+        [Started::Refused { attempt, kind: RefusalKind::Preparation, .. }] if *attempt == id
+    ));
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let record = store.record(id, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Rejected,
+            ..
+        }
+    ));
+    assert!(record.write_grants.is_empty());
+    assert!(
+        store
+            .start(prepared.run_id, &provider, &|_, _| unreachable!(), &call)?
+            .is_empty()
+    );
+    Ok(())
 }
 
 #[test]
@@ -3292,6 +3482,8 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
 
 #[test]
 fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> TestResult {
+    use std::os::unix::ffi::OsStringExt;
+
     let temp = tempfile::tempdir()?;
     let clock = clock();
     let cancel = CancelToken::new();
@@ -3303,7 +3495,7 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
     let id = prepared.attempts[0].attempt_id;
     let grant = WriteGrantRecord {
         source: WriteSource::LaneCache,
-        path: provenant_records::AbsolutePath::new(&context.state_root.as_path().join("cache"))?,
+        path: provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/cache"))?,
         scope: PathScope::Subtree,
     };
     let mut applied = admission::AppliedWriteGrants {
@@ -3322,6 +3514,26 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
     ));
     applied.grants.pop();
     assert!(reader::valid_write_grants(&applied.grants));
+    assert!(reader::write_grants_fit(&applied.grants));
+    // Native bytes double in the wire encoding, exceeding the cap even
+    // though the raw path is smaller. Old records still decode by count.
+    let mut path = b"/fixture/".to_vec();
+    path.extend(vec![b'x'; 128 * 1024]);
+    path.push(0xff);
+    applied.grants = vec![WriteGrantRecord {
+        path: provenant_records::AbsolutePath::new(std::path::Path::new(
+            &std::ffi::OsString::from_vec(path),
+        ))?,
+        ..grant.clone()
+    }];
+    assert!(!reader::write_grants_fit(&applied.grants));
+    assert!(matches!(
+        store.mark_starting(&record, &route(), &[], &applied, None, &call),
+        Err(RunError::Validation("invalid write grants"))
+    ));
+    record.write_grants = applied.grants.clone();
+    let legacy: AttemptRecord = serde_json::from_slice(&serde_json::to_vec(&record)?)?;
+    reader::validate_attempt(&legacy)?;
     applied.grants = vec![grant];
     store.mark_starting(
         &store.record(id, &call)?,

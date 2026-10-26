@@ -51,6 +51,9 @@ source, scope and absolute path. The path is stored relative to `/`, as
 `--write-root`. Writer Git grants are represented by `git_grants_digest`;
 profile deny rules still restrict the listed allowances.
 
+Run refuses an attempt whose grant list exceeds 1,024 entries or 256 KiB
+encoded. The attempt ends Rejected before launch and its siblings still start.
+
 Writers hold no Git credentials, and remote-tracking refs and shared config are
 read-only, so `git fetch` of a configured remote fails. Fetch on the host
 before dispatch, or dispatch with `--deliver-remote` and `--deliver-branch`:
