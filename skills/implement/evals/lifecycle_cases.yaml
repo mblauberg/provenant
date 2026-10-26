@@ -1,6 +1,12 @@
 schema_version: 1
 target_skill: implement
 cases:
+  - id: contest_one_reaudit
+    prompt: "A writer contests P2-7 with source anchors and a passing reproducer. The reviewer has re-audited that evidence once and still disagrees. Continue the repair loop."
+    expected:
+      contest_reaudits: 1
+      action: Record the contest evidence, re-audit outcome and residue in the PR as an accepted trade-off with the accountable owner; escalate acceptance beyond the chair's authority.
+      merge: Contest alone adds no gate; existing severity, authority and checks still apply.
   - {id: lifecycle-implement-positive, relation: positive, prompt: "Implement this approved substantial change in a fresh session, adapting the plan and topology as evidence changes.", tags: [lifecycle-alignment, direct], expected: {primary_skill: implement, companion_skills: []}}
   - {id: lifecycle-implement-negative, relation: negative, prompt: "The intended outcome and authority are unsettled; decide the scope before any implementation.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: scope, companion_skills: []}}
   - {id: lifecycle-implement-adjacent, relation: adjacent, prompt: "Implement this approved cross-cutting change with adaptive, partitioned agent teams and independent review.", tags: [lifecycle-alignment, composition], expected: {primary_skill: implement, companion_skills: [orchestrate]}}

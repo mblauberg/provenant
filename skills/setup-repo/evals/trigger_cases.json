@@ -119,6 +119,32 @@
         "primary_skill": "setup-repo",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176132",
+      "relation": "negative",
+      "prompt": "The repository setup is done; update the live issue board's priorities and PR links.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176133",
+      "relation": "negative",
+      "prompt": "Write the README's repository-setup tutorial without changing labels, forms or repository settings.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
     }
   ]
 }

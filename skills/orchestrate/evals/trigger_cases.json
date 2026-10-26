@@ -174,6 +174,32 @@
         "primary_skill": "orchestrate",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176122",
+      "relation": "negative",
+      "prompt": "The review mentions worker lanes and Fabric; correct one typo in its README paragraph.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176123",
+      "relation": "negative",
+      "prompt": "Diagnose this failing agent dispatch serially; the workers share one mutable fixture and the cause is unknown.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
     }
   ]
 }

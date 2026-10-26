@@ -116,6 +116,32 @@
           "legal-writing"
         ]
       }
+    },
+    {
+      "id": "q176118",
+      "relation": "negative",
+      "prompt": "Polish this fictional courtroom scene for a general audience; do not give legal analysis.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "natural-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176119",
+      "relation": "negative",
+      "prompt": "Rewrite the README for our legal-document parser; keep its CLI examples unchanged.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
     }
   ]
 }

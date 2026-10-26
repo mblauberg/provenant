@@ -115,6 +115,32 @@
           "release"
         ]
       }
+    },
+    {
+      "id": "q176128",
+      "relation": "negative",
+      "prompt": "The release candidate is accepted, but only rewrite its release-note prose; no publication.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176129",
+      "relation": "negative",
+      "prompt": "Implement the approved release status endpoint; deployment remains a later task.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
     }
   ]
 }

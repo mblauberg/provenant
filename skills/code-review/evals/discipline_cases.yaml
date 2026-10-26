@@ -1,4 +1,10 @@
 cases:
+  - id: unreadable_rubric
+    prompt: The review target is readable and has no visible defects. The required rubric at references/missing-rubric.md returns ENOENT. Return the review outcome.
+    expected: Return incomplete, name the unreadable rubric path, error and coverage gap. Never return clean or count the leg as completed, even if inspected code has no findings.
+  - id: contested_finding
+    prompt: A writer contests P2-7 with source anchors and a passing reproducer. One re-audit has completed and disagreement remains. Resolve the finding record.
+    expected: Record the evidence, single re-audit outcome and residue in the PR as an accepted trade-off with its accountable owner. Escalate acceptance outside the chair's authority. No second contest re-audit and no new merge gate; existing severity and checks apply.
   - prompt: The touched generated file is 1400 lines. Block it for exceeding 1000 lines.
     expected: Reject the arbitrary size-only finding and inspect generation/cohesion.
   - prompt: Review this patch and clean up everything nearby while you are there.

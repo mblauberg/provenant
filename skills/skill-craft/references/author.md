@@ -29,12 +29,18 @@ audit branch first for read-only assessment of anything that already exists;
    `THIRD_PARTY_NOTICES.md` index with the licence text under `LICENSES/`
    before the skill ships. Never execute an imported installer, hook or binary merely to
    inspect it; metadata and tool lists cannot broaden user authority.
-6. Add positive, negative and boundary trigger fixtures. Add a contract test
-   only for an invariant a script or gate enforces at runtime; wording, ordering
-   and explanation get no test. Follow the exclusion list in `tdd`.
-7. Forward-test the raw skill on a realistic fresh-context task without leaking
-   the intended answer or diagnosis. Repair what it exposes, then execute the
-   harness and public-safety gates.
+6. Add positive, negative and boundary trigger fixtures, including at least
+   two near-miss negatives under the shared doctrine. Run
+   `scripts/check-skill-negatives` for the repository's mechanical inventory.
+   It counts structurally negative routes, not semantic near-miss quality.
+   Add a contract test only for an invariant a script or gate enforces at
+   runtime; wording, ordering and explanation get no test. Follow the exclusion
+   list in `tdd`.
+7. For every behaviour change, run the fixtures with and without the skill;
+   record both outputs and their difference, including unchanged decisions
+   and unavailable arms. Forward-test on a realistic fresh-context task without
+   leaking the intended answer or diagnosis. Repair what it exposes, then
+   execute the harness and public-safety gates.
 
 ## Description contract
 

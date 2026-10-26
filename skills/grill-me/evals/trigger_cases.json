@@ -116,6 +116,32 @@
           "prototype"
         ]
       }
+    },
+    {
+      "id": "q176114",
+      "relation": "negative",
+      "prompt": "Our grilling session settled the design questions; turn the agreed answers into an approval-ready scope.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176115",
+      "relation": "negative",
+      "prompt": "Implement the approved quiz screen that asks users one question at a time.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
     }
   ]
 }

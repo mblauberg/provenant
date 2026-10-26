@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Inventory negatives; near-miss quality and routing accuracy stay advisory.
+
+The strict trigger fixture format expresses should_trigger: false as
+relation: negative with the target absent from both expected routes.
+"""
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "skills", nargs="?", type=Path,
+        default=Path(__file__).resolve().parent.parent / "skills",
+    )
+    root = parser.parse_args().skills
+    skills = sorted(root.glob("*/SKILL.md"))
+    failures = []
+    if not skills:
+        failures.append(f"{root}: no skills found")
+    for entrypoint in skills:
+        skill = entrypoint.parent.name
+        fixture = entrypoint.parent / "evals/trigger_cases.json"
+        try:
+            data = json.loads(fixture.read_text())
+            if data["schema_version"] != 1 or data["target_skill"] != skill:
+                raise ValueError("invalid version or target")
+            prompts = set()
+            ids = set()
+            for case in data["cases"]:
+                if case["relation"] != "negative":
+                    continue
+                expected = case["expected"]
+                if (expected["primary_skill"] == skill
+                        or skill in expected["companion_skills"]):
+                    continue
+                prompt = " ".join(case["prompt"].split()).casefold()
+                if prompt and case["id"] not in ids:
+                    ids.add(case["id"])
+                    prompts.add(prompt)
+            if len(prompts) < 2:
+                failures.append(f"{fixture}: {len(prompts)} negatives, need at least 2")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            failures.append(f"{fixture}: {error}")
+    if failures:
+        print("\n".join(failures), file=sys.stderr)
+        return 1
+    print(f"{len(skills)} skills: at least two distinct negatives each")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

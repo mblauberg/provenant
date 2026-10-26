@@ -53,8 +53,16 @@ Both branches follow this without restating it in two voices:
   under `Project overrides:`; and keep harness and Fabric mechanics out of
   everything but coordination skills. Global skills stay project-agnostic.
 - **Trigger fixtures:** positive, negative, boundary and composition cases.
-  A keyword match is a candidate, not ground truth. Changes to routing text
-  re-run the held-out set.
+  Every skill has at least two near-miss `should_trigger: false` negatives:
+  prompts sharing its vocabulary whose task belongs elsewhere. In the strict
+  JSON fixture format, use `relation: negative` and exclude the target from
+  both expected routes. Mark these cases `near-miss`; a keyword match alone
+  does not make a useful negative.
+  Changes to routing text re-run the held-out set.
+- **Behaviour changes:** run the same fixtures with and without the skill and
+  record the decisions, differences, model/effort and omissions as reviewer
+  evidence under [ADR 0014](../../docs/adr/0014-comparative-skill-evals-on-suspicion.md).
+  Scores are advisory, never a new gate. Pure inventory checks may fail CI.
 - **Contract-test boundary:** a contract test protects a machine-enforced
   invariant, never the prose that describes it. If the invariant has no
   enforcing script, the correct output is either an enforcing script or
@@ -70,4 +78,5 @@ Both branches follow this without restating it in two voices:
   See [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) for this skill's
   own Skill Optimizer lineage.
 
-Reference eval cases (not run by CI): [boundary trace cases](evals/boundary_trace_cases.yaml).
+Reference eval cases (not run by CI): [boundary traces](evals/boundary_trace_cases.yaml)
+and [behaviour cases](evals/behaviour_cases.yaml).

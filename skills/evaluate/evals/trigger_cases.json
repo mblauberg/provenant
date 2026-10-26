@@ -115,6 +115,32 @@
           "ui-ux-design"
         ]
       }
+    },
+    {
+      "id": "q176112",
+      "relation": "negative",
+      "prompt": "Test the deterministic parser's new rejection behaviour with a first failing regression test.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176113",
+      "relation": "negative",
+      "prompt": "Evaluate this PR's source changes for actionable defects; no stochastic benchmark is needed.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
     }
   ]
 }

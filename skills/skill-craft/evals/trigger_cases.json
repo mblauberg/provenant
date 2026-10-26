@@ -117,6 +117,32 @@
           "evaluate"
         ]
       }
+    },
+    {
+      "id": "q176134",
+      "relation": "negative",
+      "prompt": "Implement the approved skill package through verification and independent review; the skill design is settled.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176135",
+      "relation": "negative",
+      "prompt": "Rewrite this one-off prompt for the current chat; no reusable Agent Skill is wanted.",
+      "tags": [
+        "near-miss",
+        "no-skill"
+      ],
+      "expected": {
+        "primary_skill": null,
+        "companion_skills": []
+      }
     }
   ]
 }

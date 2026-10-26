@@ -61,7 +61,13 @@ reconciliation run.
    omissions and substitutions. Native subagents use the Agent tool model
    parameter and mark the route resolved.
 6. Batch findings from review and the slow checks into one repair round, then
-   repeat verification and re-review only the repair delta. A gate that still
+   repeat verification and re-review only the repair delta. A writer may
+   `CONTEST` a finding with source anchors and a reproducer or check result
+   under the [finding contract](../code-review/references/finding-contract.md#propose-fix-or-contest).
+   Give the contest exactly one re-audit; record the outcome and any residue
+   in the PR as an accepted trade-off with evidence and accountable owner.
+   Escalate acceptance outside the chair's authority to its owner. Contest
+   adds no merge gate of its own; existing gates still apply. A gate that still
    fails takes the step 2 escalation, within the repair ceilings in
    [run-contract.md](references/run-contract.md). Stop and escalate, or return to the user, when two
    consecutive repair cycles leave the failing-check set unchanged or larger,

@@ -52,7 +52,10 @@ third-party content.
    fixtures or execution checks, and local preferences remain local. Literal
    search can confirm known residue; it cannot establish semantic coverage.
 5. Use balanced, frozen routing evals for undertrigger and overtrigger
-   claims. A raw keyword match is only a candidate, not ground truth.
+   claims. Check at least two near-miss negatives per skill and, for behaviour
+   changes, with-and-without fixture outputs and their recorded differences.
+   Inventory is mechanical; near-miss quality and eval scores are advisory.
+   A raw keyword match is only a candidate, not ground truth.
 6. Report all dimensions from [method.md](method.md); mark missing evidence
    `N/A` and keep static facts separate from behavioural estimates.
 

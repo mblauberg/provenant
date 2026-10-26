@@ -40,6 +40,26 @@ At adjudication, the chair records each finding as `confirmed`,
 `false_positive`, `reviewer_bias` or `duplicate`; duplicate findings also name
 the finding they duplicate.
 
+### PROPOSE FIX or CONTEST
+
+The writer either proposes a fix or records `CONTEST` with the finding ID,
+source anchors, a reproducer or check result, and the reason the claim does
+not hold or the trade-off is acceptable. The reviewer gets exactly one
+re-audit of that evidence. Record its outcome and any remaining disagreement
+in the PR as an accepted trade-off, with the evidence and accountable owner;
+do not silently drop the finding or restart the contest loop. If acceptance
+exceeds the chair's authority, return it to the authorised owner. A contest
+adds no merge gate of its own; existing severity, authority and checks apply.
+
+## Review outcome
+
+- `findings`: supported defects, with coverage and evidence.
+- `clean`: no supported defect after the required coverage is complete.
+- `incomplete`: required context or coverage is unavailable. An unreadable
+  rubric always means `incomplete`; name the path, read error and affected
+  coverage. Supported findings may accompany it, but it provides no clean
+  review or completed review leg.
+
 ## Output
 
 Order findings by severity, then dependency impact. Use:
@@ -68,5 +88,5 @@ After findings, add only if useful:
 - verification lanes that did not run;
 - non-blocking structural opportunities with their proof burden met.
 
-If no genuine finding survives verification, return `clean`. Do not manufacture
-nits to demonstrate effort.
+If no genuine finding survives verification and required coverage is complete,
+return `clean`. Do not manufacture nits to demonstrate effort.

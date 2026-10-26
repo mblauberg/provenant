@@ -84,6 +84,10 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
+For independent reviews, bind the target and rubric without the chair's
+hypothesis or expected verdict. The reviewer reads the rubric and reports
+`incomplete` if it is unreadable; this cannot count as a clean review leg.
+
 ### Native result digest
 
 A native subagent's final message lands whole in the chair's context, so its

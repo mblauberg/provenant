@@ -37,9 +37,12 @@ effect as "may reduce", not "removes".)
    If no safe/data-authorised different-family route exists, write
    `CROSS-FAMILY-NOT-RUN: <missing tool | auth/quota | data policy | no read-only mode | user constraint>`
    to the run traces and final gate.
-3. Send a **clean, minimal** prompt: the artifact, the specific checks, and a defect taxonomy
+3. Send a **clean, minimal** prompt: the target artifact, the rubric and a defect taxonomy
    ("look for: fabricated citations, unsupported numbers, missed constraints, logic gaps…").
    Ask for a ranked list of problems with location + fix, and an explicit "what it gets right".
+   Never include the chair's hypothesis or expected verdict. The reviewer
+   reads the rubric and returns `incomplete` if it is unreadable, naming the
+   path and affected coverage; absence of findings cannot make that `clean`.
 4. For high-stakes work, use **two** different families (a small jury) when cost/data policy allow it.
    Don't simple-majority-vote — weigh by competence and by whether a flag is objectively checkable.
 5. **Beware debate convergence:** multi-round debate can settle on a confident *falsehood* if the
@@ -86,7 +89,8 @@ Use panels to create independent defect pressure. Do not treat panel agreement a
 
 ### Rules
 
-- Give reviewers the artifact and check rubric, not your scratchpad.
+- Give reviewers the target and rubric, never the chair's hypothesis,
+  expected verdict or scratchpad. An unreadable rubric means `incomplete`.
 - Vary prompt framing across families to reduce correlation.
 - Ask for locations, evidence, and fixes, not global scores alone.
 - Let weak/cheap models scout; do not let them veto stronger grounded work.

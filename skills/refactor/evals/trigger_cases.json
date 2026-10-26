@@ -122,6 +122,32 @@
         "primary_skill": "code-review",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176126",
+      "relation": "negative",
+      "prompt": "Review this refactor read-only for behavioural regressions; do not simplify the source.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176127",
+      "relation": "negative",
+      "prompt": "The refactor must now reject previously valid inputs; start with a right-reason failing test for that new behaviour.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "tdd",
+        "companion_skills": []
+      }
     }
   ]
 }
