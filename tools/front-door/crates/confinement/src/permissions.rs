@@ -3208,6 +3208,9 @@ pub mod snapshot;
 
 #[cfg(test)]
 mod tests {
+    // Tests use real file timestamps to construct race conditions.
+    #![allow(clippy::disallowed_methods)]
+
     use super::*;
     use provenant_supervisor::exec::SystemExecutor;
     use provenant_supervisor::fs::LocalFs;

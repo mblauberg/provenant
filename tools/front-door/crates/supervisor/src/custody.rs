@@ -1094,6 +1094,8 @@ pub enum Observation {
     Exited(Box<ExitObservation>),
     Unknown,
 }
+// Custody observation must expire even if the injected clock stops advancing.
+#[allow(clippy::disallowed_methods)]
 pub fn observe(
     handle: &CustodyHandle,
     budget: WaitBudget,

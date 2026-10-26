@@ -211,6 +211,8 @@ impl RunStore {
     }
     /// Wait until host capacity, startup spacing and resource floors admit
     /// this attempt, then mark it running. Expiry or a state change refuses.
+    // Admission waits are bounded by the sealed deadline and remain cancellable.
+    #[allow(clippy::disallowed_methods)]
     pub fn admit(
         &self,
         id: AttemptId,

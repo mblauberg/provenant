@@ -234,6 +234,8 @@ impl Executor for SystemExecutor {
         run(&self.reaper, options)
     }
 }
+// Process supervision deadlines use the operating system's monotonic clock.
+#[allow(clippy::disallowed_methods)]
 fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
     if options.argv.is_empty() {
         return Err(ExecError::EmptyArgv);

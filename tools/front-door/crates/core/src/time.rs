@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -179,32 +180,73 @@ impl WaitBudget {
 pub trait Clock {
     fn wall_now(&self) -> Result<WallTime, TimeError>;
     fn mono_now(&self) -> MonoTime;
+    /// Wait until a monotonic deadline; externally advanced clocks may do nothing here.
+    fn wait_until(&self, _deadline: MonoTime) -> Result<(), TimeError> {
+        Ok(())
+    }
 }
 /// Explicit, locally-owned clock for deterministic simulations and tests.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TestClock {
-    wall: WallTime,
-    mono: MonoTime,
+    times: Mutex<(WallTime, MonoTime)>,
+}
+impl Clone for TestClock {
+    fn clone(&self) -> Self {
+        let times = *self
+            .times
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self {
+            times: Mutex::new(times),
+        }
+    }
 }
 impl TestClock {
     pub const fn new(wall: WallTime, mono: MonoTime) -> Self {
-        Self { wall, mono }
+        Self {
+            times: Mutex::new((wall, mono)),
+        }
     }
     pub fn advance(&mut self, duration: DurationMicros) -> Result<(), TimeError> {
+        self.advance_by(duration)
+    }
+    fn advance_by(&self, duration: DurationMicros) -> Result<(), TimeError> {
         // Both sums are checked before either field changes.
-        (self.wall, self.mono) = (
-            self.wall.checked_add(duration)?,
-            self.mono.checked_add(duration)?,
-        );
+        let mut times = self
+            .times
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wall = times.0.checked_add(duration)?;
+        let mono = times.1.checked_add(duration)?;
+        *times = (wall, mono);
         Ok(())
     }
 }
 impl Clock for TestClock {
     fn wall_now(&self) -> Result<WallTime, TimeError> {
-        Ok(self.wall)
+        Ok(self
+            .times
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0)
     }
     fn mono_now(&self) -> MonoTime {
-        self.mono
+        self.times
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1
+    }
+    fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError> {
+        let mut times = self
+            .times
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if deadline > times.1 {
+            let duration = DurationMicros::from_micros(deadline.as_micros() - times.1.as_micros());
+            let wall = times.0.checked_add(duration)?;
+            *times = (wall, deadline);
+        }
+        Ok(())
     }
 }
 
@@ -278,5 +320,17 @@ mod tests {
         let mut clock = TestClock::new(start, MonoTime::from_micros(u64::MAX));
         assert!(clock.advance(DurationMicros::from_micros(1)).is_err());
         assert_eq!(clock.wall_now().unwrap(), start);
+        assert_eq!(clock.mono_now(), MonoTime::from_micros(u64::MAX));
+    }
+
+    #[test]
+    fn test_clock_wait_advances_virtual_time_to_deadline() {
+        let start = UtcMicros::from_micros(0).unwrap();
+        let clock = TestClock::new(start, MonoTime::from_micros(10));
+        clock.wait_until(MonoTime::from_micros(25)).unwrap();
+        assert_eq!(clock.mono_now(), MonoTime::from_micros(25));
+        assert_eq!(clock.wall_now().unwrap().as_micros(), 15);
+        clock.wait_until(MonoTime::from_micros(20)).unwrap();
+        assert_eq!(clock.mono_now(), MonoTime::from_micros(25));
     }
 }

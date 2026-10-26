@@ -1,3 +1,6 @@
+// Integration tests use real time to bound process and filesystem coordination.
+#![allow(clippy::disallowed_methods)]
+
 use provenant_core::CancelToken;
 use provenant_supervisor::{exec::*, fixture};
 use std::error::Error;

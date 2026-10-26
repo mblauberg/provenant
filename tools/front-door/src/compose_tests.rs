@@ -159,12 +159,10 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         if configured {
             assert_eq!(fs::read(locks.join("compose-lock"))?, b"lock");
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while attempt.join("reservation.json").exists() {
-            if std::time::Instant::now() >= deadline {
-                return Err("reader reservation did not settle".into());
-            }
-            std::thread::yield_now();
+        if !provenant_test_support::eventually(std::time::Duration::from_secs(5), || {
+            !attempt.join("reservation.json").exists()
+        }) {
+            return Err("reader reservation did not settle".into());
         }
         cleanup.disarm();
     }

@@ -98,6 +98,8 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
     }
 }
 
+// LaunchAgent bootstrap retries are bounded real-time OS operations.
+#[allow(clippy::disallowed_methods)]
 fn bootstrap_with(
     home: &Path,
     changed: bool,

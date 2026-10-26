@@ -28,6 +28,8 @@ struct WindowFrame {
     share: f64,
 }
 
+// SQLite's execution cap must continue expiring if query progress stalls.
+#[allow(clippy::disallowed_methods)]
 pub(super) fn capture(
     identity_dir: &Path,
     options: &Value,

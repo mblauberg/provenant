@@ -87,6 +87,8 @@ impl<E: std::fmt::Display> From<E> for Refusal {
     }
 }
 
+// Handoff lease records use current UTC wall time at this production edge.
+#[allow(clippy::disallowed_methods)]
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -122,6 +124,8 @@ fn read_owner(dir: &Path) -> Option<Owner> {
     let bytes = fs::read(dir.join("owner.json")).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
+// A wall-time nonce distinguishes staged owner files within one process.
+#[allow(clippy::disallowed_methods)]
 fn write_owner(dir: &Path, owner: &Owner) -> io::Result<()> {
     private_dirs(dir)?;
     let nanos = SystemTime::now()
@@ -556,6 +560,8 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
+// Operation identity includes the current wall-time sample.
+#[allow(clippy::disallowed_methods)]
 fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal> {
     if provenant_cli::fabric::in_lane() {
         return Err(Refusal::refused(

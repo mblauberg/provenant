@@ -15,6 +15,8 @@ struct WalkBudget {
 }
 
 impl Default for WalkBudget {
+    // The traversal budget measures real elapsed time.
+    #[allow(clippy::disallowed_methods)]
     fn default() -> Self {
         Self {
             remaining: 1_000_000,
@@ -527,6 +529,9 @@ impl DiskReport {
 
 #[cfg(test)]
 mod tests {
+    // Unit tests use a real monotonic sample to exercise expiration.
+    #![allow(clippy::disallowed_methods)]
+
     use super::*;
     use std::{
         error::Error,

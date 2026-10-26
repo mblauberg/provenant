@@ -14,6 +14,8 @@ pub trait RetryWait {
 pub struct ThreadWait;
 
 impl RetryWait for ThreadWait {
+    // SQLite retry waiting must observe cancellation against real elapsed time.
+    #[allow(clippy::disallowed_methods)]
     fn wait(&self, delay: DurationMicros, cancel: &CancelToken) {
         let started = Instant::now();
         let delay = Duration::from_micros(delay.as_micros().min(250_000));
@@ -53,6 +55,8 @@ pub fn retry<T, E>(
 
 /// Retry incomplete observations on the same schedule as `retry`.
 /// The real elapsed cap also bounds a frozen or inaccurate injected clock.
+// An injected clock cannot replace the hard wall-time safety cap.
+#[allow(clippy::disallowed_methods)]
 pub fn observe<T, E>(
     clock: &dyn Clock,
     budget: WaitBudget,
