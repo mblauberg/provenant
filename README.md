@@ -82,6 +82,8 @@ RELEASE_PARENT="$(mktemp -d)"
 RELEASE="$RELEASE_PARENT/release"
 cargo build --release --locked --bin provenant
 cargo run --locked --example package-release -- --out "$RELEASE"
+rm -rf -- "$CARGO_PARENT"
+unset CARGO_TARGET_DIR CARGO_PARENT
 cd ../..
 ```
 
