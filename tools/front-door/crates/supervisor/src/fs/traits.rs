@@ -56,15 +56,16 @@ pub trait SafeDir: Send + Sync {
     ) -> Result<LockGuard>;
     fn unlink(&self, name: &OsStr) -> Result<()>;
     fn rmdir(&self, name: &OsStr) -> Result<()>;
-    /// Disposal-only operations for detached external payload trees. Callers
-    /// must exclude supervisor state and its stable locks; see Directory's
-    /// custody requirements. Adapters retain ordinary lock protection unless
-    /// they explicitly support payload removal.
-    fn unlink_payload(&self, name: &OsStr) -> Result<()> {
-        self.unlink(name)
-    }
-    fn rmdir_payload(&self, name: &OsStr) -> Result<()> {
-        self.rmdir(name)
+    /// Payload removal, reachable only through `PayloadTree`, which alone can
+    /// grant it. Wrapping adapters forward the grant; others retain ordinary
+    /// lock protection unless they explicitly support payload removal.
+    fn remove_payload(&self, name: &OsStr, directory: bool, grant: PayloadRemoval) -> Result<()> {
+        let _ = grant;
+        if directory {
+            self.rmdir(name)
+        } else {
+            self.unlink(name)
+        }
     }
     fn replace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
@@ -201,11 +202,16 @@ impl SafeDir for Directory {
     fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
         Directory::try_lock_existing(self, name, mode)
     }
-    fn unlink_payload(&self, name: &OsStr) -> Result<()> {
-        Directory::unlink_payload(self, name)
-    }
-    fn rmdir_payload(&self, name: &OsStr) -> Result<()> {
-        Directory::rmdir_payload(self, name)
+    /// Unlike `unlink`, this permits payload names such as Cargo.lock. No
+    /// final symlink is followed.
+    fn remove_payload(&self, name: &OsStr, directory: bool, _: PayloadRemoval) -> Result<()> {
+        let name = component(name)?;
+        let operation = if directory {
+            "rmdir payload"
+        } else {
+            "unlinkat payload"
+        };
+        os::unlink(&self.file, name, directory).map_err(error(operation, &self.path.join(name)))
     }
     fn into_anchor(self: Box<Self>) -> Result<Box<dyn SafeDir>> {
         Ok(Box::new(Directory::into_anchor(*self)?))

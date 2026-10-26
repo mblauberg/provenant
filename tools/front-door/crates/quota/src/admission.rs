@@ -140,21 +140,25 @@ impl Admission<'_> {
 
 /// Build a compare-and-swap update for structured provider quota evidence.
 /// The provider message is intentionally excluded from durable quota state.
+/// Without a pool the refusal holds only the model, until `resets_unix_seconds`
+/// or the one-hour backoff.
 pub fn record_refusal(
     current: Option<&AccountRecord>,
     account: &AccountScope,
     model: &str,
-    pool: &str,
+    pool: Option<&str>,
     now_unix_seconds: i64,
+    resets_unix_seconds: Option<i64>,
 ) -> Result<UpdateIntent, QuotaError> {
     account.validate()?;
     let prefix = format!("{}/", account.adapter);
     if !model.starts_with(&prefix)
         || model.len() > 512
         || model.chars().any(char::is_control)
-        || pool.is_empty()
-        || pool.len() > 256
-        || pool.chars().any(char::is_control)
+        || pool.is_some_and(|pool| {
+            pool.is_empty() || pool.len() > 256 || pool.chars().any(char::is_control)
+        })
+        || resets_unix_seconds.is_some_and(|resets| resets <= now_unix_seconds)
     {
         return Err(QuotaError::Invalid("provider refusal"));
     }
@@ -174,16 +178,16 @@ pub fn record_refusal(
         .ok_or(QuotaError::NumberOutOfRange)?;
     record
         .refusals
-        .retain(|refusal| refusal.model != model || refusal.pool.as_deref() != Some(pool));
+        .retain(|refusal| refusal.model != model || refusal.pool.as_deref() != pool);
     if record.refusals.len() >= MAX_WINDOWS {
         return Err(QuotaError::Invalid("provider refusal bound"));
     }
     record.refusals.push(Refusal {
         account: account.clone(),
         model: model.into(),
-        pool: Some(pool.into()),
+        pool: pool.map(Into::into),
         observed_unix_seconds: now_unix_seconds,
-        resets_unix_seconds: None,
+        resets_unix_seconds,
     });
     record.validate()?;
     Ok(UpdateIntent {
@@ -360,6 +364,36 @@ mod admission_tests {
                 "now={now}"
             );
         }
+    }
+    #[test]
+    fn recorded_model_refusal_holds_until_its_stated_reset() {
+        let account = record(QuotaStatus::Available).account;
+        let mut route = route();
+        route.readiness = RouteReadiness::Ready {
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99_999,
+        };
+        let model = format!("{}/{}", account.adapter, route.model);
+        for (resets, until) in [(Some(30_000), 30_000), (None, 4600)] {
+            let intent =
+                record_refusal(None, &account, &model, None, 1000, resets).expect("refusal");
+            let record = intent.replacement.expect("record");
+            for (now, allowed) in [(1000, false), (until - 1, false), (until, true)] {
+                assert_eq!(
+                    Admission {
+                        policies: crate::source::TEST_POLICIES,
+                        now_unix_seconds: now,
+                        records: std::slice::from_ref(&record),
+                        pools: &[],
+                    }
+                    .check(&route)
+                    .is_ok(),
+                    allowed,
+                    "resets={resets:?} now={now}"
+                );
+            }
+        }
+        assert!(record_refusal(None, &account, &model, None, 1000, Some(1000)).is_err());
     }
     #[test]
     fn lapsed_window_requires_headroom_to_clear_a_newer_refusal() {
