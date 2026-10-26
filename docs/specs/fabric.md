@@ -92,9 +92,11 @@ these mutations, landing push or reconcile, `dispatch --host` and
 `workflow session handoff` under that environment. Peer-target run cancel and
 resume are also refused. `fabric peer` and `fabric peer-agent` refuse to start
 there at all, because a peer frame names its own agent. Reads and child-store
-run submit, cancel, resume and output remain available within the existing
-child policy. Graph status reads an atomic checkpoint without creating graph
-directories or acquiring the writer lock.
+run submit, cancel and output remain available within the existing child
+policy. Local resume is refused with `continuation_unsupported` (`UNSUPPORTED`
+on the CLI) because the host never launches a child continuation. Graph status
+reads an atomic checkpoint without creating graph directories or acquiring the
+writer lock.
 
 Lane event reads do not refresh execution events into the shared store and
 report incomplete host coverage. Host refresh never reads child stores, so a

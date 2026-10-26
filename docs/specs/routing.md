@@ -327,7 +327,9 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   Both also pin `PROVENANT_AGENT_LABEL=lane-<AttemptId>`, so the lane has
   its own actor and inbox. Under the host-set lane environment, Fabric
   refuses coordination mutations with `lane_coordination_refused`; reads and
-  child-store run operations remain available. The shared SQLite write grant
+  child-store run submit, cancel and output remain available. Local resume is
+  refused with `continuation_unsupported` (`UNSUPPORTED` on the CLI) because the
+  host never launches a child continuation. The shared SQLite write grant
   remains pending [lane store isolation](fabric.md#follow-up-lane-store-isolation).
   Submission refuses a child above `lanes.max_depth` (default 2), and a state
   path that is not `children/<AttemptId>` pairs below the original root. The

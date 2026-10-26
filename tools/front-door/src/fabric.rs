@@ -1944,12 +1944,14 @@ impl BinaryRunOwner<'_> {
                 ref prompt,
                 expected_generation,
             } => {
-                if self.factory.context.in_lane
-                    && target
+                if self.factory.context.in_lane {
+                    if target
                         .host
                         .is_some_and(|host| host != self.factory.context.identity.host)
-                {
-                    return Err(FacadeError::LaneCoordinationRefused);
+                    {
+                        return Err(FacadeError::LaneCoordinationRefused);
+                    }
+                    return Err(FacadeError::ContinuationUnsupported);
                 }
                 if let Some(answer) = self.remote(
                     target,
