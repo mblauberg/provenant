@@ -204,29 +204,42 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         _ => vec![],
     })
 }
-/// The CLI's own exhausted-quota refusal (`Individual quota reached`). A bare
-/// 429 or `RESOURCE_EXHAUSTED` may be a per-minute rate limit, so neither counts.
+/// The CLI's own exhausted-quota refusal, `Individual quota reached ... Resets
+/// in 7h23m`, possibly behind its 429 status. The error must open with it, so
+/// an echoed prompt or another error quoting it does not count. A bare 429 or
+/// `RESOURCE_EXHAUSTED` may be a per-minute rate limit, so neither counts.
 fn quota_reached(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("quota reached")
+    const REFUSAL: &str = "individual quota reached";
+    let message = message.trim_start();
+    let message = message
+        .strip_prefix("429")
+        .filter(|rest| rest.starts_with([':', ' ']))
+        .map_or(message, |rest| rest.trim_start_matches([':', ' ']));
+    message
+        .get(..REFUSAL.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(REFUSAL))
 }
-/// The refusal's stated wait, as in `Resets in 7h23m`, within one weekly window.
+/// The refusal's stated wait, only from its closing `Resets in 7h23m`, within
+/// one weekly window.
 fn resets_in(message: &str) -> Option<u64> {
     const MARKER: &str = "resets in ";
-    let lower = message.to_ascii_lowercase();
-    let mut rest = &lower[lower.find(MARKER)? + MARKER.len()..];
+    let lower = message
+        .trim_end()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let mut rest = lower[lower.rfind(MARKER)? + MARKER.len()..].trim_start();
     let mut total = 0_u64;
-    loop {
-        rest = rest.trim_start();
+    while !rest.is_empty() {
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        let scale = match rest.as_bytes().get(digits).filter(|_| digits > 0) {
-            Some(b'd') => 86_400,
-            Some(b'h') => 3_600,
-            Some(b'm') => 60,
-            Some(b's') => 1,
-            _ => break,
+        let scale = match rest.as_bytes().get(digits).filter(|_| digits > 0)? {
+            b'd' => 86_400,
+            b'h' => 3_600,
+            b'm' => 60,
+            b's' => 1,
+            _ => return None,
         };
         total = total.checked_add(rest[..digits].parse::<u64>().ok()?.checked_mul(scale)?)?;
-        rest = &rest[digits + 1..];
+        rest = rest[digits + 1..].trim_start();
     }
     (1..=7 * 86_400).contains(&total).then_some(total)
 }

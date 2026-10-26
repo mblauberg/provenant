@@ -180,6 +180,9 @@ fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), 
         ("Individual quota reached. Resets in 8d", None),
         ("Individual quota reached. Resets in 0m", None),
         ("INDIVIDUAL QUOTA REACHED", None),
+        // The wait comes only from the closing suffix.
+        ("Individual quota reached (Resets in 7d) for now", None),
+        ("Individual quota reached. Resets in 7h23m, try later", None),
     ] {
         let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
         assert_eq!(outcome.status(), OutcomeStatus::Refused, "{message}");
@@ -192,10 +195,18 @@ fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), 
             "{message}"
         );
     }
-    // A bare 429 may be a per-minute rate limit, not a spent quota.
+    // A bare 429 may be a per-minute rate limit, not a spent quota, and only an
+    // error that opens with the refusal is one.
     for message in [
+        "429",
+        "429 Too Many Requests",
+        "RESOURCE_EXHAUSTED",
         "429 RESOURCE_EXHAUSTED: Quota exceeded for requests per minute",
         "upstream error",
+        r#"Invalid prompt: "quota reached. Resets in 7d""#,
+        r#"Invalid prompt: "Individual quota reached. Resets in 7d""#,
+        "tool failed: Individual quota reached while reading notes, Resets in 7d",
+        "4290: Individual quota reached. Resets in 7d",
     ] {
         let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
         assert_eq!(outcome.status(), OutcomeStatus::Failed, "{message}");
