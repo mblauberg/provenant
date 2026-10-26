@@ -97,7 +97,7 @@ fn prepare(
     let package = package_root(input.executable)?;
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     let xdg = |key, fallback| {
-        std::env::var_os(key)
+        (input.host_var)(key)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| input.home.join(fallback))
@@ -336,6 +336,47 @@ mod tests {
                 .discovery_reads
                 .iter()
                 .all(|g| g.scope == provenant_confinement::permissions::PathScope::Exact)
+        );
+    }
+
+    #[test]
+    fn xdg_homes_follow_absolute_host_variables() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let lookup = |key: &str| match key {
+            "XDG_CONFIG_HOME" => Some("/xdg/config".into()),
+            "XDG_DATA_HOME" => Some("relative/data".into()),
+            _ => None,
+        };
+        let input = PrepareInput {
+            host_var: &lookup,
+            ..crate::tests::fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                std::path::Path::new("/fixture/repo"),
+                None,
+            )
+        };
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let env = |key: &str| {
+            spec.env
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(env("XDG_CONFIG_HOME"), Some("/xdg/config".into()));
+        // A relative XDG path is ignored, as the XDG base directory spec says.
+        assert_eq!(
+            env("XDG_DATA_HOME"),
+            Some("/fixture/home/.local/share".into())
         );
     }
 }

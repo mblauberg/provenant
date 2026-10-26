@@ -1,0 +1,86 @@
+#!/bin/sh
+# Collate docs/release-notes/next.d/ into release notes.
+#   collate-release-notes           print the notes for the next release
+#   collate-release-notes --check   validate the fragments only
+#   collate-release-notes vX.Y.Z    write docs/release-notes/vX.Y.Z.md and
+#                                   delete the fragments, keeping _intro.md
+# Each fragment is <topic>.md whose first line is one of the section headings
+# below, followed by its bullets. Links in fragments are relative to next.d/;
+# the collated file sits one directory up, so ../../ becomes ../.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+export LC_ALL=C
+dir=docs/release-notes/next.d
+sections='## Breaking changes
+## Behaviour changes
+## Additions
+## Fixes'
+
+check() {
+  status=0
+  if [ -e docs/release-notes/next.md ]; then
+    echo "collate-release-notes: docs/release-notes/next.md must not exist; add a fragment under $dir" >&2
+    status=1
+  fi
+  if [ ! -f "$dir/_intro.md" ]; then
+    echo "collate-release-notes: $dir/_intro.md is missing" >&2
+    status=1
+  fi
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$dir/_intro.md" ] && continue
+    first=$(sed -n 1p "$f")
+    if ! printf '%s\n' "$sections" | grep -qxF -- "$first"; then
+      echo "collate-release-notes: $f: first line must be one of: $(printf '%s' "$sections" | paste -sd, -)" >&2
+      status=1
+    fi
+  done
+  return $status
+}
+
+collate() {
+  if [ -n "${1:-}" ]; then
+    echo "# $1"
+  else
+    echo "# Next release"
+  fi
+  echo
+  cat "$dir/_intro.md"
+  printf '%s\n' "$sections" | while IFS= read -r heading; do
+    body=$(for f in "$dir"/*.md; do
+      [ -e "$f" ] || continue
+      [ "$f" = "$dir/_intro.md" ] && continue
+      [ "$(sed -n 1p "$f")" = "$heading" ] || continue
+      # Drop the heading and any blank lines around the bullets.
+      awk 'NR > 1 { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
+    done)
+    [ -n "$body" ] || continue
+    printf '\n%s\n\n%s\n' "$heading" "$body"
+  done | sed 's|](\.\./\.\./|](../|g'
+}
+
+case "${1:-}" in
+  --check)
+    check
+    ;;
+  '')
+    check
+    collate
+    ;;
+  v[0-9]*.[0-9]*.[0-9]*)
+    check
+    out=docs/release-notes/$1.md
+    if [ -e "$out" ]; then
+      echo "collate-release-notes: $out already exists" >&2
+      exit 1
+    fi
+    collate "$1" >"$out"
+    for f in "$dir"/*.md; do
+      [ "$f" = "$dir/_intro.md" ] || rm -- "$f"
+    done
+    ;;
+  *)
+    echo "usage: collate-release-notes [--check | vX.Y.Z]" >&2
+    exit 2
+    ;;
+esac

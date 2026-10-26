@@ -111,8 +111,6 @@ pub struct NodeProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphAttempt {
-    /// Missing launch evidence is conservatively treated as launched.
-    #[serde(default = "assume_launched")]
     pub launched: bool,
     pub key: AttemptKey,
     pub route: GraphRoute,
@@ -120,10 +118,8 @@ pub struct GraphAttempt {
     pub attempt_ref: Option<String>,
     pub outcome: Option<AttemptOutcome>,
     /// Actor that first submitted this attempt. Run-store operation replay is
-    /// actor-scoped, so a resume submits under it. Absent in older checkpoints,
-    /// which use the resuming actor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub launch_actor: Option<String>,
+    /// actor-scoped, so a resume submits under it.
+    pub launch_actor: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,10 +159,6 @@ pub enum AttemptOutcome {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
-}
-
-fn assume_launched() -> bool {
-    true
 }
 
 impl AttemptOutcome {
@@ -769,7 +761,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     attempt_ref: None,
                     outcome: None,
                     launched: true,
-                    launch_actor: Some(owner.actor()),
+                    launch_actor: owner.actor(),
                 });
                 checkpoint.nodes[node_index].state = NodeState::Running;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -782,8 +774,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             let launch_actor = checkpoint.nodes[node_index]
                 .attempts
                 .last()
-                .and_then(|last| last.launch_actor.clone())
-                .unwrap_or_else(|| owner.actor());
+                .map_or_else(|| owner.actor(), |last| last.launch_actor.clone());
             let observation = owner
                 .observe_or_start(
                     &key,
@@ -1485,27 +1476,22 @@ mod tests {
     }
 
     #[test]
-    fn missing_checkpoint_launch_evidence_cannot_authorise_writer_fallback() {
-        let mut task = node("writer", route("first"));
-        task.access = AccessMode::WorktreeWrite;
-        task.worktree = Some("/private/tmp/writer".into());
-        task.route = None;
-        task.routes = Some(vec![route("first"), route("second")]);
-        let document = graph(vec![task]);
+    fn checkpoint_attempts_require_launch_evidence_and_actor() {
+        let document = graph(vec![node("node", route("route"))]);
         let mut owner = FakeOwner {
-            observations: VecDeque::from([terminal(AttemptOutcome::UsageLimited)]),
+            observations: VecDeque::from([AttemptObservation::Pending { attempt_ref: None }]),
             ..FakeOwner::default()
         };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
-        let mut value = serde_json::to_value(&run.checkpoint).unwrap();
-        value["nodes"][0]["attempts"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("launched");
-        journal.0 = Some(serde_json::from_value(value).unwrap());
-        assert_eq!(advance(&document, &mut owner, &mut journal).unwrap(), run);
-        assert_eq!(owner.calls.len(), 1);
+        for member in ["launched", "launch_actor"] {
+            let mut value = serde_json::to_value(&run.checkpoint).unwrap();
+            value["nodes"][0]["attempts"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(member);
+            assert!(serde_json::from_value::<GraphCheckpoint>(value).is_err());
+        }
     }
 
     #[test]
@@ -1552,7 +1538,7 @@ mod tests {
         advance(&document, &mut first, &mut journal).unwrap();
         // The crash window: the run store accepted the attempt but no reference was saved.
         let attempt = &mut journal.0.as_mut().unwrap().nodes[0].attempts[0];
-        assert_eq!(attempt.launch_actor.as_deref(), Some("actor-a"));
+        assert_eq!(attempt.launch_actor, "actor-a");
         attempt.attempt_ref = None;
         let mut second = FakeOwner {
             actor: "actor-b".into(),
@@ -1562,31 +1548,6 @@ mod tests {
         resume(&document, &mut second, &mut journal).unwrap();
         assert_eq!(second.launch_actors, vec!["actor-a".to_owned()]);
         assert_eq!(second.stored_refs, vec![None]);
-    }
-
-    #[test]
-    fn checkpoint_without_launch_actor_decodes_and_uses_the_resuming_actor() {
-        let document = graph(vec![node("node", route("route"))]);
-        let mut journal = MemoryJournal::default();
-        let mut first = FakeOwner {
-            actor: "actor-a".into(),
-            observations: VecDeque::from([AttemptObservation::Pending { attempt_ref: None }]),
-            ..FakeOwner::default()
-        };
-        let run = advance(&document, &mut first, &mut journal).unwrap();
-        let mut value = serde_json::to_value(&run.checkpoint).unwrap();
-        value["nodes"][0]["attempts"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("launch_actor");
-        journal.0 = Some(serde_json::from_value(value).unwrap());
-        let mut second = FakeOwner {
-            actor: "actor-b".into(),
-            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
-            ..FakeOwner::default()
-        };
-        resume(&document, &mut second, &mut journal).unwrap();
-        assert_eq!(second.launch_actors, vec!["actor-b".to_owned()]);
     }
 
     #[test]

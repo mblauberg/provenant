@@ -101,9 +101,7 @@ pub struct RoutePoolMemberView {
     pub effort: Option<String>,
     pub efforts: Vec<String>,
     pub free: bool,
-    pub factor_basis_points: u32,
     pub pacing: PacingPolicy,
-    pub readiness: RouteReadiness,
 }
 pub fn list(
     query: &RouteListQuery,
@@ -145,23 +143,14 @@ pub fn list(
             if context.catalogue.model(&member.model).is_none() {
                 return Err(RoutingError::Catalogue);
             }
-            let pacing = pacing_policy(context.catalogue, context.config, &member.model);
-            let factor_basis_points = pacing_factor_basis_points(
-                pacing,
-                &member.model,
-                context.quota,
-                context.now_seconds(),
-            );
-            let readiness = candidate(&member.model, member.effort.as_deref(), context)?.readiness;
+            admissible(&member.model, member.effort.as_deref(), context)?;
             views.push(RoutePoolMemberView {
                 model: member.model.clone(),
                 weight: member.weight,
                 effort: member.effort.clone(),
                 efforts: member.efforts.clone(),
                 free: context.catalogue.is_free_model(&member.model),
-                factor_basis_points,
-                pacing,
-                readiness,
+                pacing: pacing_policy(context.catalogue, context.config, &member.model),
             });
         }
         if !views.is_empty() || query.pool.as_deref() == Some(name.as_str()) {
@@ -387,11 +376,12 @@ fn exhaustion_lapsed(snapshot: &provenant_quota::QuotaSnapshot, now_seconds: i64
                 .is_some_and(|reset| reset <= now_seconds)
         })
 }
-fn candidate(
+/// A registered adapter and, when set, an exact recorded effort control.
+fn admissible<'c>(
     model: &ModelId,
     effort: Option<&str>,
-    context: &ValidatedContext<'_>,
-) -> Result<RouteAlternative, RoutingError> {
+    context: &'c ValidatedContext<'_>,
+) -> Result<Option<&'c ModelEntry>, RoutingError> {
     context
         .registry
         .iter()
@@ -404,6 +394,14 @@ fn candidate(
     }) {
         return Err(RoutingError::UnsupportedEffort);
     }
+    Ok(entry)
+}
+fn candidate(
+    model: &ModelId,
+    effort: Option<&str>,
+    context: &ValidatedContext<'_>,
+) -> Result<RouteAlternative, RoutingError> {
+    let entry = admissible(model, effort, context)?;
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
     // the most pacing headroom, so exhausted accounts are skipped rather than

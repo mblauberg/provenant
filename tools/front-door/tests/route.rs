@@ -185,11 +185,9 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
         member["efforts"],
         serde_json::json!(["medium", "high", "xhigh"])
     );
-    assert_eq!(member["factor_basis_points"], 10_000);
-    assert_eq!(
-        member["readiness"],
-        serde_json::json!({"status": "unavailable", "reason": "unknown_availability"})
-    );
+    // Listing never probes, so it reports no readiness or pacing factor.
+    assert!(member.get("factor_basis_points").is_none());
+    assert!(member.get("readiness").is_none());
 
     let pacing = call(&rig, &["route", "pacing", "codex", "spend"], 0)?;
     assert_eq!(pacing["command"], "route pacing");

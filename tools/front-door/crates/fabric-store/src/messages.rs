@@ -37,12 +37,6 @@ pub struct Message {
     pub reply_to: Option<MessageRef>,
     pub task: Option<TaskRef>,
     pub created_at: WallTime,
-    /// Retired members a binary from before migration 7 may still write as
-    /// null. Read only when null, never written.
-    #[serde(default, skip_serializing, deserialize_with = "crate::null_member")]
-    pub legacy_output_path: (),
-    #[serde(default, skip_serializing, deserialize_with = "crate::null_member")]
-    pub legacy: (),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -192,7 +192,7 @@ final head and open a pull request after verifying it.
 | `bench` | `mine [--limit]`; `verify TASK`; `run --route ROUTE[@effort] [--split search\|acceptance\|held-out] [--limit]` | `--route` is required, `--split` defaults to acceptance (held-out is never the default) and limits are 1 to 100. |
 | `telemetry` | `stats [--usage] [--since] [--until] [--run-id] [--detail]`; `trace [--out FILE] [--since] [--run RUN]` | `trace --out` defaults to `provenant-trace.json` in the current directory. Semantics in [telemetry](telemetry.md). |
 | `worktree` | `create BRANCH [--base REV]`; `list`; `remove NAME [--discard]`; `remove --merged --integration REF (--branch NAME… \| --since OID)` | Semantics in [supervisor](supervisor.md#worktrees). |
-| `gc` | `[--dry-run] [--idle-days N] [--free-floor SIZE]` | Removes lane cargo caches whose owner worktree is gone, or with no file written for N days (1 to 3650, default 7). Idle removal takes the existing writer lock without waiting and releases it immediately after the tombstone rename. A held lock keeps the cache as live; a missing or unsafe lock, a reservation, or unverifiable registration keeps it as unobservable. After the usual pass, an optional free-space floor (for example `20G`, or plain GiB) removes further eligible caches oldest-first by newest recursive write until the cache volume reaches the floor or candidates run out. The same writer and reservation protections apply. Reports kept and removed paths and bytes freed; pressure removals use reason `free_floor`, with additive `free_bytes_before` and `free_bytes_after` observations. `--dry-run` deletes nothing and marks its estimated free-space result with `free_bytes_estimated`. The macOS installer schedules GC every six hours, controlled by `[gc]` configuration. |
+| `gc` | See below. | Collect lane caches; opt into worktree and output deletion. |
 | `disk` | `report` | Read-only storage inventory; see [disk](disk.md) for measurement limits and JSON fields. |
 | `fabric …` | Fabric's own clap subtree, mounted unchanged | Leaves and requests are in [fabric](fabric.md#cli-and-mcp-surfaces). The CLI supplies only the global options, envelope, exits and help entries. `fabric mcp [--client claude\|codex\|cursor\|agy\|opencode]` serves MCP on stdio. |
 | `workflow …` | Workflow's own clap subtree, mounted unchanged | `review --request FILE\|-`, `receipt show\|save`, `session save\|show` and `session handoff`; see [workflow](workflow.md#cli-and-hooks). |
@@ -200,10 +200,39 @@ final head and open a pull request after verifying it.
 | `check` | `config`, `install [--source ABS]`, `harness`, `release [--base OID --head OID]` and `writing PATHS… [--rules general\|academic\|legal]` | Each takes `--limit N` (1 to 100, default 50) and `--cursor TOKEN`. |
 | `internal supervise` | hidden | Launch handshake for run's scheduler and attempt guardian. Takes zero or five private descriptor numbers; `--json` refused. |
 
+`gc [--dry-run | --apply] [--idle-days N] [--free-floor SIZE]` deletes orphaned
+and idle lane caches. Merged worktrees and declared output are previewed;
+`--apply` enables their deletion. `--dry-run` previews every class. The macOS
+installer schedules GC every six hours with `--apply`, controlled by `[gc]`.
+
+GC fetches the upstream default branch and removes clean registered merged
+worktrees with known-terminal lanes, their local branches and own caches.
+Tips equal to upstream or on its first-parent history are kept. Configured
+regenerable directories are pruned only for known-terminal lanes, excluding
+dirty trees, tracked and keep paths, symlinks and writes within 24 hours.
+
+Cache collection removes owners that are gone and caches with no file written
+for N days (1 to 3650, default 7). Idle removal takes the existing writer lock
+without waiting and releases it after the tombstone rename. A held lock keeps
+the cache as live; a missing or unsafe lock, a reservation, or unverifiable
+registration keeps it as unobservable. An optional free-space floor (`20G`,
+or plain GiB) removes further eligible caches oldest-first by newest recursive
+write until the cache volume reaches the floor or candidates run out. The same
+writer and reservation protections apply. Reports include kept and removed
+paths and bytes freed; pressure removals use reason `free_floor`, with
+`free_bytes_before` and `free_bytes_after` observations. `--dry-run` marks its
+estimated free-space result with `free_bytes_estimated`.
+
 `gc` JSON uses `removed[].reason` values `orphaned`, `idle`, `tombstone` and
 `free_floor`, and `kept[].reason` values `foreign`, `live` and `unobservable`.
 `kept` includes non-foreign entries whose writer state prevents removal.
 Consumers must tolerate reason values they do not recognise.
+`worktree_cleanup[]` contains its own `dry_run` flag, `worktrees` (the removal
+result), `output[]` with `path`, `removed` and `reason`, and optional
+`upstream_error`. In previews, output reason `would_remove` and `removed: false`
+mark eligible directories. `alerts[]` records low-disk alerts or failures.
+Configured `gc.alert_below` emits a Fabric note and gc log message once per
+observed dip; previews leave the persistent latch unchanged.
 
 `chair switch` quotes each handoff argument in single quotes, and writes each
 apostrophe and backslash as a double-quoted character, which sh, bash, zsh and

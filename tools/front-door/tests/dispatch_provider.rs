@@ -297,9 +297,10 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     Ok(())
 }
 
-fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
+/// Whether graph fixtures can launch confined providers here.
+fn graph_fixture_available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
-        return Ok(());
+        return Ok(false);
     }
     let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
     let cancel = provenant_core::CancelToken::new();
@@ -316,6 +317,87 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
             return Err(error.into());
         }
         writeln!(io::stderr(), "graph fixture skipped: {error}")?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn graph_settlement_records_a_failed_advance_for_status() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
+        ".rustup/toolchains",
+        ".codex",
+        ".claude/hooks",
+        ".kiro/settings",
+        ".gemini/config",
+        ".cursor/extensions",
+        ".npm",
+    ] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let route = json!({"adapter":"claude","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"});
+    // The dependant names a worktree that was never created, so starting it
+    // fails when the first node settles and the guardian advances the graph.
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({"schema_version":1,"graph_id":"broken","nodes":[
+            {"id":"first","prompt":"reply OK","access":"read_only","route":route},
+            {"id":"second","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/missing","depends_on":["first"],"route":route}
+        ]}))?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&started),
+        0,
+        "{}",
+        String::from_utf8_lossy(&started.stdout.bytes)
+    );
+    // Status only observes: the guardian's advance is the sole writer here.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let error = loop {
+        let status = rig.command(&["fabric", "graph", "status", "broken", "--json"])?;
+        assert_eq!(code(&status), 0);
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        if let Some(error) = status["data"]["advance_error"].as_str() {
+            break error.to_owned();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no advance error recorded: {status}"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    };
+    assert!(!error.is_empty());
+    let human = rig.command(&["fabric", "graph", "status", "broken"])?;
+    assert!(
+        String::from_utf8_lossy(&human.stdout.bytes).contains(&error),
+        "{}",
+        String::from_utf8_lossy(&human.stdout.bytes)
+    );
+    cleanup.disarm();
+    Ok(())
+}
+
+fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
+    if !graph_fixture_available()? {
         return Ok(());
     }
     let rig = claude_fixture()?;
@@ -764,6 +846,7 @@ fn main() -> ExitCode {
                 "codex_dispatch_observes_rollout",
                 "claude_dispatch_refreshes_registered_account",
                 "graph_settlement_advances_writer_and_account_routed_review",
+                "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
                 "agy_individual_quota_cools_model_until_reset",
             ],
@@ -775,6 +858,9 @@ fn main() -> ExitCode {
                     }
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
+                    }
+                    "graph_settlement_records_a_failed_advance_for_status" => {
+                        graph_settlement_records_a_failed_advance_for_status()
                     }
                     "agy_individual_quota_cools_model_until_reset" => {
                         agy_individual_quota_cools_model_until_reset()

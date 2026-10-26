@@ -16,6 +16,10 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# Exposes the pure Seatbelt rendering path to the provider snapshot tests.
+snapshot = []
+
 [dev-dependencies]
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }

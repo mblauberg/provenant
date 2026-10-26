@@ -351,7 +351,7 @@ impl RunStore {
         Ok(record)
     }
     /// A terminal row may precede the guardian releasing writer custody.
-    pub fn custody_released(&self, record: &AttemptRecord) -> Result<bool> {
+    pub fn custody_released(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
         use provenant_supervisor::fs::{FsError, LockMode};
         if record.project_id != self.context.project_id {
             return Err(RunError::UnsafePath);
@@ -369,12 +369,36 @@ impl RunStore {
             Err(error) => return Err(error.into()),
         };
         let fences = self.writer_fence_listing()?;
-        // An unreadable reservation names no scope, so it cannot be this
-        // attempt's; it stays fenced and blocks only a writer that needs it.
-        Ok(!fences
+        if fences
             .reservations
             .iter()
-            .any(|fence| fence.scope == Self::scope(record)))
+            .any(|fence| fence.scope == Self::scope(record))
+        {
+            return Ok(false);
+        }
+        if fences.issues.is_empty() {
+            return Ok(true);
+        }
+        // An unreadable reservation names no scope. It holds this attempt's
+        // custody only in this writer's directory; other entries block only
+        // a writer that needs them.
+        let request = self.request(record.run_id, call)?;
+        let Some(writer) = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref())
+        else {
+            return Ok(true);
+        };
+        let name = provenant_confinement::worktrees::state_dir_name(&writer.worktree);
+        Ok(!fences.issues.iter().any(|issue| {
+            issue
+                .reservation
+                .parent()
+                .and_then(|parent| parent.file_name())
+                == Some(&name)
+        }))
     }
     fn record_with_run(
         &self,
@@ -513,6 +537,17 @@ impl RunStore {
             digest,
         })
     }
+    /// A connection-local change token for commits made by other connections.
+    /// Compare tokens only on the same retained store handle.
+    pub fn data_version(&self, call: &Request<'_>) -> Result<u64> {
+        call.retry(|| {
+            let version: i64 = self
+                .db
+                .pragma_query_value(None, "data_version", |row| row.get(0))?;
+            u64::try_from(version).map_err(|_| RunError::Validation("database data version"))
+        })
+    }
+
     /// Translate an attempt cursor only within this verified project.
     pub fn attempt_sequence(&self, id: AttemptId, call: &Request<'_>) -> Result<u64> {
         self.record(id, call)?;
