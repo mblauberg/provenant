@@ -740,7 +740,7 @@ pub(crate) mod hex_token {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(token: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error> {
-        let text: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
+        let text = provenant_core::hex(token);
         serializer.serialize_str(&text)
     }
 
