@@ -1156,7 +1156,7 @@ mod tests {
                 }),
             }
         });
-        let expected: Vec<_> = names.keys().map(|h| (*h, true, 100)).collect();
+        let expected: Vec<_> = names.keys().map(|h| (*h, true, PEER_LANES)).collect();
         assert_eq!(asked, expected);
         assert!(facts.is_empty());
         assert_eq!(hosts[0]["name"], "alpha");
