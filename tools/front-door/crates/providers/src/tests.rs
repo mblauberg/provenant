@@ -1364,6 +1364,43 @@ fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), Provide
 }
 
 #[test]
+fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), ProviderError> {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "fixture-model");
+    let reader = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
+    let mut permissions = reader.permissions().clone();
+    permissions.read_roots.push(PathGrant {
+        path: "/fixture/build".into(),
+        scope: PathScope::Subtree,
+    });
+    let plan = ConfinedPlan::new(PlanRequest {
+        scope: reader.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture read-only plan");
+    let spec = agy::Agy.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo/crates"),
+        None,
+    ))?;
+    let added: Vec<_> = spec
+        .argv
+        .windows(2)
+        .filter(|pair| pair[0] == "--add-dir")
+        .map(|pair| pair[1].clone())
+        .collect();
+    assert_eq!(added, [OsString::from("/fixture/build")]);
+    Ok(())
+}
+
+#[test]
 fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("cursor", "fixture-model");
