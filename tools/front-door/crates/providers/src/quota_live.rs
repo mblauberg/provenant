@@ -1,17 +1,14 @@
-//! Live quota effects. Credentials and unredacted captures never leave this edge.
+//! Live quota effects: the one provider module that runs probes and reads
+//! credentials. Credentials and unredacted captures never leave it.
 mod claude;
 mod opencode;
 
-use provenant_core::Roots;
-use provenant_os::exec::ExecError;
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::ExecOutcome;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
-use provenant_providers::host::PROBE_DIR_OPERATION;
-use provenant_providers::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
+use crate::accounts::Settings;
+use crate::host::PROBE_DIR_OPERATION;
+use crate::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
+use provenant_os::exec::{
+    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+};
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
     QuotaError, QuotaProbePlan,
@@ -42,7 +39,7 @@ struct Account {
     identity_dir: PathBuf,
     options: Value,
 }
-pub(crate) struct LiveQuota {
+pub struct LiveQuota {
     home: PathBuf,
     state: PathBuf,
     accounts: Vec<Account>,
@@ -73,7 +70,7 @@ fn now() -> i64 {
 }
 // Keep Lane Q's Claude identity scheme in the provider owner.
 fn fingerprint(identity: &str, length: usize) -> String {
-    provenant_providers::identity::fingerprint(identity)
+    crate::identity::fingerprint(identity)
         .and_then(|s| s.get(..length).map(str::to_owned))
         .unwrap_or_default()
 }
@@ -96,12 +93,11 @@ fn signin_key(adapter: &str, dir: &Path) -> Option<String> {
 }
 
 impl LiveQuota {
-    pub(crate) fn new(roots: &Roots) -> Result<Self, QuotaError> {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or(QuotaError::Invalid("home"))?);
-        let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-            .map_err(|_| QuotaError::Invalid("accounts configuration"))?;
+    /// Probes for the registered accounts, with private probe directories
+    /// under the `state` root and `home` as each probe's `HOME`.
+    pub fn new(state: &Path, home: &Path, settings: &Settings) -> Result<Self, QuotaError> {
         let mut accounts = Vec::new();
-        for registration in config.domains.accounts.entries.values() {
+        for registration in settings.entries.values() {
             let dir = &registration.directory;
             if !dir.is_absolute()
                 || dir
@@ -133,8 +129,8 @@ impl LiveQuota {
             return Err(QuotaError::Invalid("account bound"));
         }
         Ok(Self {
-            home,
-            state: roots.state.as_path().into(),
+            home: home.to_owned(),
+            state: state.to_owned(),
             accounts,
             refresh_expired: true,
             claude_default: RefCell::new(None),
@@ -154,7 +150,7 @@ impl LiveQuota {
             return Err(ProbeFailure::Network);
         }
         let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::MissingCli)?;
-        let executor = provenant_providers::host::HostProbeExecutor::new(&system, &self.state)
+        let executor = crate::host::HostProbeExecutor::new(&system, &self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let mut argv = vec![OsString::from(program)];
         argv.extend(args.iter().map(OsString::from));
@@ -341,7 +337,7 @@ impl LiveQuota {
             Some(("CODEX_HOME", &account.identity_dir)),
             Some(input.as_bytes()),
             deadline,
-            provenant_providers::codex::REGISTRATION.quota.probe_seconds,
+            crate::codex::REGISTRATION.quota.probe_seconds,
         )?;
         if out.stdout.truncated || out.stdout.read_failed {
             return Err(ProbeFailure::Malformed);
@@ -411,7 +407,7 @@ impl LiveQuota {
         deadline: i64,
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
-        let scratch = provenant_providers::host::HostProbeDir::create(&self.state)
+        let scratch = crate::host::HostProbeDir::create(&self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let log = scratch.path().join("cli.log");
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
@@ -427,7 +423,7 @@ impl LiveQuota {
             ],
             None,
             deadline,
-            provenant_providers::agy::REGISTRATION.quota.probe_seconds,
+            crate::agy::REGISTRATION.quota.probe_seconds,
         )?;
         if payload.get("status").and_then(Value::as_str) != Some("SUCCESS") {
             return Err(ProbeFailure::Auth);
@@ -445,13 +441,12 @@ impl LiveQuota {
 }
 /// Explicit Claude registrations only. No auth stores, identity probes or
 /// implicit default directory discovery are involved in chair switching.
-pub(crate) fn registered_claude(
-    roots: &Roots,
-) -> Result<Vec<provenant_providers::identity::RegisteredAccount>, Box<dyn std::error::Error>> {
-    use provenant_providers::identity::{Accounts, RegisteredAccount};
-    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
+pub fn registered_claude(
+    settings: &Settings,
+) -> Result<Vec<crate::identity::RegisteredAccount>, Box<dyn std::error::Error>> {
+    use crate::identity::{Accounts, RegisteredAccount};
     let mut accounts = Vec::new();
-    for registration in config.domains.accounts.entries.values() {
+    for registration in settings.entries.values() {
         if registration.adapter != "claude" {
             continue;
         }

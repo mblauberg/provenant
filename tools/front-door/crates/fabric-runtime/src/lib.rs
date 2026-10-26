@@ -9,6 +9,7 @@ pub mod handoff;
 pub mod home;
 pub mod hosts;
 pub mod identity;
+pub mod peer_agent;
 pub mod runs;
 #[cfg(test)]
 mod test_support;

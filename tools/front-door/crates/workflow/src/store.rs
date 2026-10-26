@@ -1,9 +1,7 @@
 //! Whole-receipt replacement at an expected revision. No old-state imports.
 use crate::{persistence, receipt, risk};
 use provenant_core::{CancelToken, Clock, DeliveryId, ProjectId, StateRoot, UtcMicros, WaitBudget};
-#[cfg(test)]
-use provenant_os::fs::Publication;
-use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode};
 use provenant_records::{
     DecodeError,
     workflow::{DeliveryReceipt, RiskPolicy, Subject, UserApproval},
@@ -126,18 +124,50 @@ pub struct ReceiptStore {
     root: StateRoot,
     project: ProjectId,
     delivery: DeliveryId,
-    #[cfg(test)]
-    faults: Option<Box<dyn tests::FilesystemFaults>>,
+    filesystem: Box<dyn StoreFilesystem>,
 }
+trait StoreFilesystem {
+    fn read_bounded(&self, dir: &Directory) -> Result<Vec<u8>, FsError> {
+        dir.read_bounded(OsStr::new("receipt.json"), receipt::MAX_RECEIPT_BYTES)
+    }
+    fn lock(
+        &self,
+        dir: &Directory,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<LockGuard, FsError> {
+        dir.lock(
+            OsStr::new("receipt.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )
+    }
+    fn atomic_write(&self, dir: &Directory, bytes: &[u8]) -> Result<Publication, FsError> {
+        dir.atomic_write(
+            OsStr::new("receipt.json"),
+            ".receipt.",
+            bytes,
+            PublishMode::Replace,
+        )
+    }
+}
+struct LocalStoreFilesystem;
+impl StoreFilesystem for LocalStoreFilesystem {}
 impl ReceiptStore {
     pub fn new(root: StateRoot, project: ProjectId, delivery: DeliveryId) -> Self {
         Self {
             root,
             project,
             delivery,
-            #[cfg(test)]
-            faults: None,
+            filesystem: Box::new(LocalStoreFilesystem),
         }
+    }
+    #[cfg(test)]
+    fn set_filesystem(&mut self, filesystem: impl StoreFilesystem + 'static) {
+        self.filesystem = Box::new(filesystem);
     }
     fn directory(&self, create: bool) -> Result<Directory, StoreError> {
         Ok(persistence::directory(
@@ -149,11 +179,7 @@ impl ReceiptStore {
         )?)
     }
     fn read_in(&self, dir: &Directory) -> Result<Option<DeliveryReceipt>, StoreError> {
-        #[cfg(test)]
-        if let Some(faults) = &self.faults {
-            faults.read()?;
-        }
-        let bytes = match dir.read_bounded(OsStr::new("receipt.json"), receipt::MAX_RECEIPT_BYTES) {
+        let bytes = match self.filesystem.read_bounded(dir) {
             Ok(bytes) => bytes,
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -193,18 +219,9 @@ impl ReceiptStore {
     ) -> Result<SavedReceipt, StoreError> {
         check_wait(budget, cancel, clock)?;
         let dir = self.directory(true)?;
-        #[cfg(test)]
-        if let Some(faults) = &self.faults {
-            faults.lock()?;
-        }
-        let _lock = dir
-            .lock(
-                OsStr::new("receipt.lock"),
-                LockMode::Exclusive,
-                budget,
-                cancel,
-                clock,
-            )
+        let _lock = self
+            .filesystem
+            .lock(&dir, budget, cancel, clock)
             .map_err(|error| {
                 if matches!(error, FsError::LockTimeout { .. })
                     && let Err(stop) = check_wait(budget, cancel, clock)
@@ -256,21 +273,7 @@ impl ReceiptStore {
         // Cancellation/deadline boundary: finish staging, replacement and sync
         // after this check, even if a cancellation subsequently arrives.
         check_wait(budget, cancel, clock)?;
-        let atomic_write = || {
-            dir.atomic_write(
-                OsStr::new("receipt.json"),
-                ".receipt.",
-                bytes.as_bytes(),
-                PublishMode::Replace,
-            )
-        };
-        #[cfg(test)]
-        let publication = match &self.faults {
-            Some(faults) => faults.atomic_write(&dir, bytes.as_bytes()),
-            None => atomic_write(),
-        };
-        #[cfg(not(test))]
-        let publication = atomic_write();
+        let publication = self.filesystem.atomic_write(&dir, bytes.as_bytes());
         publication?
             .require_durable()
             .map_err(|error| StoreError::Durability(cause(error)))?;

@@ -117,11 +117,12 @@ fn render(
 }
 
 fn collect(globals: &Globals) -> Result<DiskReport, Box<dyn std::error::Error>> {
-    let assets = roots::product_root()?;
-    let home = roots::home()?;
-    let project = roots::selected_project(globals.project.as_deref(), true)?;
-    let roots = roots::roots(globals, &assets, &project)?;
-    collect_resolved(&roots, &home, &project)
+    let resolved = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Required,
+    )?;
+    collect_resolved(&resolved.roots, &resolved.home, &resolved.project)
 }
 
 fn collect_resolved(
@@ -150,7 +151,7 @@ fn collect_resolved(
         project_owners: Default::default(),
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let git = roots::git_binary().ok_or("Git executable unavailable")?;
+        let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
         let utility = UtilityRuntime::read_only(git)?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;

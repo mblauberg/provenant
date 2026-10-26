@@ -73,8 +73,7 @@ license.workspace = true
 [dependencies]
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
-jiff = { workspace = true }
-rusqlite = { workspace = true }
+provenant-telemetry = { workspace = true }
 provenant-fabric-mcp = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
 provenant-fabric-store = { workspace = true }
@@ -96,6 +95,8 @@ provenant-records = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+jiff = { workspace = true }
+rusqlite = { workspace = true }
 provenant-cli = { workspace = true, features = ["fixture"] }
 provenant-run = { workspace = true, features = ["fixture"] }
 provenant-core = { workspace = true }

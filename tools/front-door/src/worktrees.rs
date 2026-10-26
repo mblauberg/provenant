@@ -4,7 +4,8 @@ use provenant_cli::{Gc, Globals, Worktree};
 use provenant_confinement::{
     UtilityBudget, UtilityRuntime,
     worktrees::{
-        self, RetainReason, WorktreeContext, WorktreeCreate, WorktreeError, WorktreeRemove,
+        self, RetainReason, WorkerObserver, WorktreeContext, WorktreeCreate, WorktreeError,
+        WorktreeRemove,
     },
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
@@ -105,14 +106,14 @@ enum Data {
     Removed(worktrees::RemoveOutcome),
 }
 
-pub fn run(command: Worktree, globals: &Globals) -> u8 {
+pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     let name = match &command {
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
         Worktree::Remove(_) => "worktree remove",
     };
     let read_only = matches!(command, Worktree::List);
-    match execute(command, globals) {
+    match execute(command, globals, workers) {
         Ok(data) => match serde_json::to_value(&data) {
             Ok(value) => emit(
                 &CommandResult::new(name, Outcome::Ok, data),
@@ -138,70 +139,84 @@ pub fn run(command: Worktree, globals: &Globals) -> u8 {
     }
 }
 
-fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
-    let assets = roots::product_root()?;
-    let project = roots::selected_project(globals.project.as_deref(), true)?;
-    let roots = roots::roots(globals, &assets, &project)?;
-    with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
-        Ok(match command {
-            Worktree::Create { branch, base } => Data::Created(worktrees::create(
-                context,
-                WorktreeCreate { branch, base },
-                cancel,
-            )?),
-            Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
-            Worktree::Remove(mut args) => {
-                let upstream = if args.discard {
-                    None
-                } else {
-                    match crate::gc_support::fetch_default(context) {
-                        Ok(upstream) => upstream,
-                        Err(error) => {
-                            warn_fetch(&error);
-                            None
+fn execute(
+    command: Worktree,
+    globals: &Globals,
+    workers: &dyn WorkerObserver,
+) -> Result<Data, Error> {
+    let resolved = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Required,
+    )?;
+    let (roots, home, project) = (&resolved.roots, &resolved.home, &resolved.project);
+    with_context(
+        roots,
+        home,
+        project,
+        MUTATION_TIMEOUT,
+        workers,
+        |context, cancel| {
+            Ok(match command {
+                Worktree::Create { branch, base } => Data::Created(worktrees::create(
+                    context,
+                    WorktreeCreate { branch, base },
+                    cancel,
+                )?),
+                Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
+                Worktree::Remove(mut args) => {
+                    let upstream = if args.discard {
+                        None
+                    } else {
+                        match crate::gc_support::fetch_default(context) {
+                            Ok(upstream) => upstream,
+                            Err(error) => {
+                                warn_fetch(&error);
+                                None
+                            }
                         }
+                    };
+                    if let Some((reference, _)) = upstream
+                        && args.integration.is_none()
+                    {
+                        args.integration = Some(
+                            reference
+                                .strip_prefix("refs/remotes/")
+                                .ok_or(Error::InvalidScope)?
+                                .to_owned(),
+                        );
                     }
-                };
-                if let Some((reference, _)) = upstream
-                    && args.integration.is_none()
-                {
-                    args.integration = Some(
-                        reference
-                            .strip_prefix("refs/remotes/")
-                            .ok_or(Error::InvalidScope)?
-                            .to_owned(),
-                    );
+                    let named = args.name.is_some();
+                    let request = if let Some(name) = args.name {
+                        WorktreeRemove::Name {
+                            name,
+                            discard: args.discard,
+                            integration: args.integration,
+                        }
+                    } else {
+                        WorktreeRemove::Merged {
+                            integration: args.integration.ok_or(Error::InvalidScope)?,
+                            scope: match args.since {
+                                Some(oid) => worktrees::PruneScope::Since(oid),
+                                None => worktrees::PruneScope::Branches(args.branch),
+                            },
+                        }
+                    };
+                    let removed = worktrees::remove(context, request, cancel)?;
+                    if named
+                        && !args.discard
+                        && removed
+                            .retained
+                            .iter()
+                            .any(|kept| kept.reason == RetainReason::NotMerged)
+                    {
+                        note_kept_unmerged();
+                    }
+                    Data::Removed(removed)
                 }
-                let named = args.name.is_some();
-                let request = if let Some(name) = args.name {
-                    WorktreeRemove::Name {
-                        name,
-                        discard: args.discard,
-                        integration: args.integration,
-                    }
-                } else {
-                    WorktreeRemove::Merged {
-                        integration: args.integration.ok_or(Error::InvalidScope)?,
-                        scope: match args.since {
-                            Some(oid) => worktrees::PruneScope::Since(oid),
-                            None => worktrees::PruneScope::Branches(args.branch),
-                        },
-                    }
-                };
-                let removed = worktrees::remove(context, request, cancel)?;
-                if named
-                    && !args.discard
-                    && removed
-                        .retained
-                        .iter()
-                        .any(|kept| kept.reason == RetainReason::NotMerged)
-                {
-                    note_kept_unmerged();
-                }
-                Data::Removed(removed)
-            }
-        })
-    })
+            })
+        },
+    )
 }
 
 #[derive(Serialize, Default)]
@@ -218,8 +233,8 @@ struct GcData {
 
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
 /// worktree has a live or unobservable writer.
-pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
-    match gc(&command, globals) {
+pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    match gc(&command, globals, workers) {
         Ok(data) => {
             let human = gc_data_summary(&data);
             let failed = !data.provider_state.errors.is_empty();
@@ -359,35 +374,51 @@ struct GcProject {
     path: PathBuf,
 }
 
-fn gc_project(roots: &provenant_core::Roots, project: &Path) -> Result<GcProject, Error> {
-    with_context(roots, project, MUTATION_TIMEOUT, |context, cancel| {
-        Ok(GcProject {
-            binding: context.binding.clone(),
-            path: project.to_owned(),
-            state: Directory::open_anchor(
-                &roots
-                    .state
-                    .as_path()
-                    .join("worktrees")
-                    .join(context.binding.project_id().to_string()),
-            )?,
-            lanes: worktrees::list(context, cancel)?,
-        })
-    })
+fn gc_project(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    workers: &dyn WorkerObserver,
+) -> Result<GcProject, Error> {
+    with_context(
+        roots,
+        home,
+        project,
+        MUTATION_TIMEOUT,
+        workers,
+        |context, cancel| {
+            Ok(GcProject {
+                binding: context.binding.clone(),
+                path: project.to_owned(),
+                state: Directory::open_anchor(
+                    &roots
+                        .state
+                        .as_path()
+                        .join("worktrees")
+                        .join(context.binding.project_id().to_string()),
+                )?,
+                lanes: worktrees::list(context, cancel)?,
+            })
+        },
+    )
 }
 
-fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
+fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
     use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
     use provenant_confinement::worktrees::{WorkerState, WriterState};
 
-    let assets = roots::product_root()?;
-    let home = roots::home()?;
-    let project = if command.scheduled {
-        home.clone()
+    let workspace = if command.scheduled {
+        roots::Workspace::Home
     } else {
-        roots::selected_project(globals.project.as_deref(), true)?
+        roots::Workspace::Checkout
     };
-    let roots = roots::roots(globals, &assets, &project)?;
+    let roots::Resolved {
+        assets,
+        home,
+        project,
+        roots,
+        ..
+    } = roots::resolve(globals, workspace, roots::Product::Required)?;
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
@@ -413,13 +444,13 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             } else {
                 common
             };
-            match gc_project(&roots, path) {
+            match gc_project(&roots, &home, path, workers) {
                 Ok(project) => projects.push(project),
                 Err(_) => unobserved_projects.push(path.to_owned()),
             }
         }
     } else {
-        let selected = gc_project(&roots, &project)?;
+        let selected = gc_project(&roots, &home, &project, workers)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
@@ -440,8 +471,10 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             .unwrap_or_default();
         let cleanup = with_context(
             &roots,
+            &home,
             &project.path,
             MUTATION_TIMEOUT,
+            workers,
             |context, cancel| {
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
@@ -454,7 +487,13 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                 // the callbacks below, which collect() invokes under the
                 // worktree writer lock before each mutation.
                 let states = RefCell::new(
-                    crate::gc_support::lane_states(&roots, project.binding.project_id()).ok(),
+                    crate::gc_support::lane_states(
+                        &roots,
+                        &home,
+                        &assets,
+                        project.binding.project_id(),
+                    )
+                    .ok(),
                 );
                 let rescan_failed = std::cell::Cell::new(false);
                 let refresh = || {
@@ -463,8 +502,13 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                         &rescan_failed,
                         |snapshot| snapshot.is_current(),
                         || {
-                            crate::gc_support::lane_states(&roots, project.binding.project_id())
-                                .ok()
+                            crate::gc_support::lane_states(
+                                &roots,
+                                &home,
+                                &assets,
+                                project.binding.project_id(),
+                            )
+                            .ok()
                         },
                     );
                 };
@@ -568,12 +612,15 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
 }
 
 /// Run one worktree-owner action for `project` under fresh state `roots`,
-/// with Git mutations bounded by `mutation`. Peer ingress uses it to create a
-/// peer writer's worktree within its peer-call budget.
+/// with Git mutations bounded by `mutation` and writers observed by
+/// `workers`. Peer ingress uses it to create a peer writer's worktree within
+/// its peer-call budget.
 pub(crate) fn with_context<T>(
     roots: &provenant_core::Roots,
+    home: &Path,
     project: &Path,
     mutation: Duration,
+    workers: &dyn WorkerObserver,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
     // Create the fresh state hierarchy through held, no-follow directories.
@@ -607,7 +654,7 @@ pub(crate) fn with_context<T>(
         }
     }
     let utility_home = child(&state, "utility-home")?;
-    let git = super::roots::git_binary().ok_or(Error::GitUnavailable)?;
+    let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let runtime = UtilityRuntime::new(
         canonicalize(&git)?,
         roots.state.as_path().join("utility-home"),
@@ -623,18 +670,14 @@ pub(crate) fn with_context<T>(
     let worktrees_state = child(&state, "worktrees")?;
     let project_state = child(&worktrees_state, &binding.project_id().to_string())?;
     let clock = SystemClock;
-    let home = roots::home()?;
     let context = WorktreeContext {
-        home: &home,
+        home,
         repo: &repo,
         binding: &binding,
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
-        #[cfg(not(test))]
-        workers: &worktrees::SystemWorkerObserver,
-        #[cfg(test)]
-        workers: &crate::worktree_tests::FreeWorkers,
+        workers,
         clock: &clock,
         utility_budget: budget,
         mutation_budget: UtilityBudget::bounded(mutation)?,

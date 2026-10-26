@@ -1,5 +1,5 @@
 //! GC composition for terminal provider state, including nested run stores.
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, RootInputs, Roots, WaitBudget};
+use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots, WaitBudget};
 use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
 use std::{ffi::OsStr, path::Path};
@@ -47,14 +47,12 @@ fn collect_store(
             Err(error) if error.is_not_found() => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        let mut inputs = RootInputs::new(home.to_owned(), assets.to_owned());
         if let Some(expected) = expected
             && !directory.metadata()?.same_identity(&expected.metadata()?)
         {
             return Err("child store changed identity".into());
         }
-        inputs.state_dir = Some(path.to_owned());
-        let state_root = inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state;
+        let state_root = crate::roots::child(home, assets, path.to_owned())?.state;
         if state_root.as_path() != path {
             return Err("child store path was redirected".into());
         }
@@ -112,7 +110,7 @@ fn collect_store(
 #[cfg(test)]
 pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime};
+    use provenant_core::{AttemptId, OperationId, RootInputs, RunId, TaskId, WallTime};
     use provenant_records::CanonicalV1;
     use std::{fs, os::unix::fs::DirBuilderExt};
     let temp = tempfile::tempdir()?;

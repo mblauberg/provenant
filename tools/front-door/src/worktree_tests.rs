@@ -17,9 +17,9 @@ use std::{
 };
 use support::{Result, TestRig, code, eventually};
 
-// Only the harness=false target compiles these observations. The installed
+// Only the harness=false target dispatches with these seams. The installed
 // binary has no fixture flag, feature or environment override.
-pub(crate) struct FreeWorkers;
+struct FreeWorkers;
 impl provenant_confinement::worktrees::WorkerObserver for FreeWorkers {
     fn observe_roots(
         &self,
@@ -34,7 +34,76 @@ impl provenant_confinement::worktrees::WorkerObserver for FreeWorkers {
     }
 }
 
-pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
+/// The driver's seams: free workers, the recorded boot and a holder that can
+/// crash after durable exit.
+struct Fixture;
+impl crate::Process for Fixture {
+    fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
+        &FreeWorkers
+    }
+    fn holder(
+        &self,
+        holder: &dyn provenant_supervisor::Holder,
+        guard: &mut dyn FnMut(&dyn provenant_supervisor::Holder) -> u8,
+    ) -> u8 {
+        guard(&FixtureHolder(holder))
+    }
+    fn supervise(
+        &self,
+        descriptors: &[OsString],
+        mut hooks: provenant_supervisor::GuardianHooks<'_>,
+    ) -> provenant_supervisor::custody::Result<()> {
+        hooks.observer = Some(&provenant_supervisor::fixture::RecordedBootObserver);
+        provenant_supervisor::supervise(descriptors, hooks)
+    }
+}
+
+/// The worktree driver's entry. Its children re-enter it as the fake
+/// provider or as the command edge with fixture seams.
+pub fn main() -> std::process::ExitCode {
+    use std::process::ExitCode;
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let first = args.first().and_then(|arg| arg.to_str());
+    let exit = |role: &str, result: Result| match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr().lock(), "{role}: {error}");
+            ExitCode::FAILURE
+        }
+    };
+    match first {
+        // Fake provider identity probes for production account observation.
+        Some("--version") => {
+            let _ = writeln!(std::io::stdout().lock(), "fixture-provider 1.0.0");
+            ExitCode::SUCCESS
+        }
+        Some("auth") => {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                r#"{{"loggedIn":true,"email":"fixture@example.test"}}"#
+            );
+            ExitCode::SUCCESS
+        }
+        // The compose fixture's lanes run in its `compose` worktree; other
+        // provider fixtures exercise lane MCP and nesting.
+        Some("exec")
+            if std::env::current_dir().is_ok_and(|cwd| cwd.ends_with(".worktrees/compose")) =>
+        {
+            exit("compose provider", crate::compose_tests::provider())
+        }
+        Some("exec" | "-p") => exit("lane provider", lane_provider()),
+        Some("--writer-provider") => exit("writer provider", provider(&args)),
+        Some("--state-dir" | "internal") => {
+            ExitCode::from(crate::dispatch(provenant_cli::parse(args), &Fixture))
+        }
+        _ => exit(
+            "worktree integration",
+            suite(&args).map_err(|error| error.into()),
+        ),
+    }
+}
+
+fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     provenant_supervisor::fixture::run_libtest(
         args,
         &[
@@ -148,7 +217,7 @@ fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
 }
 
 pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let git = crate::roots::git_binary().ok_or("Git executable unavailable")?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
     let output = rig.execute(&git, args, None)?;
     assert_eq!(
         code(&output),
@@ -645,7 +714,7 @@ fn writer_production_plan_denies_outside_writes() -> Result {
 }
 
 /// Crash only this fixture guardian after durable exit, before Run publication.
-pub(crate) struct FixtureHolder<'a>(pub provenant_run::RunHolder<'a>);
+struct FixtureHolder<'a>(&'a dyn provenant_supervisor::Holder);
 impl provenant_supervisor::Holder for FixtureHolder<'_> {
     fn admit(
         &self,
@@ -1222,7 +1291,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     use provenant_os::exec::SystemExecutor;
 
     let runtime = UtilityRuntime::new(
-        fs::canonicalize(crate::roots::git_binary().ok_or("Git executable unavailable")?)?,
+        fs::canonicalize(provenant_os::git::git_executable().ok_or("Git executable unavailable")?)?,
         rig.state.join("utility-home"),
     )?;
     let executor = SystemExecutor::new(1)?;
@@ -2167,7 +2236,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 .any(|(key, value)| key == provenant_run::LANE_DEPTH_ENV && value == "1")
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
-        let selected_git = fs::canonicalize(crate::roots::git_binary().ok_or("host Git")?)?;
+        let selected_git =
+            fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
         if adapter == "claude" && writer {
             // Claude's env scrub drops GIT_CONFIG_GLOBAL, so scratch git wraps
@@ -3366,10 +3436,12 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
     store.cancel(attempt, "fixture ended", &call)?;
-    let before_child = crate::gc_support::lane_states(&roots, context.project_id)?;
+    let before_child =
+        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
     assert!(before_child.is_current());
     assert_eq!(
-        crate::gc_support::lane_states(&roots, context.project_id)?.get(&path),
+        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?
+            .get(&path),
         Some(&true)
     );
     // A queued child lane also blocks output pruning.
@@ -3386,13 +3458,14 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     child_store.create(&child_run, &call)?;
     assert!(!before_child.is_current());
     assert!(
-        !crate::gc_support::lane_states(&roots, context.project_id)
+        !crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)
             .is_ok_and(|states| states.get(&path) == Some(&true))
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
     child_store.cancel(child_run.attempts[0].attempt_id, "child ended", &call)?;
-    let snapshot = crate::gc_support::lane_states(&roots, context.project_id)?;
+    let snapshot =
+        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
     assert!(snapshot.is_current());
     let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
     let later = writer_run(writer, "gc-later", 112, "queued after snapshot")?;
@@ -3423,7 +3496,7 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     let sealed = fs::read(&request)?;
     fs::write(&request, b"broken")?;
     assert!(
-        !crate::gc_support::lane_states(&roots, context.project_id)
+        !crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)
             .is_ok_and(|states| states.get(&path) == Some(&true))
     );
     ok(&rig, &["gc", "--apply", "--json"])?;

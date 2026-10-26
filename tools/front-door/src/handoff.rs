@@ -3,21 +3,29 @@
 //! sends one `session_handoff` peer action. The target checks the account
 //! against its own registrations, recreates each branch's worktree from
 //! origin, stores the prompt and opens Terminal through a launcher seam.
+//! Fabric-runtime owns those rules; this edge composes Git, the worktree
+//! owner, registered accounts, the run snapshot and the peer call.
 use provenant_cli::{
     Globals,
     fabric::{Context, PeerFailure, facade_outcome},
     workflow::Handoff,
 };
-use provenant_confinement::worktrees::{self, WorktreeCondition, WorktreeCreate, WriterState};
-use provenant_core::{CancelToken, Clock, HostId, OperationId, ProjectId, WaitBudget};
+use provenant_confinement::worktrees::{
+    self, WorkerObserver, WorktreeCondition, WorktreeCreate, WriterState,
+};
+use provenant_core::{CancelToken, Clock, HostId, OperationId, WaitBudget};
 use provenant_fabric_runtime::{
     coordination::facade::FacadeError,
     handoff::{
         ATTACHMENT_COUNT, ATTACHMENT_LIMIT, Attachment, HandoffReceipt, HandoffWorktree,
-        PROMPT_HEADER, PROMPT_LIMIT, SessionHandoff, encode_base64, valid_attachment_name,
-        valid_model,
+        PROMPT_LIMIT, SessionHandoff, encode_base64,
+        session::{
+            Delivery, Launcher, Owner, PromptInput, Tree, admit, compose, deliver, handoff_dir,
+            read_owner, refusal_code, short_branch, takes_lease, vet_receipt, write_owner,
+        },
+        valid_attachment_name, valid_model,
     },
-    hosts::{PeerAction, PeerResult, plain_text},
+    hosts::{PeerAction, PeerResult},
 };
 use provenant_os::{
     clock::SystemClock,
@@ -25,14 +33,12 @@ use provenant_os::{
 };
 use provenant_records::{CommandResult, Outcome};
 use provenant_workflow::session::{HostSessionId, SessionStore};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
     fmt::Write as _,
     fs,
-    io::{self, Read, Write as _},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    io::{self, Read},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -41,17 +47,6 @@ const COMMAND: &str = "workflow session handoff";
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Kept back from the peer budget for staging, launch and the reply.
 const RESERVE: Duration = Duration::from_secs(4);
-/// The source waits `peer_seconds`; the peer works to less, so a slow
-/// recreation is reported by the peer rather than timing the source out.
-const PEER_MARGIN: u64 = 5;
-/// The peer's budget: the source's less a margin, never above the peer's own
-/// limit. A source that sent no budget gets the peer's limit less the margin.
-pub(crate) fn peer_seconds(source_seconds: Option<u64>, local_limit: u64) -> u64 {
-    source_seconds
-        .map_or(local_limit, |s| s.min(local_limit))
-        .saturating_sub(PEER_MARGIN)
-        .max(1)
-}
 
 #[derive(Debug)]
 struct Refusal {
@@ -95,61 +90,8 @@ fn now_unix() -> i64 {
         .map_or(0, |t| i64::try_from(t.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// Which host owns this project's chair or session. Each host keeps its own
-/// record, and both flip it to the target on a delivered hand-off.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Owner {
-    pub schema_version: u64,
-    pub host: HostId,
-    pub previous: Option<HostId>,
-    pub operation_id: OperationId,
-    pub session_id: Option<String>,
-    pub at_unix: i64,
-}
-fn handoff_dir(state: &Path, project: ProjectId) -> PathBuf {
-    state.join("handoff").join(project.to_string())
-}
-/// The prefix keeps an operation ID from naming `owner.json` or a staged file.
-fn operation_dir(lease_dir: &Path, operation: &OperationId) -> PathBuf {
-    lease_dir.join(format!("op-{}", operation.as_str()))
-}
-fn private_dirs(path: &Path) -> io::Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-}
-fn read_owner(dir: &Path) -> Option<Owner> {
-    let bytes = fs::read(dir.join("owner.json")).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-fn write_owner(dir: &Path, owner: &Owner) -> io::Result<()> {
-    private_dirs(dir)?;
-    let staged = dir.join(format!(
-        ".owner.{}.{}.tmp",
-        std::process::id(),
-        provenant_os::fs::temporary_name()?.to_string_lossy()
-    ));
-    let result = write_new(&staged, &serde_json::to_vec_pretty(owner)?, 0o600)
-        .and_then(|()| fs::rename(&staged, dir.join("owner.json")));
-    if result.is_err() {
-        let _ = fs::remove_file(&staged);
-    }
-    result
-}
-fn write_new(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
 fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), Refusal> {
-    let binary = crate::roots::git_binary()
+    let binary = provenant_os::git::git_executable()
         .ok_or_else(|| Refusal::new(Outcome::Error, "GIT", "Git executable unavailable"))?;
     let environment: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(key, _)| {
@@ -188,62 +130,16 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     Ok((ok, text))
 }
 
-/// The branch name of a full `refs/heads/` ref.
-fn short_branch(reference: &str) -> String {
-    reference
-        .strip_prefix("refs/heads/")
-        .unwrap_or(reference)
-        .to_owned()
-}
-
-/// One worktree of this project, as the hand-off sees it.
-#[derive(Debug, Clone, Serialize)]
-struct Tree {
-    path: PathBuf,
-    branch: Option<String>,
-    head: String,
-    primary: bool,
-    dirty: bool,
-    unknown: bool,
-    live_writer: bool,
-    /// `origin/<branch>` when it exists locally.
-    upstream: Option<String>,
-    /// The head is on `origin/<branch>`.
-    pushed: bool,
-}
-impl Tree {
-    fn problems(&self) -> Vec<&'static str> {
-        let mut problems = Vec::new();
-        if self.branch.is_none() {
-            problems.push("detached HEAD");
-        }
-        if self.unknown {
-            problems.push("state unknown");
-        }
-        if self.dirty {
-            problems.push("uncommitted changes");
-        }
-        if self.branch.is_some() && self.upstream.is_none() {
-            problems.push("no origin branch");
-        } else if self.branch.is_some() && !self.pushed {
-            problems.push("commits not on origin");
-        }
-        problems
-    }
-    fn describe(&self) -> String {
-        format!(
-            "{} ({}): {}",
-            self.path.display(),
-            self.branch.as_deref().unwrap_or("detached"),
-            self.problems().join(", ")
-        )
-    }
-}
-
-fn inspect(roots: &provenant_core::Roots, project: &Path) -> Result<Vec<Tree>, Refusal> {
-    let infos = crate::worktrees::with_context(roots, project, GIT_TIMEOUT, |context, cancel| {
-        Ok(worktrees::list(context, cancel)?)
-    })?;
+fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refusal> {
+    let project = src.cwd.as_path();
+    let infos = crate::worktrees::with_context(
+        &src.roots,
+        &src.home,
+        project,
+        GIT_TIMEOUT,
+        workers,
+        |context, cancel| Ok(worktrees::list(context, cancel)?),
+    )?;
     let (_, common) = git(
         project,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -356,131 +252,6 @@ fn untracked(tree: &Tree) -> Result<Vec<String>, Refusal> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct PromptInput<'a> {
-    source: HostId,
-    agent: &'a str,
-    session: Option<&'a str>,
-    body: Option<&'a str>,
-    checkpoint: Option<&'a str>,
-    trees: &'a [Tree],
-    lanes: &'a Result<Vec<String>, String>,
-    notes: &'a [String],
-}
-fn build_prompt(input: &PromptInput<'_>) -> String {
-    let mut text = String::new();
-    if let Some(body) = input.body {
-        if !body.starts_with(PROMPT_HEADER) {
-            let _ = writeln!(text, "{PROMPT_HEADER}\n");
-        }
-        text.push_str(body.trim_end());
-        text.push('\n');
-    } else {
-        let _ = writeln!(text, "{PROMPT_HEADER}\n");
-        let _ = writeln!(
-            text,
-            "You are taking over a session handed off from host `{}` (agent `{}`{}). This is a \
-             fresh session with no transcript: treat this prompt as the briefing. Keep the \
-             authority limits recorded in the checkpoint; the hand-off grants nothing new.",
-            input.source,
-            input.agent,
-            input
-                .session
-                .map(|id| format!(", session `{id}`"))
-                .unwrap_or_default()
-        );
-        let _ = writeln!(text, "\n## Checkpoint\n");
-        match input.checkpoint {
-            Some(checkpoint) => {
-                let _ = writeln!(text, "{}", checkpoint.trim_end());
-            }
-            None => {
-                let _ = writeln!(text, "No checkpoint was saved for this session.");
-            }
-        }
-        let _ = writeln!(text, "\n## Branches\n");
-        for tree in input.trees {
-            let branch = tree.branch.as_deref().unwrap_or("detached");
-            let role = if tree.primary {
-                " (primary checkout)"
-            } else {
-                ""
-            };
-            let problems = tree.problems();
-            if problems.is_empty() {
-                let _ = writeln!(text, "- `{branch}`{role} at `{}`, pushed", tree.head);
-            } else {
-                let _ = writeln!(
-                    text,
-                    "- `{branch}`{role} at `{}`: {} on the source host",
-                    tree.head,
-                    problems.join(", ")
-                );
-            }
-        }
-        let _ = writeln!(text, "\n## Lanes running on the source host\n");
-        match input.lanes {
-            Ok(lanes) if lanes.is_empty() => {
-                let _ = writeln!(text, "None.");
-            }
-            Ok(lanes) => {
-                for lane in lanes {
-                    let _ = writeln!(text, "- `{lane}`");
-                }
-            }
-            Err(error) => {
-                let _ = writeln!(text, "Lane snapshot unavailable: {error}");
-            }
-        }
-    }
-    if !input.notes.is_empty() {
-        let _ = writeln!(text, "\n## Notes\n");
-        for note in input.notes {
-            let _ = writeln!(text, "- {}", note.trim());
-        }
-    }
-    text
-}
-
-/// [`build_prompt`], cutting the checkpoint so the whole prompt fits
-/// [`PROMPT_LIMIT`]. A prompt file or notes that cannot fit are refused.
-fn compose(input: &PromptInput<'_>) -> Result<String, Refusal> {
-    let full = build_prompt(input);
-    if full.len() <= PROMPT_LIMIT {
-        return Ok(full);
-    }
-    let too_large = || {
-        Refusal::invalid("the hand-off prompt exceeds 32 KiB; shorten the prompt file or the notes")
-    };
-    let Some(checkpoint) = input.checkpoint.filter(|_| input.body.is_none()) else {
-        return Err(too_large());
-    };
-    const CUT: &str = "\n\n[Checkpoint cut to fit the hand-off. Read the rest with \
-                       `provenant workflow session show` on the source host.]";
-    let overhead = build_prompt(&PromptInput {
-        checkpoint: Some(""),
-        ..*input
-    })
-    .len();
-    let budget = PROMPT_LIMIT
-        .checked_sub(overhead + CUT.len())
-        .filter(|budget| *budget > 0)
-        .ok_or_else(too_large)?;
-    let mut end = budget.min(checkpoint.len());
-    while !checkpoint.is_char_boundary(end) {
-        end -= 1;
-    }
-    let cut = format!("{}{CUT}", &checkpoint[..end]);
-    let prompt = build_prompt(&PromptInput {
-        checkpoint: Some(&cut),
-        ..*input
-    });
-    if prompt.len() > PROMPT_LIMIT {
-        return Err(too_large());
-    }
-    Ok(prompt)
-}
-
 fn read_attachments(paths: &[PathBuf]) -> Result<Vec<Attachment>, Refusal> {
     if paths.len() > ATTACHMENT_COUNT {
         return Err(Refusal::invalid("at most 32 attachments are allowed"));
@@ -545,23 +316,28 @@ struct Source {
 }
 
 fn open_source(globals: &Globals) -> Result<Source, Refusal> {
-    let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
-    let assets = crate::roots::product_root()?;
-    let roots = crate::roots::roots(globals, &assets, &cwd)?;
-    let home = crate::roots::home()?;
-    let context = Context::open(roots.clone(), &home, &cwd)?;
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Project,
+        crate::roots::Product::Required,
+    )?;
+    let context = Context::open(resolved.roots.clone(), &resolved.home, &resolved.project)?;
     Ok(Source {
-        roots,
-        home,
-        assets,
-        cwd,
+        roots: resolved.roots,
+        home: resolved.home,
+        assets: resolved.assets,
+        cwd: resolved.project,
         context,
     })
 }
 
 // Operation identity includes the current wall-time sample.
 #[allow(clippy::disallowed_methods)]
-fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal> {
+fn execute(
+    args: &Handoff,
+    globals: &Globals,
+    workers: &dyn WorkerObserver,
+) -> Result<(Value, String), Refusal> {
     if provenant_cli::fabric::in_lane() {
         return Err(Refusal::refused(
             "lane_coordination_refused",
@@ -668,7 +444,8 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
             trees,
             lanes: &lanes,
             notes: &args.notes,
-        })?;
+        })
+        .map_err(|error| Refusal::invalid(error.to_string()))?;
         let input = SessionHandoff {
             operation_id: operation_id.clone(),
             account: args.account.clone(),
@@ -689,7 +466,7 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
     };
 
     // 2. Worktrees must be clean and pushed, unless the caller says otherwise.
-    let mut trees = inspect(&src.roots, &src.cwd)?;
+    let mut trees = inspect(&src, workers)?;
     let mut input = request(&trees)?;
     let problems: Vec<Tree> = trees
         .iter()
@@ -746,7 +523,7 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
                     }
                     pushed.push(tree.branch.clone().unwrap_or_default());
                 }
-                trees = inspect(&src.roots, &src.cwd)?;
+                trees = inspect(&src, workers)?;
                 let left: Vec<String> = trees
                     .iter()
                     .filter(|t| !t.problems().is_empty())
@@ -887,7 +664,8 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
             ));
         }
     };
-    let receipt = vet_receipt(receipt, &branches)?;
+    let receipt = vet_receipt(receipt, &branches)
+        .map_err(|error| Refusal::new(Outcome::Error, "HANDOFF_RECEIPT", error.to_string()))?;
     match &receipt {
         HandoffReceipt::Refused {
             code,
@@ -1023,9 +801,9 @@ fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal
     Ok((data, human))
 }
 
-pub fn run(args: Handoff, globals: &Globals) -> u8 {
+pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     let dry_run = args.dry_run;
-    match execute(&args, globals) {
+    match execute(&args, globals, workers) {
         Ok((data, human)) => crate::emit(
             &CommandResult::new(COMMAND, Outcome::Ok, data),
             globals,
@@ -1057,53 +835,15 @@ pub fn run(args: Handoff, globals: &Globals) -> u8 {
     }
 }
 
-/// Opens the stored launch script. Tests substitute a recorder, so no test
-/// ever opens Terminal or starts `claude`.
-pub(crate) trait Launcher {
-    fn launch(&self, script: &Path) -> Result<(), String>;
-}
-/// `open -a Terminal <script>`: a new Terminal window runs the script in the
-/// user's login session.
-pub(crate) struct Terminal;
-impl Launcher for Terminal {
-    fn launch(&self, script: &Path) -> Result<(), String> {
-        let argv: Vec<OsString> = vec![
-            "/usr/bin/open".into(),
-            "-a".into(),
-            "Terminal".into(),
-            script.as_os_str().to_owned(),
-        ];
-        let dir = script.parent().unwrap_or(Path::new("/"));
-        let mut options = ExecOptions::new(&argv, dir, Duration::from_secs(10));
-        options.stdout = StreamPolicy::Discard;
-        options.stderr = StreamPolicy::Capture { limit: 4096 };
-        let out = SystemExecutor::new(1)
-            .and_then(|executor| executor.execute(options))
-            .map_err(|e| e.to_string())?;
-        if out.termination != Termination::Exit(0) || out.timed_out {
-            return Err(format!(
-                "open -a Terminal failed: {}",
-                String::from_utf8_lossy(&out.stderr.bytes).trim()
-            ));
-        }
-        Ok(())
-    }
-}
-
 pub(crate) struct Target<'a> {
     pub context: &'a Context,
+    pub home: &'a Path,
     /// The project's primary checkout on this host.
     pub cwd: &'a Path,
+    pub workers: &'a dyn WorkerObserver,
     pub source: HostId,
     pub clock: &'a SystemClock,
     pub budget: WaitBudget,
-}
-fn refused(code: &str, message: impl Into<String>) -> HandoffReceipt {
-    HandoffReceipt::Refused {
-        code: code.into(),
-        message: message.into(),
-        accounts: Vec::new(),
-    }
 }
 /// The registered account directory for `label`, if this host has it.
 fn account_directory(
@@ -1115,179 +855,6 @@ fn account_directory(
         .find(|a| a.key() == label)
         .map(|a| a.directory().to_path_buf())
 }
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-fn script_path(path: &Path) -> Result<&str, String> {
-    path.to_str()
-        .filter(|text| !text.chars().any(char::is_control))
-        .ok_or_else(|| format!("{} is not UTF-8 without control characters", path.display()))
-}
-/// The Terminal script. The prompt is read from its stored file, so no prompt
-/// text passes through shell quoting, and `--` ends `claude`'s options, so
-/// the prompt is never read as one.
-fn script(
-    project: &Path,
-    account: &Path,
-    state: &Path,
-    model: Option<&str>,
-    source: &str,
-    prompt: &Path,
-) -> Result<String, String> {
-    let model = model
-        .map(|m| format!(" --model {}", quote(m)))
-        .unwrap_or_default();
-    Ok(format!(
-        "#!/bin/sh\n# Provenant session hand-off.\ncd {} || exit 1\nexport CLAUDE_CONFIG_DIR={}\nexport PROVENANT_STATE_DIR={}\nprintf '%s\\n%s\\n' {} {}\nexec claude{model} -- \"$(cat {})\"\n",
-        quote(script_path(project)?),
-        quote(script_path(account)?),
-        quote(script_path(state)?),
-        quote(&format!(
-            "Provenant session hand-off from {}.",
-            plain_text(source, 200)
-        )),
-        quote(&format!("Prompt: {}", script_path(prompt)?)),
-        quote(script_path(prompt)?),
-    ))
-}
-
-/// What the target has settled before it writes anything.
-struct Delivery<'a> {
-    dir: PathBuf,
-    project: &'a Path,
-    state: &'a Path,
-    account_label: &'a str,
-    account: PathBuf,
-    model: Option<&'a str>,
-    prompt: &'a str,
-    source_label: String,
-    worktrees: Vec<HandoffWorktree>,
-    attachments: Vec<(String, Vec<u8>)>,
-    launch: bool,
-}
-/// Claim the operation directory. False means a replay, which never launches
-/// again.
-fn reserve(dir: &Path) -> io::Result<bool> {
-    if let Some(parent) = dir.parent() {
-        private_dirs(parent)?;
-    }
-    match fs::DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-/// Store the prompt and attachments in the reserved operation directory, then
-/// write and open the launch script.
-fn deliver(delivery: Delivery<'_>, launcher: &dyn Launcher) -> HandoffReceipt {
-    let staged = (|| -> io::Result<(PathBuf, Vec<String>)> {
-        let mut stored = Vec::new();
-        if !delivery.attachments.is_empty() {
-            let folder = delivery.dir.join("attachments");
-            fs::DirBuilder::new().mode(0o700).create(&folder)?;
-            for (name, bytes) in &delivery.attachments {
-                let path = folder.join(name);
-                write_new(&path, bytes, 0o600)?;
-                stored.push(path.to_string_lossy().into_owned());
-            }
-        }
-        // The stored prompt always opens with the fixed header, whatever the
-        // request held, so `claude` never reads it as an option.
-        let mut prompt = String::new();
-        if !delivery.prompt.starts_with(PROMPT_HEADER) {
-            let _ = writeln!(prompt, "{PROMPT_HEADER}\n");
-        }
-        prompt.push_str(delivery.prompt.trim_end());
-        let _ = write!(
-            prompt,
-            "\n\n## On this host\n\n- Project checkout: `{}`\n- Claude account: `{}`\n",
-            delivery.project.display(),
-            delivery.account_label
-        );
-        if !delivery.worktrees.is_empty() {
-            prompt.push_str("- Worktrees:\n");
-            for tree in &delivery.worktrees {
-                let _ = match (&tree.path, &tree.error) {
-                    (Some(path), Some(warning)) => writeln!(
-                        prompt,
-                        "  - `{}`: `{path}` (warning: {warning}; settle this before you work)",
-                        tree.branch
-                    ),
-                    (Some(path), None) => writeln!(
-                        prompt,
-                        "  - `{}`: `{path}`{}",
-                        tree.branch,
-                        if tree.created {
-                            " (created from origin)"
-                        } else {
-                            " (already present at origin's commit)"
-                        }
-                    ),
-                    (None, error) => writeln!(
-                        prompt,
-                        "  - `{}`: not recreated ({}); create it with `provenant worktree create`",
-                        tree.branch,
-                        error.as_deref().unwrap_or("unknown")
-                    ),
-                };
-            }
-        }
-        if !stored.is_empty() {
-            prompt.push_str("- Attachments:\n");
-            for path in &stored {
-                let _ = writeln!(prompt, "  - `{path}`");
-            }
-        }
-        let _ = writeln!(
-            prompt,
-            "- Lanes started before the hand-off keep running on the source host. Watch them \
-             with `provenant lanes --host {}`, collect their results and never re-run completed \
-             lanes.",
-            delivery.source_label
-        );
-        let path = delivery.dir.join("prompt.md");
-        write_new(&path, prompt.as_bytes(), 0o600)?;
-        Ok((path, stored))
-    })();
-    let (prompt_path, attachments) = match staged {
-        Ok(staged) => staged,
-        Err(error) => return refused("io", format!("cannot store the hand-off: {error}")),
-    };
-    // The script is written either way, so `--no-launch` can run it by hand.
-    let mut launched = false;
-    let path = delivery.dir.join("launch.command");
-    let written = script(
-        delivery.project,
-        &delivery.account,
-        delivery.state,
-        delivery.model,
-        &delivery.source_label,
-        &prompt_path,
-    )
-    .and_then(|text| write_new(&path, text.as_bytes(), 0o700).map_err(|e| e.to_string()));
-    let launch_error = match written {
-        Ok(()) if delivery.launch => match launcher.launch(&path) {
-            Ok(()) => {
-                launched = true;
-                None
-            }
-            Err(error) => Some(error),
-        },
-        Ok(()) => None,
-        Err(error) => Some(error),
-    };
-    let script_file = path.exists().then(|| path.to_string_lossy().into_owned());
-    HandoffReceipt::Delivered {
-        prompt_path: prompt_path.to_string_lossy().into_owned(),
-        project: delivery.project.to_string_lossy().into_owned(),
-        worktrees: delivery.worktrees,
-        attachments,
-        script_path: script_file,
-        launched,
-        launch_error,
-    }
-}
-
 /// Recreate each branch's worktree with this host's own worktree owner, from
 /// `origin/<branch>`. A worktree already on the branch is kept. Failures are
 /// reported per branch; the hand-off still lands.
@@ -1325,8 +892,10 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
             };
             let made = crate::worktrees::with_context(
                 &target.context.roots,
+                target.home,
                 target.cwd,
                 remaining(),
+                target.workers,
                 |context, cancel| {
                     if let Some(info) = worktrees::list(context, cancel)?
                         .into_iter()
@@ -1386,22 +955,6 @@ fn worktree_warning(
     (!found.is_empty()).then(|| found.join("; "))
 }
 
-/// The peer's refusal code as this command's error code: upper-case letters
-/// and underscores only, so it cannot carry text. The peer's own lower-case
-/// codes read as their upper-case form.
-fn refusal_code(code: &str) -> String {
-    let code: String = code
-        .chars()
-        .map(|c| c.to_ascii_uppercase())
-        .filter(|c| c.is_ascii_uppercase() || *c == '_')
-        .take(64)
-        .collect();
-    if code.is_empty() {
-        "HANDOFF_REFUSED".into()
-    } else {
-        code
-    }
-}
 /// A delivered hand-off whose Terminal did not open, without `--no-launch`,
 /// is a failure: the caller must not stop its own session. The receipt stays
 /// in `data`.
@@ -1443,150 +996,6 @@ fn launch_failure(
     )
 }
 
-/// A hand-off opens a Claude session here, so the operator must opt in.
-fn gate(accept_handoff: bool) -> Option<HandoffReceipt> {
-    (!accept_handoff).then(|| {
-        refused(
-            "HANDOFF_DISABLED",
-            "this host does not accept session hand-offs; turn it on here with \
-             `provenant config set fabric.accept_handoff true`",
-        )
-    })
-}
-
-/// Longest receipt string shown to the caller.
-const RECEIPT_TEXT: usize = 512;
-const RECEIPT_ROWS: usize = 64;
-fn plain(text: &str) -> String {
-    plain_text(text, RECEIPT_TEXT)
-}
-fn plain_opt(text: Option<String>) -> Option<String> {
-    text.map(|t| plain(&t))
-}
-/// The peer's receipt as the caller may show it: the worktrees are the
-/// branches that were requested, and every string is plain and bounded.
-fn vet_receipt(receipt: HandoffReceipt, requested: &[String]) -> Result<HandoffReceipt, Refusal> {
-    Ok(match receipt {
-        HandoffReceipt::Refused {
-            code,
-            message,
-            accounts,
-        } => HandoffReceipt::Refused {
-            code: plain(&code),
-            message: plain(&message),
-            accounts: accounts
-                .iter()
-                .take(RECEIPT_ROWS)
-                .map(|a| plain(a))
-                .collect(),
-        },
-        HandoffReceipt::Delivered {
-            prompt_path,
-            project,
-            worktrees,
-            attachments,
-            script_path,
-            launched,
-            launch_error,
-        } => {
-            let mut expected = requested.to_vec();
-            expected.sort();
-            let mut got: Vec<&str> = worktrees.iter().map(|t| t.branch.as_str()).collect();
-            got.sort_unstable();
-            if got != expected {
-                return Err(Refusal::new(
-                    Outcome::Error,
-                    "HANDOFF_RECEIPT",
-                    format!(
-                        "the peer's receipt names branches ({}) that differ from the requested \
-                         ones ({}); the peer may already have opened a session, so check it \
-                         before retrying",
-                        plain(&got.join(", ")),
-                        expected.join(", ")
-                    ),
-                ));
-            }
-            HandoffReceipt::Delivered {
-                prompt_path: plain(&prompt_path),
-                project: plain(&project),
-                worktrees: worktrees
-                    .into_iter()
-                    .map(|t| HandoffWorktree {
-                        branch: plain(&t.branch),
-                        path: plain_opt(t.path),
-                        head: plain_opt(t.head),
-                        created: t.created,
-                        error: plain_opt(t.error),
-                    })
-                    .collect(),
-                attachments: attachments
-                    .iter()
-                    .take(ATTACHMENT_COUNT)
-                    .map(|a| plain(a))
-                    .collect(),
-                script_path: plain_opt(script_path),
-                launched,
-                launch_error: plain_opt(launch_error),
-            }
-        }
-    })
-}
-
-/// Everything `receive` settles before it writes or opens anything: the
-/// opt-in, the input, the account and the operation directory, in that order.
-/// Only the last step touches the disk.
-/// Attachments to store, the account's directory and the claimed operation
-/// directory.
-type Admitted = (Vec<(String, Vec<u8>)>, PathBuf, PathBuf);
-fn admit(
-    accepted: bool,
-    input: &SessionHandoff,
-    lease_dir: &Path,
-    accounts: impl FnOnce() -> Result<Vec<provenant_providers::identity::RegisteredAccount>, String>,
-) -> Result<Admitted, Box<HandoffReceipt>> {
-    if let Some(receipt) = gate(accepted) {
-        return Err(Box::new(receipt));
-    }
-    let attachments = input
-        .validate()
-        .map_err(|error| Box::new(refused("invalid_input", error.to_string())))?;
-    let accounts = accounts().map_err(|error| {
-        Box::new(refused(
-            "accounts_unavailable",
-            format!("cannot read this host's registered accounts: {error}"),
-        ))
-    })?;
-    let account =
-        account_directory(&accounts, &input.account).ok_or_else(|| HandoffReceipt::Refused {
-            code: "account_unregistered".into(),
-            message: format!(
-                "{} is not a registered Claude account on this host",
-                input.account
-            ),
-            accounts: Vec::new(),
-        })?;
-    let dir = operation_dir(lease_dir, &input.operation_id);
-    match reserve(&dir) {
-        Ok(true) => Ok((attachments, account, dir)),
-        Ok(false) => Err(Box::new(refused(
-            "already_delivered",
-            format!(
-                "{} already holds this hand-off; it is never launched twice",
-                dir.display()
-            ),
-        ))),
-        Err(error) => Err(Box::new(refused(
-            "io",
-            format!("cannot store the hand-off: {error}"),
-        ))),
-    }
-}
-/// The target records itself as owner only for a session that opened, or for
-/// a `--no-launch` delivery the operator will start by hand.
-fn takes_lease(receipt: &HandoffReceipt, launch: bool) -> bool {
-    matches!(receipt, HandoffReceipt::Delivered { launched, .. } if *launched || !launch)
-}
-
 /// Peer ingress for `PeerAction::SessionHandoff`.
 pub(crate) fn receive(
     target: &Target<'_>,
@@ -1607,12 +1016,15 @@ pub(crate) fn receive(
     });
     let context = target.context;
     let lease_dir = handoff_dir(context.roots.state.as_path(), context.identity.project);
-    let (attachments, account, dir) = match admit(accepted == Some(true), input, &lease_dir, || {
-        crate::quota_live::registered_claude(&context.roots).map_err(|e| e.to_string())
-    }) {
-        Ok(admitted) => admitted,
-        Err(receipt) => return *receipt,
-    };
+    let (attachments, account, dir) =
+        match admit(accepted == Some(true), input, &lease_dir, |label| {
+            crate::registered_claude(&context.roots)
+                .map(|accounts| account_directory(&accounts, label))
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(admitted) => admitted,
+            Err(receipt) => return *receipt,
+        };
     // Worktrees are recreated only once this operation owns its directory.
     let worktrees = recreate(target, &input.branches);
     let source_label = context
@@ -1658,127 +1070,9 @@ pub(crate) fn receive(
 #[cfg(test)]
 // The worktree driver compiles this module without its harness, which leaves
 // the shared helpers unused there.
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-
-    /// Records launches instead of opening Terminal.
-    #[derive(Default)]
-    struct Recorder(RefCell<Vec<PathBuf>>);
-    impl Launcher for Recorder {
-        fn launch(&self, script: &Path) -> Result<(), String> {
-            self.0.borrow_mut().push(script.to_path_buf());
-            Ok(())
-        }
-    }
-    fn tree(branch: Option<&str>, primary: bool, dirty: bool, pushed: bool) -> Tree {
-        Tree {
-            path: PathBuf::from(format!("/repo/{}", branch.unwrap_or("detached"))),
-            branch: branch.map(Into::into),
-            head: "a".repeat(40),
-            primary,
-            dirty,
-            unknown: false,
-            live_writer: false,
-            upstream: branch.filter(|_| pushed).map(|_| "a".repeat(40)),
-            pushed,
-        }
-    }
-    #[test]
-    fn listed_refs_become_branch_names() {
-        assert_eq!(short_branch("refs/heads/feat/x"), "feat/x");
-        assert_eq!(short_branch("main"), "main");
-    }
-
-    fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {
-        Delivery {
-            dir: operation_dir(dir, &OperationId::parse("handoff-1").unwrap()),
-            project: Path::new("/Users/me/Repos/project"),
-            state: Path::new("/Users/me/.local/share/provenant/v1"),
-            account_label: "work",
-            account: PathBuf::from("/Users/me/.claude-work"),
-            model: Some("opus"),
-            prompt: "# Session hand-off\n\nBriefing.",
-            source_label: "laptop".into(),
-            worktrees: vec![HandoffWorktree {
-                branch: "feat/x".into(),
-                path: Some("/Users/me/Repos/project/.worktrees/feat-x".into()),
-                head: Some("b".repeat(40)),
-                created: true,
-                error: None,
-            }],
-            attachments: vec![("notes.md".into(), b"hello".to_vec())],
-            launch,
-        }
-    }
-
-    #[test]
-    fn problems_name_what_blocks_a_clean_hand_off() {
-        assert!(
-            tree(Some("feat/x"), false, false, true)
-                .problems()
-                .is_empty()
-        );
-        assert_eq!(
-            tree(Some("feat/x"), false, true, true).problems(),
-            ["uncommitted changes"]
-        );
-        assert_eq!(
-            tree(Some("feat/x"), false, false, false).problems(),
-            ["no origin branch"]
-        );
-        let mut ahead = tree(Some("feat/x"), false, false, false);
-        ahead.upstream = Some("c".repeat(40));
-        assert_eq!(ahead.problems(), ["commits not on origin"]);
-        assert!(
-            tree(None, false, false, false)
-                .problems()
-                .contains(&"detached HEAD")
-        );
-    }
-
-    #[test]
-    fn generated_prompt_carries_checkpoint_branches_lanes_and_notes() {
-        let trees = [
-            tree(Some("main"), true, false, true),
-            tree(Some("feat/x"), false, true, true),
-        ];
-        let lanes = Ok(vec!["run/task/attempt".to_owned()]);
-        let notes = ["Review PR 12 next".to_owned()];
-        let input = PromptInput {
-            source: HostId::from_bytes([7; 16]),
-            agent: "chair",
-            session: Some("explicit-session"),
-            body: None,
-            checkpoint: Some("Goal: ship it."),
-            trees: &trees,
-            lanes: &lanes,
-            notes: &notes,
-        };
-        let prompt = build_prompt(&input);
-        for expected in [
-            "explicit-session",
-            "Goal: ship it.",
-            "`main` (primary checkout)",
-            "`feat/x` at `aaaa",
-            "uncommitted changes on the source host",
-            "- `run/task/attempt`",
-            "- Review PR 12 next",
-        ] {
-            assert!(
-                prompt.contains(expected),
-                "{expected} missing from\n{prompt}"
-            );
-        }
-        let replaced = build_prompt(&PromptInput {
-            body: Some("--allowedTools Bash\nInvestigate the flaky test."),
-            ..input
-        });
-        assert!(replaced.starts_with("# Session hand-off\n\n--allowedTools Bash\n"));
-        assert!(replaced.contains("- Review PR 12 next"));
-        assert!(!replaced.contains("## Branches"));
-    }
 
     #[test]
     fn account_directory_returns_only_a_registered_match() {
@@ -1792,73 +1086,6 @@ mod tests {
             PathBuf::from("/Users/me/.claude-work")
         );
         assert_eq!(account_directory(&accounts, "other"), None);
-    }
-
-    #[test]
-    fn delivery_stores_the_prompt_and_launches_once_through_the_seam() {
-        let temp = tempfile::tempdir().unwrap();
-        let recorder = Recorder::default();
-        let first = delivery(temp.path(), true);
-        assert!(first.dir.ends_with("op-handoff-1"));
-        assert!(reserve(&first.dir).unwrap());
-        let receipt = deliver(first, &recorder);
-        let HandoffReceipt::Delivered {
-            prompt_path,
-            attachments,
-            script_path,
-            launched,
-            launch_error,
-            ..
-        } = &receipt
-        else {
-            panic!("expected a delivery: {receipt:?}");
-        };
-        assert!(*launched && launch_error.is_none());
-        let script_path = PathBuf::from(script_path.as_deref().unwrap());
-        assert_eq!(*recorder.0.borrow(), std::slice::from_ref(&script_path));
-        let script = fs::read_to_string(&script_path).unwrap();
-        assert!(script.contains("export CLAUDE_CONFIG_DIR='/Users/me/.claude-work'"));
-        assert!(script.contains(&format!(
-            "exec claude --model 'opus' -- \"$(cat '{prompt_path}')\""
-        )));
-        let prompt = fs::read_to_string(prompt_path).unwrap();
-        for expected in [
-            "Briefing.",
-            "## On this host",
-            "`feat/x`: `/Users/me/Repos/project/.worktrees/feat-x` (created from origin)",
-            "provenant lanes --host laptop",
-        ] {
-            assert!(
-                prompt.contains(expected),
-                "{expected} missing from\n{prompt}"
-            );
-        }
-        assert_eq!(fs::read(&attachments[0]).unwrap(), b"hello");
-
-        // A replay finds the directory taken, so it never launches again.
-        assert!(!reserve(&delivery(temp.path(), true).dir).unwrap());
-        assert_eq!(recorder.0.borrow().len(), 1);
-    }
-
-    #[test]
-    fn a_prompt_that_looks_like_an_option_stays_a_prompt() {
-        let temp = tempfile::tempdir().unwrap();
-        let recorder = Recorder::default();
-        let mut hostile = delivery(temp.path(), true);
-        hostile.prompt = "--allowedTools Bash --dangerously-skip-permissions";
-        reserve(&hostile.dir).unwrap();
-        let HandoffReceipt::Delivered {
-            prompt_path,
-            script_path,
-            ..
-        } = deliver(hostile, &recorder)
-        else {
-            panic!("expected a delivery");
-        };
-        let prompt = fs::read_to_string(&prompt_path).unwrap();
-        assert!(prompt.starts_with("# Session hand-off\n\n--allowedTools"));
-        let script = fs::read_to_string(script_path.unwrap()).unwrap();
-        assert!(script.contains(&format!("-- \"$(cat '{prompt_path}')\"")));
     }
 
     #[test]
@@ -1880,174 +1107,19 @@ mod tests {
             "{warning}"
         );
         assert!(warning.contains("uncommitted changes"), "{warning}");
-
-        let temp = tempfile::tempdir().unwrap();
-        let mut stale = delivery(temp.path(), false);
-        stale.worktrees[0].created = false;
-        stale.worktrees[0].error = Some(warning);
-        reserve(&stale.dir).unwrap();
-        let HandoffReceipt::Delivered { prompt_path, .. } = deliver(stale, &Recorder::default())
-        else {
-            panic!("expected a delivery");
-        };
-        let prompt = fs::read_to_string(prompt_path).unwrap();
-        assert!(
-            prompt.contains("(warning: local branch differs from origin"),
-            "{prompt}"
-        );
-    }
-
-    #[test]
-    fn a_large_checkpoint_is_cut_to_fit_and_a_large_prompt_file_is_refused() {
-        let trees = [tree(Some("feat/x"), false, false, true)];
-        let lanes = Ok(Vec::new());
-        let big = "checkpoint line\n".repeat(PROMPT_LIMIT / 8);
-        let input = PromptInput {
-            source: HostId::from_bytes([7; 16]),
-            agent: "chair",
-            session: Some("explicit-session"),
-            body: None,
-            checkpoint: Some(&big),
-            trees: &trees,
-            lanes: &lanes,
-            notes: &[],
-        };
-        let prompt = compose(&input).unwrap();
-        assert!(prompt.len() <= PROMPT_LIMIT);
-        assert!(prompt.contains("[Checkpoint cut to fit the hand-off."));
-        assert!(prompt.contains("## Branches"));
-        let body = "x".repeat(PROMPT_LIMIT);
-        assert!(
-            compose(&PromptInput {
-                body: Some(&body),
-                ..input
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn no_launch_writes_the_script_but_never_launches() {
-        let temp = tempfile::tempdir().unwrap();
-        let recorder = Recorder::default();
-        let quiet = delivery(temp.path(), false);
-        reserve(&quiet.dir).unwrap();
-        let receipt = deliver(quiet, &recorder);
-        assert!(matches!(
-            receipt,
-            HandoffReceipt::Delivered {
-                launched: false,
-                script_path: Some(_),
-                launch_error: None,
-                ..
-            }
-        ));
-        assert!(recorder.0.borrow().is_empty());
-    }
-
-    #[test]
-    fn script_quotes_paths_and_refuses_control_characters() {
-        let text = script(
-            Path::new("/Users/me/it's"),
-            Path::new("/Users/me/.claude-work"),
-            Path::new("/state"),
-            None,
-            "laptop",
-            Path::new("/state/prompt.md"),
-        )
-        .unwrap();
-        let notice = text.find("printf ").unwrap();
-        assert!(text.contains("'Provenant session hand-off from laptop.'"));
-        assert!(text.contains("'Prompt: /state/prompt.md'"));
-        assert!(notice < text.find("exec claude").unwrap());
-        assert!(text.contains("cd '/Users/me/it'\\''s' || exit 1"));
-        assert!(text.contains("exec claude -- \"$(cat '/state/prompt.md')\""));
-        assert!(
-            script(
-                Path::new("/a\nb"),
-                Path::new("/c"),
-                Path::new("/d"),
-                None,
-                "laptop",
-                Path::new("/e")
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn receive_refuses_until_the_host_opts_in() {
-        let Some(HandoffReceipt::Refused { code, message, .. }) = gate(false) else {
-            panic!("a host that has not opted in must refuse");
-        };
-        assert_eq!(code, "HANDOFF_DISABLED");
-        assert!(message.contains("fabric.accept_handoff"));
-        assert!(gate(true).is_none());
-    }
-
-    fn delivered(branch: &str, path: &str) -> HandoffReceipt {
-        HandoffReceipt::Delivered {
-            prompt_path: "/state/prompt.md".into(),
-            project: "/repo".into(),
-            worktrees: vec![HandoffWorktree {
-                branch: branch.into(),
-                path: Some(path.into()),
-                head: None,
-                created: true,
-                error: Some("warn\x1b[2J".into()),
-            }],
-            attachments: Vec::new(),
-            script_path: Some("/state/launch.command\x07".into()),
-            launched: false,
-            launch_error: Some("x".repeat(5000)),
-        }
-    }
-
-    #[test]
-    fn receipt_text_is_plain_and_bounded() {
-        let requested = vec!["feat/x".to_owned()];
-        let HandoffReceipt::Delivered {
-            worktrees,
-            script_path,
-            launch_error,
-            ..
-        } = vet_receipt(delivered("feat/x", "/w\x1b]0;owned\x07"), &requested).unwrap()
-        else {
-            panic!("expected a delivery");
-        };
-        assert_eq!(worktrees[0].path.as_deref(), Some("/w]0;owned"));
-        assert_eq!(worktrees[0].error.as_deref(), Some("warn[2J"));
-        assert_eq!(script_path.as_deref(), Some("/state/launch.command"));
-        assert_eq!(launch_error.unwrap().chars().count(), RECEIPT_TEXT);
-        let HandoffReceipt::Refused { message, .. } = vet_receipt(
-            HandoffReceipt::Refused {
-                code: "c\x1b".into(),
-                message: "m\x1b[31m".into(),
-                accounts: vec!["a\n".into()],
-            },
-            &requested,
-        )
-        .unwrap() else {
-            panic!("expected a refusal");
-        };
-        assert_eq!(message, "m[31m");
-    }
-
-    #[test]
-    fn a_receipt_with_an_unrequested_branch_is_refused() {
-        let requested = vec!["feat/x".to_owned()];
-        let refusal = vet_receipt(delivered("evil\x1b[2J", "/w"), &requested).unwrap_err();
-        assert_eq!(refusal.code, "HANDOFF_RECEIPT");
-        assert!(!refusal.message.contains('\x1b'));
-        assert!(vet_receipt(delivered("feat/x", "/w"), &[]).is_err());
     }
 
     #[test]
     fn a_delivery_that_did_not_launch_fails_unless_no_launch_was_given() {
-        let mut receipt = delivered("feat/x", "/w");
-        if let HandoffReceipt::Delivered { launch_error, .. } = &mut receipt {
-            *launch_error = Some("no Terminal".into());
-        }
+        let receipt = HandoffReceipt::Delivered {
+            prompt_path: "/state/prompt.md".into(),
+            project: "/repo".into(),
+            worktrees: Vec::new(),
+            attachments: Vec::new(),
+            script_path: Some("/state/launch.command".into()),
+            launched: false,
+            launch_error: Some("no Terminal".into()),
+        };
         let mut data = json!({"receipt": serde_json::to_value(&receipt).unwrap()});
         let failure = launch_failure("workshop", &receipt, false, &mut data).unwrap();
         assert_eq!(failure.code, "LAUNCH_FAILED");
@@ -2061,97 +1133,6 @@ mod tests {
             *l = true;
         }
         assert!(launch_failure("workshop", &launched, false, &mut data).is_none());
-    }
-
-    #[test]
-    fn admission_refuses_before_it_touches_the_disk_or_the_accounts() {
-        let temp = tempfile::tempdir().unwrap();
-        let lease = temp.path().join("handoff/project");
-        let input = SessionHandoff {
-            operation_id: OperationId::parse("handoff-1").unwrap(),
-            account: "work".into(),
-            model: None,
-            prompt: "# Session hand-off\n\nBriefing.".into(),
-            branches: vec!["feat/x".into()],
-            attachments: Vec::new(),
-            launch: true,
-        };
-        let refusal = *admit(false, &input, &lease, || {
-            panic!("accounts must not be read while hand-off is off")
-        })
-        .unwrap_err();
-        assert!(matches!(
-            refusal,
-            HandoffReceipt::Refused { ref code, .. } if code == "HANDOFF_DISABLED"
-        ));
-        assert!(!lease.exists());
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
-        // Opted in, an unregistered account still stops before the directory.
-        let refusal = *admit(true, &input, &lease, || {
-            use provenant_providers::identity::RegisteredAccount;
-            Ok(vec![
-                RegisteredAccount::new("claude", "home", "/Users/me/.claude-home".into()).unwrap(),
-                RegisteredAccount::new("claude", "other", "/Users/me/.claude-other".into())
-                    .unwrap(),
-            ])
-        })
-        .unwrap_err();
-        assert!(matches!(
-            refusal,
-            HandoffReceipt::Refused { ref code, ref accounts, .. }
-                if code == "account_unregistered" && accounts.is_empty()
-        ));
-        assert!(!lease.exists());
-    }
-
-    #[test]
-    fn the_peer_takes_the_lease_only_for_a_launch_or_no_launch() {
-        let mut receipt = delivered("feat/x", "/w");
-        assert!(!takes_lease(&receipt, true), "launch failed");
-        assert!(takes_lease(&receipt, false), "--no-launch");
-        if let HandoffReceipt::Delivered { launched, .. } = &mut receipt {
-            *launched = true;
-        }
-        assert!(takes_lease(&receipt, true));
-        assert!(!takes_lease(&refused("io", "x"), false));
-    }
-
-    #[test]
-    fn refusal_codes_pass_through_as_plain_upper_case() {
-        assert_eq!(refusal_code("HANDOFF_DISABLED"), "HANDOFF_DISABLED");
-        assert_eq!(refusal_code("account_unregistered"), "ACCOUNT_UNREGISTERED");
-        assert_eq!(refusal_code("\x1b[2J 1"), "J");
-        assert_eq!(refusal_code("123"), "HANDOFF_REFUSED");
-    }
-
-    #[test]
-    fn the_peer_works_to_less_than_the_source_waits() {
-        assert_eq!(peer_seconds(Some(30), 30), 25);
-        assert_eq!(peer_seconds(Some(10), 30), 5);
-        assert_eq!(peer_seconds(Some(30), 12), 7);
-        assert_eq!(peer_seconds(None, 30), 25);
-        assert_eq!(peer_seconds(Some(3), 30), 1);
-    }
-
-    #[test]
-    fn owner_lease_flips_and_reads_back() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("handoff/project");
-        assert!(read_owner(&dir).is_none());
-        let mut owner = Owner {
-            schema_version: 1,
-            host: HostId::from_bytes([2; 16]),
-            previous: Some(HostId::from_bytes([1; 16])),
-            operation_id: OperationId::parse("handoff-1").unwrap(),
-            session_id: Some("explicit-session".into()),
-            at_unix: 1,
-        };
-        write_owner(&dir, &owner).unwrap();
-        assert_eq!(read_owner(&dir).unwrap(), owner);
-        owner.host = HostId::from_bytes([1; 16]);
-        owner.previous = Some(HostId::from_bytes([2; 16]));
-        write_owner(&dir, &owner).unwrap();
-        assert_eq!(read_owner(&dir).unwrap(), owner);
     }
 
     #[test]

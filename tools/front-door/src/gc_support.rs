@@ -21,7 +21,7 @@ use std::{
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
 ) -> Result<Option<(String, GitOid)>, Error> {
-    let git = crate::roots::git_binary().ok_or(Error::GitUnavailable)?;
+    let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let environment: Vec<(OsString, OsString)> = [
         "HOME",
         "SSH_AUTH_SOCK",
@@ -295,8 +295,12 @@ fn terminal_after_worktree_creation(finished_at: i64, created_at: Option<i128>) 
     created_at.is_some_and(|created| i128::from(finished_at) > created)
 }
 
+/// Lane states under `roots` and its child stores, which bind with the same
+/// `home` and `assets` as their parent.
 pub(crate) fn lane_states(
     roots: &Roots,
+    home: &Path,
+    assets: &Path,
     project: provenant_core::ProjectId,
 ) -> Result<LaneSnapshot, Box<dyn std::error::Error>> {
     let context = ExecutionContext {
@@ -311,7 +315,7 @@ pub(crate) fn lane_states(
         stores: Vec::new(),
         stale: std::cell::Cell::new(false),
     };
-    scan_terminal(&context, &mut snapshot, 0)?;
+    scan_terminal(&context, (home, assets), &mut snapshot, 0)?;
     for (path, terminal) in &mut snapshot.states {
         if *terminal {
             *terminal = snapshot.terminal_times.get(path).is_some_and(|finished| {
@@ -324,6 +328,7 @@ pub(crate) fn lane_states(
 
 fn scan_terminal(
     context: &ExecutionContext,
+    (home, assets): (&Path, &Path),
     snapshot: &mut LaneSnapshot,
     depth: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -427,11 +432,13 @@ fn scan_terminal(
         }
         children.open_verified_directory(&name)?;
         let mut child = context.clone();
-        let mut inputs =
-            provenant_core::RootInputs::new(crate::roots::home()?, crate::roots::product_root()?);
-        inputs.state_dir = Some(context.state_root.as_path().join("children").join(name));
-        child.state_root = inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state;
-        scan_terminal(&child, snapshot, depth + 1)?;
+        child.state_root = crate::roots::child(
+            home,
+            assets,
+            context.state_root.as_path().join("children").join(name),
+        )?
+        .state;
+        scan_terminal(&child, (home, assets), snapshot, depth + 1)?;
     }
     snapshot.stores.push(StoreSnapshot {
         path: context.state_root.as_path().to_owned(),

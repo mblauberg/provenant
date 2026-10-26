@@ -99,7 +99,7 @@ fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()>
     Ok(())
 }
 fn merge(project: &Path, number: &str, head: GitOid) -> Result<()> {
-    let git = roots::git_binary().ok_or("Git executable is unavailable")?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
     let git = git.to_str().ok_or("Git executable path is not UTF-8")?;
     let configured = execute(project, &[git, "config", "--get", "user.email"], false)?;
     let email = match configured.termination {

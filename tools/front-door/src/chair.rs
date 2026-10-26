@@ -38,6 +38,8 @@ struct Context {
     cwd: PathBuf,
     assets: PathBuf,
     home: PathBuf,
+    /// The session's `CLAUDE_CONFIG_DIR`, if the environment names one.
+    claude_config: Option<PathBuf>,
 }
 impl Context {
     fn new(globals: &Globals, cwd: &Path) -> Result<Self, Error> {
@@ -52,12 +54,17 @@ impl Context {
         {
             return Err("hook project differs from cwd".into());
         }
-        let assets = crate::roots::product_root()?;
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::At(&cwd),
+            crate::roots::Product::Required,
+        )?;
         Ok(Self {
-            roots: crate::roots::roots(globals, &assets, &cwd)?,
+            roots: resolved.roots,
             cwd,
-            assets,
-            home: crate::roots::home()?,
+            assets: resolved.assets,
+            home: resolved.home,
+            claude_config: resolved.claude_config,
         })
     }
     fn store(&self) -> HandoffStore {
@@ -81,11 +88,12 @@ fn now() -> i64 {
 }
 fn current<'a>(
     accounts: &'a [RegisteredAccount],
-    home: &Path,
+    context: &Context,
 ) -> Result<&'a RegisteredAccount, Error> {
-    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".claude"));
+    let dir = context
+        .claude_config
+        .clone()
+        .unwrap_or_else(|| context.home.join(".claude"));
     let dir = std::fs::canonicalize(dir)?;
     let mut matches = accounts.iter().filter(|a| a.directory() == dir);
     let account = matches
@@ -279,8 +287,8 @@ fn switch(
     let allowed = knob("chair.switch_accounts")
         .and_then(Value::as_array)
         .ok_or("invalid switch allow-list")?;
-    let accounts = crate::quota_live::registered_claude(&context.roots)?;
-    let current = current(&accounts, &context.home)?;
+    let accounts = crate::registered_claude(&context.roots)?;
+    let current = current(&accounts, context)?;
     let snapshot = cached(&context.roots, current.key());
     let mut rotating_target = false;
     let targets = allowed
@@ -417,7 +425,7 @@ fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
         {
             return Err("handoff target is no longer allowed".into());
         }
-        let accounts = crate::quota_live::registered_claude(&context.roots)?;
+        let accounts = crate::registered_claude(&context.roots)?;
         let target = accounts
             .iter()
             .find(|a| a.key() == label)
@@ -547,8 +555,8 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
             if context.store().pending(now())?.is_none() {
                 return Ok(None);
             }
-            let accounts = crate::quota_live::registered_claude(&context.roots)?;
-            let target = current(&accounts, &context.home)?;
+            let accounts = crate::registered_claude(&context.roots)?;
+            let target = current(&accounts, &context)?;
             check_time(Some(deadline))?;
             let Some(handoff) = context
                 .store()
@@ -620,6 +628,7 @@ mod tests {
             cwd: cwd.clone(),
             assets: home.join("assets"),
             home: home.clone(),
+            claude_config: None,
         };
         let target = RegisteredAccount::new("claude", "work", home.join(".claude-work"))?;
         let checkpoint = home.join("checkpoint.md");

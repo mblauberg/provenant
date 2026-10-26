@@ -5,6 +5,8 @@
 use provenant_core::OperationId;
 use serde::{Deserialize, Serialize};
 
+pub mod session;
+
 /// Total decoded attachment bytes. Base64 inflates this to about 683 KiB,
 /// which leaves room for the prompt inside the 1 MiB peer frame.
 pub const ATTACHMENT_LIMIT: usize = 512 * 1024;

@@ -432,6 +432,7 @@ dependencies = [
  "provenant-records",
  "provenant-run",
  "provenant-supervisor",
+ "provenant-telemetry",
  "provenant-workflow",
  "rusqlite",
  "serde",
@@ -579,6 +580,7 @@ dependencies = [
  "provenant-os",
  "provenant-quota",
  "provenant-records",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -674,9 +676,11 @@ version = "1.0.0"
 dependencies = [
  "jiff",
  "provenant-core",
+ "provenant-os",
  "provenant-records",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml_edit",
 ]

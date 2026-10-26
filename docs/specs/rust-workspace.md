@@ -25,7 +25,7 @@ responsibility or edges lands in this table in the same PR.
 | confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, os, supervisor |
 | providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota, os |
 | quota | Quota windows, reset schedules, refresh scheduling and admission advice | records, config |
-| telemetry | Pure terminal-attempt usage/cost reduction and price schema | core, records |
+| telemetry | Terminal-attempt usage/cost reduction, price schema and bounded usage log | core, records, os |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
 | sqlite | Shared safe SQLite opening, WAL setup, migration execution and budgeted busy retry | core, os |
 | run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, os, supervisor, confinement, sqlite |
@@ -34,7 +34,7 @@ responsibility or edges lands in this table in the same PR.
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime; fabric-store in tests only, to check store error rendering |
 | workflow | Delivery/review validators, session, tracker and writing tools | core, records, os |
 | cli | Argument parsing and output/exit rendering for all commands | core, records, config, confinement, providers, quota, telemetry, routing, run, fabric-runtime, workflow, os, supervisor |
-| provenant | Binary composition, install identity and process-level setup | core, records, config, os, supervisor, confinement, providers, quota, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
+| provenant | Binary composition, install identity and process-level setup | core, records, config, os, supervisor, confinement, providers, quota, telemetry, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
 
 `records::ADAPTER_SPECS` is the compiled, closed adapter fact table. Config names,
 CLI values, executable aliases and shared capability lookups use those rows.
