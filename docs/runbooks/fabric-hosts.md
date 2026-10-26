@@ -128,14 +128,36 @@ command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 Requests bind source and target host IDs and a project locator. The transport
 bounds frames to 1 MiB and refuses identity or version mismatches.
 
-Hosts on either side of the legacy import's removal work together, in either
-direction, with the peer protocol still at version 1. Older releases write the
-removed `legacy` members of tasks and messages as null. Newer releases accept a
-null member, drop it on read and never write it, and refuse a non-null one.
+Tasks and messages have no `legacy` or `legacy_output_path` members. A store
+or peer reply that still carries one, even as null, is refused.
+
+Every request and reply envelope carries integer `protocol`, currently 2.
+Ingress refuses a different protocol before decoding or executing the action,
+replying with `peer_version` and its own version. The client checks the reply
+protocol; a missing field or the released peer's decode refusal means protocol
+1. Each call uses one SSH connection. A difference fails the call with
+`peer_version` (`PEER_VERSION` on the CLI), for example: "peer workshop speaks
+protocol 1, this host speaks 2; upgrade both". Peers must be upgraded together.
+There is no capability negotiation or support for older peers. The framing
+envelope's `version` remains 1.
+
+Health replies also carry `protocol`. `hosts` retains a mismatched peer with
+`available: false`, its remote protocol and `reason: "peer_version"`, alongside
+the other hosts. Unprobed or unreachable peers omit `protocol`.
+
+The released v1 peer-agent can hide a decode refusal in its log and close
+without a reply. This ambiguous failure remains `home_unavailable` for reads
+and `launch_unknown` for mutations, since it can also follow execution. Inspect
+the peer-agent log and upgrade both hosts before retrying.
+
 An older binary that already had the store open keeps working, but one that
 opens it after the upgrade finds a newer schema and fails with `state_corrupt`.
-The MCP server reopens the store for each events call, so restart MCP servers
-and running workers after upgrading.
+
+Install the same release on both hosts and restart their peer agents, MCP
+servers and running workers after upgrading. `not_terminal` and
+`operation_conflict` now travel unchanged over the peer wire; the CLI reports
+`NONTERMINAL` and `OPERATION_CONFLICT`. An unavailable run owner reports
+`OWNER_UNAVAILABLE`, distinct from an operation's `UNSUPPORTED` refusal.
 
 ## Dispatch and recovery
 

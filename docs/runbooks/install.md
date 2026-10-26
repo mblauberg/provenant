@@ -36,13 +36,18 @@ Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry
 `~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
 a lane cache for a host build. `provenant worktree remove` deletes only the
 removed worktree's own cache while holding its writer lock. Other orphaned
-caches remain until `provenant gc [--dry-run] [--idle-days N]
+caches remain until `provenant gc [--dry-run | --apply] [--idle-days N]
 [--free-floor SIZE]`, which also
 removes caches idle for N days (default 7) for the selected project's
 worktrees, sparing live or unobservable writers. Idle removal takes the existing
 writer lock without waiting and releases it immediately after the tombstone
 rename. A held lock keeps the cache as live; a missing or unsafe lock, a
 reservation, or unverifiable registration keeps it as unobservable.
+Manual collection previews by default; `--apply` deletes. Scheduled GC also
+removes clean merged worktrees using fetched upstream ancestry and prunes
+explicitly configured regenerable output for known terminal lanes. The
+[configuration runbook](configuration.md#lane-cache-collection) describes
+per-project keep paths, the 24-hour write protection and low-space alerts.
 If `--free-floor 20G` (or plain GiB) is set and space on the cache volume
 remains below that floor after the usual pass, GC removes further eligible
 caches oldest-first by their newest recursive write. It rechecks writer
@@ -174,10 +179,11 @@ surface without resolving roots or creating state.
 
 ## Receipt recovery
 
-Receipts with a non-null `legacy` object fail to decode with a reinstall error.
-Current receipts with `"legacy":null` upgrade normally and need no recovery.
-Move `<state>/install/receipt.json` aside, then preview and reapply `install`
-with the desired release and harnesses. Existing exact desired files and links
+A receipt that fails to decode reports a reinstall error. A `legacy` member of
+any value is ignored and dropped on the next install write, so it needs no
+recovery. For any other invalid receipt, move `<state>/install/receipt.json`
+aside, then preview and reapply `install` with the desired release and
+harnesses. Existing exact desired files and links
 remain no-ops. Links into an older release conflict; remove those binary, skill
 and instruction links manually before reapplying install. Use `--adopt-existing`
 for occupied managed MCP selectors or a stable regular executable that must be

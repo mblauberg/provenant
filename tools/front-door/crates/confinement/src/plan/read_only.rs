@@ -67,7 +67,7 @@ impl ReadOnlyPolicy {
             });
         }
         Ok(ReadOnlyGrants {
-            #[cfg(any(target_os = "macos", test))]
+            #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
             root: repo.0.root_path().to_owned(),
             // The host binding is authority; the lane's Git marker is not.
             // Its subtree includes each linked worktree's private directory.
@@ -85,15 +85,15 @@ impl ReadOnlyPolicy {
 /// constructor that can turn a lane's Git marker into authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadOnlyGrants {
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
     pub(crate) root: std::path::PathBuf,
     pub(crate) git_reads: [PathGrant; 1],
     pub(crate) writes: Vec<PathGrant>,
     relative: Vec<String>,
 }
 impl ReadOnlyGrants {
-    #[cfg(test)]
-    pub(crate) fn for_test(root: std::path::PathBuf, writes: Vec<PathGrant>) -> Self {
+    #[cfg(any(test, feature = "snapshot"))]
+    pub fn for_test(root: std::path::PathBuf, writes: Vec<PathGrant>) -> Self {
         Self {
             git_reads: [PathGrant {
                 path: root.join(".git"),
@@ -173,7 +173,7 @@ fn reserved(name: &OsStr) -> bool {
         .iter()
         .any(|n| name.as_encoded_bytes().eq_ignore_ascii_case(n.as_bytes()))
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(crate) fn exclusion_regex() -> String {
     let names: Vec<String> = RESERVED
         .iter()

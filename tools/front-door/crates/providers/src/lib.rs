@@ -146,4 +146,6 @@ macro_rules! quota_source {
 pub(crate) use quota_source;
 
 #[cfg(test)]
+mod seatbelt_snapshots;
+#[cfg(test)]
 mod tests;

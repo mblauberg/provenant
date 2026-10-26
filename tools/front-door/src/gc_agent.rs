@@ -41,6 +41,7 @@ pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec
     <string>{program}</string>
     <string>gc</string>
     <string>--scheduled</string>
+    <string>--apply</string>
     <string>--idle-days</string>
     <string>{idle_days}</string>
 {floor}  </array>
@@ -184,6 +185,7 @@ mod tests {
         assert!(text.contains("<key>StartInterval</key>\n  <integer>21600</integer>"));
         assert!(text.contains("<string>/bin/a&amp;b</string>"));
         assert!(text.contains("<string>--scheduled</string>"));
+        assert!(text.contains("<string>--apply</string>"));
         assert!(text.contains("<string>--idle-days</string>\n    <string>14</string>"));
         assert!(text.contains("<string>--free-floor</string>\n    <string>20G</string>"));
         assert!(text.contains("<key>PROVENANT_STATE_DIR</key>"));

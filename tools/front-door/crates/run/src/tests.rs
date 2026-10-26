@@ -133,6 +133,24 @@ pub(super) fn exit() -> ExitObservation {
     }
 }
 #[test]
+fn read_only_data_version_detects_a_new_queued_attempt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let writer = RunStore::open(&context, &call)?;
+    let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("missing reader")?;
+    let before = reader.data_version(&call)?;
+    assert_eq!(reader.data_version(&call)?, before);
+    writer.create(&input(), &call)?;
+    let after = reader.data_version(&call)?;
+    assert_ne!(after, before);
+    assert_eq!(reader.data_version(&call)?, after);
+    Ok(())
+}
+
+#[test]
 fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

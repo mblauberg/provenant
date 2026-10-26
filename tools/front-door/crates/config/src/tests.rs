@@ -41,11 +41,22 @@ fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
     assert_eq!(value["gc"]["idle_days"], 14);
     assert_eq!(value["gc"]["free_floor"], "20G");
     test_support::assert_leaf_origins(&config);
+    let configured = load(&roots(), Some(b"schema_version=1\n[gc]\nalert_below='20G'\n[gc.projects.example]\nregenerable=['target','node_modules']\nkeep=['web/target']".as_slice())).unwrap();
+    assert_eq!(
+        configured.gc.projects["example"].regenerable,
+        ["target", "node_modules"]
+    );
+    assert_eq!(configured.gc.projects["example"].keep, ["web/target"]);
+    test_support::assert_leaf_origins(&configured);
     for field in [
         "idle_days=0",
         "idle_days=3651",
         "schedule='yes'",
         "free_floor='bad'",
+        "alert_below='bad'",
+        "projects.p.regenerable=['../target']",
+        "projects.p.regenerable=['.git']",
+        "projects.p.keep=['/absolute']",
         "unknown=true",
     ] {
         let text = format!("schema_version=1\n[gc]\n{field}");

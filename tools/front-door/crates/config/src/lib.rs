@@ -7,7 +7,7 @@
 
 mod domains;
 mod gc;
-pub use gc::{GcSettings, parse_cache_size};
+pub use gc::{GcSettings, ProjectGcSettings, parse_cache_size};
 mod harness;
 mod hooks;
 pub use harness::mcp_entry;

@@ -119,7 +119,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     std::fs::write(
         &response,
         serde_json::to_vec(&json!({
-            "version": 1,
+            "version": 1, "protocol": 2,
             "host": first.to_string(),
             "project": project_key,
             "result": {"result":"health","data":{
@@ -164,7 +164,9 @@ fn hosts_probe_only_the_requested_page() -> Result {
         .ok_or("hosts")?["result"]["structuredContent"]["hosts"];
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
-    assert_eq!(hosts[0]["available"], true);
+    assert_eq!(hosts[0]["available"], true, "{hosts}");
+    assert_eq!(hosts[0]["protocol"], 2);
+    assert!(hosts[0].get("reason").is_none());
     assert_eq!(
         replies
             .iter()
@@ -179,6 +181,33 @@ fn hosts_probe_only_the_requested_page() -> Result {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["target_host"], first.to_string());
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+                "name":"fabric_hosts","arguments":{"op":"list","after":local.to_string(),"limit":2}
+            }}),
+        ],
+    )?;
+    let hosts = &replies
+        .iter()
+        .find(|reply| reply["id"] == 3)
+        .ok_or("hosts")?["result"]["structuredContent"]["hosts"];
+    assert_eq!(hosts[0]["available"], true);
+    // The second peer cannot provide a valid reply for its host identity.
+    assert_eq!(hosts[1]["host"], second.to_string());
+    assert_eq!(hosts[1]["available"], false);
+    assert!(hosts[1].get("protocol").is_none());
+    // An unreachable peer also has no observed protocol.
+    std::fs::write(&ssh, "#!/bin/sh\ncat >/dev/null\nexit 255\n")?;
+    let (status, output) = json_command(&rig, &["hosts", "--json"])?;
+    assert_eq!(status, 0, "{output}");
+    for host in output["data"].as_array().ok_or("CLI host list")? {
+        if host["host"] != local.to_string() {
+            assert_eq!(host["available"], false);
+            assert!(host.get("protocol").is_none());
+        }
+    }
     rig.assert_legacy_unchanged()
 }
 
@@ -213,7 +242,7 @@ fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
         .as_str()
         .ok_or("project key")?;
     let request = json!({
-        "version": 1,
+        "version": 1, "protocol": 2,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -259,7 +288,7 @@ fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
         .as_str()
         .ok_or("project key")?;
     let request = json!({
-        "version": 1,
+        "version": 1, "protocol": 2,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -303,7 +332,7 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
         .map(|index| json!({"host":host,"attempt":format!("{index:032x}")}))
         .collect::<Vec<_>>();
     let request = json!({
-        "version": 1,
+        "version": 1, "protocol": 2,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -335,7 +364,7 @@ fn peer_wait_refuses_remote_fanout() -> Result {
     let remote = next_host(local)?;
     configure_fixture_peer(&rig, remote)?;
     let request = json!({
-        "version": 1,
+        "version": 1, "protocol": 2,
         "target_host": local.to_string(),
         "source_host": remote.to_string(),
         "agent": "fixture",
@@ -404,9 +433,43 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
     rig.assert_legacy_unchanged()
 }
 #[test]
+fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    for protocol in [1, 3] {
+        for action in [
+            json!({"action":"coordination","input":{
+                "domain":"events","input":{"op":"note","note":"must not run","dedup_key":null}
+            },"operation_id":"wrong-version"}),
+            json!({"action":"future_unknown_action"}),
+        ] {
+            let input = json!({
+                "version":1,"protocol":protocol,
+                "target_host":identity["data"]["host"],
+                "source_host":"22222222222222222222222222222222",
+                "agent":"fixture",
+                "project":{"key":identity["data"]["federation"]["key"],"common_dir":"repo/.git"},
+                "action":action,
+            });
+            let output = rig.execute_os(
+                Path::new(env!("CARGO_BIN_EXE_provenant")),
+                &["fabric".into(), "peer".into()],
+                Some(&serde_json::to_vec(&input)?),
+            )?;
+            assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
+            let reply: Value = serde_json::from_slice(&output.stdout.bytes)?;
+            assert_eq!(reply["protocol"], 2);
+            assert_eq!(reply["result"]["data"]["code"], "peer_version");
+            assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
+        }
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn peer_ingress_rejects_wrong_host_before_coordination_mutation() -> Result {
     let rig = TestRig::new()?;
-    let input = json!({"version":1,"target_host":"11111111111111111111111111111111","source_host":"22222222222222222222222222222222","agent":"fixture","project":{"key":"not-a-project","common_dir":"../escape"},"action":{"action":"health"}});
+    let input = json!({"version":1,"protocol":2,"target_host":"11111111111111111111111111111111","source_host":"22222222222222222222222222222222","agent":"fixture","project":{"key":"not-a-project","common_dir":"../escape"},"action":{"action":"health"}});
     let output = rig.execute_os(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
         &["fabric".into(), "peer".into()],
@@ -425,7 +488,7 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
     let host = identity["data"]["host"].as_str().ok_or("host")?;
     configure_fixture_peer(&rig, host.parse()?)?;
     let request = json!({
-        "version": 1,
+        "version": 1, "protocol": 2,
         "target_host": host,
         "source_host": host,
         "agent": "fixture",
@@ -475,7 +538,7 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     assert!(key.is_string());
     let source = next_host(host.as_str().ok_or("host")?.parse()?)?;
     configure_fixture_peer(&rig, source)?;
-    let request = json!({"version":1,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
+    let request = json!({"version":1,"protocol":2,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
     let input = serde_json::to_vec(&request)?;
     let args: Vec<OsString> = vec![
         "--state-dir".into(),
@@ -517,7 +580,7 @@ fn peer_frames_a_local_run_event_failure() -> Result {
         std::fs::Permissions::from_mode(0o600),
     )?;
     let request = json!({
-        "version": 1, "target_host": host, "source_host": source, "agent": "worker",
+        "version": 1, "protocol": 2, "target_host": host, "source_host": source, "agent": "worker",
         "project": {"key": key, "common_dir": "repo/.git"},
         "action": {"action": "coordination", "operation_id": null,
             "input": {"domain": "events", "input": {
@@ -921,7 +984,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             .any(|event| event["record"]["kind"] == "run_changed")
     );
     // A cancel operation is bound to its target: a replay is answered, the
-    // same ID for another target is a conflict.
+    // same ID for another target is an operation conflict.
     let other = json!({"host":null,"attempt":"00000000000000000000000000000001"});
     let cancel_request = |id: u64, target: &Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"cancel","target":target,"operation_id":"stop"}}});
     let bound = mcp(&rig, &[cancel_request(1, &target)])?;
@@ -943,7 +1006,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     );
     let conflict = &replies.iter().find(|r| r["id"] == 3).ok_or("conflict")?["result"];
     assert_eq!(
-        conflict["structuredContent"]["code"], "conflict",
+        conflict["structuredContent"]["code"], "operation_conflict",
         "{conflict}"
     );
 
@@ -964,7 +1027,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let project_key_value: provenant_fabric_runtime::identity::CrossHostProjectKey =
         serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
     let ingress_request = json!({
-        "version": 1,
+        "version": 1, "protocol": 2,
         "target_host": local_host.to_string(),
         "source_host": remote_host.to_string(),
         "agent": "fixture",
@@ -1000,6 +1063,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let status_record = records[0].clone();
     let mut response = provenant_fabric_runtime::hosts::PeerResponse {
         version: 1,
+        protocol: provenant_fabric_runtime::hosts::PROTOCOL,
         host: remote_host,
         project: project_key,
         result: provenant_fabric_runtime::hosts::PeerResult::RunStatuses(records),
@@ -1291,7 +1355,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     };
     assert!((1..=64).contains(&event_limit));
     let run_events_request = json!({
-        "version": 1,
+        "version": 1, "protocol": 2,
         "target_host": local_host.to_string(),
         "source_host": remote_host.to_string(),
         "agent": "fixture",
@@ -2091,6 +2155,142 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
         )
     })?;
     Ok((code(&output), value))
+}
+
+#[test]
+fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
+    let host = next_host(local)?;
+    let project = &identity["data"]["federation"]["key"];
+    let ssh = rig.root.join("ssh");
+    let refusal = rig.root.join("refusal.json");
+    let calls = rig.root.join("ssh-calls");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\ncat '{}'\n",
+            calls.display(),
+            refusal.display(),
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+         [domains.fabric.peers.workshop]\nhost='{host}'\ndestination='workshop'\n",
+            ssh.to_string_lossy(),
+        ),
+    )?;
+    let frame = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"fabric_run", "arguments":{"op":"status","target":{
+            "host":host.to_string(), "attempt":"11111111111111111111111111111111",
+        }},
+    }});
+    for (wire, cli) in [
+        ("not_terminal", "NONTERMINAL"),
+        ("operation_conflict", "OPERATION_CONFLICT"),
+        ("owner_unavailable", "OWNER_UNAVAILABLE"),
+    ] {
+        std::fs::write(
+            &refusal,
+            serde_json::to_vec(&json!({
+                "version":1,"protocol":2, "host":host.to_string(), "project":project,
+                "result":{"result":"error","data":{"code":wire,"operation_id":null}},
+            }))?,
+        )?;
+        let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
+        assert_eq!(status, 1, "{output}");
+        assert_eq!(output["error"]["code"], cli, "{output}");
+        let replies = mcp(&rig, std::slice::from_ref(&frame))?;
+        let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
+        assert_eq!(result["structuredContent"]["code"], wire, "{result}");
+    }
+    // The released v1 health response, without protocol in either place.
+    std::fs::write(
+        &refusal,
+        serde_json::to_vec(&json!({
+            "version":1, "host":host.to_string(), "project":project,
+            "result":{"result":"health","data":{
+                "host":host.to_string(), "available":true, "execution":true,
+            }},
+        }))?,
+    )?;
+    std::fs::write(&calls, "")?;
+    let expected = "peer workshop speaks protocol 1, this host speaks 2; upgrade both";
+    let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
+    assert_eq!(status, 1, "{output}");
+    assert_eq!(output["error"]["code"], "PEER_VERSION", "{output}");
+    assert!(
+        output["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(expected)),
+        "{output}"
+    );
+    let hosts = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"fabric_hosts", "arguments":{"op":"list","limit":10},
+    }});
+    let replies = mcp(&rig, &[frame, hosts])?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
+    assert_eq!(
+        result["structuredContent"]["code"], "peer_version",
+        "{result}"
+    );
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .is_some_and(|m| m.contains(expected)),
+        "{result}"
+    );
+    let result = &replies
+        .iter()
+        .find(|r| r["id"] == 2)
+        .ok_or("MCP hosts reply")?["result"];
+    let hosts = result["structuredContent"]["hosts"]
+        .as_array()
+        .ok_or("host list")?;
+    assert_eq!(hosts.len(), 2, "{result}");
+    let remote = hosts
+        .iter()
+        .find(|entry| entry["host"] == host.to_string())
+        .ok_or("remote")?;
+    assert_eq!(remote["available"], false);
+    assert_eq!(remote["protocol"], 1);
+    assert_eq!(remote["reason"], "peer_version");
+    let local_health = hosts
+        .iter()
+        .find(|entry| entry["host"] == local.to_string())
+        .ok_or("local")?;
+    assert_eq!(local_health["available"], true);
+    assert_eq!(local_health["protocol"], 2);
+    let calls = std::fs::read_to_string(calls)?;
+    assert_eq!(calls.lines().count(), 3);
+    let actions = calls
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(actions[0]["action"]["action"], "lanes");
+    // MCP workers run the two tool calls concurrently, so their order varies.
+    let mut concurrent = [&actions[1], &actions[2]].map(|call| call["action"]["action"].clone());
+    concurrent.sort_by_key(|action| action.to_string());
+    assert_eq!(concurrent, ["health", "run"]);
+    for call in actions {
+        assert_eq!(call["protocol"], 2);
+    }
+    let (status, output) = json_command(&rig, &["hosts", "--json"])?;
+    assert_eq!(status, 0, "{output}");
+    let remote = output["data"]
+        .as_array()
+        .ok_or("CLI host list")?
+        .iter()
+        .find(|entry| entry["host"] == host.to_string())
+        .ok_or("remote")?;
+    assert_eq!(remote["available"], false);
+    assert_eq!(remote["protocol"], 1);
+    assert_eq!(remote["reason"], "peer_version");
+    rig.assert_legacy_unchanged()
 }
 
 #[test]

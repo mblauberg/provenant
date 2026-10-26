@@ -566,6 +566,12 @@ impl ServiceError {
             Self::Coordination(CoordinationError::LaneMutation) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
+            Self::Facade(FacadeError::PeerProtocolMismatch { .. })
+            | Self::Coordination(CoordinationError::Peer(
+                provenant_fabric_runtime::hosts::PeerError::ProtocolMismatch { .. },
+            )) => {
+                serde_json::json!({"code":self.code(),"message":self.to_string()})
+            }
             Self::Coordination(CoordinationError::Input(error)) => {
                 serde_json::json!({"code":self.code(),"path":error.path})
             }

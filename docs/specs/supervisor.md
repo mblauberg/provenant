@@ -367,6 +367,14 @@ same detach, recheck and delete path until available space on the cache volume
 reaches the floor or candidates run out. Dry-run estimates space without
 deleting files. On macOS, installation schedules cache GC every six hours by
 default; `[gc]` configures scheduling, idle days and an optional floor.
+Manual GC previews by default; `--apply` applies it. The same sweep also
+fetches the upstream default branch and removes clean merged registered
+worktrees, expected-old local branches and own lane caches. Per-project
+regenerable names and keep paths authorise output pruning only for known
+terminal lanes, with tracked paths, dirty trees, symlinks and writes within
+24 hours protected. GC holds writer custody through verified output
+detachment and no-follow payload disposal. A configured `gc.alert_below`
+emits a Fabric note and gc log message once per observed low-space dip.
 Scheduled GC discovers registered projects. Unobserved projects retain their
 existing caches, reported as foreign, and `unobserved_projects` lists their
 paths in JSON.
