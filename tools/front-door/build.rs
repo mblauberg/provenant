@@ -836,7 +836,7 @@ fn index_path_from_output(output: &[u8]) -> BuildResult<PathBuf> {
     if !path.is_absolute() {
         return Err(invalid("git returned a non-absolute index path").into());
     }
-    fs::metadata(&path).map_err(|_| invalid("git returned a missing index path"))?;
+    // A fresh repository has no index yet; watch() skips missing paths.
     Ok(path)
 }
 
@@ -896,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn git_index_output_requires_one_existing_absolute_path() -> BuildResult<()> {
+    fn git_index_output_requires_one_absolute_path() -> BuildResult<()> {
         let temporary = tempfile::tempdir()?;
         let index = temporary.path().join("index");
         fs::write(&index, b"")?;
@@ -905,7 +905,10 @@ mod tests {
         assert_eq!(index_path_from_output(output.as_bytes())?, index);
         assert!(index_path_from_output(b"--path-format=absolute\n.git/index\n").is_err());
         assert!(index_path_from_output(b"relative/index\n").is_err());
-        assert!(index_path_from_output(b"/missing/index\n").is_err());
+        assert_eq!(
+            index_path_from_output(b"/missing/index\n")?,
+            Path::new("/missing/index")
+        );
         Ok(())
     }
 
