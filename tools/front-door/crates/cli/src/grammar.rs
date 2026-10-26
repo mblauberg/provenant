@@ -438,6 +438,9 @@ pub struct Output {
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", value_parser = clap::value_parser!(u64).range(1..=65536))]
     pub max_bytes: u64,
+    /// Print the attempt's trace and its parent chain instead of a part
+    #[arg(long, conflicts_with_all = ["part", "offset", "tail", "max_bytes"])]
+    pub trace: bool,
 }
 #[derive(Debug, Args)]
 pub struct Cancel {

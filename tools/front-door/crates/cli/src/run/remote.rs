@@ -688,6 +688,9 @@ pub(super) fn output(
     if command.tail.is_some() {
         return Err(unsupported("--tail"));
     }
+    if command.trace {
+        return Err(unsupported("--trace"));
+    }
     let peer = Peer::open_for(edge, [placement])?;
     let input = OutputInput::Read {
         target: AttemptTarget {

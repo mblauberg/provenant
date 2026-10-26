@@ -64,6 +64,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
         verified_owner: None,
         lineage: vec![],
         reason: None,
+        trace: Default::default(),
     }
 }
 fn reduce(facts: impl IntoIterator<Item = AttemptFact>, rate: Option<u64>) -> Stats {

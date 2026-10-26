@@ -182,6 +182,7 @@ mod tests {
             verified_owner: None,
             lineage: vec![],
             reason: None,
+            trace: Default::default(),
         }
     }
     fn subject() -> Subject {
