@@ -1,5 +1,5 @@
 use super::*;
-use crate::tools::{InvalidInput, ToolCall};
+use crate::tools::{IdentityReply, InvalidInput, ToolCall};
 use regex::Regex;
 use serde_json::{Map, Number, Value, json};
 use std::{fs, path::Path};
@@ -832,7 +832,11 @@ fn published_output_schemas_accept_real_runtime_records() {
         let schema = output_schema(name);
         assert!(accepts(schema, schema, &value), "{name}: {value}");
     };
-    check("fabric_identity", serde_json::to_value(&identity).unwrap());
+    let reply = IdentityReply {
+        identity: &identity,
+        server_version: env!("CARGO_PKG_VERSION"),
+    };
+    check("fabric_identity", serde_json::to_value(reply).unwrap());
     check("fabric_submit", serde_json::to_value(&receipt).unwrap());
     identity.federation = Some(FederatedProject {
         key: CrossHostProjectKey::from_home(Path::new("/"), Path::new("/repo/.git")).unwrap(),
@@ -843,7 +847,11 @@ fn published_output_schemas_accept_real_runtime_records() {
         path: "/repo/.worktrees/feat/schema-test".into(),
         branch: "feat/schema-test".into(),
     });
-    check("fabric_identity", serde_json::to_value(&identity).unwrap());
+    let reply = IdentityReply {
+        identity: &identity,
+        server_version: env!("CARGO_PKG_VERSION"),
+    };
+    check("fabric_identity", serde_json::to_value(reply).unwrap());
     check("fabric_submit", serde_json::to_value(&receipt).unwrap());
 }
 

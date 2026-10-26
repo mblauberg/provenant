@@ -120,7 +120,7 @@ pub(crate) fn output_schema(kind: ToolKind) -> Option<Value> {
             "project":pattern("^[0-9a-f]{32}$"),"host":pattern("^[0-9a-f]{32}$"),
             "inbox":output_object(json!({"host":pattern("^[0-9a-f]{32}$"),"agent":text_value,"actor":pattern("^[0-9a-f]{32}$")})),
             "client":text_value,"cwd":output_absolute_path(),"common_dir":output_absolute_path(),
-            "federation":{"anyOf":[any_object,{"type":"null"}]}
+            "federation":{"anyOf":[any_object,{"type":"null"}]},"server_version":text_value
         }))),
         ToolKind::Submit => Some(output_object(json!({
             "operation_id":text_value,"targets":array(output_attempt_target(),0,100),

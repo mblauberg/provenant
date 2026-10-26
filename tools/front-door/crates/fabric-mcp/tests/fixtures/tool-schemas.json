@@ -115,6 +115,9 @@
         "project": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
+        },
+        "server_version": {
+          "type": "string"
         }
       },
       "required": [
@@ -124,7 +127,8 @@
         "federation",
         "host",
         "inbox",
-        "project"
+        "project",
+        "server_version"
       ],
       "type": "object"
     }
