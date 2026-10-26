@@ -719,16 +719,6 @@ impl Directory {
     ) -> Result<()> {
         self.rename(source, destination_dir, destination, os::Rename::NoReplace)
     }
-    // Kept crate-private until an authorised caller lands.
-    #[allow(dead_code)]
-    pub(crate) fn exchange(
-        &self,
-        source: &OsStr,
-        destination_dir: &Self,
-        destination: &OsStr,
-    ) -> Result<()> {
-        self.rename(source, destination_dir, destination, os::Rename::Exchange)
-    }
     pub fn replace(
         &self,
         source: &OsStr,
