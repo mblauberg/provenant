@@ -311,7 +311,7 @@ exact-head evidence), then merge it.
 
 ### Rust build cache
 
-Both Rust cache steps cache the workspace's `target/` directory, including Cargo's
+Both Rust cache steps cache `tools/front-door/target`, including Cargo's
 nested build-dir layout. A `build.build-dir` outside that tree is not cached
 unless its path is added to the action's `cache-directories`.
 

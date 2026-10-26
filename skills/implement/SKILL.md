@@ -25,7 +25,8 @@ Read [delivery contract and execution detail](references/run-contract.md).
    Save a delivery receipt with `provenant workflow receipt save`; carry its
    typed DeliveryId through every dispatch, review, retry, resume and handoff.
 2. Keep an adaptive plan and name the governing skill in worker contracts.
-   Use tdd for observable behaviour, refactor for preserving structure,
+   Writer tier follows task size. Use tdd for every new or changed observable
+   behaviour, refactor for preserving structure,
    diagnose for unknown causes and orchestrate for decomposition.
    For version-sensitive interfaces and migrations, read
    [source grounding](references/source-grounding.md) and
@@ -38,9 +39,10 @@ Read [delivery contract and execution detail](references/run-contract.md).
    multiple crates/packages, subject to `review.polish`. Keep changes within
    approved structure and every fast check green.
 5. Invoke read-only code-review under the HARNESS ladder. Bind attempts with
-   `provenant workflow review`. Give viewport screenshots for UI changes to
-   reviewers with vision. Record omissions and substitutions; native
-   reviewers record resolved routes from tool evidence.
+   `provenant workflow review`. UI changes produce viewport screenshots;
+   attach them to briefs for reviewers with vision. Record omissions and
+   substitutions; native reviewers bind the tool's model parameter and
+   record resolved routes from tool evidence.
 6. Batch review and slow-check findings into bounded repair. A failed gate
    gets one repair at the same tier, then escalates one tier. Downward
    handoffs carry failing tests, types or checks. Re-review only repaired

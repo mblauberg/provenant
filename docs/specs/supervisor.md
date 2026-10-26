@@ -330,7 +330,7 @@ the primary checkout's HEAD changed during the add.
 
 ### GC deletes only proven-idle state
 
-`gc` previews unless `--apply`. Cache collection takes the writer lock
+`gc --dry-run` previews collection. Cache collection takes the writer lock
 without waiting; a held lock keeps a cache live, and a missing lock, a
 reservation or unverifiable registration keeps it. v1 owners are never idle.
 Merged worktrees go only when clean, registered and with terminal lanes;

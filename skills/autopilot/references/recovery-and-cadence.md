@@ -8,7 +8,8 @@ outputs, with a short keyed Markdown checkpoint for human-readable context.
 
 After a crash, context loss, or uncertain dispatch:
 
-1. Run `provenant reconcile --id RUN` to recover queued or orphaned work.
+1. Run `provenant reconcile` to recover queued or orphaned work;
+   optional `--id RUN` narrows recovery to a known run.
 2. Inspect `provenant lanes` and the related Fabric tasks.
 3. Use `fabric_run` `resume` (`target: { attempt }`,
    `expected_generation: 0`, `operation_id`, `prompt`) to continue the attempt
