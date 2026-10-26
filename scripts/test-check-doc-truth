@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused controls for advisory references and the optional inventory gate."""
 
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -162,6 +163,19 @@ class DocTruthTests(unittest.TestCase):
         self.document("# Quiet\nOwner: maintainers\nAnchor: tools/front-door\n"
                       "Pass `--vanished` to the other tool.\n")
         self.assertEqual(self.check().stdout, "")
+
+    def test_hidden_internal_commands_stay_silent(self):
+        catalogue = self.root / "help.json"
+        catalogue.write_text(json.dumps({"commands": [
+            {"command": "provenant", "arguments": []},
+            {"command": "provenant fabric", "arguments": []},
+            {"command": "provenant fabric send", "arguments": []},
+        ]}))
+        self.document("# Hidden\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Run `provenant fabric peer`, then `provenant fabric gone`.\n")
+        result = self.check("--help-json", str(catalogue), source=False)
+        self.assertEqual(result.stdout.count("unresolved command"), 1, result.stdout)
+        self.assertIn("`provenant fabric gone`", result.stdout)
 
     def test_binary_is_used_only_for_help_and_document_snippets_never_run(self):
         binary = self.root / "provenant"
