@@ -6,6 +6,8 @@ use provenant_core::{
 use serde::{Deserialize, Serialize};
 
 pub const RECORD_LIMIT: u64 = 1024 * 1024;
+/// Encoded write grants an attempt may record, leaving terminal headroom.
+pub const MAX_WRITE_GRANT_BYTES: u64 = 256 * 1024;
 pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;

@@ -165,8 +165,9 @@ configuration components are refused, and the attempt records every granted path
 
 The database is rusqlite with WAL, foreign keys and `synchronous=FULL`. Records
 use `schema_version:1`, strict fields and tagged enums; unknown versions fail
-closed without modification. Caps: a JSON record or a prompt 1 MiB, a captured
-stream 64 MiB, a result 4 MiB, an `output` read 64 KiB. An oversized result is
+closed without modification. Caps: a JSON record or a prompt 1 MiB, an attempt's
+encoded write grants 256 KiB, a captured stream 64 MiB, a result 4 MiB, an
+`output` read 64 KiB. An oversized result is
 a typed failure, never a certified truncation. Every terminal attempt has a
 `result.md`, possibly empty, with a completeness flag and digest.
 

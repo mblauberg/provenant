@@ -646,35 +646,69 @@ impl RunStore {
             let write_grants = plan
                 .confinement
                 .as_ref()
-                .map(|c| -> Result<_> {
-                    let permissions = c.plan.permissions();
-                    let grants = provenant_confinement::write_grants(permissions, &c.profile)
-                        .into_iter()
-                        .map(|grant| {
-                            Ok(WriteGrantRecord {
-                                source: grant.source,
-                                path: provenant_records::AbsolutePath::new(&grant.path).map_err(
-                                    |_| RunError::Validation("invalid write grant path"),
-                                )?,
-                                scope: grant.scope,
+                .map(
+                    |c| -> std::result::Result<admission::AppliedWriteGrants, String> {
+                        let permissions = c.plan.permissions();
+                        let grants = provenant_confinement::write_grants(permissions, &c.profile)
+                            .into_iter()
+                            .map(|grant| {
+                                Ok(WriteGrantRecord {
+                                    source: grant.source,
+                                    path: provenant_records::AbsolutePath::new(&grant.path)
+                                        .map_err(|_| "invalid write grant path".to_owned())?,
+                                    scope: grant.scope,
+                                })
                             })
+                            .collect::<std::result::Result<Vec<_>, String>>()?;
+                        let git_grants_digest = match &permissions.mode {
+                            provenant_confinement::permissions::AccessMode::ReadOnly => None,
+                            provenant_confinement::permissions::AccessMode::WorktreeWrite(
+                                authority,
+                            ) => Some(provenant_core::Digest::from_bytes(
+                                authority.git_grants_digest,
+                            )),
+                        };
+                        Ok(admission::AppliedWriteGrants {
+                            grants,
+                            git_grants_digest,
                         })
-                        .collect::<Result<Vec<_>>>()?;
-                    let git_grants_digest = match &permissions.mode {
-                        provenant_confinement::permissions::AccessMode::ReadOnly => None,
-                        provenant_confinement::permissions::AccessMode::WorktreeWrite(
-                            authority,
-                        ) => Some(provenant_core::Digest::from_bytes(
-                            authority.git_grants_digest,
-                        )),
-                    };
-                    Ok(admission::AppliedWriteGrants {
-                        grants,
-                        git_grants_digest,
-                    })
-                })
-                .transpose()?
-                .unwrap_or_default();
+                    },
+                )
+                .transpose()
+                .and_then(|grants| {
+                    let grants = grants.unwrap_or_default();
+                    if crate::reader::write_grants_fit(&grants.grants) {
+                        Ok(grants)
+                    } else {
+                        Err("write grants exceed 1,024 entries or 256 KiB".to_owned())
+                    }
+                });
+            let write_grants = match write_grants {
+                Ok(grants) => grants,
+                Err(reason) => {
+                    match self.withdraw(
+                        id,
+                        AttemptState::Queued,
+                        Outcome::Rejected,
+                        &reason,
+                        now()?,
+                        call,
+                    ) {
+                        Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,
+                        Ok(None) => continue,
+                        // Another launcher or cancellation changed the attempt
+                        // while write grants were being recorded.
+                        Err(RunError::Conflict) => continue,
+                        Err(error) => return Err(error),
+                    }
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason,
+                        kind: RefusalKind::Preparation,
+                    });
+                    continue;
+                }
+            };
             if !plan.skipped_routes.is_empty() {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
