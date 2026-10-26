@@ -72,6 +72,7 @@ pub(crate) fn handoff(
     capture: CapturePlan,
     publication: &PublicationReservation,
 ) -> Result<()> {
+    crate::sys::provider::ensure_supported()?;
     if owned.command.protected_commands.len() > 128
         || owned
             .command
@@ -362,8 +363,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         PublishMode::NoReplace,
     )?)?;
     let reactor = crate::sys::provider::GuardianReactor::install()?;
-    #[cfg(target_os = "linux")]
-    let subreaper = crate::sys::provider::SubreaperGuard::enable()?;
     #[cfg(feature = "fixture")]
     let exit_publisher = hooks.exit_publisher;
     #[cfg(not(feature = "fixture"))]
@@ -415,12 +414,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         holder_context: message.holder_context,
         secret_input: message.secret_input,
     };
-    let result = driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks);
-    #[cfg(target_os = "linux")]
-    if result.is_ok() {
-        subreaper.restore()?;
-    }
-    result
+    driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks)
 }
 
 struct Driver<'a> {

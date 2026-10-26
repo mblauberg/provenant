@@ -28,18 +28,12 @@ pub struct CanonicalRequest {
 }
 impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
-        Self::sealed_digest(self)
-    }
-    /// The request digest of sealed bytes as decoded, so a field removed from
-    /// the record type since sealing still counts.
-    pub fn sealed_digest(sealed: &impl Serialize) -> Result<Digest, CanonicalError> {
-        CanonicalV1::record_digest("run-request", 1, sealed)
+        CanonicalV1::record_digest("run-request", 1, self)
     }
 }
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
-/// Unknown fields are ignored: terminal attempts are immutable, and those
-/// sealed before task classes were removed still carry `task_class`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessProfile {
     pub name: String,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
@@ -557,8 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn request_sealed_with_a_task_class_decodes_and_keeps_its_sealed_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn request_with_a_removed_task_class_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
             schema_version: 1,
             tasks: vec![TaskRequest {
@@ -590,14 +583,7 @@ mod tests {
         };
         let mut sealed = serde_json::to_value(&request)?;
         sealed["tasks"][0]["profile"]["task_class"] = serde_json::json!("mechanical");
-        let decoded: CanonicalRequest = serde_json::from_value(sealed.clone())?;
-        assert_eq!(decoded, request);
-        // The re-encoding drops the field, so only the sealed bytes match.
-        assert_ne!(decoded.digest()?, CanonicalRequest::sealed_digest(&sealed)?);
-        assert_eq!(
-            CanonicalRequest::sealed_digest(&serde_json::to_value(&request)?)?,
-            request.digest()?
-        );
+        assert!(serde_json::from_value::<CanonicalRequest>(sealed).is_err());
         Ok(())
     }
 }

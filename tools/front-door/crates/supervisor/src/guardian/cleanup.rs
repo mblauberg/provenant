@@ -359,8 +359,8 @@ impl Driver<'_> {
         {
             return Ok(false);
         }
-        // Darwin lacks Linux's subreaper child list. Consume the dead direct
-        // provider only here, retaining attempt custody and the persistent fence.
+        // Consume the dead direct provider only here, retaining attempt
+        // custody and the persistent fence.
         let _ = child.cleanup(true)?;
         if !child.quiescent_children()? {
             return Ok(false);
@@ -456,6 +456,7 @@ impl Driver<'_> {
                     self.omitted_reaped = self.omitted_reaped.saturating_add(1);
                 }
             }
+            #[cfg(target_os = "macos")]
             let outstanding =
                 self.tracked
                     .iter()
@@ -466,24 +467,19 @@ impl Driver<'_> {
                         }
                         crate::census::ProcessLookup::Unknown => true,
                     });
+            #[cfg(target_os = "macos")]
             let census_clear = census.is_complete() && !reaped.unresolved && !outstanding;
-            #[cfg(target_os = "linux")]
-            let complete = census_clear && child.quiescent_children().unwrap_or(false);
             #[cfg(target_os = "macos")]
             let complete = census_clear && self.darwin_quiescent(child, &census)?;
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(not(target_os = "macos"))]
             let complete = false;
             if complete {
-                #[cfg(target_os = "linux")]
-                {
-                    self.settlement_evidence = SettlementEvidence::LinuxKernelChildren;
-                }
                 let _ = child.cleanup(true)?;
                 self.persist_tracking(warnings, omitted);
                 return Ok(true);
             }
             // Root exit does not authorise an arbitrary PID. Only the pinned
-            // provider and kernel-confirmed adopted children are targets.
+            // provider and attempt-sandbox escapees are targets.
             let escalation = began.elapsed() >= Duration::from_millis(plan.descendant_grace_ms);
             let reason = machine::StopReason::PostTerminalCleanup;
             let signal = if escalation {
@@ -498,22 +494,6 @@ impl Driver<'_> {
                 self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
                 if outcome != DeliveryOutcome::Delivered {
                     push_warning(warnings, omitted, "post-terminal provider signal failed");
-                }
-            }
-            #[cfg(target_os = "linux")]
-            if self.descendant_stop_allowed {
-                match child.stop_adopted(escalation, &census, &spared) {
-                    Ok(deliveries) => {
-                        for delivery in deliveries {
-                            self.record_delivery(
-                                Some(delivery.identity),
-                                reason,
-                                signal,
-                                delivery.outcome,
-                            );
-                        }
-                    }
-                    Err(_) => push_warning(warnings, omitted, "adopted-child signal failed"),
                 }
             }
             #[cfg(target_os = "macos")]

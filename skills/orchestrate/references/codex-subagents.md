@@ -64,7 +64,6 @@ Good Codex worker prompt fields:
 
 ```
 role:              explorer | worker | default
-task-class:        mechanical | legwork | critical-review | orchestration
 tier:              junior | senior | principal
 catalogue-model:     Astra | Sol | Luna
 effort:            <effective effort from route receipt>

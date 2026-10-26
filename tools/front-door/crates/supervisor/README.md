@@ -49,7 +49,7 @@ Process children use temporary HOME, state and harness configuration paths.
 | `child`, `raw_exec` | Preallocated argv/environment, strict exec, signal reset, CLOEXEC sweep, owned utility child and bounded pipe polling. |
 | `reaper` | Fixed admission reserved before spawn, non-signalling transfer, bounded fair `try_wait` turns. |
 | `pid`, `census` | Linux procfs and Darwin libproc identity/CPU/CWD, native boot identity, complete/partial/unknown census. Observation never grants arbitrary PID signalling. |
-| `provider` | Guardian-local signal reactor and Linux subreaping, WNOWAIT leader reservation, direct-child delivery, exact adopted-child checks and explicit cleanup before reap. |
+| `provider` | macOS guardian-local signal reactor, WNOWAIT leader reservation, direct-child delivery and explicit cleanup before reap. Other platforms return an unsupported error. |
 | `handoff` | Bounded private same-binary channel; only the guardian inherits writer/attempt locks. Provider environment values and prompt remain ephemeral. |
 | `fs` | Held-directory open/stat/mutation, atomic publication, no-follow locks, descriptor ownership, directory sync and bounded flock. |
 
@@ -110,19 +110,16 @@ while the persistent reservation continues to fence every new writer. Keeping
 the guardian alive indefinitely would prevent that recovery path. Publication
 failure still retains custody and the bounded outcome for retry.
 
-A census cannot freeze process-group membership. Supervision therefore never sends a group
-signal: cancellation targets the pinned unreaped provider, and Linux descendant
-cleanup targets only kernel-confirmed adopted children. A successful bounded
-children-journal observation is required before descendant delivery. This closes
-the shared-host/sibling race instead of treating a fresh census as atomic proof.
+A census cannot freeze process-group membership. Signals target the pinned
+unreaped provider, its group when no spared owner shares it, and exact
+attempt-sandbox escapees. A successful bounded children-journal observation is
+required before descendant delivery.
 
 An empty session census cannot disprove an unrecorded setsid escape. Same-boot
-recovery keeps any durable unresolved-cleanup reservation unknown. Linux clears
-that bit only after complete census/tracking checks and a stable bounded scan of
-all guardian threads' kernel children lists proves only the dead leader remains.
-Darwin has no corresponding subreaper proof. Settlement instead requires two
-complete censuses with no provider/session/group/history members and a fresh
-lock on the same writer inode after closing the guardian's inherited duplicate.
+recovery keeps any durable unresolved-cleanup reservation unknown. Settlement
+requires two complete censuses with no provider/session/group/history members
+and a fresh lock on the same writer inode after closing the guardian's inherited
+duplicate.
 An unknown census, inherited lease or protected nested owner retains the fence.
 
 ## Spawn, polling and publication

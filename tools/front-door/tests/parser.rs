@@ -544,6 +544,8 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(text.contains(" profile=balanced "), "{text}");
     assert!(text.ends_with(" schema_version=1\n"), "{text}");
+    let removed = rig.command(&["config", "show", "--task-class", "mechanical", "--json"])?;
+    assert_eq!(code(&removed), 2);
     assert!(!rig.state.exists());
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(

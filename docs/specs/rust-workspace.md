@@ -141,8 +141,9 @@ invalid transitions, bounds and typed failures. Integration tests in the
 binary drive the real command tree and MCP server against a fake provider
 binary and an isolated state root. Process and custody behaviour (no healthy
 provider killed, terminal publication never lost, one writer, cancellation
-scope) is tested with process fixtures on Linux and macOS, using FIFO or
-handshake synchronisation instead of sleeps. Every test sets `HOME`, the
+scope) is tested with process fixtures on macOS, using FIFO or handshake
+synchronisation instead of sleeps. Utility execution fixtures also run on
+Linux. Every test sets `HOME`, the
 state root and any harness config path to a temporary directory, so no test
 can read or write the old roots, the stable install or real harness config.
 Repo-file fixtures use

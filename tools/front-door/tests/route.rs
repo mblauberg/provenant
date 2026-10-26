@@ -244,6 +244,71 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
 }
 
 #[test]
+fn route_config_verbs_edit_inline_domain_tables() -> Result {
+    let rig = rig()?;
+    let defaults = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    fs::create_dir_all(&rig.state)?;
+    for tables in [
+        "domains = { routing = {} }",
+        "[domains]\nrouting = {}",
+        "[domains.routing]\npools = {}\npacing = {}",
+    ] {
+        fs::write(
+            rig.state.join("config.toml"),
+            format!("schema_version = 1 # keep\n{tables}\n"),
+        )?;
+        call(
+            &rig,
+            &[
+                "route",
+                "set",
+                "junior",
+                "codex/gpt-6-luna",
+                "--weight",
+                "7",
+                "--effort",
+                "high",
+            ],
+            0,
+        )?;
+        let listed = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+        assert!(
+            listed["data"]["pools"]["junior"]
+                .as_array()
+                .ok_or("members")?
+                .iter()
+                .any(|m| m["model"] == "codex/gpt-6-luna" && m["weight"] == 7)
+        );
+        call(&rig, &["route", "pacing", "codex", "spend"], 0)?;
+        call(&rig, &["route", "remove", "junior", "codex/gpt-6-luna"], 0)?;
+        call(&rig, &["route", "reset", "junior"], 0)?;
+        let reset = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+        assert!(
+            reset["data"]["pools"]["junior"]
+                .as_array()
+                .ok_or("members")?
+                .iter()
+                .any(|m| m["model"] == "codex/gpt-6-luna")
+        );
+        let persisted = fs::read_to_string(rig.state.join("config.toml"))?;
+        assert!(persisted.contains("# keep"));
+        let config = call(&rig, &["config", "show"], 0)?;
+        assert_eq!(
+            config["data"]["domains"]["routing"]["pacing"]["codex"],
+            "spend"
+        );
+    }
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\ndomains = { routing = { pools = { junior = [{ model = 'codex/gpt-6-luna', weight = 7, effort = 'high', efforts = ['high'] }] } } }\n",
+    )?;
+    call(&rig, &["route", "reset", "junior"], 0)?;
+    let reset = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    assert_eq!(reset["data"]["pools"], defaults["data"]["pools"]);
+    Ok(())
+}
+
+#[test]
 fn named_routes_are_read_only_and_fail_closed() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;

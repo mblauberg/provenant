@@ -643,11 +643,7 @@ fn persisted_refusal(
         .join(attempt_id.to_string());
     let provider_state = attempt_dir.join("provider-state");
     fs::create_dir_all(&provider_state)?;
-    let evidence = if cfg!(target_os = "macos") {
-        SettlementEvidence::DarwinCensusAndCustodyLease
-    } else {
-        SettlementEvidence::LinuxKernelChildren
-    };
+    let evidence = SettlementEvidence::DarwinCensusAndCustodyLease;
     let exit = ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
