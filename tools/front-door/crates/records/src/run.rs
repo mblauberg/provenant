@@ -332,6 +332,8 @@ pub enum Outcome {
     PermissionDenied,
     Quarantined,
     Lost,
+    /// A writer succeeded but left uncommitted edits and no new commit.
+    Uncommitted,
     InputRequired,
 }
 impl From<Outcome> for crate::AttemptOutcome {
@@ -349,6 +351,7 @@ impl From<Outcome> for crate::AttemptOutcome {
             Outcome::PermissionDenied => Self::PermissionDenied,
             Outcome::Quarantined => Self::Quarantined,
             Outcome::Lost => Self::Lost,
+            Outcome::Uncommitted => Self::Uncommitted,
             Outcome::InputRequired => Self::InputRequired,
         }
     }

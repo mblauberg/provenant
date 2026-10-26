@@ -359,6 +359,7 @@ pub enum LaneState {
     PermissionDenied,
     Quarantined,
     Lost,
+    Uncommitted,
     Cancelled,
     InputRequired,
 }
@@ -380,6 +381,7 @@ impl LaneState {
             Self::PermissionDenied => "permission_denied",
             Self::Quarantined => "quarantined",
             Self::Lost => "lost",
+            Self::Uncommitted => "uncommitted",
             Self::Cancelled => "cancelled",
             Self::InputRequired => "input_required",
         }

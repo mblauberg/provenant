@@ -411,6 +411,80 @@ impl WriterLaunch {
         Ok(review)
     }
 }
+/// How many dirty paths a reason names before it counts the rest.
+const UNCOMMITTED_LISTED: usize = 12;
+impl WriterLaunch {
+    /// A diagnostic naming the edits a writer left uncommitted, or `None` when
+    /// it committed or its tree is clean. Call it after `terminal` succeeds.
+    pub(crate) fn uncommitted(
+        &self,
+        state: &Path,
+        custody: &provenant_supervisor::custody::Recovery,
+    ) -> Result<Option<String>> {
+        let base = custody
+            .writer_base(
+                self.worktree.repo().root_dir(),
+                self.worktree.repo().private_dir(),
+                self.branch.as_str(),
+            )
+            .map_err(error)?;
+        let utility = runtime(state)?;
+        let executor = SystemExecutor::new(1).map_err(error)?;
+        let cancel = CancelToken::new();
+        let git = provenant_confinement::Git::new(
+            &executor,
+            self.worktree.repo(),
+            &utility,
+            budget()?,
+            &cancel,
+        );
+        let paths = git.uncommitted_since(base).map_err(error)?;
+        Ok(uncommitted_reason(&paths))
+    }
+}
+fn uncommitted_reason(paths: &[Vec<u8>]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let listed: Vec<_> = paths
+        .iter()
+        .take(UNCOMMITTED_LISTED)
+        .map(|path| String::from_utf8_lossy(path))
+        .collect();
+    let more = paths.len().saturating_sub(UNCOMMITTED_LISTED);
+    let mut reason = format!(
+        "writer left uncommitted edits and no new commit: {}",
+        listed.join(", ")
+    );
+    if more > 0 {
+        reason.push_str(&format!(" and {more} more"));
+    }
+    reason.truncate(reason.floor_char_boundary(1024));
+    Some(reason)
+}
+#[cfg(test)]
+mod uncommitted_tests {
+    use super::*;
+
+    #[test]
+    fn reason_lists_dirty_paths_and_counts_the_rest() {
+        assert_eq!(uncommitted_reason(&[]), None);
+        let one = uncommitted_reason(&[b"a.rs".to_vec(), b"b/c.rs".to_vec()]);
+        assert_eq!(
+            one.as_deref(),
+            Some("writer left uncommitted edits and no new commit: a.rs, b/c.rs")
+        );
+        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n}").into_bytes()).collect();
+        let reason = uncommitted_reason(&many).unwrap();
+        assert!(
+            reason.contains("f11") && !reason.contains("f12"),
+            "{reason}"
+        );
+        assert!(reason.ends_with(" and 3 more"), "{reason}");
+        let long = uncommitted_reason(&[vec![b'x'; 4000]]).unwrap();
+        assert!(long.len() <= 1024);
+    }
+}
 #[derive(serde::Serialize)]
 struct WriterManifest {
     schema_version: u64,

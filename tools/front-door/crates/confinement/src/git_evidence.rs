@@ -256,6 +256,23 @@ impl<'a> Git<'a> {
         Ok(())
     }
 
+    /// Changed and untracked paths when HEAD is still `base`; empty once the
+    /// writer committed. Ignored paths and `.review-snapshots/` never count.
+    pub fn uncommitted_since(&self, base: GitOid) -> Result<Vec<Vec<u8>>, GitEvidenceError> {
+        if self.head()? != base {
+            return Ok(Vec::new());
+        }
+        // Lists each untracked file, not its directory, whatever
+        // `status.showUntrackedFiles` says.
+        let status = self.read(GitRead::StatusIncludingIgnored)?;
+        Ok(parse_porcelain_v2_z(&status.stdout.bytes)?
+            .into_iter()
+            .filter(|record| record.kind != StatusKind::Ignored)
+            .map(|record| record.path)
+            .filter(|path| !path.starts_with(b".review-snapshots/"))
+            .collect())
+    }
+
     pub fn verify_tip(&self, expected: GitOid) -> Result<GitOid, GitEvidenceError> {
         self.repo
             .revalidate()
@@ -567,8 +584,49 @@ fn digest_diff_parts(commit: &[u8], index: &[u8], worktree: &[u8]) -> FileDigest
 
 #[cfg(test)]
 mod tests {
-    use super::digest_diff_parts;
+    use super::{Git, digest_diff_parts};
+    use crate::test_support::Fixture;
+    use provenant_core::CancelToken;
     use provenant_records::CanonicalV1;
+    use std::{error::Error, fs};
+
+    #[test]
+    fn uncommitted_paths_skip_ignored_and_snapshots_and_need_an_unmoved_head()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let base = fixture.head()?;
+        let token = CancelToken::new();
+        let git = Git::new(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &token,
+        );
+        assert!(git.uncommitted_since(base)?.is_empty());
+        fs::write(fixture.root.join(".gitignore"), "ignored.log\n")?;
+        fs::write(fixture.root.join("ignored.log"), "noise")?;
+        fs::write(fixture.root.join("edit.txt"), "work")?;
+        fs::create_dir(fixture.root.join("new"))?;
+        fs::write(fixture.root.join("new/file.rs"), "work")?;
+        fs::create_dir(fixture.root.join(".review-snapshots"))?;
+        fs::write(fixture.root.join(".review-snapshots/1.md"), "issue")?;
+        let mut dirty = git.uncommitted_since(base)?;
+        dirty.sort();
+        assert_eq!(
+            dirty,
+            [
+                b".gitignore".to_vec(),
+                b"edit.txt".to_vec(),
+                b"new/file.rs".to_vec()
+            ]
+        );
+        // A commit moves HEAD past the base: the lane delivered something.
+        fixture.run(&["add", "--", "edit.txt"])?;
+        fixture.run(&["commit", "-m", "work"])?;
+        assert!(git.uncommitted_since(base)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn diff_digest_separates_views_and_preserves_empty_views() {

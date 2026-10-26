@@ -1870,9 +1870,16 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     }
     align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+    // The text alone cannot tell a clean success from one that needs the chair.
+    let reason = match &record.state {
+        run::AttemptState::Terminal { reason, .. } => reason.clone(),
+        _ => None,
+    };
     Ok((
         json!({
             "attempt_id": id,
+            "state": state_name(&record.state),
+            "reason": reason,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,
             "next_offset": chunk.next_offset,
@@ -3026,6 +3033,50 @@ mod tests {
         assert_eq!(data["lanes"][0]["state"], "rejected");
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert!(data["lanes"][0]["applied_route"].is_null());
+        Ok(())
+    }
+    #[test]
+    fn render_lanes_shows_uncommitted_with_its_dirty_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let reason = "writer left uncommitted edits and no new commit: src/a.rs, b.txt";
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "uncommitted-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {
+                "state": "terminal",
+                "outcome": "uncommitted",
+                "finished_at": now,
+                "reason": reason
+            },
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 1,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        assert_eq!(settled(&lane.state), (true, false));
+        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert!(
+            human.contains(&format!(" uncommitted unresolved ({reason})\n")),
+            "{human}"
+        );
+        assert_eq!(data["lanes"][0]["state"], "uncommitted");
+        assert_eq!(data["lanes"][0]["reason"], json!(reason));
         Ok(())
     }
     #[test]

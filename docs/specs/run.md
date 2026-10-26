@@ -264,7 +264,9 @@ Attempt states run `queued`, `starting`, `running`, `settling`, `terminal`;
 refusal, queued cancellation and spawn failure can end before `running`. The
 outcomes are `succeeded`, `failed`, `rejected`, `cancelled`, `timed_out`,
 `rate_limited`, `quota_limited`, `auth_required`, `model_unavailable`,
-`permission_denied`, `quarantined`, `lost` and `input_required`. A dead owner
+`permission_denied`, `quarantined`, `lost`, `uncommitted` and `input_required`.
+A writer that succeeds with edits left uncommitted and no new commit ends
+`uncommitted`, naming the dirty paths, and skips host delivery. A dead owner
 is not a failed provider: unresolved custody stays an observation until
 supervisor proves exit or loss. A natural completion wins over a late
 cancellation or deadline. Success needs supervisor-observed exit 0, a matching
