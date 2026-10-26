@@ -487,6 +487,17 @@ impl RunStore {
             digest,
         })
     }
+    /// A connection-local change token for commits made by other connections.
+    /// Compare tokens only on the same retained store handle.
+    pub fn data_version(&self, call: &Request<'_>) -> Result<u64> {
+        call.retry(|| {
+            let version: i64 = self
+                .db
+                .pragma_query_value(None, "data_version", |row| row.get(0))?;
+            u64::try_from(version).map_err(|_| RunError::Validation("database data version"))
+        })
+    }
+
     /// Translate an attempt cursor only within this verified project.
     pub fn attempt_sequence(&self, id: AttemptId, call: &Request<'_>) -> Result<u64> {
         self.record(id, call)?;

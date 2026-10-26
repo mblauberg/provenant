@@ -29,9 +29,11 @@ reservations first, then holds the attempt's writer lock during deletion to
 exclude read-only guardians. It does not hold the worktree writer lock during
 deletion.
 
-Two holders permit lock-named payload disposal: the terminal, unreserved
+Three holders permit lock-named payload disposal: the terminal, unreserved
 reconcile retry inside the attempt's `tmp/`, including rustc incremental
-`*.lock` files, and cache GC (#1591) inside a verified detached cache tree.
+`*.lock` files, cache GC (#1591) inside a verified detached cache tree, and
+declared regenerable output GC (#1687) detached beneath a private staging
+directory while holding the worktree writer lock.
 `PayloadTree::claim` in `supervisor::fs` is the only entry point (#1597). It
 refuses a root whose identity differs from the holder's observation, or that
 is not owned by the effective user or grants group or other access. Reconcile
@@ -48,8 +50,28 @@ optional free-space floor. Collection is scoped to lane build caches, uses
 verified detachment and preserves live writers, reservations and unobservable
 owners. A free-space floor collects eligible caches oldest-first by last write
 after the orphaned, tombstoned and idle pass. This approval does not extend to
-durable run artefacts or general state deletion. Automatic removal of merged
-worktrees is tracked separately in #1683.
+durable run artefacts or general state deletion.
+
+Merged worktree collection (#1683) is also approved: GC fetches the upstream
+default branch, proves branch ancestry against that fetched tip and removes
+clean registered linked worktrees, their expected-old local refs and their
+own lane caches. Worktrees need known-terminal lanes and merged commits of
+their own. Tips equal to upstream or on its first-parent history stay, as do
+dirty, unmerged, live or unobservable worktrees. Failed fetches grant no
+removal authority.
+
+Projects may explicitly declare regenerable directory names and keep paths
+in configuration (#1687). GC prunes matching directories only in clean
+registered worktrees whose associated lanes are all known terminal. Missing,
+unreadable and unknown lane state blocks pruning. Ignored output is allowed;
+tracked paths are protected. Anything written in the preceding 24 hours is
+kept. Collection holds writer exclusion, never follows symlinks and rechecks
+identity and recursive write times after detachment. Errors skip individual
+entries. Bare GC deletes eligible caches and previews worktree and output
+cleanup. Those classes require `--apply`; `--dry-run` previews every class.
+The installed scheduled agent passes `--apply`. No declaration grants no
+output deletion. This scope does not cover arbitrary temporary directories
+or durable run artefacts.
 
 ## Consequences
 
