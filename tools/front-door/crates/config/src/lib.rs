@@ -17,7 +17,6 @@ mod knobs;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
-mod legacy;
 mod presets;
 mod project_binding;
 mod release;
@@ -188,7 +187,7 @@ pub use managed::{
     InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
     ReleaseSmoke, SelectorChange, Snapshots, Targets, gc_agent_plist, inspect_install, install,
     installed_binary, peer_agent_plist, plan_and_install, plan_install, private_directory,
-    recorded_hook_checkout, uninstall,
+    uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

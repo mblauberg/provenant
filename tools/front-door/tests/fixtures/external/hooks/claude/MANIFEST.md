@@ -19,8 +19,3 @@ of the committed bytes. Raw captures are never copied into the repository.
 | `compact.json` | host -> hook stdin | `973d21fd60a06b30dd9c25f08da8b91547033bdc625d567b5e94f389149afc5f` |
 | `host-deny-json.json` | host -> caller result after hook response | `acca3e0e34269d5c528f5b533ac6a5ba19d467ee395a3fa2b98e55470c9e982f` |
 | `host-deny-exit2.json` | host -> caller result after hook response | `387cd98c00da0ec8271bd8a80309d8dbe08ca646d41fc8d1c70ae98e4b1e7670` |
-
-`legacy-settings.json`: recorded Claude Code settings hook registrations on
-2026-10-24, direction installer input. Only the hooks object was retained;
-home and checkout paths became {home} and {legacy}. The Herdr command,
-array order and timeout fields are otherwise unchanged. SHA-256: `4ce2d2920fbb16c4f0591fe8aa85a2f93ea2367994fd8052789ab0eeb5fd5669`.
