@@ -17,7 +17,7 @@ use provenant_supervisor::{
 use serde::Serialize;
 use std::{
     ffi::OsStr,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -175,6 +175,8 @@ struct GcData {
     #[serde(flatten)]
     report: provenant_confinement::permissions::CacheGcReport,
     idle_days: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unobserved_projects: Vec<PathBuf>,
 }
 
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
@@ -199,6 +201,7 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
                 GcData {
                     report: error.report,
                     idle_days: command.idle_days,
+                    unobserved_projects: Vec::new(),
                 },
             );
             result.error = Some(provenant_records::CommandError {
@@ -253,6 +256,7 @@ fn gc_reason(reason: provenant_confinement::permissions::CacheGcReason) -> &'sta
     match reason {
         CacheGcReason::Orphaned => "orphaned",
         CacheGcReason::Idle => "idle",
+        CacheGcReason::FreeFloor => "free_floor",
         CacheGcReason::Tombstone => "tombstone",
         CacheGcReason::Foreign => "foreign",
         CacheGcReason::Live => "live",
@@ -260,44 +264,108 @@ fn gc_reason(reason: provenant_confinement::permissions::CacheGcReason) -> &'sta
     }
 }
 
+struct GcProject {
+    binding: provenant_config::ProjectBinding,
+    state: Directory,
+    lanes: Vec<worktrees::WorktreeInfo>,
+}
+
+fn gc_project(roots: &provenant_core::Roots, project: &Path) -> Result<GcProject, Error> {
+    with_context(roots, project, MUTATION_TIMEOUT, |context, cancel| {
+        Ok(GcProject {
+            binding: context.binding.clone(),
+            state: Directory::open_anchor(
+                &roots
+                    .state
+                    .as_path()
+                    .join("worktrees")
+                    .join(context.binding.project_id().to_string()),
+            )?,
+            lanes: worktrees::list(context, cancel)?,
+        })
+    })
+}
+
 fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
     use provenant_confinement::permissions::{
         CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard,
     };
-    use provenant_confinement::worktrees::WriterState;
+    use provenant_confinement::worktrees::{WorkerState, WriterState};
 
     let assets = roots::product_root()?;
-    let project = roots::selected_project(globals.project.as_deref(), true)?;
-    let roots = roots::roots(globals, &assets, &project)?;
     let home = roots::home()?;
-    with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
-        let listed = worktrees::list(context, cancel)?;
-        let protected_owners = listed
+    let project = if command.scheduled {
+        home.clone()
+    } else {
+        roots::selected_project(globals.project.as_deref(), true)?
+    };
+    let roots = roots::roots(globals, &assets, &project)?;
+    let mut projects = Vec::new();
+    let mut unobserved_projects = Vec::new();
+    if command.scheduled {
+        let config = provenant_config::read_with_domains(
+            &roots,
+            &LocalFs,
+            &provenant_cli::domains::SECTIONS,
+        )?;
+        if !config.gc.schedule {
+            return Ok(GcData {
+                report: provenant_confinement::permissions::CacheGcReport {
+                    dry_run: command.dry_run,
+                    ..Default::default()
+                },
+                idle_days: command.idle_days,
+                unobserved_projects,
+            });
+        }
+        for binding in provenant_config::list_projects(&roots, &LocalFs)? {
+            let common = binding.common_dir();
+            let path = if common.file_name() == Some(OsStr::new(".git")) {
+                common.parent().ok_or(Error::InvalidScope)?
+            } else {
+                common
+            };
+            match gc_project(&roots, path) {
+                Ok(project) => projects.push(project),
+                Err(_) => unobserved_projects.push(path.to_owned()),
+            }
+        }
+    } else {
+        projects.push(gc_project(&roots, &project)?);
+    }
+    let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
+    let now_ns = SystemClock
+        .wall_now()
+        .map(|now| i128::from(now.as_micros()) * 1_000)
+        .map_err(|_| Error::Budget)?;
+    let policy = CacheGcPolicy {
+        idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
+        free_floor_bytes: command.free_floor,
+        dry_run: command.dry_run,
+        protected_owners: lanes
             .iter()
             .filter(|info| info.writer != WriterState::Free)
             .map(|info| (info.path.clone(), info.writer))
-            .collect();
-        let now_ns = SystemClock
-            .wall_now()
-            .map(|now| i128::from(now.as_micros()) * 1_000)
-            .map_err(|_| Error::Budget)?;
-        let idle_ns = i128::from(command.idle_days) * 86_400 * 1_000_000_000;
-        let policy = CacheGcPolicy {
-            idle_before_ns: Some(now_ns - idle_ns),
-            dry_run: command.dry_run,
-            protected_owners,
-            project_owners: listed.iter().map(|info| info.path.clone()).collect(),
-        };
-        Ok(GcData {
-            report: gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
-                let branch = listed
-                    .iter()
-                    .find(|info| info.path == path)
-                    .and_then(|info| info.branch.as_deref());
-                worktrees::cache_writer_guard(context.binding, context.project_state, path, branch)
-            })?,
-            idle_days: command.idle_days,
-        })
+            .collect(),
+        project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
+    };
+    let report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
+        for project in &projects {
+            if let Some(lane) = project.lanes.iter().find(|lane| lane.path == path) {
+                return worktrees::cache_writer_guard(
+                    &project.binding,
+                    &project.state,
+                    path,
+                    lane.branch.as_deref(),
+                );
+            }
+        }
+        Err(WorkerState::Unknown)
+    })?;
+    Ok(GcData {
+        report,
+        idle_days: command.idle_days,
+        unobserved_projects,
     })
 }
 

@@ -192,12 +192,35 @@ pub fn lookup_project(
     find_binding(&*projects, location.common_dir())
 }
 
+/// Read registered project locations without allocating identities or state.
+pub fn list_projects(roots: &Roots, fs: &dyn SafeFs) -> Result<Vec<ProjectBinding>, ConfigError> {
+    let state = match fs.open_anchor(roots.state.as_path()) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&*state, true)?;
+    let projects = match state.open_verified_directory(OsStr::new(PROJECTS_DIR)) {
+        Ok(projects) => projects,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&*projects, true)?;
+    read_bindings(&*projects)
+}
+
 fn find_binding(
     projects: &dyn SafeDir,
     target: &Path,
 ) -> Result<Option<ProjectBinding>, ConfigError> {
+    Ok(read_bindings(projects)?
+        .into_iter()
+        .find(|binding| binding.common_dir() == target))
+}
+
+fn read_bindings(projects: &dyn SafeDir) -> Result<Vec<ProjectBinding>, ConfigError> {
     let mut count = 0;
-    let mut found = None;
+    let mut found = Vec::new();
     for entry in projects.entries()? {
         let entry = entry?;
         if entry == OsStr::new(BINDING_LOCK) {
@@ -222,17 +245,15 @@ fn find_binding(
         }
         let common_dir = decode_location(&record.canonical_common_dir)?;
         if found
-            .as_ref()
-            .is_some_and(|binding: &ProjectBinding| binding.common_dir() == common_dir)
+            .iter()
+            .any(|binding: &ProjectBinding| binding.common_dir() == common_dir)
         {
             return Err(ConfigError::InvalidProjectBinding);
         }
-        if common_dir == target {
-            found = Some(ProjectBinding {
-                project,
-                canonical_common_dir: common_dir,
-            });
-        }
+        found.push(ProjectBinding {
+            project,
+            canonical_common_dir: common_dir,
+        });
     }
     Ok(found)
 }
@@ -504,6 +525,11 @@ mod tests {
         .unwrap();
 
         assert_ne!(first.project, second.project);
+        fs::set_permissions(roots.state.as_path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let listed = list_projects(&roots, &LocalFs).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.contains(&first));
+        assert!(listed.contains(&second));
     }
 
     #[test]

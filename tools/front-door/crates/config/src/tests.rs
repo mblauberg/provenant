@@ -25,6 +25,34 @@ fn explicit_profile_selects_the_compiled_preset() {
     assert_eq!(config.profile, Profile::Economy);
 }
 
+#[test]
+fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
+    let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
+    assert_eq!(defaults["gc"]["schedule"], true);
+    assert_eq!(defaults["gc"]["idle_days"], 7);
+    assert!(defaults["gc"]["free_floor"].is_null());
+    let config = load(
+        &roots(),
+        Some(&b"schema_version=1\n[gc]\nschedule=false\nidle_days=14\nfree_floor='20G'"[..]),
+    )
+    .unwrap();
+    let value = serde_json::to_value(&config).unwrap();
+    assert_eq!(value["gc"]["schedule"], false);
+    assert_eq!(value["gc"]["idle_days"], 14);
+    assert_eq!(value["gc"]["free_floor"], "20G");
+    test_support::assert_leaf_origins(&config);
+    for field in [
+        "idle_days=0",
+        "idle_days=3651",
+        "schedule='yes'",
+        "free_floor='bad'",
+        "unknown=true",
+    ] {
+        let text = format!("schema_version=1\n[gc]\n{field}");
+        assert!(load(&roots(), Some(text.as_bytes())).is_err(), "{field}");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestDomains {

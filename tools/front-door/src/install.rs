@@ -42,7 +42,7 @@ enum EdgeError {
     Peer(super::peer_agent::AgentError),
 }
 
-fn prepare_peer_agent(targets: &mut Targets) -> Result<(), EdgeError> {
+fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
     let state = targets.roots.state.as_path();
     if super::peer_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
@@ -54,6 +54,14 @@ fn prepare_peer_agent(targets: &mut Targets) -> Result<(), EdgeError> {
         targets.peer_agent_previous =
             super::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;
+        let config =
+            provenant_config::read_with_domains(&targets.roots, &LocalFs, &cli::domains::SECTIONS)
+                .map_err(|error| EdgeError::Install(InstallError::Config(error)))?;
+        if config.gc.schedule {
+            targets.gc_agent = Some(
+                super::gc_agent::render(&program, state, &config.gc).map_err(EdgeError::Peer)?,
+            );
+        }
     }
     Ok(())
 }
@@ -226,14 +234,18 @@ impl PreviewReporter {
         action: &Action,
         stop: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
-        if action.selector == "peer-agent" {
+        if matches!(action.selector.as_str(), "peer-agent" | "gc-agent") {
             let home = self
                 .home
                 .as_deref()
                 .ok_or_else(|| io::Error::other("missing agent home"))?;
             let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-            if action.before.is_some()
-                && action.path.to_path_buf().ok().as_ref() != Some(&super::peer_agent::plist(&home))
+            let expected = if action.selector == "gc-agent" {
+                super::gc_agent::plist(&home)
+            } else {
+                super::peer_agent::plist(&home)
+            };
+            if action.before.is_some() && action.path.to_path_buf().ok().as_ref() != Some(&expected)
             {
                 return Err(io::Error::other("unexpected agent plist path"));
             }
@@ -245,7 +257,11 @@ impl PreviewReporter {
 impl InstallReporter for PreviewReporter {
     fn before_remove(&mut self, action: &Action) -> io::Result<()> {
         self.before_remove_with(action, |home| {
-            super::peer_agent::stop(home).map_err(io::Error::other)
+            if action.selector == "gc-agent" {
+                super::gc_agent::stop(home).map_err(io::Error::other)
+            } else {
+                super::peer_agent::stop(home).map_err(io::Error::other)
+            }
         })
     }
     fn preview(&mut self, _: &[Action]) -> io::Result<()> {
@@ -266,6 +282,8 @@ struct InstallData {
     remaining: Vec<Action>,
     #[serde(skip_serializing_if = "Option::is_none")]
     peer_agent: Option<super::peer_agent::Installed>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gc_agent: Option<super::gc_agent::Installed>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -274,6 +292,7 @@ impl InstallData {
             completed: Vec::new(),
             remaining: Vec::new(),
             peer_agent: None,
+            gc_agent: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
@@ -287,6 +306,7 @@ impl InstallData {
             completed,
             remaining: Vec::new(),
             peer_agent: None,
+            gc_agent: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -300,6 +320,7 @@ impl InstallData {
                 completed: completed.clone(),
                 remaining: remaining.clone(),
                 peer_agent: None,
+                gc_agent: None,
             },
             _ => Self::empty(),
         }
@@ -399,6 +420,7 @@ fn output_install(
     command: &str,
     result: Result<InstallOutcome, InstallError>,
     peer_agent: Option<super::peer_agent::Installed>,
+    gc_agent: Option<super::gc_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
     match result {
@@ -447,7 +469,10 @@ fn output_install(
             let mut human = format!("{command}:\n");
             for finding in &outcome.findings {
                 if let Ok(path) = finding.path.to_path_buf()
-                    && path.file_name() == Some(OsStr::new("dev.provenant.peer.plist"))
+                    && matches!(
+                        path.file_name().and_then(OsStr::to_str),
+                        Some("dev.provenant.peer.plist" | "dev.provenant.gc.plist")
+                    )
                 {
                     human.push_str(&format!(
                         "  LaunchAgent plist: preserved {} ({})\n",
@@ -457,7 +482,7 @@ fn output_install(
                 }
             }
             for action in &outcome.actions {
-                if action.selector == "peer-agent" {
+                if matches!(action.selector.as_str(), "peer-agent" | "gc-agent") {
                     let path = action
                         .path
                         .to_path_buf()
@@ -493,9 +518,13 @@ fn output_install(
             if let Some(agent) = &peer_agent {
                 human.push_str(&format!("peer agent: {}\n", agent.describe()));
             }
+            if let Some(agent) = &gc_agent {
+                human.push_str(&format!("scheduled gc: {}\n", agent.describe()));
+            }
             let read_only = outcome.dry_run;
             let mut data = InstallData::success(outcome);
             data.peer_agent = peer_agent;
+            data.gc_agent = gc_agent;
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, data),
                 globals,
@@ -617,10 +646,14 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
     };
     let state = targets.roots.state.as_path().to_path_buf();
     let home = targets.home.clone();
-    if let Err(error) = prepare_peer_agent(&mut targets) {
+    targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
+    if let Err(error) = prepare_agents(&mut targets) {
         return edge_error("install", error, globals);
     }
-    let mut reporter = PreviewReporter::default();
+    let gc_enabled = targets.gc_agent.is_some();
+    let mut reporter = PreviewReporter {
+        home: Some(home.clone()),
+    };
     let result = cli::install::execute_install(
         &args,
         targets,
@@ -641,7 +674,19 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         )),
         _ => None,
     };
-    output_install("install", result, peer_agent, globals)
+    let gc_agent = match &result {
+        Ok(outcome) if !outcome.dry_run => Some(super::gc_agent::install(
+            &state,
+            &home,
+            outcome
+                .actions
+                .iter()
+                .any(|action| action.selector == "gc-agent"),
+            gc_enabled,
+        )),
+        _ => None,
+    };
+    output_install("install", result, peer_agent, gc_agent, globals)
 }
 
 pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 {
@@ -649,7 +694,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
         Ok(value) => value,
         Err(error) => return edge_error("uninstall", error, globals),
     };
-    if let Err(error) = prepare_peer_agent(&mut targets) {
+    if let Err(error) = prepare_agents(&mut targets) {
         return edge_error("uninstall", error, globals);
     }
     let fs = LocalFs;
@@ -667,6 +712,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     output_install(
         "uninstall",
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),
+        None,
         None,
         globals,
     )

@@ -334,10 +334,20 @@ orphaned caches and existing cleanup tombstones for `provenant gc` to sweep.
 Cache cleanup accepts v1 owner markers when the owner path is missing, and
 `provenant gc` retries their interrupted tombstones. Existing v1 owners are kept, reported
 as foreign when outside the project, and never collected as idle.
-Idle GC takes the existing writer lock without waiting, checks for reservations
-and releases the guard immediately after the tombstone rename. A held lock keeps
-the cache as live; a missing or unsafe lock, a reservation, or unverifiable
-registration keeps it as unobservable.
+Idle and free-floor GC take the existing writer lock without waiting, check
+for reservations and release the guard immediately after the tombstone rename.
+A held lock keeps the cache as live; a missing or unsafe lock, a reservation,
+or unverifiable registration keeps it as unobservable.
+
+`gc --free-floor SIZE` runs after the ordinary orphaned, tombstoned and idle
+pass. It selects eligible caches by oldest recursive last write and uses the
+same detach, recheck and delete path until available space on the cache volume
+reaches the floor or candidates run out. Dry-run estimates space without
+deleting files. On macOS, installation schedules cache GC every six hours by
+default; `[gc]` configures scheduling, idle days and an optional floor.
+Scheduled GC discovers registered projects. Unobserved projects retain their
+existing caches, reported as foreign, and `unobserved_projects` lists their
+paths in JSON.
 
 Removal and pruning hold writer exclusion, recheck reservations and worker
 observations, and refuse live or unknown candidates. A post-merge hook passes

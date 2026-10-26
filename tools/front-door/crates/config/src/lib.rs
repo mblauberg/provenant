@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 
 mod domains;
+mod gc;
+pub use gc::{GcSettings, parse_cache_size};
 mod harness;
 mod hooks;
 pub use harness::mcp_entry;
@@ -30,7 +32,7 @@ pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config, edit_config_docume
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{
-    ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_project,
+    ProjectBinding, ProjectLocation, bind_host, bind_project, list_projects, lookup_project,
 };
 pub use provenant_records::Finding;
 
@@ -155,6 +157,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub profile: Profile,
     pub domains: D,
     pub install: InstallSettings,
+    pub gc: GcSettings,
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,
     pub origins: BTreeMap<String, Origin>,
@@ -183,8 +186,9 @@ pub struct ConfigInspection {
 pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
-    ReleaseSmoke, SelectorChange, Snapshots, Targets, inspect_install, install, installed_binary,
-    peer_agent_plist, plan_and_install, plan_install, private_directory, uninstall,
+    ReleaseSmoke, SelectorChange, Snapshots, Targets, gc_agent_plist, inspect_install, install,
+    installed_binary, peer_agent_plist, plan_and_install, plan_install, private_directory,
+    uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

@@ -537,6 +537,12 @@ pub enum Disk {
 }
 #[derive(Debug, Args)]
 pub struct Gc {
+    /// Run for registered projects from the scheduled per-user agent
+    #[arg(long, hide = true)]
+    pub scheduled: bool,
+    /// Keep at least this much free space (20G, or plain GiB)
+    #[arg(long, value_name = "SIZE", value_parser = provenant_config::parse_cache_size)]
+    pub free_floor: Option<u64>,
     /// Report what would be removed without deleting anything
     #[arg(long)]
     pub dry_run: bool,

@@ -3925,3 +3925,204 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
     assert!(matches!(err, InstallError::Drift(_)));
     assert_eq!(reporter.previews, 1);
 }
+
+#[test]
+fn missing_gc_agent_is_stopped_only_when_the_last_harness_is_removed() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude, Harness::Codex],
+    )
+    .harnesses;
+    f.targets.gc_agent = Some(b"rendered plist\n".to_vec());
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    fs::remove_file(gc_agent_plist(f.targets.roots.state.as_path()).unwrap()).unwrap();
+    struct StopReporter(usize);
+    impl InstallReporter for StopReporter {
+        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+            if action.selector == "gc-agent" {
+                self.0 += 1;
+            }
+            Ok(())
+        }
+    }
+    let mut reporter = StopReporter(0);
+    let codex = f.targets.harnesses.pop().unwrap();
+    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
+    assert_eq!(reporter.0, 0);
+    assert!(
+        read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "gc-agent")
+    );
+    f.targets.harnesses = vec![codex];
+    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
+    assert_eq!(reporter.0, 1);
+    assert!(
+        !read_receipt(&f.targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "gc-agent")
+    );
+}
+
+#[test]
+fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
+    for state in ["unchanged", "modified", "missing"] {
+        let modified = state == "modified";
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        f.targets.gc_agent = Some(b"rendered plist\n".to_vec());
+        let plist = gc_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        let plan = f.plan();
+        assert!(
+            plan.actions()
+                .iter()
+                .any(|action| action.selector == "gc-agent"
+                    && action.path.to_path_buf().unwrap() == plist)
+        );
+        assert!(!plist.exists());
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            fs: &LocalFs,
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+        };
+        install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
+        assert!(f.plan().actions().is_empty());
+        let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+        assert!(
+            receipt
+                .entries
+                .iter()
+                .any(|entry| entry.selector == "gc-agent")
+        );
+        if modified {
+            fs::write(&plist, b"user edited plist\n").unwrap();
+            let release = f.release();
+            let error = Snapshots::capture(&release, &f.targets, &LocalFs)
+                .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(plist.to_str().unwrap()), "{error}");
+        }
+        if state == "missing" {
+            fs::remove_file(&plist).unwrap();
+        }
+        struct StopReporter(usize);
+        impl InstallReporter for StopReporter {
+            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+                Ok(())
+            }
+            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+                if action.selector == "gc-agent" {
+                    self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+        let mut reporter = StopReporter(0);
+        let result = uninstall(&f.targets, &context, &mut reporter).unwrap();
+        assert_eq!(reporter.0, usize::from(!modified));
+        assert_eq!(
+            result
+                .actions
+                .iter()
+                .filter(|action| action.selector == "gc-agent")
+                .count(),
+            usize::from(!modified)
+        );
+        assert_eq!(plist.exists(), modified);
+        assert_eq!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "relinquished_modified_entry"
+                    && finding.path.to_path_buf().unwrap() == plist),
+            modified
+        );
+    }
+}
+
+#[test]
+fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
+    for state in ["unchanged", "modified", "missing"] {
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        f.targets.gc_agent = Some(b"rendered plist\n".to_vec());
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let ctx = context(&clock, &cancel);
+        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        let plist = gc_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        match state {
+            "modified" => fs::write(&plist, b"user edited plist\n").unwrap(),
+            "missing" => fs::remove_file(&plist).unwrap(),
+            _ => {}
+        }
+        f.targets.gc_agent = None;
+        let plan = f.plan();
+        let removable = state != "modified";
+        assert_eq!(
+            plan.actions()
+                .iter()
+                .any(|action| action.selector == "gc-agent"),
+            removable
+        );
+        struct StopReporter(usize);
+        impl InstallReporter for StopReporter {
+            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+                Ok(())
+            }
+            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+                if action.selector == "gc-agent" {
+                    self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+        let mut reporter = StopReporter(0);
+        let preview = install(&plan, &ctx, &mut reporter, &Smoke, true).unwrap();
+        assert!(preview.dry_run);
+        assert_eq!(reporter.0, 0);
+        let outcome = install(&plan, &ctx, &mut reporter, &Smoke, false).unwrap();
+        assert_eq!(reporter.0, usize::from(removable));
+        assert_eq!(plist.exists(), !removable);
+        assert_eq!(
+            outcome.findings.iter().any(|finding| {
+                finding.rule == "relinquished_modified_entry"
+                    && finding.path.to_path_buf().unwrap() == plist
+            }),
+            !removable
+        );
+        assert!(
+            !read_receipt(&f.targets, &LocalFs)
+                .unwrap()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.selector == "gc-agent")
+        );
+    }
+}

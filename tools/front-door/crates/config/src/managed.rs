@@ -155,6 +155,8 @@ pub struct Targets {
     pub remove_hooks: bool,
     /// Rendered per-user LaunchAgent, supplied only by the process edge.
     pub peer_agent: Option<Vec<u8>>,
+    /// Rendered scheduled cache collector, supplied only by the process edge.
+    pub gc_agent: Option<Vec<u8>>,
     /// Exact recognised historical rendering, for migration from pre-receipt agents.
     pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
@@ -212,6 +214,7 @@ impl Targets {
             hooks: false,
             remove_hooks: false,
             peer_agent: None,
+            gc_agent: None,
             peer_agent_previous: None,
             hook_specs: Vec::new(),
             legacy_checkout: None,
@@ -421,7 +424,7 @@ pub struct ManualInclude {
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
     /// Called under the install lock after rechecking an exact match or absence,
-    /// before unlinking or forgetting an already missing managed peer agent.
+    /// before unlinking or forgetting an already missing managed agent.
     fn before_remove(&mut self, _action: &Action) -> std::io::Result<()> {
         Ok(())
     }
@@ -497,6 +500,7 @@ impl Snapshots {
             for entry in &previous.entries {
                 if entry.selector == "binary"
                     || entry.selector == "git-hook:pre-push"
+                    || entry.selector == "gc-agent"
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
                         .is_some_and(|owner| selected.contains(&owner))
                 {
@@ -648,6 +652,25 @@ fn desired(
             "peer-agent".into(),
         )?;
     }
+    if let Some(bytes) = &targets.gc_agent {
+        let path = gc_agent_plist(targets.roots.state.as_path()).ok_or(
+            InstallError::InvalidConfig("gc agent requires the default state root"),
+        )?;
+        let home = provenant_supervisor::fs::canonicalize(&targets.home)
+            .unwrap_or_else(|_| targets.home.clone());
+        if path != home.join("Library/LaunchAgents/dev.provenant.gc.plist") {
+            return Err(InstallError::Conflict(path));
+        }
+        insert(
+            path,
+            Value::File {
+                bytes: bytes.clone(),
+                mode: 0o600,
+            },
+            None,
+            "gc-agent".into(),
+        )?;
+    }
     for target in &targets.harnesses {
         let mut skills = BTreeMap::new();
         for path in release.files.keys() {
@@ -714,6 +737,11 @@ pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
     let home = state.ancestors().nth(4)?;
     (state == home.join(".local/share/provenant/v1"))
         .then(|| home.join("Library/LaunchAgents/dev.provenant.peer.plist"))
+}
+
+/// The scheduled collector shares the per-user default-state ownership scope.
+pub fn gc_agent_plist(state: &Path) -> Option<PathBuf> {
+    peer_agent_plist(state).map(|path| path.with_file_name("dev.provenant.gc.plist"))
 }
 
 fn validate_removal(
@@ -786,7 +814,7 @@ pub(crate) fn same_link_target(actual: &Path, expected: &Path) -> bool {
 pub fn plan_install(
     release: Release,
     targets: Targets,
-    snapshots: Snapshots,
+    mut snapshots: Snapshots,
 ) -> Result<InstallPlan, InstallError> {
     let mut desired = desired(&release, &targets)?;
     for (path, value) in &snapshots.harness.files {
@@ -997,7 +1025,10 @@ pub fn plan_install(
                 }
                 continue;
             }
-            if entry.selector != "binary" && entry.selector != "git-hook:pre-push" {
+            if !matches!(
+                entry.selector.as_str(),
+                "binary" | "git-hook:pre-push" | "gc-agent"
+            ) {
                 let Some(owner) = owner else {
                     continue;
                 };
@@ -1011,17 +1042,24 @@ pub fn plan_install(
                 .entries
                 .get(&path)
                 .ok_or_else(|| InstallError::Drift(path.clone()))?;
-            if let Some(before) = current
-                && matches_owned(&before.value, &entry.expected)
+            if current
+                .as_ref()
+                .is_some_and(|before| matches_owned(&before.value, &entry.expected))
+                || (current.is_none() && entry.selector == "gc-agent")
             {
                 actions.push(Action {
                     path: entry.path.clone(),
                     disposition: Disposition::Remove,
                     selector: entry.selector.clone(),
-                    before: Some(entry.expected.clone()),
+                    before: current.as_ref().map(|_| entry.expected.clone()),
                     after: None,
                     identity: identity(current),
                     edits: Vec::new(),
+                });
+            } else if entry.selector == "gc-agent" {
+                snapshots.harness.findings.push(InstallFinding {
+                    rule: "relinquished_modified_entry".into(),
+                    path: entry.path.clone(),
                 });
             }
         }
@@ -1313,7 +1351,15 @@ pub fn install(
                 .ok_or_else(|| InstallError::Drift(path.clone()))?;
             recheck(&path, before, fs, state_root)?;
             if action.disposition == Disposition::Remove {
-                remove_entry(&path, fs, state_root)
+                reporter
+                    .before_remove(action)
+                    .map_err(InstallError::Preview)?;
+                recheck(&path, before, fs, state_root)?;
+                if before.is_some() {
+                    remove_entry(&path, fs, state_root)
+                } else {
+                    Ok(())
+                }
             } else {
                 let value = if action.selector == "receipt" {
                     Value::File {
@@ -1880,8 +1926,13 @@ fn permitted_entry(
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
-        if entry.selector == "peer-agent" {
-            return Ok(peer_agent_plist(state_root).as_ref() == Some(&path)
+        if matches!(entry.selector.as_str(), "peer-agent" | "gc-agent") {
+            let expected_path = if entry.selector == "peer-agent" {
+                peer_agent_plist(state_root)
+            } else {
+                gc_agent_plist(state_root)
+            };
+            return Ok(expected_path.as_ref() == Some(&path)
                 && matches!(
                     entry.expected,
                     OwnedValue::File {
@@ -2225,8 +2276,10 @@ pub fn uninstall(
     }
     let removed = |entry: &OwnedEntry, owner: &Option<TargetId>| {
         owner.as_ref().is_some_and(|id| selected.contains(id))
-            || (matches!(entry.selector.as_str(), "git-hook:pre-push" | "peer-agent")
-                && selected == registered)
+            || (matches!(
+                entry.selector.as_str(),
+                "git-hook:pre-push" | "peer-agent" | "gc-agent"
+            ) && selected == registered)
     };
 
     let mut removals = Vec::new();
@@ -2277,7 +2330,10 @@ pub fn uninstall(
         let before = snapshot(&path, fs)?;
         // A deleted plist can still have a loaded service. Keep its stop in the
         // same locked, retryable removal path as an unchanged recorded plist.
-        if before.is_none() && (entry.selector != "peer-agent" || !recorded_peer_agent) {
+        if before.is_none()
+            && entry.selector != "gc-agent"
+            && (entry.selector != "peer-agent" || !recorded_peer_agent)
+        {
             continue;
         }
         if before

@@ -4,9 +4,9 @@
 
 ## Context
 
-Current retention is deliberately report/archive-only. Universal retention
+Durable run retention remains report/archive-only. Universal retention
 classes and typed deletion would add state fields and lifecycle machinery
-before a concrete deletion requirement exists.
+before a concrete requirement for those abstractions exists.
 
 ## Decision
 
@@ -40,6 +40,16 @@ handles have no payload removal. Settlement keeps ordinary lock-name
 protection while reservations may remain.
 Stable owner locks outside `tmp/` remain protected: unlinking a lock and
 recreating its name could split writer exclusion across different inodes.
+
+Scheduled lane cache GC is approved automatic deletion as of 2026-10-26
+(#1591). On macOS, installation schedules collection every six hours by
+default. User configuration can disable it or change the idle threshold and
+optional free-space floor. Collection is scoped to lane build caches, uses
+verified detachment and preserves live writers, reservations and unobservable
+owners. A free-space floor collects eligible caches oldest-first by last write
+after the orphaned, tombstoned and idle pass. This approval does not extend to
+durable run artefacts or general state deletion. Automatic removal of merged
+worktrees is tracked separately in #1683.
 
 ## Consequences
 
