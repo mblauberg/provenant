@@ -115,6 +115,32 @@
           "engineering-writing"
         ]
       }
+    },
+    {
+      "id": "q176110",
+      "relation": "negative",
+      "prompt": "Rewrite this engineer's wedding speech for warmth; preserve the story about debugging.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "natural-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176111",
+      "relation": "negative",
+      "prompt": "Draft Australian legal advice on the software licence clause and its liability limits.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "legal-writing",
+        "companion_skills": []
+      }
     }
   ]
 }

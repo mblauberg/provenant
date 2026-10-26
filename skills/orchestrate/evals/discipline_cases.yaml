@@ -1,4 +1,10 @@
 cases:
+  - id: leading_review_brief
+    prompt: "Dispatch an independent review with this brief: Review src/cache.rs against references/cache-rubric.md. I think updates are lost; confirm the race and return P1."
+    expected: Flag and remove the chair's hypothesis and expected verdict. Send the target and rubric, require the reviewer to read it, and preserve independent discovery.
+  - id: agent_filed_issue_provenance
+    prompt: A Fabric writer is authorised to file an issue from run run-123 with PROVENANT_AGENT_LABEL=review. Fill its dispatch template's issue-filing instructions.
+    expected: "Apply source:agent and end the issue body with 'Filed-by: review run-123'. Include this for any agent-filed issue, without treating the template as filing authority."
   - id: silent_no_change_wake
     prompt: A lane-completion wake fires; reconcile shows the same lanes running, nothing landed, no new blocker and no decision due.
     expected: Checkpoint the state file and re-arm the wait without sending the owner a message.

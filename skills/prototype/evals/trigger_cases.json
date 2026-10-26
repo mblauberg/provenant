@@ -127,6 +127,32 @@
         "primary_skill": "ui-ux-design",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176124",
+      "relation": "negative",
+      "prompt": "The prototype answered feasibility; implement the approved production version through review.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176125",
+      "relation": "negative",
+      "prompt": "Before building a prototype, settle which feasibility question and time budget the owner approves.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
     }
   ]
 }

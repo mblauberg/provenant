@@ -3,10 +3,12 @@
 Run this checklist when asked to sweep, and as part of a steward pass's
 `run_sweep` event.
 
-- **Stale.** No activity and no owner response past the repository's own
-  staleness window (declare it if the repo hasn't). Comment naming the last
-  known evidence and ask once before closing; close as not-planned if there is
-  still no response after that.
+- **Stale.** Content no longer matches current evidence: a referenced PR has
+  merged, a dependency has closed, or the cited evidence has moved. Re-verify
+  the claim against current state, then correct it or propose closure with
+  evidence and a terminal reason. Ask once where intent remains unclear;
+  silence alone cannot justify closure. Neither age nor `updatedAt` decides
+  staleness; bulk edits refresh timestamps without resolving the claim.
 - **Orphaned.** A child issue whose parent epic is closed or deleted, or a
   sub-issue link that no longer resolves. Re-parent under the right epic or
   make it standalone; never leave a dangling reference.

@@ -116,6 +116,32 @@
           "tdd"
         ]
       }
+    },
+    {
+      "id": "q176108",
+      "relation": "negative",
+      "prompt": "The crash diagnosis and root cause are confirmed; implement the approved fix.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176109",
+      "relation": "negative",
+      "prompt": "Inspect this diff for possible performance regressions.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
     }
   ]
 }

@@ -115,6 +115,32 @@
           "natural-writing"
         ]
       }
+    },
+    {
+      "id": "q176104",
+      "relation": "negative",
+      "prompt": "Draw this dependency diagram in Mermaid, preserving the D2-labelled service names.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-docs",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176105",
+      "relation": "negative",
+      "prompt": "The D2 diagram is complete; rewrite the accompanying README paragraph only.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
     }
   ]
 }

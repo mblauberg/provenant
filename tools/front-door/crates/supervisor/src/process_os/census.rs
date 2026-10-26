@@ -5,7 +5,8 @@
 //! description; it does not create a process-control capability.
 //!
 //! Darwin's public libproc API does not report which process owns a `flock`,
-//! so nested custody checks return `Unknown` there. Darwin can also report an
+//! so nested custody checks return `Unknown` there, and on every other
+//! platform, where custody is unsupported. Darwin can also report an
 //! exited zombie as absent; `ProcessFact::zombie` does not cover every zombie.
 use crate::census::{
     Census, CensusError, ObservationIssue, OwnerRegistration, ProcessFact, ProcessIdentity,
@@ -48,7 +49,6 @@ pub(crate) fn prove_nested_custody(
     registration: &OwnerRegistration,
     custody_file: &File,
 ) -> Result<HeldCustodyProof, CustodyProofError> {
-    use std::os::unix::fs::MetadataExt;
     let identity = registration.identity();
     identity
         .validate()
@@ -78,16 +78,7 @@ pub(crate) fn prove_nested_custody(
     if !metadata.is_file() {
         return Err(CustodyProofError::InvalidDescriptor);
     }
-    #[cfg(target_os = "linux")]
-    let held = linux_owner_holds_lock(identity.pid, metadata.dev(), metadata.ino())?;
-    #[cfg(target_os = "macos")]
-    let held = darwin_owner_holds_lock(identity.pid, metadata.dev(), metadata.ino())?;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let held = {
-        let _ = (identity, metadata);
-        return Err(CustodyProofError::Unknown);
-    };
-    if !held {
+    if !owner_holds_lock(identity.pid, &metadata)? {
         return Err(CustodyProofError::NotHeld);
     }
     match observer.observe(identity.pid) {
@@ -102,124 +93,16 @@ pub(crate) fn prove_nested_custody(
     })
 }
 
-#[cfg(target_os = "linux")]
-fn linux_owner_holds_lock(pid: i64, device: u64, inode: u64) -> Result<bool, CustodyProofError> {
+#[cfg(target_os = "macos")]
+fn owner_holds_lock(pid: i64, metadata: &std::fs::Metadata) -> Result<bool, CustodyProofError> {
     use std::os::unix::fs::MetadataExt;
-    let directory = format!("/proc/{pid}/fd");
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            return Err(CustodyProofError::Unknown);
-        }
-        Err(_) => return Err(CustodyProofError::Unknown),
-    };
-    let mut inspected = 0_usize;
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => return Err(CustodyProofError::Unknown),
-        };
-        inspected = inspected.saturating_add(1);
-        if inspected > 4096 {
-            return Err(CustodyProofError::Unknown);
-        }
-        let Some(fd_name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if fd_name.parse::<i32>().ok().filter(|fd| *fd >= 0).is_none() {
-            continue;
-        }
-        let path = entry.path();
-        let before = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if before.dev() != device || before.ino() != inode {
-            continue;
-        }
-        let fdinfo = format!("/proc/{pid}/fdinfo/{fd_name}");
-        let info = match read_small_text(&fdinfo, 64 * 1024) {
-            Ok(info) => info,
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                return Err(CustodyProofError::Unknown);
-            }
-            Err(_) => continue,
-        };
-        let lock_matches = info
-            .lines()
-            .any(|line| lock_record_matches(line, device, inode));
-        let after = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if lock_matches
-            && after.dev() == device
-            && after.ino() == inode
-            && before.dev() == after.dev()
-            && before.ino() == after.ino()
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    darwin_owner_holds_lock(pid, metadata.dev(), metadata.ino())
 }
 
-#[cfg(target_os = "linux")]
-fn lock_record_matches(line: &str, device: u64, inode: u64) -> bool {
-    let Some(rest) = line.strip_prefix("lock:") else {
-        return false;
-    };
-    let fields: Vec<_> = rest.split_whitespace().collect();
-    let Some(file_identity) = fields.get(5) else {
-        return false;
-    };
-    let mut parts = file_identity.split(':');
-    let (Some(major), Some(minor), Some(lock_inode), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    let major_value = match u64::from_str_radix(major, 16) {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-    let minor_value = match u64::from_str_radix(minor, 16) {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-    let inode_value = match lock_inode.parse::<u64>() {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-    fields.get(1) == Some(&"FLOCK")
-        && fields.get(2) == Some(&"ADVISORY")
-        && fields.get(3) == Some(&"WRITE")
-        && inode_value == inode
-        && major_value == linux_device_major(device)
-        && minor_value == linux_device_minor(device)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_device_major(device: u64) -> u64 {
-    ((device >> 8) & 0x0fff) | ((device >> 32) & !0x0fff)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_device_minor(device: u64) -> u64 {
-    (device & 0x00ff) | ((device >> 12) & !0x00ff)
-}
-
-#[cfg(target_os = "linux")]
-fn read_small_text(path: &str, limit: u64) -> io::Result<String> {
-    use std::io::Read;
-    let file = File::open(path)?;
-    let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(io::Error::from(io::ErrorKind::InvalidData));
-    }
-    String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+/// Custody is unsupported off macOS.
+#[cfg(not(target_os = "macos"))]
+fn owner_holds_lock(_pid: i64, _metadata: &std::fs::Metadata) -> Result<bool, CustodyProofError> {
+    Err(CustodyProofError::Unknown)
 }
 
 #[cfg(target_os = "macos")]
@@ -1321,34 +1204,28 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn lock_record_requires_exact_file_identity_and_write_flock() {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = match std::fs::metadata("/proc/self/exe") {
-            Ok(metadata) => metadata,
-            Err(_) => return,
+    fn custody_proof_is_unknown_off_macos() {
+        let Ok(boot) = SystemProcessObserver::boot_identity() else {
+            return;
         };
-        let major = linux_device_major(metadata.dev());
-        let minor = linux_device_minor(metadata.dev());
-        let locked = format!(
-            "lock: 1: FLOCK ADVISORY WRITE 1234 {major:x}:{minor:x}:{} 0 EOF",
-            metadata.ino()
-        );
-        let unlocked = format!(
-            "lock: 1: POSIX ADVISORY WRITE 1234 {major:x}:{minor:x}:{} 0 EOF",
-            metadata.ino()
-        );
-        assert!(lock_record_matches(&locked, metadata.dev(), metadata.ino()));
-        assert!(!lock_record_matches(
-            &unlocked,
-            metadata.dev(),
-            metadata.ino()
-        ));
-        assert!(!lock_record_matches(
-            &locked,
-            metadata.dev(),
-            metadata.ino().saturating_add(1)
-        ));
+        let observer = match NativeProcessObserver::for_boot(boot) {
+            Ok(observer) => observer,
+            Err(error) => panic!("boot key rejected: {error}"),
+        };
+        let ProcessObservation::Present(fact) = observer.observe(i64::from(std::process::id()))
+        else {
+            panic!("current process not observed");
+        };
+        let registration = OwnerRegistration::from_validated_registration(fact.identity);
+        let path = std::env::temp_dir().join(format!("census-proof-{}", std::process::id()));
+        let regular = match File::create(&path) {
+            Ok(file) => file,
+            Err(error) => panic!("create failed: {error}"),
+        };
+        let result = prove_nested_custody(&observer, &registration, &regular);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(CustodyProofError::Unknown)));
     }
 }

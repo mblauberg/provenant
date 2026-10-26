@@ -115,6 +115,32 @@
           "work-map"
         ]
       }
+    },
+    {
+      "id": "q176138",
+      "relation": "negative",
+      "prompt": "Refresh the work items' current owners, blockers and PR status on the tracker; the durable spec route is settled.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176139",
+      "relation": "negative",
+      "prompt": "Checkpoint this session's remaining work and handoff for tomorrow.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "session",
+        "companion_skills": []
+      }
     }
   ]
 }

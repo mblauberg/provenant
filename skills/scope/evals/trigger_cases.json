@@ -128,6 +128,32 @@
         "primary_skill": "scope",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q17550",
+      "relation": "negative",
+      "prompt": "The issue spec is approved and its fresh-reader questions are resolved. Implement the accepted criteria and retain reviewer evidence.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q17551",
+      "relation": "negative",
+      "prompt": "Proofread the approved spec for Australian spelling and shorter sentences; all requirements and decisions are settled.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
     }
   ]
 }

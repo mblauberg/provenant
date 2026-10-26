@@ -115,6 +115,32 @@
         "primary_skill": "orchestrate",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176100",
+      "relation": "negative",
+      "prompt": "Our mission statement mentions STOP and autonomous agents; shorten that paragraph.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "natural-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176101",
+      "relation": "negative",
+      "prompt": "Coordinate one bounded wave of autonomous research agents and finish after the synthesis.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "orchestrate",
+        "companion_skills": []
+      }
     }
   ]
 }

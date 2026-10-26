@@ -113,6 +113,32 @@
         "primary_skill": "diagnose",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176130",
+      "relation": "negative",
+      "prompt": "The incident is still active; reproduce the current failure and isolate its cause before any retrospective.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176131",
+      "relation": "negative",
+      "prompt": "Audit the skill's triggers for the misses reported in the retrospective; keep the audit read-only.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "skill-craft",
+        "companion_skills": []
+      }
     }
   ]
 }

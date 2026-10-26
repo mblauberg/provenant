@@ -1,0 +1,33 @@
+#!/bin/sh
+# Advisory only: possible session-scratch citations need a reader's judgement.
+set -u
+
+if ! root=$(git rev-parse --show-toplevel 2>/dev/null); then
+  echo 'check-scratch-paths: warning: cannot locate tracked files' >&2
+  exit 0
+fi
+if ! cd "$root"; then
+  echo 'check-scratch-paths: warning: cannot read repository' >&2
+  exit 0
+fi
+
+# Match literal variable names, not this process's environment.
+# shellcheck disable=SC2016
+patterns='/tmp/[^<[:space:]]|/private/tmp/[^<[:space:]*]|/var/folders/|\$TMPDIR|\$\{TMPDIR\}|\.agent-run/|\.local/share/provenant/v1/runs/|/runs/[^/<[:space:]]+/attempts/|\.(claude|codex)/plans/|[Pp][Ll][Aa][Nn][-_ ]([Cc][Oo][Dd][Ee]|[Ii][Dd])[[:space:]]*[:=][[:space:]]*[[:alnum:]_-]+'
+status=0
+# Specs, the constitution, runtime-path runbooks and fixtures describe these
+# paths on purpose.
+hits=$(git grep -n -I -E "$patterns" -- '*.md' .github/ISSUE_TEMPLATE \
+  ':(exclude)HARNESS.md' ':(exclude)docs/specs' \
+  ':(exclude)docs/runbooks/disk.md' ':(exclude)docs/runbooks/configuration.md' \
+  ':(exclude)**/tests/**' \
+  ':(exclude)**/fixtures/**' ':(exclude)**/evals/**') || status=$?
+case "$status" in
+  0)
+    printf '%s\n' "$hits" >&2
+    echo 'check-scratch-paths: warning: review possible scratch citations above; use resolvable project evidence' >&2
+    ;;
+  1) ;;
+  *) echo 'check-scratch-paths: warning: scan incomplete; inspect tracked docs manually' >&2 ;;
+esac
+exit 0
