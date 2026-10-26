@@ -1,4 +1,5 @@
 //! Real dispatch composition with isolated, synthetic provider processes.
+#![allow(clippy::disallowed_methods)]
 mod support;
 use serde_json::{Value, json};
 use std::{
