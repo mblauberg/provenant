@@ -29,7 +29,7 @@ const CLOCK: &dyn Clock = &Fixed;
 struct Fixed;
 impl Clock for Fixed {
     fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
-        WallTime::parse("2026-10-26T00:00:00Z")
+        WallTime::parse("2026-10-26T00:00:00.000000Z")
     }
     fn mono_now(&self) -> MonoTime {
         MonoTime::from_micros(0)
@@ -56,6 +56,7 @@ fn unattributed_events_omit_project_id_from_json() -> Result {
     std::fs::create_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
     record_tool(&roots, CLOCK, "fabric_identity", "ok", 1, None);
+    assert!(roots.state.as_path().join(LOG).is_file());
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
@@ -66,7 +67,7 @@ fn unattributed_events_omit_project_id_from_json() -> Result {
     assert!(
         events
             .iter()
-            .all(|event| event["timestamp"] == "2026-10-26T00:00:00Z")
+            .all(|event| event["timestamp"] == "2026-10-26T00:00:00.000000Z")
     );
     Ok(())
 }

@@ -24,7 +24,7 @@ responsibility or edges lands in this table in the same PR.
 | confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, supervisor's safe OS API |
 | providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota, supervisor |
 | quota | Quota windows, reset schedules, refresh scheduling and admission advice | records, config |
-| telemetry | Pure terminal-attempt usage/cost reduction and price schema | core, records |
+| telemetry | Terminal-attempt usage/cost reduction, price schema and bounded usage log | core, records, supervisor's safe filesystem API |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
 | sqlite | Shared safe SQLite opening, WAL setup, migration execution and budgeted busy retry | core, supervisor's safe filesystem API |
 | run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, sqlite |
