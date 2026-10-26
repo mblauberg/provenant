@@ -1343,6 +1343,27 @@ fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> 
 }
 
 #[test]
+fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "fixture-model");
+    let plan = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
+    let spec = agy::Agy.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    // Zero switches off agy's own print timeout, which would end a turn early.
+    assert!(
+        spec.argv
+            .windows(2)
+            .any(|pair| { pair[0] == "--print-timeout" && pair[1] == "0s" })
+    );
+    Ok(())
+}
+
+#[test]
 fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("cursor", "fixture-model");
