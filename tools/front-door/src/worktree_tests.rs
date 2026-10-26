@@ -3148,12 +3148,14 @@ fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
         ("fresh-tip", "at_integration_tip"),
         ("locked", "locked_or_prunable"),
     ] {
+        let retained = collected["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
+            .as_array()
+            .ok_or("retained")?;
         assert!(
-            collected["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
-                .as_array()
-                .ok_or("retained")?
+            retained
                 .iter()
-                .any(|entry| entry["branch"] == branch && entry["reason"] == reason)
+                .any(|entry| entry["branch"] == branch && entry["reason"] == reason),
+            "expected {branch} with {reason}; got {retained:?}"
         );
     }
     assert!(

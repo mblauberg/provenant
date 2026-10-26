@@ -1460,6 +1460,7 @@ const MAX_PRUNE_BRANCHES: usize = 100;
 
 struct RemovedTree {
     info: WorktreeInfo,
+    lane_cache: Option<PathBuf>,
     _writer: LockGuard,
 }
 
@@ -1578,12 +1579,6 @@ fn remove_tree_when(
     tombstone_identity(&locked)?;
     // Keep writer exclusion through cache detachment and verified deletion.
     // Cleanup remains best-effort after Git has removed the worktree.
-    if let Some(cargo_cache) = cargo_cache
-        && let Err(error) =
-            crate::permissions::prune_worktree_cargo_cache(context.home, &cargo_cache.path)
-    {
-        warn_cache_removal(&error);
-    }
     let info = WorktreeInfo {
         path: canonical,
         branch: Some(branch.as_str().to_owned()),
@@ -1594,6 +1589,7 @@ fn remove_tree_when(
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {
         info,
+        lane_cache: cargo_cache.map(|cache| cache.path),
         _writer: writer,
     })
 }
@@ -1833,6 +1829,7 @@ fn remove_merged_candidate(
     branch_tips: &BTreeMap<GitRefName, GitOid>,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
+    detached: &mut Vec<RemovedTree>,
 ) -> Result<(), WorktreeError> {
     let Some(tip) = branch_tips.get(branch).copied() else {
         retain(outcome, branch, RetainReason::Changed);
@@ -1865,7 +1862,8 @@ fn remove_merged_candidate(
             match remove_tree(context, entry, tip, cancel) {
                 Ok(removed) => {
                     outcome.removed.push(removed.info.clone());
-                    Some(removed)
+                    detached.push(removed);
+                    Some(())
                 }
                 Err(error) => {
                     retain(outcome, branch, retain_reason(&error));
@@ -1901,96 +1899,111 @@ pub fn remove(
     cancel: &CancelToken,
 ) -> Result<RemoveOutcome, WorktreeError> {
     validate_binding(context)?;
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-    context.repo.revalidate()?;
-    let entries = read_worktrees(context, cancel)?;
-    let mut outcome = RemoveOutcome::default();
-    match request {
-        WorktreeRemove::Name {
-            name,
-            discard,
-            integration,
-        } => {
-            let (integration, integration_tip) = match integration {
-                Some(text) => pin_integration(context, &text, cancel)?,
-                None => primary_integration(context, cancel)?,
-            };
-            let branch_tips = read_branch_tips(context, cancel)?;
-            let entry = named_worktree(&entries, &name, context.repo.root_path())?;
-            let branch = entry.branch.clone().ok_or(WorktreeError::InvalidRequest)?;
-            let tip = branch_tips
-                .get(&branch)
-                .copied()
-                .filter(|tip| *tip == entry.head)
-                .ok_or(WorktreeError::IdentityChanged)?;
-            let disposition = keep_disposition(
-                context,
-                &branch,
-                tip,
-                PruneRange {
-                    integration: &integration,
-                    tip: integration_tip,
-                },
-                Policy::Named { discard },
-                cancel,
-            );
-            // A dirty or live worktree fails here, before any branch changes.
-            let removed = remove_tree(context, entry, tip, cancel)?;
-            outcome.removed.push(removed.info.clone());
-            settle_branch(context, &branch, tip, disposition, cancel, &mut outcome)?;
-        }
-        WorktreeRemove::Merged { integration, scope } => {
-            let (integration, integration_tip) = pin_integration(context, &integration, cancel)?;
-            let branch_tips = read_branch_tips(context, cancel)?;
-            let mut branches = BTreeMap::new();
-            match scope {
-                PruneScope::Branches(names) => {
-                    if names.is_empty() || names.len() > MAX_PRUNE_BRANCHES {
-                        return Err(WorktreeError::InvalidRequest);
-                    }
-                    for name in names {
-                        let branch =
-                            GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
-                        if branches.insert(branch, ()).is_some() {
-                            return Err(WorktreeError::InvalidRequest);
-                        }
-                    }
-                }
-                PruneScope::Since(bound) => {
-                    if !is_ancestor(context, bound, integration_tip, cancel)? {
-                        return Err(WorktreeError::InvalidRequest);
-                    }
-                    // Scope ancestry-proven tips to the pinned graph delta.
-                    // Squash merges lack exact-head proof here and stay put.
-                    for (branch, tip) in &branch_tips {
-                        if is_ancestor(context, *tip, integration_tip, cancel)?
-                            && !is_ancestor(context, *tip, bound, cancel)?
-                        {
-                            branches.insert(branch.clone(), ());
-                        }
-                    }
-                    if branches.len() > MAX_PRUNE_BRANCHES {
-                        return Err(WorktreeError::InvalidRequest);
-                    }
-                }
-            }
-            for branch in branches.keys() {
-                remove_merged_candidate(
+    let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let mut detached = Vec::new();
+    let result = (|| {
+        context.repo.revalidate()?;
+        let entries = read_worktrees(context, cancel)?;
+        let mut outcome = RemoveOutcome::default();
+        match request {
+            WorktreeRemove::Name {
+                name,
+                discard,
+                integration,
+            } => {
+                let (integration, integration_tip) = match integration {
+                    Some(text) => pin_integration(context, &text, cancel)?,
+                    None => primary_integration(context, cancel)?,
+                };
+                let branch_tips = read_branch_tips(context, cancel)?;
+                let entry = named_worktree(&entries, &name, context.repo.root_path())?;
+                let branch = entry.branch.clone().ok_or(WorktreeError::InvalidRequest)?;
+                let tip = branch_tips
+                    .get(&branch)
+                    .copied()
+                    .filter(|tip| *tip == entry.head)
+                    .ok_or(WorktreeError::IdentityChanged)?;
+                let disposition = keep_disposition(
                     context,
-                    branch,
+                    &branch,
+                    tip,
                     PruneRange {
                         integration: &integration,
                         tip: integration_tip,
                     },
-                    &entries,
-                    &branch_tips,
+                    Policy::Named { discard },
                     cancel,
-                    &mut outcome,
-                )?;
+                );
+                // A dirty or live worktree fails here, before any branch changes.
+                let removed = remove_tree(context, entry, tip, cancel)?;
+                outcome.removed.push(removed.info.clone());
+                detached.push(removed);
+                settle_branch(context, &branch, tip, disposition, cancel, &mut outcome)?;
+            }
+            WorktreeRemove::Merged { integration, scope } => {
+                let (integration, integration_tip) =
+                    pin_integration(context, &integration, cancel)?;
+                let branch_tips = read_branch_tips(context, cancel)?;
+                let mut branches = BTreeMap::new();
+                match scope {
+                    PruneScope::Branches(names) => {
+                        if names.is_empty() || names.len() > MAX_PRUNE_BRANCHES {
+                            return Err(WorktreeError::InvalidRequest);
+                        }
+                        for name in names {
+                            let branch = GitRefName::branch(name)
+                                .map_err(|_| WorktreeError::InvalidRequest)?;
+                            if branches.insert(branch, ()).is_some() {
+                                return Err(WorktreeError::InvalidRequest);
+                            }
+                        }
+                    }
+                    PruneScope::Since(bound) => {
+                        if !is_ancestor(context, bound, integration_tip, cancel)? {
+                            return Err(WorktreeError::InvalidRequest);
+                        }
+                        // Scope ancestry-proven tips to the pinned graph delta.
+                        // Squash merges lack exact-head proof here and stay put.
+                        for (branch, tip) in &branch_tips {
+                            if is_ancestor(context, *tip, integration_tip, cancel)?
+                                && !is_ancestor(context, *tip, bound, cancel)?
+                            {
+                                branches.insert(branch.clone(), ());
+                            }
+                        }
+                        if branches.len() > MAX_PRUNE_BRANCHES {
+                            return Err(WorktreeError::InvalidRequest);
+                        }
+                    }
+                }
+                for branch in branches.keys() {
+                    remove_merged_candidate(
+                        context,
+                        branch,
+                        PruneRange {
+                            integration: &integration,
+                            tip: integration_tip,
+                        },
+                        &entries,
+                        &branch_tips,
+                        cancel,
+                        &mut outcome,
+                        &mut detached,
+                    )?;
+                }
             }
         }
+        Ok(outcome)
+    })();
+    drop(repository);
+    for removed in detached {
+        if let Some(cache) = removed.lane_cache.as_deref()
+            && let Err(error) = crate::permissions::prune_worktree_cargo_cache(context.home, cache)
+        {
+            warn_cache_removal(&error);
+        }
     }
-    Ok(outcome)
+    result
 }
 
 #[cfg(test)]
@@ -2262,7 +2275,7 @@ mod lifecycle_tests {
         let terminal = |_: &Path| {
             let count = calls.get() + 1;
             calls.set(count);
-            if count == 2 {
+            if count == 1 {
                 let repository_free = context
                     .project_state
                     .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)

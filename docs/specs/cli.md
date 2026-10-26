@@ -219,9 +219,8 @@ Consumers must tolerate reason values they do not recognise.
 result), `output[]` with `path`, `removed` and `reason`, and optional
 `upstream_error`. In previews, output reason `would_remove` and `removed: false`
 mark eligible directories. `alerts[]` records low-disk alerts or failures.
-Configured
-`gc.alert_below` emits a Fabric note and gc log message once per observed dip;
-previews leave the persistent latch unchanged.
+Configured `gc.alert_below` emits a Fabric note and gc log message once per
+observed dip; previews leave the persistent latch unchanged.
 
 `chair switch` quotes each handoff argument in single quotes and writes any
 apostrophe as a double-quoted `'`, which sh, bash, zsh and fish all read

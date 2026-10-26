@@ -81,9 +81,8 @@ collects eligible caches oldest-first by last write to reach a free-space
 floor. Both paths protect live writers and reservations. macOS default-state
 installs schedule cache GC every six hours; the `[gc]` configuration can
 disable or adjust it. Bare `provenant gc` deletes eligible lane caches and
-previews merged worktree and declared output cleanup. `--apply` also deletes
-those entries; `--dry-run` previews every class. The installed agent passes
-`--apply`.
+previews merged worktree and declared output cleanup. `--apply` deletes those
+entries; `--dry-run` previews every class. The installed agent passes `--apply`.
 GC fetches `origin`'s default branch and selects clean registered linked
 worktrees with known-terminal lanes and merged commits of their own. Tips
 equal to the fetched upstream tip or on its first-parent history are kept,
@@ -93,8 +92,7 @@ Broken registrations are skipped individually. Configured regenerable
 output requires a clean or ignored-only registered worktree whose associated
 lanes are all known terminal. Ignored output may be pruned; tracked paths,
 configured keep paths, symlinks and output written within 24 hours are kept.
-See the
-[configuration runbook](runbooks/configuration.md#lane-cache-collection).
+See the [configuration runbook](runbooks/configuration.md#lane-cache-collection).
 Output pruning holds the worktree's writer lock; the repository lock is held
 only for individual worktree removals. Tracked paths and their ancestors are
 indexed once per worktree.

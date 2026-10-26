@@ -16,6 +16,7 @@ use provenant_supervisor::{
 };
 use serde::Serialize;
 use std::{
+    cell::RefCell,
     ffi::OsStr,
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -408,16 +409,6 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
     .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
     let mut worktree_cleanup = Vec::new();
     for project in &mut projects {
-        // A single snapshot per project and sweep bounds run-store IO. Writer
-        // locks and reservations still recheck custody at each mutation.
-        let states = crate::gc_support::lane_states(&roots, project.binding.project_id()).ok();
-        let terminal =
-            |path: &Path| states.as_ref().and_then(|states| states.get(path)) == Some(&true);
-        let no_live_lanes = |path: &Path| {
-            states
-                .as_ref()
-                .is_some_and(|states| states.no_live_lanes(path))
-        };
         let settings = config
             .gc
             .projects
@@ -434,6 +425,39 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                 let (upstream, upstream_error) = match crate::gc_support::fetch_default(context) {
                     Ok(upstream) => (upstream, None),
                     Err(error) => (None, Some(error.to_string())),
+                };
+                // Fetch can take a while, so begin the single sweep snapshot
+                // only after it completes. A stale snapshot is refreshed by
+                // the callbacks below, which collect() invokes under the
+                // worktree writer lock before each mutation.
+                let states = RefCell::new(
+                    crate::gc_support::lane_states(&roots, project.binding.project_id()).ok(),
+                );
+                let refresh = || {
+                    let mut states = states.borrow_mut();
+                    if !states
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.is_current())
+                    {
+                        *states =
+                            crate::gc_support::lane_states(&roots, project.binding.project_id())
+                                .ok();
+                    }
+                };
+                let terminal = |path: &Path| {
+                    refresh();
+                    states
+                        .borrow()
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.get(path))
+                        == Some(&true)
+                };
+                let no_live_lanes = |path: &Path| {
+                    refresh();
+                    states
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.no_live_lanes(path))
                 };
                 let now_ns = SystemClock
                     .wall_now()

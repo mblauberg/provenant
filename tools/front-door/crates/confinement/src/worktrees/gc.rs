@@ -44,12 +44,16 @@ pub fn collect(
         read_worktrees(context, cancel)?
     };
     let primary = canonicalize(context.repo.root_path())?;
+    let managed = primary.join(".worktrees");
     let mut report = WorktreeGcReport {
         dry_run: policy.dry_run,
         ..Default::default()
     };
     for lane in lanes {
         if lane.path == primary {
+            continue;
+        }
+        if !lane.path.starts_with(&managed) {
             continue;
         }
         let Some(branch) = lane
@@ -70,7 +74,7 @@ pub fn collect(
             );
             continue;
         }
-        if lane.writer != WriterState::Free || !(policy.no_live_lanes)(&lane.path) {
+        if lane.writer != WriterState::Free {
             retain(&mut report.worktrees, &branch, RetainReason::UnknownWriter);
             continue;
         }
@@ -82,10 +86,10 @@ pub fn collect(
             continue;
         }
         let mut preview_clean = lane.dirty == WorktreeCondition::Clean;
-        if !policy.regenerable.is_empty() && (policy.terminal)(&lane.path) {
+        if !policy.regenerable.is_empty() {
             let mut prune = || -> Result<(), WorktreeError> {
                 let locked = lock_worktree_for_mutation(context, entry, cancel)?;
-                if !(policy.terminal)(&lane.path) {
+                if !(policy.terminal)(&lane.path) || !(policy.no_live_lanes)(&lane.path) {
                     return Err(WorktreeError::UnknownWriter);
                 }
                 if !matches!(
@@ -136,8 +140,10 @@ pub fn collect(
                 Ok(())
             };
             if let Err(error) = prune() {
-                retain(&mut report.worktrees, &branch, retain_reason(&error));
-                continue;
+                if !matches!(error, WorktreeError::UnknownWriter) {
+                    retain(&mut report.worktrees, &branch, retain_reason(&error));
+                    continue;
+                }
             }
         }
         let Some(upstream) = policy.upstream else {
@@ -173,12 +179,9 @@ pub fn collect(
                 continue;
             }
         }
-        if !(policy.terminal)(&lane.path) {
-            retain(&mut report.worktrees, &branch, RetainReason::UnknownWriter);
-            continue;
-        }
         if policy.dry_run {
-            if preview_clean {
+            if preview_clean && (policy.terminal)(&lane.path) && (policy.no_live_lanes)(&lane.path)
+            {
                 report.worktrees.removed.push(lane.clone());
                 report
                     .worktrees
@@ -187,30 +190,42 @@ pub fn collect(
             }
             continue;
         }
-        let _repository = match repository_lock(context, LockMode::Exclusive, cancel) {
-            Ok(lock) => lock,
-            Err(error) => {
-                retain(&mut report.worktrees, &branch, retain_reason(&error));
-                continue;
-            }
-        };
-        match remove_tree_when(context, entry, lane.head, cancel, &|| {
-            (policy.terminal)(&lane.path) && (policy.no_live_lanes)(&lane.path)
-        }) {
-            Ok(removed) => {
-                report.worktrees.removed.push(removed.info.clone());
-                if let Err(error) = settle_branch(
-                    context,
-                    &branch,
-                    lane.head,
-                    Disposition::Merged,
-                    cancel,
-                    &mut report.worktrees,
-                ) {
+        let removed = {
+            let _repository = match repository_lock(context, LockMode::Exclusive, cancel) {
+                Ok(lock) => lock,
+                Err(error) => {
                     retain(&mut report.worktrees, &branch, retain_reason(&error));
+                    continue;
+                }
+            };
+            match remove_tree_when(context, entry, lane.head, cancel, &|| {
+                (policy.terminal)(&lane.path) && (policy.no_live_lanes)(&lane.path)
+            }) {
+                Ok(removed) => {
+                    report.worktrees.removed.push(removed.info.clone());
+                    if let Err(error) = settle_branch(
+                        context,
+                        &branch,
+                        lane.head,
+                        Disposition::Merged,
+                        cancel,
+                        &mut report.worktrees,
+                    ) {
+                        retain(&mut report.worktrees, &branch, retain_reason(&error));
+                    }
+                    Some(removed)
+                }
+                Err(error) => {
+                    retain(&mut report.worktrees, &branch, retain_reason(&error));
+                    None
                 }
             }
-            Err(error) => retain(&mut report.worktrees, &branch, retain_reason(&error)),
+        };
+        if let Some(removed) = removed
+            && let Some(cache) = removed.lane_cache.as_deref()
+            && let Err(error) = crate::permissions::prune_worktree_cargo_cache(context.home, cache)
+        {
+            warn_cache_removal(&error);
         }
     }
     Ok(report)

@@ -46,7 +46,7 @@ pub(crate) fn fetch_default(
         ("LANG".into(), "C".into()),
     ])
     .collect();
-    let run = |args: &[&str]| -> Result<_, Error> {
+    let run = |args: &[&str], timeout: Duration| -> Result<_, Error> {
         let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
             .chain(
                 [
@@ -76,7 +76,7 @@ pub(crate) fn fetch_default(
                 .map(OsString::from),
             )
             .collect();
-        let mut options = ExecOptions::new(&argv, context.repo.root_path(), Duration::from_secs(5));
+        let mut options = ExecOptions::new(&argv, context.repo.root_path(), timeout);
         options.env = Some(&environment);
         options.stdin = Some(b"");
         options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
@@ -94,14 +94,20 @@ pub(crate) fn fetch_default(
         }
         Ok(output)
     };
-    let remote = run(&["config", "--get", "remote.origin.url"])?;
+    let remote = run(
+        &["config", "--get", "remote.origin.url"],
+        Duration::from_secs(5),
+    )?;
     if remote.termination == Termination::Exit(1) {
         return Ok(None);
     }
     if remote.termination != Termination::Exit(0) {
         return Err(Error::GcObservation("cannot read origin"));
     }
-    let advertised = run(&["ls-remote", "--symref", "origin", "HEAD"])?;
+    let advertised = run(
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        Duration::from_secs(60),
+    )?;
     if advertised.termination != Termination::Exit(0) {
         return Err(Error::GcObservation(
             "cannot observe upstream default branch",
@@ -120,19 +126,25 @@ pub(crate) fn fetch_default(
         .map_err(|_| Error::GcObservation("invalid upstream default branch"))?;
     let reference = format!("refs/remotes/origin/{branch}");
     let refspec = format!("+refs/heads/{branch}:{reference}");
-    let fetched = run(&[
-        "fetch",
-        "--no-tags",
-        "--no-recurse-submodules",
-        "--no-write-fetch-head",
-        "--refmap=",
-        "origin",
-        &refspec,
-    ])?;
+    let fetched = run(
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "origin",
+            &refspec,
+        ],
+        Duration::from_secs(60),
+    )?;
     if fetched.termination != Termination::Exit(0) {
         return Err(Error::GcObservation("cannot fetch upstream default branch"));
     }
-    let tip = run(&["rev-parse", "--verify", &format!("{reference}^{{commit}}")])?;
+    let tip = run(
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        Duration::from_secs(5),
+    )?;
     if tip.termination != Termination::Exit(0) {
         return Err(Error::GcObservation("cannot pin fetched upstream"));
     }
@@ -147,6 +159,7 @@ pub(crate) fn fetch_default(
 /// a nested lane is subject to the same terminal-state rule as its parent.
 pub(crate) struct LaneSnapshot {
     states: BTreeMap<PathBuf, bool>,
+    terminal_times: BTreeMap<PathBuf, i64>,
     stores: Vec<StoreSnapshot>,
     stale: std::cell::Cell<bool>,
 }
@@ -249,6 +262,15 @@ fn child_membership(
     Ok(Some((children.metadata()?, names)))
 }
 
+/// A terminal attempt authorises only the worktree instance that existed
+/// when it finished. For linked worktrees, the `.git` file is written when
+/// Git creates the administrative gitdir link and remains stable afterward.
+fn worktree_created_at_micros(path: &Path) -> Option<i128> {
+    let modified = std::fs::metadata(path.join(".git")).ok()?.modified().ok()?;
+    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(i128::from(since_epoch.as_secs()) * 1_000_000 + i128::from(since_epoch.subsec_micros()))
+}
+
 pub(crate) fn lane_states(
     roots: &Roots,
     project: provenant_core::ProjectId,
@@ -261,10 +283,20 @@ pub(crate) fn lane_states(
     };
     let mut snapshot = LaneSnapshot {
         states: BTreeMap::new(),
+        terminal_times: BTreeMap::new(),
         stores: Vec::new(),
         stale: std::cell::Cell::new(false),
     };
     scan_terminal(&context, &mut snapshot, 0)?;
+    for (path, terminal) in &mut snapshot.states {
+        if *terminal {
+            *terminal = snapshot
+                .terminal_times
+                .get(path)
+                .zip(worktree_created_at_micros(path))
+                .is_some_and(|(finished, created)| i128::from(*finished) > created);
+        }
+    }
     Ok(snapshot)
 }
 
@@ -319,8 +351,17 @@ fn scan_terminal(
                         return Err("unknown writer path".into());
                     }
                     let path = writer.worktree.clone();
-                    let terminal = matches!(attempt.state, AttemptState::Terminal { .. });
-                    *snapshot.states.entry(path).or_insert(true) &= terminal;
+                    match &attempt.state {
+                        AttemptState::Terminal { finished_at, .. } => {
+                            let newest = snapshot
+                                .terminal_times
+                                .entry(path.clone())
+                                .or_insert(i64::MIN);
+                            *newest = (*newest).max(finished_at.as_micros());
+                            snapshot.states.entry(path).or_insert(true);
+                        }
+                        _ => *snapshot.states.entry(path).or_insert(true) = false,
+                    }
                 }
             }
             match page.next {
