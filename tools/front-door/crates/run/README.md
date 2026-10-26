@@ -50,11 +50,9 @@ the orphan remains unresolved; a result file alone cannot establish success.
 `AttemptReader` produces Serialize-only terminal facts, including optional
 provider timing and unknown route observations. Its iterator snapshots the
 upper sequence and reads at most 64 IDs per page, surfacing read/validation
-errors. `record`, `run`, `operation`, `events` and `work_snapshot` provide the
-other scoped reads. Workspace selection is refused until the confinement
-association exists. Work snapshots describe stored nonterminal work only;
-`reconcile` observes custody directly, and durable cursor acknowledgement
-arrives with the Fabric facade binding.
+errors. `record`, `run`, `operation` and `events` provide the other scoped
+reads. `reconcile` observes custody directly, and durable cursor
+acknowledgement arrives with the Fabric facade binding.
 
 `read_output` supports sealed prompt and result bytes, and the attempt's
 stderr capture, with exact offsets,

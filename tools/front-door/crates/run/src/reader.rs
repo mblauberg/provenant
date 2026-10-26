@@ -4,7 +4,7 @@ use crate::{
     *,
 };
 use provenant_confinement::valid_read_only_writable;
-use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime};
 use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
@@ -234,13 +234,6 @@ pub struct LaneQuery {
 pub struct LanePage {
     pub lanes: Vec<AttemptRecord>,
     pub next: Option<u64>,
-}
-#[derive(Debug)]
-pub struct RunWorkSnapshot {
-    pub generation: u64,
-    pub observed_at: WallTime,
-    pub active_count: u64,
-    pub active_attempts: Vec<AttemptId>,
 }
 impl RunStore {
     pub fn operation(
@@ -696,22 +689,6 @@ impl RunStore {
                 page.push(event);
             }
             Ok(page)
-        })
-    }
-    pub fn work_snapshot(&self, scope: WorkScope, call: &Request<'_>) -> Result<RunWorkSnapshot> {
-        let run = match scope {
-            WorkScope::Project(project) if project == self.context.project_id => None,
-            WorkScope::Run { project, run } if project == self.context.project_id => Some(run),
-            _ => return Err(RunError::Refused),
-        };
-        call.retry(|| {
-            let mut query = self.db.prepare("SELECT id FROM attempts WHERE project=?1 AND terminal=0 AND (?2 IS NULL OR run=?2) ORDER BY sequence LIMIT 257")?;
-            let rows = query.query_map(params![self.context.project_id.to_string(), run.map(|id| id.to_string())], |r| r.get::<_, String>(0))?;
-            let mut active = Vec::new();
-            for row in rows { active.push(AttemptId::parse(&row?).map_err(|_| RunError::Validation("attempt index ID"))?); }
-            if active.len() > 256 { return Err(RunError::Validation("snapshot exceeds active bound")); }
-            let generation = if let Some(run) = run { self.run_on(&self.db, run)?.generation } else { 0 };
-            Ok(RunWorkSnapshot { generation, observed_at: call.clock.wall_now().map_err(|_| RunError::Validation("wall clock"))?, active_count: active.len() as u64, active_attempts: active })
         })
     }
 }
