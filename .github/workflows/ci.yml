@@ -23,6 +23,44 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  macos-scope:
+    name: Select macOS checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run_macos: ${{ steps.paths.outputs.run_macos }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Select macOS checks from changed paths
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          if [ "$IS_MAIN" = "true" ]; then
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "Base commit unavailable; running macOS checks conservatively."
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$)'; then
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_macos=false" >> "$GITHUB_OUTPUT"
+          fi
+
   docs:
     name: Harness asset checks
     runs-on: ubuntu-latest
@@ -157,6 +195,8 @@ jobs:
     name: Rust macOS release smoke
     runs-on: macos-15
     timeout-minutes: 20
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_macos == 'true'
     permissions:
       contents: read
     steps:
@@ -309,12 +349,14 @@ jobs:
           advanced-security: "false"
           annotations: "true"
 
-  # Keep one required check; every job must run and succeed.
+  # Keep one required check. The macOS job may skip only when its path filter
+  # explicitly says it is unnecessary; all other skips fail closed.
   ci-status:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     needs:
+      - macos-scope
       - docs
       - rust
       - rust-macos-release
@@ -325,11 +367,15 @@ jobs:
       - name: Require every needed job to succeed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          RUN_MACOS: ${{ needs.macos-scope.outputs.run_macos }}
         run: |
           echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value.result)"'
-          blocking="$(echo "$NEEDS_JSON" | jq -r \
+          blocking="$(echo "$NEEDS_JSON" | jq -r --arg run_macos "$RUN_MACOS" \
             'to_entries[]
-             | select(.value.result != "success")
+             | select(.value.result != "success"
+                 and (.key != "rust-macos-release"
+                   or .value.result != "skipped"
+                   or $run_macos != "false"))
              | "\(.key)=\(.value.result)"')"
           if [ -n "$blocking" ]; then
             echo "Blocking job results:"
