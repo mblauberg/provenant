@@ -12,7 +12,7 @@ use provenant_confinement::{
 use provenant_core::{CancelToken, GitOid, ProjectId};
 use provenant_os::{
     exec::SystemExecutor,
-    fs::{Directory, canonicalize},
+    fs::{Directory, FsError, canonicalize},
 };
 use provenant_supervisor::custody::WriterBinding;
 use std::io::Read;
@@ -24,6 +24,23 @@ use std::{
 
 fn error(error: impl std::fmt::Display) -> RunError {
     RunError::Io(std::io::Error::other(error.to_string()))
+}
+/// Held-directory errors name paths relative to their anchor. This registry
+/// anchor is the state root, so retain its location before crossing the edge.
+fn state_error(error: FsError, state: &Path) -> RunError {
+    match error {
+        FsError::Io {
+            operation,
+            path,
+            source,
+        } => FsError::Io {
+            operation,
+            path: state.join(path),
+            source,
+        }
+        .into(),
+        other => other.into(),
+    }
 }
 fn runtime(state: &Path) -> Result<UtilityRuntime> {
     let home = state.join("writer-git-home");
@@ -155,7 +172,7 @@ pub fn prepare_writer(
         if error.is_not_found() {
             RunError::WorktreeUnregistered(request.worktree.clone())
         } else {
-            error.into()
+            state_error(error, state)
         }
     };
     let projects = state_dir

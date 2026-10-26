@@ -3,6 +3,21 @@ use provenant_core::OperationId;
 use serde_json::json;
 
 #[test]
+fn io_error_payload_preserves_native_path_diagnostics_without_source_text() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+    let error = FacadeError::from(&provenant_fabric_store::Error::Io {
+        path: PathBuf::from(OsString::from_vec(b"/state-\xff/worktrees".to_vec())),
+        source: std::io::Error::other("private source text"),
+    });
+    assert_eq!(
+        ServiceError::Facade(error).structured_error(),
+        json!({
+            "code":"io", "operation":"access Fabric store", "path":"/state-\u{fffd}/worktrees"
+        })
+    );
+}
+
+#[test]
 fn legacy_import_refusals_report_upgrade_refused_in_tool_errors() {
     for error in [
         ServiceError::Coordination(CoordinationError::from(

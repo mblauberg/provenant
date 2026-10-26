@@ -53,6 +53,8 @@ pub struct Fail {
     pub status: Status,
     pub kind: ErrorKind,
     pub message: String,
+    /// Safe typed detail retained for the MCP edge, without raw source errors.
+    pub detail: Option<provenant_fabric_runtime::coordination::facade::FacadeError>,
 }
 impl Fail {
     fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
@@ -60,11 +62,22 @@ impl Fail {
             status,
             kind,
             message: message.into(),
+            detail: None,
         }
     }
 }
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        let detail = match &error {
+            run::RunError::WorktreeUnregistered(path) => Some(FacadeError::WorktreeUnregistered {
+                path: path.to_string_lossy().into_owned(),
+            }),
+            run::RunError::Filesystem(error) | run::RunError::Publication(error) => {
+                Some(FacadeError::filesystem(error))
+            }
+            _ => None,
+        };
         let kind = ErrorKind::from(&error);
         let status = match kind {
             ErrorKind::Invalid
@@ -83,7 +96,10 @@ impl From<run::RunError> for Fail {
             | ErrorKind::ContinuationUnsupported => Status::Refused,
             _ => Status::Error,
         };
-        Self::new(status, kind, error.to_string())
+        Self {
+            detail,
+            ..Self::new(status, kind, error.to_string())
+        }
     }
 }
 /// A reply whose reader deadline expired still reports what it saw.

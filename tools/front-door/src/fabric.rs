@@ -108,13 +108,23 @@ impl stdio::Factory for Factory {
         }
     }
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError> {
-        Ok(Service::new(
-            self.coordination()?,
-            BoundFacade { factory: self },
-            &self.clock,
+        let coordination = self.coordination().map_err(|error| {
+            let typed = FacadeError::from(&error);
+            if matches!(typed, FacadeError::Io { .. }) {
+                ServiceError::Facade(scope_io(
+                    typed,
+                    "open coordination store",
+                    self.context.roots.state.as_path(),
+                ))
+            } else {
+                ServiceError::Coordination(error)
+            }
+        })?;
+        Ok(
+            Service::new(coordination, BoundFacade { factory: self }, &self.clock)
+                .with_limits(self.context.config.limits.clone())
+                .with_lane_restrictions(self.context.in_lane),
         )
-        .with_limits(self.context.config.limits.clone())
-        .with_lane_restrictions(self.context.in_lane))
     }
 }
 struct BoundFacade<'a> {
@@ -307,6 +317,17 @@ impl F3Facade for BoundFacade<'_> {
             return Err(FacadeError::Cancelled);
         }
         Ok(page)
+    }
+}
+
+/// The bound state root supplies scope for failures without a lower-level path.
+fn scope_io(error: FacadeError, operation: &str, state: &Path) -> FacadeError {
+    match error {
+        FacadeError::Io { path: None, .. } => FacadeError::Io {
+            operation: operation.into(),
+            path: Some(state.to_string_lossy().into_owned()),
+        },
+        other => other,
     }
 }
 
@@ -807,12 +828,12 @@ fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
             | E::BundleHeadMismatch
             | E::TransportConflict
             | E::RemoteMoved => FacadeError::Conflict,
-            _ => FacadeError::Io,
+            _ => FacadeError::io("landing"),
         };
     }
     error
         .downcast_ref::<provenant_fabric_store::Error>()
-        .map_or(FacadeError::Io, FacadeError::from)
+        .map_or(FacadeError::io("landing"), FacadeError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1082,7 +1103,7 @@ pub(crate) fn remote_base(
         .filter(|(key, _)| !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key)))
         .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])
         .collect();
-    let executor = SystemExecutor::new(1).map_err(|_| FacadeError::Io)?;
+    let executor = SystemExecutor::new(1).map_err(|_| FacadeError::io("create Git executor"))?;
     let git_output = |args: &[&str]| -> Result<Vec<u8>, FacadeError> {
         let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
             .chain(
@@ -1164,19 +1185,17 @@ fn events_within<T: serde::Serialize>(events: &[T], max_bytes: u64) -> Result<us
     Ok(events.len())
 }
 fn run_error(error: provenant_run::RunError) -> FacadeError {
-    kind_error(provenant_run::ErrorKind::from(&error))
+    fail_error(error.into())
 }
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
-    kind_error(fail.kind)
+    fail.detail.unwrap_or_else(|| kind_error(fail.kind))
 }
 /// Translate a typed run category at the MCP edge. `ErrorKind` is the one
 /// categorisation of run errors; this only renders it.
 fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;
     match kind {
-        E::SecretInput | E::Refused | E::WorktreeUnregistered | E::Unsupported => {
-            FacadeError::ConfinementRefused
-        }
+        E::SecretInput | E::Refused | E::Unsupported => FacadeError::ConfinementRefused,
         E::LaneDepth => FacadeError::LaneDepth,
         E::LaneContext
         | E::ParentAttempt
@@ -1184,6 +1203,9 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::WorktreeRequired
         | E::WorktreeNotApplicable => FacadeError::InvalidInput,
         E::WorktreeMissing => FacadeError::WorktreeMissing,
+        E::WorktreeUnregistered => FacadeError::WorktreeUnregistered {
+            path: String::new(),
+        },
         E::NotFound => FacadeError::NotFound,
         E::Conflict => FacadeError::Conflict,
         E::OperationConflict => FacadeError::OperationConflict,
@@ -1200,7 +1222,7 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         E::LaneCoordinationRefused => FacadeError::LaneCoordinationRefused,
         E::UpgradeRefused => FacadeError::UpgradeRefused,
         E::PeerVersion => FacadeError::PeerVersion,
-        _ => FacadeError::Io,
+        _ => FacadeError::io("run operation"),
     }
 }
 impl BinaryRunOwner<'_> {
@@ -1459,6 +1481,15 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
+        self.submit_inner(input, budget, cancel)
+            .map_err(|error| scope_io(error, "submit", self.factory.context.roots.state.as_path()))
+    }
+    fn submit_inner(
+        &mut self,
+        input: SubmitInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
             operation_id,
@@ -1642,10 +1673,14 @@ impl BinaryRunOwner<'_> {
                 FacadeError::BaseUnreachable
             }
             crate::worktrees::Error::Worktree(WorktreeError::Cancelled) => FacadeError::Cancelled,
-            _ => FacadeError::Io,
+            _ => FacadeError::io("create peer worktree"),
         })?;
         Ok(provenant_fabric_runtime::runs::PeerWorktree {
-            path: info.path.to_str().ok_or(FacadeError::Io)?.to_owned(),
+            path: info
+                .path
+                .to_str()
+                .ok_or(FacadeError::io("create peer worktree"))?
+                .to_owned(),
             branch: spec.branch,
         })
     }
@@ -2388,13 +2423,14 @@ impl Factory {
                 } else {
                     self.cwd.join(document)
                 };
-                let path = provenant_os::fs::canonicalize(&path).map_err(|_| FacadeError::Io)?;
+                let path = provenant_os::fs::canonicalize(&path)
+                    .map_err(|_| FacadeError::io("access graph journal"))?;
                 if !path.starts_with(&self.cwd) {
                     return Err(FacadeError::ConfinementRefused);
                 }
                 let bytes = provenant_os::fs::FileHandle::open_source(&path)
                     .and_then(|mut file| file.read_bounded(1_048_576))
-                    .map_err(|_| FacadeError::Io)?;
+                    .map_err(|_| FacadeError::io("access graph journal"))?;
                 let document: GraphDocument = provenant_records::decode_v1(
                     bytes.as_slice(),
                     provenant_records::Limits::CONFIG,
@@ -2429,7 +2465,9 @@ impl Factory {
                     // Unreadable is not corrupt: a denied or vanished read stays Io.
                     JournalError::Filesystem(_)
                     | JournalError::Io(_)
-                    | JournalError::DurabilityUnconfirmed(_) => FacadeError::Io,
+                    | JournalError::DurabilityUnconfirmed(_) => {
+                        FacadeError::io("access graph journal")
+                    }
                     _ => FacadeError::StateCorrupt,
                 }
             })?
@@ -2440,7 +2478,7 @@ impl Factory {
                 self.context.identity.project,
                 id,
             )
-            .map_err(|_| FacadeError::Io)?;
+            .map_err(|_| FacadeError::io("access graph journal"))?;
             return Ok(run);
         }
         let mut journal = FileJournal::open(
@@ -2451,7 +2489,7 @@ impl Factory {
             cancel,
             &self.clock,
         )
-        .map_err(|_| FacadeError::Io)?;
+        .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
@@ -2484,7 +2522,7 @@ impl Factory {
                 id,
                 None,
             )
-            .map_err(|_| FacadeError::Io)?;
+            .map_err(|_| FacadeError::io("access graph journal"))?;
             return Ok(run);
         }
         let mut checkpoint = journal
@@ -2494,7 +2532,9 @@ impl Factory {
         if matches!(input, GraphInput::Cancel { .. }) {
             // Persist the admission fence before asking the run owner to stop live attempts.
             checkpoint.cancelled = true;
-            journal.save(&checkpoint).map_err(|_| FacadeError::Io)?;
+            journal
+                .save(&checkpoint)
+                .map_err(|_| FacadeError::io("access graph journal"))?;
             let mut owner = BinaryRunOwner {
                 factory: self,
                 allow_remote: true,
@@ -2722,7 +2762,7 @@ impl Factory {
             }
             let after = store
                 .run_event_cursor(ctx.identity.project, host, &request)
-                .map_err(|_| FacadeError::Io)?;
+                .map_err(|_| FacadeError::io("read run event cursor"))?;
             let result = if host == ctx.identity.host {
                 owner.events(after, 64, budget, cancel)
             } else {
@@ -2916,10 +2956,17 @@ mod peer_tests {
             super::FacadeError::NotTerminal,
             super::FacadeError::OperationConflict,
             super::FacadeError::OwnerUnavailable,
+            super::FacadeError::Io {
+                operation: "openat directory".into(),
+                path: Some("/state/worktrees".into()),
+            },
+            super::FacadeError::WorktreeUnregistered {
+                path: "/repo/.worktrees/writer".into(),
+            },
         ] {
-            let expected = error.code();
+            let expected = error.clone();
             let response = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
-                error: super::FacadeError::Io,
+                error: super::FacadeError::io("test"),
             });
             let response: super::PeerResult =
                 serde_json::from_slice(&serde_json::to_vec(&response)?)?;
@@ -2931,8 +2978,9 @@ mod peer_tests {
                 status,
                 kind,
                 message: error.to_string(),
+                detail: Some(error),
             };
-            assert_eq!(super::fail_error(fail).code(), expected);
+            assert_eq!(super::fail_error(fail), expected);
         }
         Ok(())
     }
@@ -2948,7 +2996,7 @@ mod peer_tests {
             operation_id: provenant_core::OperationId::parse("stop")?,
         };
         let reply = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
-            error: super::FacadeError::Io,
+            error: super::FacadeError::io("test"),
         });
         let super::PeerResult::Error { error } = reply else {
             return Err("expected error".into());

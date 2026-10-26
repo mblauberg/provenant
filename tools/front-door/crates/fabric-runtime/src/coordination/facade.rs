@@ -185,6 +185,10 @@ pub enum FacadeError {
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
     #[error(
+        "worktree {path:?} is not registered with Provenant; create a writer with `provenant worktree create <new-branch> --base <branch>`"
+    )]
+    WorktreeUnregistered { path: String },
+    #[error(
         "writer base is not reachable from the peer's remotes after a fetch; push it, or check the peer's Git access"
     )]
     BaseUnreachable,
@@ -202,8 +206,11 @@ pub enum FacadeError {
     Cancelled,
     #[error("wait timed out")]
     Timeout,
-    #[error("I/O operation failed")]
-    Io,
+    #[error("I/O operation {operation} failed at {path:?}")]
+    Io {
+        operation: String,
+        path: Option<String>,
+    },
 }
 
 impl FacadeError {
@@ -226,6 +233,7 @@ impl FacadeError {
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",
             Self::WorktreeMissing => "worktree_missing",
+            Self::WorktreeUnregistered { .. } => "worktree_unregistered",
             Self::BaseUnreachable => "base_unreachable",
             Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
@@ -234,7 +242,38 @@ impl FacadeError {
             Self::PublicationFailed => "publication_failed",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
-            Self::Io => "io",
+            Self::Io { .. } => "io",
+        }
+    }
+}
+
+impl FacadeError {
+    pub fn io(operation: impl Into<String>) -> Self {
+        Self::Io {
+            operation: operation.into(),
+            path: None,
+        }
+    }
+
+    pub fn filesystem(error: &provenant_os::fs::FsError) -> Self {
+        use provenant_os::fs::FsError;
+        let (operation, path) = match error {
+            FsError::Io {
+                operation, path, ..
+            } => (*operation, Some(path.clone())),
+            FsError::ReadIo { path, .. } => ("read file", Some(path.clone())),
+            FsError::Rename { to_path, .. } => ("rename", Some(to_path.clone())),
+            FsError::Symlink { path, .. } => ("resolve path", Some(path.clone())),
+            FsError::CrossDevice { path } => ("verify filesystem device", Some(path.clone())),
+            FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => {
+                ("acquire lock", Some(path.clone()))
+            }
+            FsError::LockDeadlineOverflow { path } => ("set lock deadline", Some(path.clone())),
+            _ => ("verify filesystem entry", None),
+        };
+        Self::Io {
+            operation: operation.into(),
+            path: path.map(|path| path.to_string_lossy().into_owned()),
         }
     }
 }
@@ -273,7 +312,9 @@ impl From<&super::CoordinationError> for FacadeError {
             CoordinationError::Cancelled => Self::Cancelled,
             CoordinationError::Timeout => Self::Timeout,
             CoordinationError::Busy => Self::Busy,
-            CoordinationError::Entropy(_) | CoordinationError::EntropyEncoding => Self::Io,
+            CoordinationError::Entropy(_) | CoordinationError::EntropyEncoding => {
+                Self::io("generate entropy")
+            }
             CoordinationError::UpgradeRefused(_) => Self::UpgradeRefused,
             CoordinationError::Store(error) => Self::from(error),
         }
@@ -300,9 +341,33 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             | Error::JournalMode(_)
             | Error::Time(_) => Self::StateCorrupt,
             Error::LegacyImportData { .. } => Self::UpgradeRefused,
-            Error::Sqlite(_) | Error::Filesystem(_) | Error::Io { .. } | Error::UnsafePath(_) => {
-                Self::Io
+            // checked_directory's device refusal names only the child component.
+            Error::Filesystem(provenant_os::fs::FsError::CrossDevice { .. }) => {
+                Self::io("verify Fabric filesystem device")
             }
+            Error::Filesystem(error) => {
+                // Fabric's held directories are traversed from `/`.
+                let mut detail = Self::filesystem(error);
+                if let Self::Io {
+                    path: Some(path), ..
+                } = &mut detail
+                {
+                    *path = std::path::Path::new("/")
+                        .join(&*path)
+                        .to_string_lossy()
+                        .into_owned();
+                }
+                detail
+            }
+            Error::Io { path, .. } => Self::Io {
+                operation: "access Fabric store".into(),
+                path: Some(path.to_string_lossy().into_owned()),
+            },
+            Error::Sqlite(_) => Self::io("access Fabric database"),
+            Error::UnsafePath(path) => Self::Io {
+                operation: "verify Fabric store path".into(),
+                path: Some(path.to_string_lossy().into_owned()),
+            },
         }
     }
 }
