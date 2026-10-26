@@ -454,11 +454,15 @@ mod tests {
         let mut report = DiskReport::new(state.into(), 0);
         RunStore::disk_usage_unindexed(&context.state_root, &mut report)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(report.entries.len(), 2);
+        assert_eq!(report.entries.len(), 3);
+        let (provider, runs): (Vec<_>, Vec<_>) = report
+            .entries
+            .iter()
+            .partition(|entry| entry.class == "provider_state");
+        assert_eq!(provider.len(), 1);
+        assert_eq!(provider[0].count, Some(100));
         assert!(
-            report
-                .entries
-                .iter()
+            runs.iter()
                 .all(|entry| entry.path == state.join("runs/run"))
         );
         assert!(
