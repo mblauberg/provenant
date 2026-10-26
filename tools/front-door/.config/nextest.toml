@@ -161,3 +161,7 @@ serial-sqlite = { max-threads = 1 }
 [[profile.ci.overrides]]
 filter = 'package(provenant-fabric-store) | package(provenant-supervisor) | package(provenant-run) | (package(provenant) & binary(parser))'
 test-group = "serial-sqlite"
+
+[[profile.lane.overrides]]
+filter = 'package(provenant-fabric-store) | package(provenant-supervisor) | package(provenant-run) | (package(provenant) & binary(parser))'
+test-group = "serial-sqlite"
