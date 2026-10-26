@@ -67,22 +67,9 @@ fn prepare(
         Access::ReadOnly => "deny",
         Access::WorktreeWrite => "allow",
     };
-    let mut config = format!(
+    let config = format!(
         r#"{{"autoupdate":false,"share":"disabled","mcp":{{}},"plugin":[],"permission":{{"edit":"{edit}","bash":"{edit}","webfetch":"deny"}}}}"#
     );
-    if let Some(file) = input.prompt.file() {
-        let path = file.to_str().ok_or(ProviderError::InvalidPath)?;
-        let parent = file
-            .parent()
-            .and_then(|path| path.to_str())
-            .ok_or(ProviderError::InvalidPath)?;
-        let mut value: serde_json::Value =
-            serde_json::from_str(&config).map_err(|_| ProviderError::Malformed)?;
-        value["permission"]["read"] = serde_json::json!({path: "allow"});
-        value["permission"]["external_directory"] =
-            serde_json::json!({format!("{parent}/*"): "allow"});
-        config = value.to_string();
-    }
     let package = package_root(input.executable)?;
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     let xdg = |key, fallback| {
