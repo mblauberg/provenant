@@ -2258,9 +2258,19 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
     let (token, _) = run(vec![expiring, item("fixture-access", now + 30_000)]);
     assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
 
-    let (token, calls) = run(vec![item("fixture-access", now)]);
+    // An expired token is refreshed; it stays expired only if the CLI fails.
+    let (token, calls) = run(vec![
+        item("fixture-access", now),
+        item("fixture-renewed", now + hour),
+    ]);
+    token.expect("expired token refreshed");
+    assert_eq!(calls.len(), 1, "expired storage refreshes once");
+    let (token, calls) = run(vec![
+        item("fixture-access", now),
+        item("fixture-access", now),
+    ]);
     assert!(matches!(token, Err(ProviderError::CredentialExpired)));
-    assert!(calls.is_empty(), "expired storage must not trigger refresh");
+    assert_eq!(calls.len(), 1);
 
     // Corrupt stored JSON cannot be repaired by refreshing.
     let (token, calls) = run(vec![b"not json: fixture-secret".to_vec()]);

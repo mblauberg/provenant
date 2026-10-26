@@ -326,7 +326,9 @@ pub fn refresh_if_expiring(
     };
     match read() {
         Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
-        Ok(_) => {}
+        // An expired token was read successfully, so refreshing is safe: no
+        // running lane can still be using it. Read failures never refresh.
+        Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
     }
     if authority.is_some() && credential_source(login)? != source {
