@@ -164,6 +164,95 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
 }
 
 #[test]
+fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let mut record = availability();
+    record.observed_models = vec!["gpt-6.1-terra".into(), "gpt-6.1-sol".into()];
+    let records = [record];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut context = context(&catalogue, &config, now()?);
+    context.availability = &records;
+    context.access = &access;
+    let codex_models: Vec<_> = catalogue
+        .models()
+        .iter()
+        .filter(|entry| entry.model.adapter() == "codex")
+        .map(|entry| entry.model.model())
+        .collect();
+    assert_eq!(
+        codex_models,
+        ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"]
+    );
+    for (pool, model, weight, allowed) in [
+        (
+            "senior",
+            "gpt-6.1-terra",
+            4,
+            vec!["low", "medium", "high", "xhigh"],
+        ),
+        (
+            "principal",
+            "gpt-6.1-sol",
+            1,
+            vec!["medium", "high", "xhigh", "max", "ultra"],
+        ),
+    ] {
+        let member = catalogue.pools[pool]
+            .iter()
+            .find(|member| member.model.adapter() == "codex")
+            .ok_or("Codex pool member missing")?;
+        assert_eq!(member.model.model(), model);
+        assert_eq!(member.weight, weight);
+        assert_eq!(member.efforts, allowed);
+        let entry = catalogue.model(&member.model).ok_or("model missing")?;
+        assert_eq!(entry.family.as_deref(), Some("openai"));
+        assert_eq!(entry.trains_on_prompts, Some(false));
+        assert!(entry.evidence_ref.contains("models_cache.json"));
+        let mut query = request(&format!("codex/{model}"))?;
+        query.confidential = true;
+        for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+            query.effort = Some(effort.into());
+            let exact = resolve(&query, &context)?;
+            assert_eq!(exact.effort.as_deref(), Some(effort));
+            assert!(matches!(exact.readiness, RouteReadiness::Ready { .. }));
+        }
+        query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
+        query.effort = None;
+        let resolved = resolve_with_seed(&query, &context, "codex-tier", 0)?;
+        assert_eq!(resolved.model, model);
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+        for effort in &allowed {
+            query.effort = Some((*effort).into());
+            let resolved = resolve_with_seed(&query, &context, "codex-tier", 0)?;
+            assert_eq!(resolved.model, model);
+            assert_eq!(resolved.effort.as_deref(), Some(*effort));
+        }
+        for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+            if allowed.contains(&effort) {
+                continue;
+            }
+            query.effort = Some(effort.into());
+            match resolve_with_seed(&query, &context, "codex-tier", 0) {
+                Ok(resolved) => assert_ne!(resolved.model, model),
+                Err(RoutingError::NoEligiblePoolMember { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let principal = &catalogue.pools["principal"];
+    assert_eq!(principal.len(), 2);
+    assert_eq!(principal[0].model.as_str(), "claude/claude-opus-5-5");
+    assert_eq!(principal[0].weight, 1);
+    Ok(())
+}
+
+#[test]
 fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
 -> Result<(), Box<dyn std::error::Error>> {
     struct Case {
@@ -784,7 +873,7 @@ fn availability() -> AvailabilityRecord {
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
-        catalogue_revision: "route-pools-20261025-v2".into(),
+        catalogue_revision: "route-pools-20261027-v1".into(),
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
         observed_unix_seconds: 80,

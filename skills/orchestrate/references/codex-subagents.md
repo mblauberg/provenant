@@ -1,11 +1,12 @@
 # Codex subagents (Codex-only layer)
 
-Verified against OpenAI Codex and model docs on 2026-09-08:
+Sources for Codex subagent mechanics and model capabilities:
 
 - `https://learn.chatgpt.com/docs/agent-configuration/subagents`
 - `https://developers.openai.com/api/docs/guides/latest-model`
 - `https://developers.openai.com/api/docs/guides/tools-multi-agent`
-- `https://developers.openai.com/api/docs/models/gpt-6-astra`
+- `https://developers.openai.com/api/docs/models/gpt-6.1-sol`
+- `https://developers.openai.com/api/docs/models/gpt-6.1-terra`
 
 Codex subagents are native parallel workers inside a Codex session. For eligible
 models/accounts, native `ultra` uses maximum reasoning and proactively delegates
@@ -31,10 +32,11 @@ project uses them. Do not assume a custom agent exists; discover current tools a
 
 ## Routing rules
 
-- Prefer a GPT-6 Astra principal Codex lead at `xhigh` for substantial-to-terminal
-  orchestration. The native runtime exposes `ultra` and the API route `max`,
-  but neither is the standing default; record any fallback to `high`, and do
-  not assume an entitlement exists.
+- Prefer a GPT-6.1 Sol principal Codex lead at `xhigh` for substantial-to-terminal
+  orchestration; the pool default is `high`. GPT-6.1 Terra is the senior Codex
+  member at `high`. The Codex models cache fetched 2026-10-26T22:24Z records
+  low, medium, high, xhigh, max and ultra for both models. Keep these CLI controls
+  separate from API controls and do not assume an entitlement exists.
 - Use Codex native subagents for same-harness fan-out. Do not use `codex exec` as a substitute for
   Codex subagents inside Codex.
 - Use `fabric_run` (`op: submit`) for an external Codex verifier when Fabric
@@ -66,7 +68,7 @@ Good Codex worker prompt fields:
 ```
 role:              explorer | worker | default
 tier:              junior | senior | principal
-catalogue-model:     Astra | Sol | Luna
+catalogue-model:    Sol | Terra | Luna
 effort:            <effective effort from route receipt>
 route-receipt:     <path or receipt identity>
 scope:             <files / sources / task slice>
@@ -78,7 +80,7 @@ return:            3-6 bullets, surprises, unresolved, file path
 ```
 
 When the native Codex surface exposes model and effort overrides, bind both to
-the resolved route. Retain Astra, Sol or Luna as the catalogue identity in the
+the resolved route. Retain Sol, Terra or Luna as the catalogue identity in the
 receipt. If the native surface cannot bind either field, stop or use an
 authorised adapter and record the substitution; do not silently inherit the
 chair route. Explicit chair inheritance is valid only when the dispatch and

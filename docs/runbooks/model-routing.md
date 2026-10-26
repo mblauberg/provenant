@@ -16,8 +16,8 @@ zero-weight fallback members:
 |---|---|
 | `utility` | Claude Haiku@low w4, Codex Luna@low w2, DeepSeek Flash Free w1, GLM Flash Free w1 |
 | `junior` | Codex Luna@high w4, Claude Haiku@high w4, Agy Gemini@medium w2, Agy Sonnet 4.6 w1, two OpenCode free models w1 each |
-| `senior` | Codex Sol@high w4, Claude Sonnet 5.5 w4, Agy Gemini@high w2, Agy Opus 4.6 Thinking w1, Cursor Grok 4.7 w1 |
-| `principal` | Claude Opus 5.5 w1, Codex Astra w0 fallback |
+| `senior` | Codex Terra@high w4, Claude Sonnet 5.5 w4, Agy Gemini@high w2, Agy Opus 4.6 Thinking w1, Cursor Grok 4.7 w1 |
+| `principal` | Claude Opus 5.5 w1, Codex Sol@high w1 |
 | `writing` | Agy Gemini w4, Claude Haiku w4, Agy Sonnet 4.6 w2, Claude Sonnet 5.5 w1, Codex Luna@high w1 |
 | `design` | Claude Sonnet 5.5 w4, Agy Gemini@high w2, Claude Opus 5.5 w1 |
 

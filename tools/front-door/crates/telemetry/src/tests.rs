@@ -371,7 +371,7 @@ fn bundled_toml_uses_exact_rates_and_unknowns_without_aliases() {
         account_label: None,
     });
     let report = stats([input.clone()], &table, Window::default()).unwrap();
-    assert_eq!(report.prices.reviewed_at, "2026-10-22");
+    assert_eq!(report.prices.reviewed_at, "2026-10-27");
     assert_eq!(report.totals.cost.complete.unwrap().usd, "2.000000");
     input.resolved_route.as_mut().unwrap().model = Some("gpt-6.1-sol-alias".into());
     let report = stats([input], &table, Window::default()).unwrap();

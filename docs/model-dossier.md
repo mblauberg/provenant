@@ -89,36 +89,37 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** consult `provenant route list`; only models exposed by the active
   Claude routes can be dispatched.
 
-### GPT-6 Astra (OpenAI principal)
+### GPT-6.1 Sol (OpenAI principal)
 
-- **Good at:** the hard, high-stakes slice: correctness, edge cases and precise
-  work on a tight scope.
-- **Watch out for:** no standing behavioural note yet. Keep the brief tight and
-  record new evidence rather than carrying GPT-5.6 Sol's profile forward by
-  assumption.
+- **Good at:** the hard slice: correctness, edge cases and precise work on a
+  tight scope. In the owner's benchmark assessment, medium through xhigh beats
+  Terra, which places Sol in principal.
+- **Watch out for:** benchmark comparisons are priors; record task evidence.
 - **Cost:** principal-tier.
-- **Reach:** `codex` adapter (preferred), `openai` family. The native Codex app
-  exposes `low` through `ultra`; the Responses API supports through `max`.
-  Treat those as separate surfaces and probe the CLI before dispatch.
+- **Reach:** `codex` adapter, `openai` family. The Codex models cache fetched
+  2026-10-26T22:24Z records low, medium, high, xhigh, max and ultra. Consult the
+  catalogue for the principal pool's narrower effort range.
 
-### GPT-6.1 Sol (OpenAI senior)
+### GPT-6.1 Terra (OpenAI senior)
 
-- **Good at:** Codex senior tasks: ordinary implementation, research
-  legwork, review and drafting that need more judgement than bulk extraction
-  but do not justify Astra. Very cheap for its strength.
-- **Watch out for:** new on 2026-09-23; no field record yet. Record what you see.
-- **Cost:** cheap.
-- **Reach:** `codex` adapter, `openai` family. Check the current route list for
-  a model selector and supported effort.
+- **Good at:** Codex senior tasks: ordinary implementation, research legwork,
+  review and drafting. In the owner's benchmark assessment, low edges out Luna
+  xhigh on cost per performance and scales roughly linearly to high, where it
+  beats Sol low.
+- **Watch out for:** no standing behavioural note yet. Record what you see.
+- **Cost:** below Sol; see the sourced rates in `config/telemetry-prices.toml`.
+- **Reach:** `codex` adapter, `openai` family. The owner verified
+  `codex exec -m gpt-6.1-terra`. The Codex models cache fetched
+  2026-10-26T22:24Z records low, medium, high, xhigh, max and ultra; the senior
+  pool uses low through xhigh.
 
 ### GPT-6 Luna (OpenAI junior)
 
 - **Good at:** cheap, high-token legwork and mechanical slices, and fan-out
   where several bounded opinions are worth more than one principal call.
-- **Watch out for:** the owner on its predecessor, GPT-5.6 Luna: "codex astra is
-  better at design and motion than luna - luna isn't great", and it could
-  over-engineer a loose brief. Keep briefs tight and keep design work off it
-  until GPT-6 Luna has its own record.
+- **Watch out for:** the owner found its predecessor, GPT-5.6 Luna, weak at
+  design and motion, and prone to over-engineering a loose brief. Keep briefs
+  tight and keep design work off it until GPT-6 Luna has its own record.
 - **Cost:** very cheap; the owner's standing preference is to use Luna for
   smaller implementation and fixes where the catalogue offers it.
 - **Reach:** `codex` adapter, `openai` family, in the `utility` pool after
@@ -128,8 +129,8 @@ not read an absent `Watch out for` as an endorsement.
 
 - **Good at:** the preferred Claude model for most work: implementation
   (including UI/frontend), research, screenshots, second opinions, ordinary
-  review and lane leads. Roughly level with GPT-6.1 Sol, cheaper than Opus 5.5
-  for about the same result, and probably better at design and taste.
+  review and lane leads. Cheaper than Opus 5.5 for about the same result, and
+  probably better at design and taste.
 - **Watch out for:** Opus 5.5 remains the choice for critical review,
   orchestration, crucial and terminal synthesis and hard reasoning.
 - **Cost:** senior-tier.
@@ -223,7 +224,7 @@ sign-in and quota, which dispatch decides; `provenant route list` does not probe
 | Adapter | Models in the bundled pools |
 |---|---|
 | Claude | Haiku 5.5, Sonnet 5.5, Opus 5.5 |
-| Codex | GPT-6 Luna, GPT-6.1 Sol, GPT-6 Astra |
+| Codex | GPT-6 Luna, GPT-6.1 Terra, GPT-6.1 Sol |
 | Agy | Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking |
 | Cursor | Grok 4.7 |
 | OpenCode | DeepSeek V4.1 Flash and GLM 5.3 Flash (free models) |

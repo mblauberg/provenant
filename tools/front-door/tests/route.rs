@@ -84,13 +84,13 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
             "route",
             "resolve",
             "--model",
-            "codex/gpt-6.1-sol",
+            "codex/gpt-6.1-terra",
             "--fallback",
             "opencode/openrouter/~anthropic/claude-haiku-latest,agy/explicit",
         ],
         0,
     )?;
-    assert_eq!(resolved["data"]["model"], "gpt-6.1-sol");
+    assert_eq!(resolved["data"]["model"], "gpt-6.1-terra");
     assert_eq!(resolved["data"]["effort"], Value::Null);
     assert_eq!(
         resolved["data"]["readiness"]["reason"],
