@@ -36,9 +36,29 @@ peers on different versions are not supported.
 - GC reports locked or prunable entries as `locked_or_prunable` and omits
   the primary checkout. Pruning or branch-settlement failures retain that
   entry and allow the sweep to continue.
+- Every peer request and reply envelope now carries integer `protocol: 2`.
+  The host listing reports the protocol observed in the reply envelope. Calls
+  use one SSH connection and reject any different version, naming both
+  versions; upgrade peers together. Missing reply protocols and released
+  peers' decode refusals identify protocol 1. There is no capability
+  negotiation or support for older peers. Facade errors use distinct
+  `not_terminal` and `operation_conflict` codes locally and on the peer wire,
+  instead of `conflict` (#1631, #1571).
+- The CLI reports an unavailable run owner as `OWNER_UNAVAILABLE`, replacing
+  `UNSUPPORTED` so the refusal round-trips without changing its meaning.
+- Installer cut-over support is removed: the `--legacy-checkout` install flag,
+  the `LEGACY_CHECKOUT` error code, pre-1.0 cleanup and Git launcher ownership
+  are removed. `check install` no longer reports the finding rules
+  `legacy_entry`, `legacy_hook_conflict`, `legacy_instruction_variable` or
+  `legacy_checkout_unavailable`. Receipts with a non-null `legacy` object need
+  a reinstall; see [receipt recovery](../runbooks/install.md#receipt-recovery).
+  Current receipts with `"legacy":null` upgrade normally; newly written
+  receipts omit the key (#1571).
 
 ## Behaviour changes
 
+- Host entries report `protocol` only when known. Mismatched peers remain in
+  the list with `available: false`, their protocol and `reason: "peer_version"`.
 - `provenant output` on a terminal attempt that has no requested part now
   reports `NOT_FOUND` (exit 2). It used to report `NONTERMINAL` (exit 1)
   locally and `CONFLICT` over a peer. Over MCP the facade code is

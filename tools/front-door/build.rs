@@ -250,16 +250,6 @@ fn main() -> BuildResult<()> {
         )?;
     }
 
-    let legacy_manifest = repository.join("assets/install/legacy.toml");
-    watch(&mut watched, legacy_manifest.clone())?;
-    add_required_file(
-        &repository,
-        &legacy_manifest,
-        "assets/install/legacy.toml".into(),
-        &tracked,
-        &mut inputs,
-    )?;
-
     add_workspace_configuration(&workspace, &repository, &mut watched, &tracked, &mut inputs)?;
     let toolchain = pinned_toolchain(&workspace, &repository, &mut watched, &tracked, &mut inputs)?;
     let target = env::var("TARGET")

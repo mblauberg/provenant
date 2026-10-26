@@ -173,6 +173,10 @@ pub enum FacadeError {
     NotFound,
     #[error("request conflicts with current state")]
     Conflict,
+    #[error("attempt is not terminal")]
+    NotTerminal,
+    #[error("operation ID was reused with different input")]
+    OperationConflict,
     #[error("service is busy")]
     Busy,
     #[error("ownership fence is stale")]
@@ -181,6 +185,8 @@ pub enum FacadeError {
     HomeUnavailable,
     #[error("peer protocol version is incompatible")]
     PeerVersion,
+    #[error("peer {peer} speaks protocol {remote}, this host speaks {protocol}; upgrade both", protocol = crate::hosts::PROTOCOL)]
+    PeerProtocolMismatch { peer: String, remote: u64 },
     #[error("run launch outcome is unknown for operation {operation_id}")]
     LaunchUnknown { operation_id: OperationId },
     #[error("run continuation is unsupported")]
@@ -224,6 +230,8 @@ impl FacadeError {
             ("invalid_input", _) => Self::InvalidInput,
             ("not_found", _) => Self::NotFound,
             ("conflict", _) => Self::Conflict,
+            ("not_terminal", _) => Self::NotTerminal,
+            ("operation_conflict", _) => Self::OperationConflict,
             ("busy", _) => Self::Busy,
             ("stale_fence", _) => Self::StaleFence,
             ("home_unavailable", _) => Self::HomeUnavailable,
@@ -253,10 +261,12 @@ impl FacadeError {
             Self::InvalidInput => "invalid_input",
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
+            Self::NotTerminal => "not_terminal",
+            Self::OperationConflict => "operation_conflict",
             Self::Busy => "busy",
             Self::StaleFence => "stale_fence",
             Self::HomeUnavailable => "home_unavailable",
-            Self::PeerVersion => "peer_version",
+            Self::PeerVersion | Self::PeerProtocolMismatch { .. } => "peer_version",
             Self::LaunchUnknown { .. } => "launch_unknown",
             Self::ContinuationUnsupported => "continuation_unsupported",
             Self::LaneDepth => "lane_depth",

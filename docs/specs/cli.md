@@ -183,7 +183,7 @@ final head and open a pull request after verifying it.
 | `config show` | `[--task-class NAME]` | The resolved config with secrets redacted and each knob's source (default, profile or override). |
 | `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. `null` clears a nullable knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |
 | `config unset` | `NAME` | Removes a knob override. |
-| `install` | `--source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | Harnesses are claude, codex, cursor, agy and opencode. Omitting `--hooks` refreshes unchanged owned hooks and relinquishes edited entries; a first install leaves them disabled. Explicit `off` removes unchanged owned hooks. `--source` is a staged release. `--dry-run` writes nothing. See [state](state.md) for the layout and migration. |
+| `install` | `--source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--dry-run]` | Harnesses are claude, codex, cursor, agy and opencode. Omitting `--hooks` refreshes unchanged owned hooks and relinquishes edited entries; a first install leaves them disabled. Explicit `off` removes unchanged owned hooks. `--source` is a staged release. `--dry-run` writes nothing. See [state](state.md) for the layout and recovery. |
 | `uninstall` | `--harness NAME…` | Removes only still-owned entries. |
 | `accounts` | `list`; `register LABEL --adapter A --directory DIR [--plan] [--priority] [--billing-anchor]`; `set ACCOUNT [--display-name] [--hidden true\|false] [--order N] [--headline auto\|5h\|weekly\|default]` | Semantics in [routing](routing.md). `set` needs at least one option; an empty name, `--order 0` and `--headline default` clear a field. |
 | `route` | `list [--adapter] [--pool]`; `resolve` with route flags; `set POOL MODEL [--weight 0..100] [--effort] [--efforts]`; `remove POOL MODEL`; `reset POOL`; `pacing PROVIDER pace\|spend\|max` | `list` and `resolve` are pure previews. The others edit pool overrides in `config.toml`. |
@@ -331,8 +331,6 @@ stderr, exit 1 refuses and exit 0 allows. It refuses on any inspection, read
 or size failure. It guards default-branch deletion, non-fast-forward updates,
 pushes from linked worktrees to the default branch and conflict markers,
 reading Git evidence with inherited redirects disabled and doing no fetch.
-Git launchers are quoted absolute `exec` commands, and foreign hooks are
-preserved or reported as conflicts.
 
 Installer leaves match hooks by exact event, matcher and command, keep array
 positions, and never rewrite foreign siblings. Only Claude registers harness
