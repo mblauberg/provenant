@@ -252,8 +252,12 @@ the plist or any parent, stages with `O_NOFOLLOW | O_EXCL`, then renames.
 Its PATH starts with `/usr/bin:/bin:/usr/sbin:/sbin`, followed by the absolute
 install bin directory and existing absolute directories holding resolved
 Claude, Codex and Git executables, when known. Empty and relative entries are
-excluded. Uninstall of the last recorded target boots out the service before
-removing an exact receipt match. A modified plist and its service are kept
+excluded. A Claude or Codex directory inside a Git worktree, found by an
+ancestor `.git` file or directory, is skipped with a note and the search
+continues, so a repository-local entry such as direnv's `PATH_add` cannot
+lend the agent its other executables. The Homebrew prefix `/opt/homebrew` is
+exempt because it is itself a clone. Uninstall of the last recorded target
+boots out the service before removing an exact receipt match. A modified plist and its service are kept
 and reported; failed bootout leaves the plist owned for retry.
 The earlier installer's unreceipted plist is recognised only when its complete
 bytes match the historical template for the validated receipt's binary path

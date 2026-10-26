@@ -584,15 +584,56 @@ fn sanitised_path(bin: &Path, executables: &[PathBuf]) -> Result<OsString, Agent
     std::env::join_paths(directories).map_err(|error| io::Error::other(error).into())
 }
 
+/// Git clones that are package prefixes, not projects. Apple Silicon Homebrew
+/// is a clone at its prefix, and providers install into its `bin`.
+const PACKAGE_PREFIXES: [&str; 1] = ["/opt/homebrew"];
+
+/// The Git worktree holding `directory`, found by an ancestor `.git` file or
+/// directory. A marker that cannot be ruled out counts as present.
+fn repository_root(directory: &Path) -> Option<PathBuf> {
+    let directory = fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    directory
+        .ancestors()
+        .find(
+            |ancestor| match fs::symlink_metadata(ancestor.join(".git")) {
+                Ok(_) => true,
+                Err(error) => error.kind() != io::ErrorKind::NotFound,
+            },
+        )
+        .filter(|root| {
+            !PACKAGE_PREFIXES
+                .iter()
+                .any(|prefix| *root == Path::new(prefix))
+        })
+        .map(Path::to_path_buf)
+}
+
+#[allow(clippy::print_stderr)]
 fn provider_executables(search: &OsStr) -> Vec<PathBuf> {
     let mut executables = Vec::new();
     // Resolve only through absolute PATH directories. Never turn a relative
     // shell entry into an absolute agent search directory by canonicalising it.
+    // A repository-local directory (direnv's `PATH_add`) would lend the agent
+    // everything it holds, so it is skipped and the search continues.
     for name in ["claude", "codex"] {
         if let Some(program) = std::env::split_paths(search)
             .filter(|dir| dir.is_absolute())
+            .filter(|dir| {
+                let path = dir.join(name);
+                path.is_file() && provenant_supervisor::sys::is_executable(&path)
+            })
+            .find(|dir| match repository_root(dir) {
+                Some(root) => {
+                    eprintln!(
+                        "note: peer agent PATH skips {} for {name}: inside the Git worktree at {}",
+                        dir.display(),
+                        root.display()
+                    );
+                    false
+                }
+                None => true,
+            })
             .map(|dir| dir.join(name))
-            .find(|path| path.is_file() && provenant_supervisor::sys::is_executable(path))
         {
             executables.push(program);
         }
@@ -821,6 +862,38 @@ mod tests {
         assert!(entries.contains(&bin));
         assert!(!entries.contains(&root.path().to_path_buf()));
         assert!(entries.iter().all(|entry| entry.is_absolute()));
+    }
+
+    #[test]
+    fn provider_path_skips_directories_inside_a_git_worktree() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let linked = root.path().join("linked");
+        let tools = root.path().join("tools");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(linked.join("nested/bin")).unwrap();
+        fs::write(linked.join(".git"), b"gitdir: /elsewhere\n").unwrap();
+        for dir in [repo.join("bin"), tools.clone()] {
+            fs::create_dir_all(&dir).unwrap();
+        }
+        for path in [
+            repo.join("bin/codex"),
+            linked.join("nested/bin/claude"),
+            tools.join("codex"),
+        ] {
+            fs::write(&path, b"#!/bin/sh\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            repository_root(&repo.join("bin")),
+            Some(fs::canonicalize(&repo).unwrap())
+        );
+        assert_eq!(repository_root(Path::new("/opt/homebrew/bin")), None);
+        let search =
+            std::env::join_paths([repo.join("bin"), linked.join("nested/bin"), tools.clone()])
+                .unwrap();
+        assert_eq!(provider_executables(&search), vec![tools.join("codex")]);
     }
 
     #[test]
