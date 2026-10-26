@@ -274,7 +274,7 @@ fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(
         response["result"],
-        json!({"result":"error","data":{"error":{"code":"upgrade_refused"},"operation_id":null}})
+        json!({"result":"error","data":{"error":{"code":"upgrade_refused"}}})
     );
     rig.assert_legacy_unchanged()
 }
@@ -426,7 +426,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
         "2025-11-25"
     );
     let list = &replies.iter().find(|r| r["id"] == 2).ok_or("catalogue")?["result"]["tools"];
-    assert_eq!(list.as_array().ok_or("tools")?.len(), 11);
+    assert_eq!(list.as_array().ok_or("tools")?.len(), 8);
     let identity =
         &replies.iter().find(|r| r["id"] == 3).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(identity["client"], "codex");
@@ -536,7 +536,7 @@ fn peer_ingress_refuses_a_trace_naming_another_host_than_the_sender() -> Result 
     configure_fixture_peer(&rig, source)?;
     let key = &identity["data"]["federation"]["key"];
     let mut request = json!({
-        "version": 1, "protocol": 2, "target_host": host, "source_host": source, "agent": "worker",
+        "version": 1, "protocol": 3, "target_host": host, "source_host": source, "agent": "worker",
         "project": {"key": key, "common_dir": "repo/.git"},
         "trace": {"host": host},
         "action": {"action": "health"},
@@ -2067,13 +2067,9 @@ fn submitted_policy(
     operation: &str,
     concurrency: Option<u64>,
     knobs: &[&str],
-    mut route: Value,
+    route: Value,
 ) -> Result<(provenant_records::run::CanonicalRequest, Value)> {
-    let task_class = route
-        .as_object_mut()
-        .and_then(|route| route.remove("task_class"));
-    let task =
-        json!({"prompt":"fixture", "route":route,"task_class":task_class,"timeout_seconds":60});
+    let task = json!({"prompt":"fixture", "route":route,"timeout_seconds":60});
     let mut arguments = json!({"op":"submit","operation_id":operation,"tasks":[task.clone(),task.clone(),task.clone(),task],"knobs":knobs});
     if let Some(n) = concurrency {
         arguments["concurrency"] = n.into();
@@ -2110,7 +2106,7 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
         "named-tier",
         None,
         &[],
-        json!({"kind":"named","name":"senior","task_class":"mechanical"}),
+        json!({"kind":"named","name":"senior"}),
     )?;
     assert_eq!(
         request.tasks[0].route,
@@ -2118,10 +2114,6 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
             name: "senior".into(),
             effort: None,
         }
-    );
-    assert_eq!(
-        request.tasks[0].profile.task_class.as_deref(),
-        Some("mechanical")
     );
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
@@ -2140,7 +2132,7 @@ fn mcp_submission_stamps_the_local_host_on_its_trace() -> Result {
         "trace-host",
         None,
         &[],
-        json!({"kind":"named","name":"senior","task_class":"mechanical"}),
+        json!({"kind":"named","name":"senior"}),
     )?;
     assert_eq!(attempt["trace"]["host"], identity["data"]["host"]);
     assert_eq!(attempt["trace"]["attempt"], attempt["attempt_id"]);
@@ -2167,6 +2159,7 @@ fn submission_does_not_advertise_unsupported_inputs() -> Result {
         .find(|tool| tool["name"] == "fabric_run")
         .ok_or("fabric_run")?;
     assert!(!submit["inputSchema"].to_string().contains("inputs"));
+    assert!(!submit["inputSchema"].to_string().contains("task_class"));
 
     let reply = mcp(
         &rig,
@@ -2175,6 +2168,16 @@ fn submission_does_not_advertise_unsupported_inputs() -> Result {
         ],
     )?;
     let call = reply.iter().find(|reply| reply["id"] == 2).ok_or("call")?;
+    assert_eq!(call["result"]["isError"], true, "{call}");
+    assert_eq!(text_error_code(&call["result"]), "invalid_input");
+
+    let reply = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"no-task-class","tasks":[{"prompt":"fixture","route":{"kind":"named","name":"senior"},"task_class":"mechanical","timeout_seconds":60}]}}}),
+        ],
+    )?;
+    let call = reply.iter().find(|reply| reply["id"] == 3).ok_or("call")?;
     assert_eq!(call["result"]["isError"], true, "{call}");
     assert_eq!(text_error_code(&call["result"]), "invalid_input");
     rig.assert_legacy_unchanged()
@@ -2194,11 +2197,7 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
         (
             "dispatch-capacity",
             None,
-            vec![
-                "lanes.max_concurrency=2",
-                "effort.shift=-1",
-                "routing.pool_mode=rotate",
-            ],
+            vec!["lanes.max_concurrency=2", "review.extra_reviewers=2"],
             2,
         ),
         (
@@ -2213,19 +2212,18 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             operation,
             explicit,
             &knobs,
-            json!({"kind":"model","provider":"codex","model":"fixture","task_class":"mechanical"}),
+            json!({"kind":"model","provider":"codex","model":"fixture"}),
         )?;
         assert_eq!(request.concurrency, expected);
         let task = &request.tasks[0];
         assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
         assert_eq!(task.profile.overrides, knobs);
-        assert_eq!(task.profile.task_class.as_deref(), Some("mechanical"));
         assert_eq!(
-            task.profile.knobs["effort.shift"],
+            task.profile.knobs["review.extra_reviewers"],
             if operation == "dispatch-capacity" {
-                -1
+                2
             } else {
-                0
+                1
             }
         );
     }
@@ -2252,7 +2250,7 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
             operation,
             None,
             &knobs,
-            json!({"kind":"model","provider":"codex","model":"fixture","task_class":"mechanical"}),
+            json!({"kind":"model","provider":"codex","model":"fixture"}),
         )?;
         let plan = provenant_run::capture_plan(&request.tasks[0]);
         assert_eq!(plan.silence_ms, threshold);
@@ -2380,7 +2378,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
             &refusal,
             serde_json::to_vec(&json!({
                 "version":1,"protocol":3, "host":host.to_string(), "project":project,
-                "result":{"result":"error","data":{"error":{"code":wire},"operation_id":null}},
+                "result":{"result":"error","data":{"error":{"code":wire}}},
             }))?,
         )?;
         let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;

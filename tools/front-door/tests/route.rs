@@ -172,7 +172,7 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
     )?;
     assert_eq!(set["command"], "route set");
     let persisted = fs::read_to_string(rig.state.join("config.toml"))?;
-    assert!(persisted.contains("[routing]"));
+    assert!(persisted.contains("[domains.routing]"));
 
     let listed = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
     let member = listed["data"]["pools"]["junior"]
@@ -216,7 +216,7 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
     fs::write(
         rig.state.join("config.toml"),
         r#"schema_version = 1
-[routing]
+[domains.routing]
 pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high", efforts = ["high"] }] }
 "#,
     )?;
@@ -227,6 +227,84 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
         .as_str()
         .ok_or("config error")?;
     assert!(message.contains("routing") && message.contains("weight"));
+
+    // Routing lives only under its domain; the root alias is gone.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[routing.pacing]\ncodex = \"spend\"\n",
+    )?;
+    let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
+    assert_eq!(code(&out), 2);
+    let rejected: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let message = rejected["error"]["message"]
+        .as_str()
+        .ok_or("config error")?;
+    assert!(message.contains("unknown_key"), "{message}");
+    Ok(())
+}
+
+#[test]
+fn route_config_verbs_edit_inline_domain_tables() -> Result {
+    let rig = rig()?;
+    let defaults = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    fs::create_dir_all(&rig.state)?;
+    for tables in [
+        "domains = { routing = {} }",
+        "[domains]\nrouting = {}",
+        "[domains.routing]\npools = {}\npacing = {}",
+    ] {
+        fs::write(
+            rig.state.join("config.toml"),
+            format!("schema_version = 1 # keep\n{tables}\n"),
+        )?;
+        call(
+            &rig,
+            &[
+                "route",
+                "set",
+                "junior",
+                "codex/gpt-6-luna",
+                "--weight",
+                "7",
+                "--effort",
+                "high",
+            ],
+            0,
+        )?;
+        let listed = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+        assert!(
+            listed["data"]["pools"]["junior"]
+                .as_array()
+                .ok_or("members")?
+                .iter()
+                .any(|m| m["model"] == "codex/gpt-6-luna" && m["weight"] == 7)
+        );
+        call(&rig, &["route", "pacing", "codex", "spend"], 0)?;
+        call(&rig, &["route", "remove", "junior", "codex/gpt-6-luna"], 0)?;
+        call(&rig, &["route", "reset", "junior"], 0)?;
+        let reset = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+        assert!(
+            reset["data"]["pools"]["junior"]
+                .as_array()
+                .ok_or("members")?
+                .iter()
+                .any(|m| m["model"] == "codex/gpt-6-luna")
+        );
+        let persisted = fs::read_to_string(rig.state.join("config.toml"))?;
+        assert!(persisted.contains("# keep"));
+        let config = call(&rig, &["config", "show"], 0)?;
+        assert_eq!(
+            config["data"]["domains"]["routing"]["pacing"]["codex"],
+            "spend"
+        );
+    }
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\ndomains = { routing = { pools = { junior = [{ model = 'codex/gpt-6-luna', weight = 7, effort = 'high', efforts = ['high'] }] } } }\n",
+    )?;
+    call(&rig, &["route", "reset", "junior"], 0)?;
+    let reset = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    assert_eq!(reset["data"]["pools"], defaults["data"]["pools"]);
     Ok(())
 }
 

@@ -1404,17 +1404,6 @@
                       }
                     ]
                   },
-                  "task_class": {
-                    "anyOf": [
-                      {
-                        "maxLength": 128,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
                   "timeout_seconds": {
                     "maximum": 14400,
                     "minimum": 1,

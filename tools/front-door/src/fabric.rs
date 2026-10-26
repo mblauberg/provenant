@@ -1530,7 +1530,6 @@ impl BinaryRunOwner<'_> {
             .map_err(fail_error)?;
             submitted.push(Submitted {
                 base: task.base,
-                task_class: task.task_class,
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 account: task.account,
@@ -2281,7 +2280,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     access,
                     worktree: worktree.map(str::to_owned),
                     prompt: prompt.into(),
-                    task_class: None,
                     route: match &route.model {
                         Some(model) => provenant_records::run::RequestedRoute::Model {
                             provider: route.adapter.clone(),

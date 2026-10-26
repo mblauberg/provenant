@@ -12,15 +12,18 @@ Process children use temporary HOME, state and harness configuration paths.
 
 ## Native boundaries
 
-process_os::census observes native process identity and proves held custody.
-process_os::provider owns guardian-local signals, subreaping and adopted-child
-cleanup. process_os::handoff passes writer and attempt locks over a bounded
-private same-binary channel. Shared child, filesystem and reaper primitives
-live in provenant_os::sys.
+| Owner | Operations and proof |
+| --- | --- |
+| `provenant_os::sys::{child, raw_exec}` | Preallocated argv/environment, strict exec, signal reset, CLOEXEC sweep, owned utility child and bounded pipe polling. |
+| `provenant_os::sys::reaper` | Fixed admission reserved before spawn, non-signalling transfer, bounded fair `try_wait` turns. |
+| `provenant_os::sys::pid`, `process_os::census` | Linux procfs and Darwin libproc identity/CPU/CWD, native boot identity, complete/partial/unknown census. Observation never grants arbitrary PID signalling. |
+| `process_os::provider` | macOS guardian-local signal reactor, WNOWAIT leader reservation, direct-child delivery and explicit cleanup before reap. Other platforms return an unsupported error. |
+| `process_os::handoff` | Bounded private same-binary channel; only the guardian inherits writer/attempt locks. Provider environment values and prompt remain ephemeral. |
+| `provenant_os::sys::fs` | Held-directory open/stat/mutation, atomic publication, no-follow locks, descriptor ownership, directory sync and bounded flock. |
 
 `machine` is pure; `provenant_os::capture` decodes before bounded retention and
-never treats capture failure or silence as a reason to stop. `custody` owns generation-scoped
-records, reservation fencing, recovery and release. `internal supervise` is
+never treats capture failure or silence as a reason to stop. `custody` owns
+generation-scoped records, reservation fencing, recovery and release. `internal supervise` is
 private descriptor handoff, not a raw launch API. Run composes provider decoding
 and its children journal through `GuardianHooks` in its same-binary entry point.
 The hidden invocation carries five validated descriptor numbers in argv, rather
@@ -75,19 +78,16 @@ while the persistent reservation continues to fence every new writer. Keeping
 the guardian alive indefinitely would prevent that recovery path. Publication
 failure still retains custody and the bounded outcome for retry.
 
-A census cannot freeze process-group membership. Supervision therefore never sends a group
-signal: cancellation targets the pinned unreaped provider, and Linux descendant
-cleanup targets only kernel-confirmed adopted children. A successful bounded
-children-journal observation is required before descendant delivery. This closes
-the shared-host/sibling race instead of treating a fresh census as atomic proof.
+A census cannot freeze process-group membership. Signals target the pinned
+unreaped provider, its group when no spared owner shares it, and exact
+attempt-sandbox escapees. A successful bounded children-journal observation is
+required before descendant delivery.
 
 An empty session census cannot disprove an unrecorded setsid escape. Same-boot
-recovery keeps any durable unresolved-cleanup reservation unknown. Linux clears
-that bit only after complete census/tracking checks and a stable bounded scan of
-all guardian threads' kernel children lists proves only the dead leader remains.
-Darwin has no corresponding subreaper proof. Settlement instead requires two
-complete censuses with no provider/session/group/history members and a fresh
-lock on the same writer inode after closing the guardian's inherited duplicate.
+recovery keeps any durable unresolved-cleanup reservation unknown. Settlement
+requires two complete censuses with no provider/session/group/history members
+and a fresh lock on the same writer inode after closing the guardian's inherited
+duplicate.
 An unknown census, inherited lease or protected nested owner retains the fence.
 
 ## Spawn, polling and publication

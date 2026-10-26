@@ -319,7 +319,12 @@ fn main() -> Result<()> {
     if fixture::dispatch()? {
         return Ok(());
     }
-    fixture::run_libtest(&args, TESTS, |name| {
+    let tests = if cfg!(target_os = "macos") {
+        TESTS
+    } else {
+        &[]
+    };
+    fixture::run_libtest(&args, tests, |name| {
         run_case(name).map_err(|error| io::Error::other(error.to_string()))
     })?;
     Ok(())

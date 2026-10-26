@@ -67,7 +67,7 @@ recovery requirements.
 
 ## Worker contract
 
-Every dispatched worker states task class, route tier, catalogue model identity,
+Every dispatched worker states route tier, catalogue model identity,
 effort, route receipt, identity, objective, authority, paths, output, checks,
 stop condition and budget. A worker that changes code or other observable
 behaviour also names its governing skill (for example, `tdd` under

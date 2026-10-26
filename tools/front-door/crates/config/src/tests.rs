@@ -192,6 +192,7 @@ fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_witho
         ("schema_version=1\nknobs=42", "type"),
         ("schema_version=1\n[domains.unknown]", "unknown_key"),
         ("schema_version=1\n[task_classes]", "unknown_key"),
+        ("schema_version=1\n[knobs]\n'effort.shift'=1", "unknown_key"),
         ("schema_version=18446744073709551616", "syntax"),
         ("schema_version=1\n[domains]\nx=inf", "unknown_key"),
         ("schema_version=1\n[domains]\nx=2026-01-01", "unknown_key"),
@@ -1004,6 +1005,11 @@ fn state_roots(dir: &Path) -> Roots {
     inputs.state_dir = Some(dir.into());
     inputs.resolve(&Resolver).unwrap()
 }
+fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigError> {
+    edit_config(roots, &crate::domains::NO_DOMAINS, |document| {
+        edit.apply(document)
+    })
+}
 #[test]
 fn set_knob_is_written_atomically_and_shown_with_its_source() {
     let dir = tempfile::tempdir().unwrap();
@@ -1012,31 +1018,34 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     let path = dir.path().join("config.toml");
     std::fs::write(
         &path,
-        "schema_version = 1 # keep\nknobs = { \"effort.shift\" = 1 } # inline\n",
+        "schema_version = 1 # keep\nknobs = { \"review.extra_reviewers\" = 1 } # inline\n",
     )
     .unwrap();
-    edit_config(
+    let shown = knob_edit(
         &roots,
         KnobEdit::Set {
-            name: "effort.shift",
-            value: "-1",
+            name: "review.extra_reviewers",
+            value: "2",
         },
     )
     .unwrap();
     assert!(std::fs::read_to_string(&path).unwrap().contains("# inline"));
-    assert_eq!(read(&roots).unwrap().knobs["effort.shift"].value, -1);
-    edit_config(&roots, KnobEdit::Unset("effort.shift")).unwrap();
+    assert_eq!(shown.knobs["review.extra_reviewers"].value, 2);
+    assert_eq!(read(&roots).unwrap(), shown);
+    knob_edit(&roots, KnobEdit::Unset("review.extra_reviewers")).unwrap();
     assert_eq!(
-        read(&roots).unwrap().knobs["effort.shift"].source,
+        read(&roots).unwrap().knobs["review.extra_reviewers"].source,
         KnobSource::Default
     );
-    edit_config(&roots, KnobEdit::Profile("rigorous")).unwrap();
-    let mut rigorous = read(&roots).unwrap();
-    assert_eq!(rigorous.knobs["effort.shift"].value, 1);
-    rigorous.apply_task_class("mechanical").unwrap();
-    assert_eq!(rigorous.knobs["effort.shift"].value, 0);
-    edit_config(&roots, KnobEdit::Profile("economy")).unwrap();
-    edit_config(
+    knob_edit(&roots, KnobEdit::Profile("rigorous")).unwrap();
+    let rigorous = read(&roots).unwrap();
+    let knob = &rigorous.knobs["review.extra_reviewers"];
+    assert_eq!(
+        (knob.value.as_i64(), knob.source),
+        (Some(1), KnobSource::Profile)
+    );
+    knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
+    knob_edit(
         &roots,
         KnobEdit::Set {
             name: "lanes.max_concurrency",
@@ -1053,11 +1062,8 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
         (knob.value.as_i64(), knob.source),
         (Some(2), KnobSource::Override)
     );
-    assert_eq!(
-        shown.knobs["context.ceiling_tokens"].source,
-        KnobSource::Profile
-    );
-    edit_config(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
+    assert_eq!(shown.knobs["review.polish"].source, KnobSource::Profile);
+    knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
     let shown = read(&roots).unwrap();
     assert_eq!(
         shown.knobs["lanes.max_concurrency"].source,
@@ -1068,8 +1074,7 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
 fn set_rejects_out_of_range_values_and_unknown_knobs() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
-
-    let set = |name, value| edit_config(&roots, KnobEdit::Set { name, value });
+    let set = |name, value| knob_edit(&roots, KnobEdit::Set { name, value });
     assert!(matches!(
         set("lanes.max_concurrency", "99"),
         Err(ConfigError::KnobValue {
@@ -1083,7 +1088,28 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
         }
         other => panic!("expected unknown knob, got {other:?}"),
     }
+    // The advisory knobs moved into the orchestrate skill's prose.
+    assert!(matches!(
+        set("effort.shift", "1"),
+        Err(ConfigError::UnknownKnob { .. })
+    ));
     assert!(!dir.path().join("config.toml").exists());
+}
+#[test]
+fn knob_edit_refuses_to_rewrite_an_invalid_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let path = dir.path().join("config.toml");
+    let invalid = "schema_version = 1\nunknown = 1\n";
+    std::fs::write(&path, invalid).unwrap();
+    assert!(matches!(
+        knob_edit(&roots, KnobEdit::Profile("rigorous")),
+        Err(ConfigError::Schema {
+            rule: "unknown_key",
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
 }
 #[test]
 fn set_creates_a_missing_private_state_directory() {
@@ -1091,7 +1117,7 @@ fn set_creates_a_missing_private_state_directory() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
     let roots = state_roots(&state);
-    edit_config(&roots, KnobEdit::Profile("rigorous")).unwrap();
+    knob_edit(&roots, KnobEdit::Profile("rigorous")).unwrap();
     assert_eq!(
         std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
         0o700

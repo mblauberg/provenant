@@ -36,9 +36,22 @@ impl CanonicalRequest {
 #[serde(deny_unknown_fields)]
 pub struct HarnessProfile {
     pub name: String,
-    pub task_class: Option<String>,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
     pub overrides: Vec<String>,
+    // Preserve the removed field only to verify sealed request and attempt digests.
+    #[doc(hidden)]
+    #[serde(
+        rename = "task_class",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_legacy_task_class"
+    )]
+    pub legacy_task_class: Option<Option<String>>,
+}
+fn deserialize_legacy_task_class<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 impl HarnessProfile {
     fn is_empty(&self) -> bool {
@@ -555,6 +568,62 @@ mod tests {
         let request: CanonicalRequest = serde_json::from_value(original.clone())?;
         assert_eq!(request.digest()?, digest);
         assert_eq!(serde_json::to_value(request)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn request_with_a_removed_task_class_retains_its_sealed_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = CanonicalRequest {
+            schema_version: 1,
+            tasks: vec![TaskRequest {
+                profile: HarnessProfile {
+                    name: "rigorous".into(),
+                    ..HarnessProfile::default()
+                },
+                task_id: TaskId::from_bytes([3; 16]),
+                prompt_digest: CanonicalV1::file_digest(b"prompt"),
+                base: None,
+                base_ref: None,
+                route: RequestedRoute::Named {
+                    name: "senior".into(),
+                    effort: None,
+                },
+                account: None,
+                fallback: Vec::new(),
+                authority_digest: Digest::from_bytes([5; 32]),
+                writer: None,
+                deliver: None,
+                provider_timeout_seconds: 60,
+                delivery_id: None,
+                access: LaneAccess::default(),
+            }],
+            concurrency: 1,
+            parent: None,
+            lane_depth: None,
+            parent_attempt: None,
+        };
+        let mut sealed = serde_json::to_value(&request)?;
+        for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
+            sealed["tasks"][0]["profile"]["task_class"] = task_class;
+            let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
+            let parsed: CanonicalRequest = serde_json::from_value(sealed.clone())?;
+            assert_eq!(parsed.digest()?, digest);
+            assert_eq!(serde_json::to_value(parsed)?, sealed);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn new_profile_omits_task_class() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = HarnessProfile {
+            name: "rigorous".into(),
+            ..HarnessProfile::default()
+        };
+        let sealed = serde_json::to_value(&profile)?;
+        assert!(sealed.get("task_class").is_none());
+        let parsed: HarnessProfile = serde_json::from_value(sealed.clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, sealed);
         Ok(())
     }
 }

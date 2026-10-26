@@ -278,8 +278,7 @@ Submission tasks carry a prompt and the shared tagged route request:
 `{"kind":"model","provider":"codex","model":"...","effort":"high"}` or
 `{"kind":"named","name":"utility","effort":null}`. Effort is optional.
 The service normalises bare model IDs and refuses an explicit provider that
-mismatches a qualified model ID. Tasks may also name an account, task class,
-access, worktree, `deliver` and
+mismatches a qualified model ID. Tasks may also name an account, access, worktree, `deliver` and
 delivery ID.
 They accept no artefact inputs. `resume` cannot change route, account or
 authority.

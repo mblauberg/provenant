@@ -472,7 +472,6 @@ fn submitted_task(
     timeout_seconds: u64,
 ) -> SubmittedTask {
     SubmittedTask {
-        task_class: None,
         // A writer's base belongs to its new worktree request.
         base: if new_worktree.is_none() {
             task.base

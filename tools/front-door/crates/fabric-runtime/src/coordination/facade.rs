@@ -30,8 +30,6 @@ pub struct SubmittedTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     pub route: provenant_records::run::RequestedRoute,
-    #[serde(default)]
-    pub task_class: Option<String>,
     pub timeout_seconds: u64,
     #[serde(default)]
     pub delivery_id: Option<DeliveryId>,

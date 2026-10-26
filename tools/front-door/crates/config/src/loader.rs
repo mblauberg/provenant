@@ -186,7 +186,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .map(|text| parse(text, &user_origin, ""))
         .transpose()?
         .unwrap_or_default();
-    let mut user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
+    let user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
     let install_item = user.remove("install");
     let install = if let Some(item) = &install_item {
         let mut table = Table::new();
@@ -260,7 +260,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
     };
 
     let knobs_item = user.remove("knobs");
-    apply_root_aliases(&mut user, sections, &mut user_sites, &user_origin)?;
     let version = user.get("schema_version");
     if text.is_some() {
         let location = site(&user_sites, "schema_version", &user_origin, false);
@@ -444,76 +443,6 @@ fn qualify(name: &str, field: &str) -> String {
         format!("domains.{name}")
     } else {
         format!("domains.{name}.{field}")
-    }
-}
-
-fn apply_root_aliases<T>(
-    user: &mut Table,
-    sections: &DomainSections<T>,
-    sites: &mut BTreeMap<String, Site>,
-    origin: &Origin,
-) -> Result<(), ConfigError> {
-    for section in sections.entries.iter().filter(|section| section.root_alias) {
-        let Some(alias) = user.remove(section.name) else {
-            continue;
-        };
-        let alias_path = section.name;
-        let alias_table = alias.into_table().map_err(|_| ConfigError::Schema {
-            location: site(sites, alias_path, origin, false),
-            rule: "type",
-        })?;
-        let mut domains = match user.remove("domains") {
-            Some(item) => item.into_table().map_err(|_| ConfigError::Schema {
-                location: site(sites, "domains", origin, false),
-                rule: "type",
-            })?,
-            None => Table::new(),
-        };
-        let mut domain = match domains.remove(section.name) {
-            Some(item) => item.into_table().map_err(|_| ConfigError::Schema {
-                location: site(sites, &format!("domains.{}", section.name), origin, false),
-                rule: "type",
-            })?,
-            None => Table::new(),
-        };
-        merge_tables(&mut domain, alias_table);
-        domains.insert(section.name, Item::Table(domain));
-        user.insert("domains", Item::Table(domains));
-
-        let prefix = format!("{}.", section.name);
-        let aliases: Vec<_> = sites
-            .iter()
-            .filter_map(|(key, value)| {
-                if key == section.name {
-                    Some((format!("domains.{}", section.name), value.clone()))
-                } else {
-                    key.strip_prefix(&prefix).map(|suffix| {
-                        (
-                            format!("domains.{}.{}", section.name, suffix),
-                            value.clone(),
-                        )
-                    })
-                }
-            })
-            .collect();
-        for (key, value) in aliases {
-            sites.insert(key, value);
-        }
-    }
-    Ok(())
-}
-
-fn merge_tables(target: &mut Table, overlay: Table) {
-    for (key, item) in overlay {
-        let nested = target
-            .get_mut(&key)
-            .and_then(Item::as_table_mut)
-            .zip(item.as_table().cloned());
-        if let Some((target, source)) = nested {
-            merge_tables(target, source);
-        } else {
-            target.insert(&key, item);
-        }
     }
 }
 

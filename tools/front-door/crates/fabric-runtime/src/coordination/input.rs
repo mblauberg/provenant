@@ -390,11 +390,6 @@ impl ValidateInput for SubmitInput {
                         bounded_text(&deliver.branch, &format!("{path}.deliver.branch"), 1024)?;
                     }
                     route(&task.route, &format!("{path}.route"))?;
-                    optional_text(
-                        task.task_class.as_deref(),
-                        &format!("{path}.task_class"),
-                        MAX_ROUTE_BYTES,
-                    )?;
                     if !(1..=14_400).contains(&task.timeout_seconds) {
                         return Err(field(&format!("{path}.timeout_seconds")));
                     }

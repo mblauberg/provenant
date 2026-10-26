@@ -883,7 +883,6 @@ pub enum SettlementEvidence {
     #[default]
     Unresolved,
     NeverSpawned,
-    LinuxKernelChildren,
     DarwinCensusAndCustodyLease,
     /// Recovery found the guardian gone and every named leftover process
     /// absent or ended after proving it belonged to the attempt.

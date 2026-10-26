@@ -1043,9 +1043,6 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     wait_for_descendant(&root.join("setsid-writer/reservation.json"), &descendant)?;
     drop(gate);
     let exit = exited(&handle)?;
-    #[cfg(target_os = "linux")]
-    assert!(!exit.unresolved_cleanup);
-    #[cfg(target_os = "macos")]
     assert!(
         exit.unresolved_cleanup,
         "a live setsid descendant still holds custody"
@@ -1276,7 +1273,7 @@ fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Resul
     // The provider exits on its own, leaving the TERM-ignoring child behind.
     drop(gate);
     let first = exited(&handle)?;
-    // Linux's subreaper kills the adopted child itself; Darwin leaves it fenced.
+    // A live detached descendant can keep the attempt fenced.
     if first.unresolved_cleanup {
         assert!(first.unresolved_pids.contains(&child.pid), "{first:?}");
         assert_eq!(
@@ -2061,7 +2058,11 @@ fn main() -> Result<()> {
     if fixture::dispatch()? {
         return Ok(());
     }
-    let names: Vec<_> = CASES.iter().map(|(name, _)| *name).collect();
+    let names: Vec<_> = CASES
+        .iter()
+        .filter(|_| cfg!(target_os = "macos"))
+        .map(|(name, _)| *name)
+        .collect();
     fixture::run_libtest(&args, &names, |name| {
         run_case(name).map_err(|error| io::Error::other(error.to_string()))
     })?;

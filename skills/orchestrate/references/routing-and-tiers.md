@@ -48,7 +48,7 @@ is accepted only when the catalogue records that control; unsupported effort
 is refused. An unknown exact model remains unverified until a current provider
 observation and the activation, disclosure and confinement checks permit it.
 There is no classifier or synonym inference. The bundled Rust catalogue owns
-default pool membership and weights; `[routing]` in the state root's
+default pool membership and weights; `[domains.routing]` in the state root's
 `config.toml` overrides pools and provider pacing. To change routing, run
 `provenant route set` or `provenant route pacing`. A Fabric submission carries
 one route preference; the task schema rejects unknown fields.
@@ -61,9 +61,8 @@ or substituted provider supplied a missing review leg.
 
 ## Task metadata and councils
 
-Rust Fabric accepts one route choice per task. Its `task_class` may select a
-configured knob preset, but it does not resolve a route name or synonym; `role`
-does not select a pool. For a council, submit one task per distinct exact model
+Rust Fabric accepts one route choice per task; `role` does not select a pool
+or resolve a synonym. For a council, submit one task per distinct exact model
 and have the chair compare and synthesise the results. The CLI's explicit
 fallback models are recovery candidates, not extra council seats. Choose exact
 models from the current pool listing when family diversity matters. Ordinary

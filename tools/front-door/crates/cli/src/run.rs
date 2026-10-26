@@ -716,8 +716,6 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
-    /// Fabric's route.task_class, retained separately from the resolved route.
-    pub task_class: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
@@ -758,18 +756,16 @@ pub fn submit_with_host(
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let profile = |class: Option<&str>| {
-        config
-            .dispatch_profile(class, &submission.knobs)
-            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))
-    };
-    let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
+    let profile = config
+        .dispatch_profile(&submission.knobs)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    let concurrency = run::concurrency(submission.concurrency, &profile);
     let tasks = submission
         .tasks
         .into_iter()
         .map(|task| {
             Ok(run::DispatchTask {
-                profile: profile(task.task_class.as_deref())?,
+                profile: profile.clone(),
                 task_id: task.task_id,
                 prompt: task.prompt,
                 base: task.base,
@@ -1012,7 +1008,6 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         .into_iter()
         .map(
             |(task_id, prompt, route, fallback, delivery_id, account, deliver, base)| Submitted {
-                task_class: None,
                 base,
                 task_id,
                 prompt,
@@ -2683,7 +2678,6 @@ mod tests {
         let submission = |base: &str| Submission {
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
-                task_class: None,
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "review".into(),
                 base: Some(base.into()),

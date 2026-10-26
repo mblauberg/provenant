@@ -12,7 +12,6 @@
   `kind: model` with `provider` and `model`, or `kind: named` with `name`.
   Both accept optional `effort` inside `route`. Manifest tasks require this
   object; flat `model`, string `route` and task-level `effort` are removed.
-  An MCP submission names `task_class` on the task, not inside `route`.
 - Run and lane responses expose `provider_seconds` instead of `provider_ms`;
   fractional seconds preserve the observed millisecond precision.
 - CLI `lanes --since`, `telemetry stats --since` and `telemetry trace --since`
