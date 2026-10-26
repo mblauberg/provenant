@@ -16,9 +16,15 @@ description: "Use to coordinate bounded work across agents, research lanes or in
    submission, claims, waiting, resume, cancellation and landing. Use its
    Fabric brief template, including provenance for agent-filed issues.
 3. Review briefs carry the target and rubric, never the chair's hypothesis or
-   expected verdict. Reviewers read the rubric; an unreadable rubric means
-   `incomplete`, never `clean`. Use
-   [verification.md](references/verification.md) for independent checks.
+   verdict ([review outcome](../code-review/references/finding-contract.md#review-outcome)).
+   Use [verification.md](references/verification.md) for independent checks.
+
+## Always
+
+Wait once, in the background; never sleep or poll. Bound tool output, and run
+no foreground wait over about four minutes. Full worker output stays in run
+files; return a digest and path. Record `adapter/model@effort` from the
+receipt.
 
 ## Rules
 
@@ -41,8 +47,7 @@ description: "Use to coordinate bounded work across agents, research lanes or in
 
 ## Adaptive loop
 
-Preflight authority, isolation, disclosure and receipts. Dispatch independent
-waves, reduce their claims against objective evidence, and add only informative
+Dispatch independent waves, reduce their claims against objective evidence, and add only informative
 repair, verification or review waves. Parallel lanes stop ready to merge; the
 chair merges serially and reruns checks after the tree changes. Record missing
 review legs and substitutions. Objective checks and tier-required review meet
@@ -68,6 +73,4 @@ Keep the criteria, evidence and outcome in the existing project document or PR.
 
 Reference eval cases (not run by CI): [lifecycle](evals/lifecycle_cases.yaml),
 [contracts](evals/contract_cases.yaml), [discipline](evals/discipline_cases.yaml),
-and [topology value](evals/topology_value_cases.yaml). The
-[trigger comparison](evals/trigger_comparison.json) records before/after
-decisions and evaluation limits for the procedure move.
+and [topology value](evals/topology_value_cases.yaml).

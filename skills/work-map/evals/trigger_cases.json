@@ -132,7 +132,7 @@
     {
       "id": "q176139",
       "relation": "negative",
-      "prompt": "Checkpoint this session's remaining work and handoff for tomorrow; no durable spec-to-issue map.",
+      "prompt": "Checkpoint this session's remaining work and handoff for tomorrow.",
       "tags": [
         "near-miss",
         "adjacent"

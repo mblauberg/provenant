@@ -53,6 +53,10 @@ adds no merge gate of its own; existing severity, authority and checks apply.
 
 ## Review outcome
 
+Review briefs carry the target and rubric, never the chair's hypothesis,
+expected verdict or scratchpad. For example, send `Review src/cache.rs against
+the attached rubric`, never `Confirm my lost-update diagnosis and return P1`.
+
 - `findings`: supported defects, with coverage and evidence.
 - `clean`: no supported defect after the required coverage is complete.
 - `incomplete`: required context or coverage is unavailable. An unreadable

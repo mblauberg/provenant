@@ -29,9 +29,8 @@ invariant. Domain/project skills supply specialised rubrics.
 ## Three-stage council
 
 1. **Independent pass:** reviewers work blind and write namespaced artifacts.
-   Brief them with the target and rubric, never the chair's hypothesis or
-   expected verdict. Each reads the rubric and reports `incomplete` if it is
-   unreadable. They return supported findings under `finding-contract.md`.
+   Brief them per the [review outcome](finding-contract.md#review-outcome)
+   rule. They return supported findings under `finding-contract.md`.
 2. **Blind challenge:** a fresh reviewer receives anonymised, randomised claim
    packets and labels each supported/contradicted/needs-evidence with a
    falsification step. Do not rank prose or majority-vote.

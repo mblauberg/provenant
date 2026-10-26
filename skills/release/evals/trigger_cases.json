@@ -119,7 +119,7 @@
     {
       "id": "q176128",
       "relation": "negative",
-      "prompt": "The release candidate is accepted, but only rewrite its release-note prose; no publication.",
+      "prompt": "The release candidate is accepted; rewrite its release-note prose.",
       "tags": [
         "near-miss",
         "adjacent"

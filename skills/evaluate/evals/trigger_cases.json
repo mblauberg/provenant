@@ -132,7 +132,7 @@
     {
       "id": "q176113",
       "relation": "negative",
-      "prompt": "Evaluate this PR's source changes for actionable defects; no stochastic benchmark is needed.",
+      "prompt": "Evaluate this PR's source changes for actionable defects.",
       "tags": [
         "near-miss",
         "adjacent"

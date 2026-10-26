@@ -120,7 +120,7 @@
     {
       "id": "q176118",
       "relation": "negative",
-      "prompt": "Polish this fictional courtroom scene for a general audience; do not give legal analysis.",
+      "prompt": "Polish this fictional courtroom scene for a general audience.",
       "tags": [
         "near-miss",
         "adjacent"

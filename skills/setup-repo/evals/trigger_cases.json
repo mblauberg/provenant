@@ -136,7 +136,7 @@
     {
       "id": "q176133",
       "relation": "negative",
-      "prompt": "Write the README's repository-setup tutorial without changing labels, forms or repository settings.",
+      "prompt": "Write the README's repository-setup tutorial.",
       "tags": [
         "near-miss",
         "adjacent"

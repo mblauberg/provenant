@@ -31,7 +31,8 @@ reconciliation run.
    retries, resumes and handoffs inherit it.
 2. Keep an adaptive plan. Name the governing skill in the worker contract
    before changing code. Invoke `tdd` for every new or changed observable
-   behaviour, and use `refactor`
+   behaviour. For crucial work, consider the optional fresh-context
+   acceptance-test writer described in [tdd](../tdd/SKILL.md). Use `refactor`
    for behaviour-preserving structure and `diagnose` for unknown causes.
    Writer tier follows task size; a failed gate gets one repair at the same
    tier, then escalates one tier. A downward handoff carries an executable
@@ -62,12 +63,8 @@ reconciliation run.
    parameter and mark the route resolved.
 6. Batch findings from review and the slow checks into one repair round, then
    repeat verification and re-review only the repair delta. A writer may
-   `CONTEST` a finding with source anchors and a reproducer or check result
-   under the [finding contract](../code-review/references/finding-contract.md#propose-fix-or-contest).
-   Give the contest exactly one re-audit; record the outcome and any residue
-   in the PR as an accepted trade-off with evidence and accountable owner.
-   Escalate acceptance outside the chair's authority to its owner. Contest
-   adds no merge gate of its own; existing gates still apply. A gate that still
+   `CONTEST` a finding under the [finding contract](../code-review/references/finding-contract.md#propose-fix-or-contest);
+   it gets one re-audit and adds no gate. A gate that still
    fails takes the step 2 escalation, within the repair ceilings in
    [run-contract.md](references/run-contract.md). Stop and escalate, or return to the user, when two
    consecutive repair cycles leave the failing-check set unchanged or larger,

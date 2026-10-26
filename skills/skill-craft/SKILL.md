@@ -53,16 +53,13 @@ Both branches follow this without restating it in two voices:
   under `Project overrides:`; and keep harness and Fabric mechanics out of
   everything but coordination skills. Global skills stay project-agnostic.
 - **Trigger fixtures:** positive, negative, boundary and composition cases.
-  Every skill has at least two near-miss `should_trigger: false` negatives:
-  prompts sharing its vocabulary whose task belongs elsewhere. In the strict
-  JSON fixture format, use `relation: negative` and exclude the target from
-  both expected routes. Mark these cases `near-miss`; a keyword match alone
-  does not make a useful negative.
-  Changes to routing text re-run the held-out set.
-- **Behaviour changes:** run the same fixtures with and without the skill and
-  record the decisions, differences, model/effort and omissions as reviewer
-  evidence under [ADR 0014](../../docs/adr/0014-comparative-skill-evals-on-suspicion.md).
-  Scores are advisory, never a new gate. Pure inventory checks may fail CI.
+  Each skill has at least two `near-miss` negatives (`relation: negative`,
+  target excluded from both expected routes) that share its vocabulary but
+  belong elsewhere. Routing-text changes re-run the held-out set.
+- **Behaviour changes:** run the fixtures with and without the skill and record
+  decisions, differences, model/effort and omissions as reviewer evidence
+  ([ADR 0014](../../docs/adr/0014-comparative-skill-evals-on-suspicion.md)).
+  Scores are advisory; only inventory checks may fail CI.
 - **Contract-test boundary:** a contract test protects a machine-enforced
   invariant, never the prose that describes it. If the invariant has no
   enforcing script, the correct output is either an enforcing script or

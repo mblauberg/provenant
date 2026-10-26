@@ -119,7 +119,7 @@
     {
       "id": "q176100",
       "relation": "negative",
-      "prompt": "Our mission statement contains STOP and autonomous agents; shorten that paragraph without running a mission.",
+      "prompt": "Our mission statement mentions STOP and autonomous agents; shorten that paragraph.",
       "tags": [
         "near-miss",
         "adjacent"

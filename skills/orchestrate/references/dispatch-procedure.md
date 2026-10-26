@@ -98,10 +98,9 @@ cancel ATTEMPT`. The full RUN/TASK/ATTEMPT form is also accepted.
   - Keep tool output bounded: output over a bound goes to a file, and the
     command returns a pointer and a short tail. Avoid unbounded `gh ... --limit
     1000` and `rg --files` over run directories. A polling loop prints one line.
-  - Wait once: run one `provenant lanes --wait N` in the background, or one
-    status wait. Never sleep or poll loops.
-  - Wait with `provenant lanes --wait N` or `gh pr checks --watch` as a
-    background command; never a bare sleep or a manual polling loop.
+  - Wait once, as a background command: one `provenant lanes --wait N`, one
+    `gh pr checks --watch` or one status wait. Never a bare sleep or polling
+    loop.
   - No subagent or lane blocks in a foreground wait longer than about four
     minutes. Long waits run in the background (the harness notifies on
     completion) or belong to the chair. Cache lifetimes vary by provider
@@ -198,8 +197,4 @@ issue body with Filed-by: <PROVENANT_AGENT_LABEL> <run> using the actual label
 and originating run ID. This applies to any issue an agent files.
 ```
 
-Review briefs carry the target and rubric, never the chair's hypothesis or
-expected verdict. For example, send `Review src/cache.rs against the attached
-rubric`, never `Confirm my lost-update diagnosis and return P1`. Reviewers read
-the rubric and return `incomplete` if it is unreadable, naming the missing path
-and affected coverage. Missing criteria cannot produce a clean review.
+Review briefs follow the [review outcome](../../code-review/references/finding-contract.md#review-outcome) rule.

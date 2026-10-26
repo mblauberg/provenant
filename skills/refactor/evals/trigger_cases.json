@@ -126,7 +126,7 @@
     {
       "id": "q176126",
       "relation": "negative",
-      "prompt": "Review this refactor read-only for behavioural regressions; do not simplify the source.",
+      "prompt": "Review this refactor read-only for behavioural regressions.",
       "tags": [
         "near-miss",
         "adjacent"

@@ -42,6 +42,7 @@ class InventoryTests(unittest.TestCase):
             self.assertNotEqual(check([negative, dict(second, expected={
                 "primary_skill": "other", "companion_skills": ["example"],
             })]).returncode, 0)
+            self.assertNotEqual(check([negative, dict(second, tags=["adjacent"])]).returncode, 0)
             fixture.unlink()
             missing = subprocess.run(
                 [sys.executable, str(SCRIPT), str(root)],

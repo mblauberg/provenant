@@ -132,7 +132,7 @@
     {
       "id": "q176103",
       "relation": "negative",
-      "prompt": "Review the rendered checkout visually for keyboard navigation and contrast; no source-diff audit.",
+      "prompt": "Review the rendered checkout for keyboard navigation and contrast.",
       "tags": [
         "near-miss",
         "adjacent"

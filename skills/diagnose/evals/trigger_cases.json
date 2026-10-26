@@ -133,7 +133,7 @@
     {
       "id": "q176109",
       "relation": "negative",
-      "prompt": "Inspect this diff for possible performance regressions; no reported failure needs reproduction.",
+      "prompt": "Inspect this diff for possible performance regressions.",
       "tags": [
         "near-miss",
         "adjacent"

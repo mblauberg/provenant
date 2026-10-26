@@ -178,13 +178,13 @@
     {
       "id": "q176122",
       "relation": "negative",
-      "prompt": "The review mentions worker lanes and Fabric; correct one typo in its README paragraph.",
+      "prompt": "The ticket calls this a three-lane rollout, but it is one approved config edit in one file; make the change.",
       "tags": [
         "near-miss",
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "engineering-writing",
+        "primary_skill": "implement",
         "companion_skills": []
       }
     },
