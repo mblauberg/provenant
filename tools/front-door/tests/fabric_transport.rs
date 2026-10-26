@@ -2272,8 +2272,10 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         .map(serde_json::from_str::<Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     assert_eq!(actions[0]["action"]["action"], "lanes");
-    assert_eq!(actions[1]["action"]["action"], "run");
-    assert_eq!(actions[2]["action"]["action"], "health");
+    // MCP workers run the two tool calls concurrently, so their order varies.
+    let mut concurrent = [&actions[1], &actions[2]].map(|call| call["action"]["action"].clone());
+    concurrent.sort_by_key(|action| action.to_string());
+    assert_eq!(concurrent, ["health", "run"]);
     for call in actions {
         assert_eq!(call["protocol"], 2);
     }
