@@ -1,4 +1,6 @@
 # Build, package and install
+Owner: provenant-config
+Anchor: tools/front-door/crates/config/src
 
 The `provenant-config` crate owns release stamping, packaging and managed-file
 installation. See the [state design](../specs/state.md) for

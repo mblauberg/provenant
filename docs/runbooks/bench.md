@@ -1,4 +1,6 @@
 # Replay bench
+Owner: provenant
+Anchor: tools/front-door/src/bench.rs
 
 The bench freezes small repository changes as replay tasks. Each file in
 `bench/tasks/` names the repository, parent and merge commits, task prompt,

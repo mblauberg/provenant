@@ -1,4 +1,6 @@
 # Collect caches and expired provider state
+Owner: provenant
+Anchor: tools/front-door/src/gc_agent.rs
 
 Preview collection before inspecting the named removals:
 

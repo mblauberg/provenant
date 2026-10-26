@@ -1,4 +1,6 @@
 # Providers
+Owner: provenant-providers
+Anchor: tools/front-door/crates/providers/src
 
 Per-adapter launch notes. All five adapters (Claude, Codex, Cursor, Agy and
 OpenCode) are enabled by default in every access and session mode with a launch

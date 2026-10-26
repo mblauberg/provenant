@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Focused controls for reference sources, regeneration and drift detection."""
+
+from contextlib import redirect_stdout
+import io
+from pathlib import Path
+import runpy
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+
+SCRIPTS = Path(__file__).resolve().parent
+GEN = runpy.run_path(str(SCRIPTS / 'generate-reference'), run_name='reference_generator')
+# runpy returns a copy; functions retain the original module globals.
+GLOBALS = GEN['generate'].__globals__
+
+
+class ReferenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='provenant-reference-test-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def test_missing_sources_are_named_without_losing_available_sources(self):
+        source = self.root / GEN['KNOBS']
+        source.parent.mkdir(parents=True)
+        source.write_text('{"knobs": {"example": {"default": false}}, "schema_version": 1}')
+        files, gaps = GEN['generate'](self.root)
+        self.assertEqual(len(gaps), 3)
+        self.assertIn('## `example`', files['config-keys.md'])
+        self.assertIn('Cargo.toml is missing', files['cli.md'])
+        self.assertIn('tool-schemas.json is missing', files['mcp-tools.md'])
+        self.assertIn('Seatbelt goldens unavailable', files['seatbelt/README.md'])
+        for text in files.values():
+            self.assertIn('scripts/generate-reference', text.splitlines()[0])
+
+    def test_cli_contract_keeps_constraints_groups_and_argument_metadata(self):
+        contract = {'name': 'mode', 'long': 'mode', 'required': True,
+                    'repeatable': False, 'defaults': ['read-only'],
+                    'values': ['read-only', 'worktree-write'], 'bounds': [1, 2],
+                    'requires': ['project'], 'conflicts': ['other'],
+                    'conditional_defaults': [['writer', '10800']]}
+        text = GEN['cli_reference']({'commands': [{
+            'command': 'provenant example', 'arguments': [contract],
+            'constraints': ['must agree'], 'groups': [{'name': 'scope', 'required': True}],
+        }]})
+        self.assertIn('## `provenant example`', text)
+        self.assertIn('| `--mode` |', text)
+        for key in ('required', 'defaults', 'values', 'bounds', 'requires', 'conflicts',
+                    'conditional_defaults', 'groups', 'constraints'):
+            self.assertIn('"' + key + '"', text)
+
+    def test_non_machine_readable_source_is_a_named_gap(self):
+        source = self.root / GEN['SCHEMAS']
+        source.parent.mkdir(parents=True)
+        for content in ('not JSON', '{"wrong": "shape"}'):
+            source.write_text(content)
+            files, gaps = GEN['generate'](self.root)
+            self.assertIn('no supported machine-readable schema', files['mcp-tools.md'])
+            self.assertTrue(any(str(GEN['SCHEMAS']) in gap for gap in gaps))
+
+    def test_unsupported_help_is_a_gap_but_build_failure_is_an_error(self):
+        workspace = self.root / GEN['WORKSPACE']
+        workspace.mkdir(parents=True)
+        (workspace / 'Cargo.toml').touch()
+        failure = subprocess.CalledProcessError(2, ['provenant', 'help', '--json'])
+        with patch('subprocess.run', side_effect=failure):
+            files, gaps = GEN['generate'](self.root, self.root / 'built-cli')
+            self.assertIn('no machine-readable catalogue', files['cli.md'])
+            self.assertTrue(any('help --json' in gap for gap in gaps))
+        with patch.dict(GLOBALS, cargo=unittest.mock.Mock(side_effect=failure)):
+            with self.assertRaises(subprocess.CalledProcessError):
+                GEN['generate'](self.root)
+
+    def test_mcp_and_configuration_preserve_all_schema_fields(self):
+        tool = {'name': 'fixture_tool', 'inputSchema': {'type': 'object'},
+                'outputSchema': {'const': None}, '_meta': {'schemaVersion': 2}}
+        text = GEN['mcp_reference']([tool])
+        for key in tool:
+            self.assertIn('"' + key + '"', text)
+        data = {'knobs': {'fixture': {'type': 'enum', 'default': 'a', 'values': ['a', 'b'],
+                                    'effect': 'One | two `three`.'}},
+                'schema_version': 1, 'profiles': {'balanced': {'fixture': 'b'}}}
+        text = GEN['config_reference'](data)
+        self.assertIn('## `fixture`', text)
+        self.assertIn('"profiles"', text)
+        self.assertIn('&#124;', text)
+        self.assertIn('&#96;', text)
+
+    def test_default_cli_is_built_from_this_worktree_and_binary_can_be_reused(self):
+        target = self.root / 'lane-target'
+        result = subprocess.CompletedProcess([], 0, stdout='{"data":{"commands":[]}}')
+        with patch.dict(GLOBALS, cargo=unittest.mock.Mock(side_effect=[
+            '', '{"target_directory":' + '"' + str(target) + '"}',
+        ])), patch('subprocess.run', return_value=result) as run:
+            self.assertEqual(GEN['catalogue'](self.root), {'commands': []})
+            self.assertIn('build', GLOBALS['cargo'].call_args_list[0].args)
+            self.assertEqual(run.call_args.args[0], [str(target / 'debug/provenant'), 'help', '--json'])
+            self.assertEqual(run.call_args.kwargs['cwd'], self.root)
+        with patch.dict(GLOBALS, cargo=unittest.mock.Mock()) as globals_, patch('subprocess.run', return_value=result):
+            GEN['catalogue'](self.root, self.root / 'built-cli')
+            globals_['cargo'].assert_not_called()
+
+    def test_seatbelt_goldens_are_copied_byte_for_byte_after_header_without_cargo(self):
+        snapshots = self.root / GEN['SNAPSHOTS']
+        snapshots.mkdir(parents=True)
+        profile = '; fixture\n(version 1)\n'
+        (snapshots / 'fixture-read-only.sb').write_text(profile)
+        with patch.dict(GLOBALS, cargo=unittest.mock.Mock()):
+            files, _ = GEN['generate'](self.root)
+            GLOBALS['cargo'].assert_not_called()
+        self.assertEqual(files['seatbelt/fixture-read-only.sb'].split('\n', 1)[1], profile)
+
+    def test_diff_detects_edits_and_both_missing_and_extra_files(self):
+        actual, expected = self.root / 'actual', self.root / 'expected'
+        GEN['write_files'](expected, {'cli.md': 'expected\n', 'seatbelt/a.sb': '; profile\n'})
+        GEN['write_files'](actual, {'cli.md': 'expected\n', 'seatbelt/a.sb': '; profile\n'})
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(GEN['differences'](expected, actual))
+            (actual / 'cli.md').write_text('hand edit\n')
+            self.assertTrue(GEN['differences'](expected, actual))
+            (actual / 'cli.md').unlink()
+            self.assertTrue(GEN['differences'](expected, actual))
+            GEN['write_files'](actual, {'cli.md': 'expected\n', 'extra.md': ''})
+            self.assertTrue(GEN['differences'](expected, actual))
+
+
+if __name__ == '__main__':
+    unittest.main()

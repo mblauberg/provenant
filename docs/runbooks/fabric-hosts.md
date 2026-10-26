@@ -1,4 +1,6 @@
 # Fabric hosts
+Owner: provenant-fabric-runtime
+Anchor: tools/front-door/crates/fabric-runtime/src
 
 Fabric uses bounded SSH calls and host-owned state. Each host keeps its own
 provider sign-ins. The [Fabric design](../specs/fabric.md#peer-hosts) owns the

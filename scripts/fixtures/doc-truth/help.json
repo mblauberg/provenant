@@ -1,0 +1,15 @@
+{
+  "data": {
+    "commands": [
+      {"command": "provenant", "arguments": [{"long": "json"}, {"long": "state-dir"}]},
+      {"command": "provenant help", "arguments": [{"long": "json"}]},
+      {"command": "provenant route", "arguments": [{"long": "json"}]},
+      {"command": "provenant route list", "arguments": [{"long": "json"}, {"long": "pool"}]},
+      {"command": "provenant config", "arguments": []},
+      {"command": "provenant config set", "arguments": []},
+      {"command": "provenant config unset", "arguments": []},
+      {"command": "provenant config show", "arguments": [{"long": "sources"}]},
+      {"command": "provenant gc", "arguments": [{"long": "json"}, {"long": "apply"}]}
+    ]
+  }
+}

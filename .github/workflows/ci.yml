@@ -61,8 +61,8 @@ jobs:
             echo "run_macos=false" >> "$GITHUB_OUTPUT"
           fi
 
-  docs:
-    name: Harness asset checks
+  generated-reference:
+    name: Harness assets and generated reference
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -92,6 +92,16 @@ jobs:
           PROVENANT_STATE_DIR: ${{ runner.temp }}/provenant-state
           TMPDIR: ${{ runner.temp }}
         run: cargo run --locked -q -p provenant --bin provenant -- check harness --project "$GITHUB_WORKSPACE"
+
+      - name: Check generated contract reference
+        run: scripts/generate-reference --check --binary "$CARGO_TARGET_DIR/debug/provenant"
+      # Advisory: continue-on-error keeps this outside the ci-status gate.
+      - name: Report unresolved documentation references and missing headers
+        continue-on-error: true
+        run: |
+          scripts/check-doc-truth --binary "$CARGO_TARGET_DIR/debug/provenant" > "$RUNNER_TEMP/doc-truth.txt"
+          cat "$RUNNER_TEMP/doc-truth.txt"
+          cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
   rust:
     name: Rust front door
@@ -339,6 +349,10 @@ jobs:
         run: scripts/collate-release-notes --check
       - name: Test release-note collation
         run: scripts/test-collate-release-notes
+      - name: Test documentation reference checks
+        run: |
+          scripts/test-generate-reference
+          scripts/test-check-doc-truth
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
@@ -357,7 +371,7 @@ jobs:
     permissions: {}
     needs:
       - macos-scope
-      - docs
+      - generated-reference
       - rust
       - rust-macos-release
       - rust-dependencies
