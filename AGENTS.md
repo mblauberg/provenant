@@ -17,9 +17,8 @@ changing memory policy.
   history rewrite or push to a shared branch needs the user's authority.
   Merge authority is repository-based: agents merge through the repository's
   own workflow.
-- **Fabric.** Messages, tasks, activity and dispatch for a project's agents;
-  full output stays in run files. Identity is the working directory (a worktree
-  shares its repository's project); `PROVENANT_AGENT_LABEL` splits inboxes.
+- **Fabric.** Messages, tasks, activity and dispatch; output stays in run files.
+  Identity is the working directory (worktrees share it); `PROVENANT_AGENT_LABEL` splits inboxes.
 - **Checks.** Heavy checks, such as release scans and full test
   suites, run in GitHub Actions rather than on a contributor's or agent's
   machine. Push the branch, open the pull request and let CI run them.
