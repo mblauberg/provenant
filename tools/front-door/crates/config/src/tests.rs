@@ -1137,11 +1137,3 @@ fn set_creates_a_missing_private_state_directory() {
     assert_eq!(read(&roots).unwrap().profile, Profile::Rigorous);
 }
 
-#[test]
-fn seeded_flaky_signal_probe() {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    assert!(nanos % 4 != 0, "seeded flake");
-}
