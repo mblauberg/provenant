@@ -225,16 +225,15 @@ fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> Str
             "{verb} {} ({} bytes, {})\n",
             entry.path.display(),
             entry.bytes,
-            match entry.reason {
-                provenant_confinement::permissions::CacheGcReason::Orphaned => "orphaned",
-                provenant_confinement::permissions::CacheGcReason::Idle => "idle",
-                provenant_confinement::permissions::CacheGcReason::Tombstone => "tombstone",
-                provenant_confinement::permissions::CacheGcReason::Foreign => "foreign",
-            }
+            gc_reason(entry.reason)
         ));
     }
     for entry in &report.kept {
-        human.push_str(&format!("kept {} (foreign)\n", entry.path.display()));
+        human.push_str(&format!(
+            "kept {} ({})\n",
+            entry.path.display(),
+            gc_reason(entry.reason)
+        ));
     }
     human.push_str(&format!(
         "{} cache(s), {} bytes {}\n",
@@ -249,36 +248,56 @@ fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> Str
     human
 }
 
+fn gc_reason(reason: provenant_confinement::permissions::CacheGcReason) -> &'static str {
+    use provenant_confinement::permissions::CacheGcReason;
+    match reason {
+        CacheGcReason::Orphaned => "orphaned",
+        CacheGcReason::Idle => "idle",
+        CacheGcReason::Tombstone => "tombstone",
+        CacheGcReason::Foreign => "foreign",
+        CacheGcReason::Live => "live",
+        CacheGcReason::Unobservable => "unobservable",
+    }
+}
+
 fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
-    use provenant_confinement::permissions::{CacheGcPolicy, gc_worktree_cargo_caches};
+    use provenant_confinement::permissions::{
+        CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard,
+    };
     use provenant_confinement::worktrees::WriterState;
 
     let assets = roots::product_root()?;
     let project = roots::selected_project(globals.project.as_deref(), true)?;
     let roots = roots::roots(globals, &assets, &project)?;
     let home = roots::home()?;
-    let listed = with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
-        Ok(worktrees::list(context, cancel)?)
-    })?;
-    let protected_owners = listed
-        .iter()
-        .filter(|info| info.writer != WriterState::Free)
-        .map(|info| info.path.clone())
-        .collect();
-    let now_ns = SystemClock
-        .wall_now()
-        .map(|now| i128::from(now.as_micros()) * 1_000)
-        .map_err(|_| Error::Budget)?;
-    let idle_ns = i128::from(command.idle_days) * 86_400 * 1_000_000_000;
-    let policy = CacheGcPolicy {
-        idle_before_ns: Some(now_ns - idle_ns),
-        dry_run: command.dry_run,
-        protected_owners,
-        project_owners: listed.into_iter().map(|info| info.path).collect(),
-    };
-    Ok(GcData {
-        report: gc_worktree_cargo_caches(&home, &policy)?,
-        idle_days: command.idle_days,
+    with_context(&roots, &project, MUTATION_TIMEOUT, |context, cancel| {
+        let listed = worktrees::list(context, cancel)?;
+        let protected_owners = listed
+            .iter()
+            .filter(|info| info.writer != WriterState::Free)
+            .map(|info| info.path.clone())
+            .collect();
+        let now_ns = SystemClock
+            .wall_now()
+            .map(|now| i128::from(now.as_micros()) * 1_000)
+            .map_err(|_| Error::Budget)?;
+        let idle_ns = i128::from(command.idle_days) * 86_400 * 1_000_000_000;
+        let policy = CacheGcPolicy {
+            idle_before_ns: Some(now_ns - idle_ns),
+            dry_run: command.dry_run,
+            protected_owners,
+            project_owners: listed.iter().map(|info| info.path.clone()).collect(),
+        };
+        Ok(GcData {
+            report: gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
+                let branch = listed
+                    .iter()
+                    .find(|info| info.path == path)
+                    .and_then(|info| info.branch.as_deref());
+                worktrees::cache_writer_guard(context.binding, context.project_state, path, branch)
+            })?,
+            idle_days: command.idle_days,
+        })
     })
 }
 

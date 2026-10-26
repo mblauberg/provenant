@@ -331,6 +331,9 @@ orphaned caches and existing cleanup tombstones for `provenant gc` to sweep.
 Cache cleanup accepts v1 owner markers when the owner path is missing, and
 `provenant gc` retries their interrupted tombstones. Existing v1 owners are kept, reported
 as foreign when outside the project, and never collected as idle.
+Idle GC takes the existing writer lock without waiting, checks for reservations
+and holds the guard across the tombstone rename. A held lock keeps the cache as
+live; a missing or unobservable lock keeps it as unobservable.
 
 Removal and pruning hold writer exclusion, recheck reservations and worker
 observations, and refuse live or unknown candidates. A post-merge hook passes

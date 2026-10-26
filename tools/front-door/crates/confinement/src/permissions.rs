@@ -21,12 +21,13 @@ use provenant_supervisor::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termina
 use provenant_supervisor::fs::Metadata;
 #[cfg(target_os = "macos")]
 use provenant_supervisor::fs::SafeDir;
-use provenant_supervisor::fs::{FileKind, FsError, PublishMode, SafeFs, entry_names};
+use provenant_supervisor::fs::{FileKind, FsError, LockGuard, PublishMode, SafeFs, entry_names};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::repo::{GitRefName, VerifiedWorktree};
+use crate::worktrees::WorkerState;
 pub use provenant_records::run::{NetworkAccess, PathScope, WriteSource};
 
 const MAX_PATH_BYTES: usize = 4096;
@@ -377,6 +378,10 @@ pub enum CacheGcReason {
     Tombstone,
     /// An existing owner outside the selected project; always kept.
     Foreign,
+    /// The owner's writer lock is held; always kept.
+    Live,
+    /// Writer exclusion cannot be established; always kept.
+    Unobservable,
 }
 
 /// What a lane cache sweep removes besides orphans.
@@ -404,7 +409,7 @@ pub struct CacheGcEntry {
 pub struct CacheGcReport {
     pub dry_run: bool,
     pub removed: Vec<CacheGcEntry>,
-    /// Foreign caches are reported without traversing their contents.
+    /// Caches kept because ownership or writer state prevents removal.
     pub kept: Vec<CacheGcEntry>,
     pub bytes_freed: u64,
 }
@@ -445,21 +450,35 @@ pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<()
         name,
         &CacheGcPolicy::default(),
         &mut CacheGcReport::default(),
+        &mut |_| Err(WorkerState::Unknown),
     )
 }
 
 /// Sweep the lane cache root: orphaned caches always, idle ones when the policy
 /// sets a threshold and lists the owner in this project. Retry GC tombstones
-/// too. Directories are opened without following symlinks or crossing devices.
+/// too. Without a writer guard, idle caches are kept as unobservable.
+/// Directories are opened without following symlinks or crossing devices.
 pub fn gc_worktree_cargo_caches(
     home: &Path,
     policy: &CacheGcPolicy,
+) -> Result<CacheGcReport, CacheGcError> {
+    gc_worktree_cargo_caches_with_writer_guard(home, policy, |_| Err(WorkerState::Unknown))
+}
+
+type CacheWriterGuard<'a> = dyn FnMut(&Path) -> Result<LockGuard, WorkerState> + 'a;
+
+/// Sweep caches while holding the owner's writer lock across idle detachment.
+/// The guard must exclude writers and refuse missing or unobservable locks.
+pub fn gc_worktree_cargo_caches_with_writer_guard(
+    home: &Path,
+    policy: &CacheGcPolicy,
+    mut writer_guard: impl FnMut(&Path) -> Result<LockGuard, WorkerState>,
 ) -> Result<CacheGcReport, CacheGcError> {
     let mut report = CacheGcReport {
         dry_run: policy.dry_run,
         ..CacheGcReport::default()
     };
-    match sweep_worktree_cargo_caches(home, policy, &mut report) {
+    match sweep_worktree_cargo_caches(home, policy, &mut report, &mut writer_guard) {
         Ok(()) => Ok(report),
         Err(source) => Err(CacheGcError {
             report,
@@ -472,13 +491,14 @@ fn sweep_worktree_cargo_caches(
     home: &Path,
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
+    writer_guard: &mut CacheWriterGuard<'_>,
 ) -> Result<(), PermissionError> {
     validate_absolute(home)?;
     let cache_root = home.join("Library/Caches/provenant-lane-cargo");
     let Some(root) = open_cache_root(&cache_root)? else {
         return Ok(());
     };
-    sweep_cache_root(root.as_ref(), &cache_root, policy, report)
+    sweep_cache_root(root.as_ref(), &cache_root, policy, report, writer_guard)
 }
 
 fn open_cache_root(
@@ -508,6 +528,7 @@ fn sweep_cache_root(
     cache_root: &Path,
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
+    writer_guard: &mut CacheWriterGuard<'_>,
 ) -> Result<(), PermissionError> {
     let mut failures = Vec::new();
     // Snapshot names so newly detached tombstones are retried on a later run.
@@ -531,7 +552,9 @@ fn sweep_cache_root(
                 continue;
             }
         };
-        if let Err(error) = prune_worktree_cache(root, cache_root, &name, policy, report) {
+        if let Err(error) =
+            prune_worktree_cache(root, cache_root, &name, policy, report, writer_guard)
+        {
             failures.push(format!("{:?}: {error}", name));
         }
     }
@@ -549,6 +572,7 @@ fn prune_worktree_cache(
     name: &OsStr,
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
+    writer_guard: &mut CacheWriterGuard<'_>,
 ) -> Result<(), PermissionError> {
     let Some(digest) = name.to_str() else {
         return Ok(());
@@ -616,6 +640,16 @@ fn prune_worktree_cache(
             return Ok(());
         };
         let Some(reason) = cache_gc_reason(cache.as_ref(), Path::new(name), owner, policy)? else {
+            if policy.protected_owners.contains(&owner.path) {
+                report.kept.push(CacheGcEntry {
+                    path: cache_root.join(name),
+                    bytes: 0,
+                    reason: match writer_guard(&owner.path) {
+                        Err(WorkerState::Live) => CacheGcReason::Live,
+                        _ => CacheGcReason::Unobservable,
+                    },
+                });
+            }
             return Ok(());
         };
         if reason == CacheGcReason::Foreign {
@@ -627,6 +661,26 @@ fn prune_worktree_cache(
             return Ok(());
         }
         reason
+    };
+    let _writer_guard = if reason == CacheGcReason::Idle {
+        let owner = owner.as_ref().ok_or(PermissionError::AnchorMismatch)?;
+        match writer_guard(&owner.path) {
+            Ok(guard) => Some(guard),
+            Err(state) => {
+                report.kept.push(CacheGcEntry {
+                    path: cache_root.join(name),
+                    bytes: 0,
+                    reason: if state == WorkerState::Live {
+                        CacheGcReason::Live
+                    } else {
+                        CacheGcReason::Unobservable
+                    },
+                });
+                return Ok(());
+            }
+        }
+    } else {
+        None
     };
     let (bytes, _) = measure_cache(cache.as_ref(), Path::new(name), 0)?;
     if policy.dry_run {
@@ -4895,6 +4949,15 @@ mod tests {
         Ok(())
     }
 
+    fn test_writer_lock(home: &Path) -> Result<provenant_supervisor::fs::Directory, FsError> {
+        use provenant_supervisor::fs::{Directory, LockMode};
+        let parent = Directory::open_anchor(home)?;
+        parent.mkdir(OsStr::new("writer-state"), 0o700)?;
+        let directory = parent.open_verified_directory(OsStr::new("writer-state"))?;
+        let _guard = directory.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+        Ok(directory)
+    }
+
     // Exercise races and I/O failures at the filesystem boundary, without
     // timing-dependent threads or production-only test hooks.
     mod gc_faults {
@@ -5005,6 +5068,15 @@ mod tests {
             policy: &CacheGcPolicy,
             event: Event,
         ) -> Result<CacheGcReport, CacheGcError> {
+            sweep_with_writer_guard(home, policy, event, &mut |_| Err(WorkerState::Unknown))
+        }
+
+        fn sweep_with_writer_guard(
+            home: &Path,
+            policy: &CacheGcPolicy,
+            event: Event,
+            writer_guard: &mut CacheWriterGuard<'_>,
+        ) -> Result<CacheGcReport, CacheGcError> {
             let path = home.join("Library/Caches/provenant-lane-cargo");
             let mut report = CacheGcReport {
                 dry_run: policy.dry_run,
@@ -5023,6 +5095,7 @@ mod tests {
                         &path,
                         policy,
                         &mut report,
+                        writer_guard,
                     )
                 });
             result
@@ -5322,6 +5395,101 @@ mod tests {
         }
 
         #[test]
+        fn gc_idle_refuses_writers_that_became_live_or_unobservable()
+        -> Result<(), Box<dyn std::error::Error>> {
+            for live in [true, false] {
+                let temporary = tempfile::tempdir()?;
+                let home = temporary.path();
+                let owner = home.join("owner");
+                std::fs::create_dir(&owner)?;
+                let path = cache(home, &"a".repeat(64), &owner)?;
+                let locks = test_writer_lock(home)?;
+                let held = if live {
+                    Some(locks.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+                } else {
+                    std::fs::remove_file(home.join("writer-state/writer.lock"))?;
+                    None
+                };
+                // The listing observed a free writer; the lock changed later.
+                let policy = CacheGcPolicy {
+                    idle_before_ns: Some(i128::MAX),
+                    project_owners: [owner].into(),
+                    ..CacheGcPolicy::default()
+                };
+                let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, |_| {
+                    locks
+                        .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                        .map_err(|error| match error {
+                            FsError::LockTimeout { .. } => WorkerState::Live,
+                            _ => WorkerState::Unknown,
+                        })
+                })?;
+                assert!(report.removed.is_empty());
+                assert_eq!(report.kept.len(), 1);
+                assert_eq!(
+                    report.kept[0].reason,
+                    if live {
+                        CacheGcReason::Live
+                    } else {
+                        CacheGcReason::Unobservable
+                    }
+                );
+                assert!(path.join("artifact").is_file());
+                assert_eq!(home.join("writer-state/writer.lock").exists(), live);
+                drop(held);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn gc_idle_holds_writer_lock_across_tombstone_rename()
+        -> Result<(), Box<dyn std::error::Error>> {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let owner = home.join("owner");
+            std::fs::create_dir(&owner)?;
+            let path = cache(home, &"a".repeat(64), &owner)?;
+            let locks = Arc::new(test_writer_lock(home)?);
+            let observed_locks = locks.clone();
+            let renames = Arc::new(AtomicUsize::new(0));
+            let observed_renames = renames.clone();
+            let policy = CacheGcPolicy {
+                idle_before_ns: Some(i128::MAX),
+                project_owners: [owner].into(),
+                ..CacheGcPolicy::default()
+            };
+            let report = sweep_with_writer_guard(
+                home,
+                &policy,
+                Arc::new(move |event, _| {
+                    if matches!(event, "before rename" | "after rename") {
+                        assert!(matches!(
+                            observed_locks
+                                .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive,),
+                            Err(FsError::LockTimeout { .. })
+                        ));
+                        observed_renames.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(())
+                }),
+                &mut |_| {
+                    locks
+                        .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                        .map_err(|_| WorkerState::Unknown)
+                },
+            )?;
+            assert_eq!(renames.load(Ordering::SeqCst), 2);
+            assert_eq!(report.removed.len(), 1);
+            assert_eq!(report.removed[0].reason, CacheGcReason::Idle);
+            assert!(!path.exists());
+            let _released =
+                locks.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+            Ok(())
+        }
+
+        #[test]
         fn gc_rechecks_orphan_and_idle_conditions_before_detaching()
         -> Result<(), Box<dyn std::error::Error>> {
             use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5345,8 +5513,9 @@ mod tests {
                     project_owners: [owner.clone()].into(),
                     ..CacheGcPolicy::default()
                 };
+                let locks = test_writer_lock(home)?;
                 let reads = AtomicUsize::new(0);
-                let report = sweep(
+                let report = sweep_with_writer_guard(
                     home,
                     &policy,
                     Arc::new(move |event, marker| {
@@ -5362,6 +5531,11 @@ mod tests {
                         }
                         Ok(())
                     }),
+                    &mut |_| {
+                        locks
+                            .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map_err(|_| WorkerState::Unknown)
+                    },
                 )?;
                 assert!(report.removed.is_empty());
                 assert!(path.join(CARGO_CACHE_OWNER).is_file());
@@ -5734,6 +5908,15 @@ mod tests {
             caches.push((cache, owner));
         }
         std::fs::remove_dir(&caches[0].1)?;
+        let locks = test_writer_lock(home)?;
+        let mut writer_guard = |_: &Path| {
+            locks
+                .try_lock_existing(
+                    OsStr::new("writer.lock"),
+                    provenant_supervisor::fs::LockMode::Exclusive,
+                )
+                .map_err(|_| WorkerState::Unknown)
+        };
         let mut policy = CacheGcPolicy {
             idle_before_ns: Some(i128::MAX),
             dry_run: true,
@@ -5741,12 +5924,12 @@ mod tests {
             protected_owners: [caches[2].1.clone()].into(),
         };
 
-        let dry = gc_worktree_cargo_caches(home, &policy)?;
+        let dry = gc_worktree_cargo_caches_with_writer_guard(home, &policy, &mut writer_guard)?;
         assert_eq!(dry.removed.len(), 2);
         assert!(caches.iter().all(|(cache, _)| cache.is_dir()));
 
         policy.dry_run = false;
-        let report = gc_worktree_cargo_caches(home, &policy)?;
+        let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, &mut writer_guard)?;
         let reasons: Vec<_> = report.removed.iter().map(|e| e.reason).collect();
         assert!(reasons.contains(&CacheGcReason::Orphaned));
         assert!(reasons.contains(&CacheGcReason::Idle));
@@ -5758,7 +5941,11 @@ mod tests {
         // A recent cache is kept when the threshold predates its writes.
         policy.idle_before_ns = Some(0);
         policy.protected_owners.clear();
-        assert!(gc_worktree_cargo_caches(home, &policy)?.removed.is_empty());
+        assert!(
+            gc_worktree_cargo_caches_with_writer_guard(home, &policy, &mut writer_guard)?
+                .removed
+                .is_empty()
+        );
         assert!(caches[2].0.is_dir());
         Ok(())
     }

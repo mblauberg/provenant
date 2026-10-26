@@ -161,6 +161,8 @@ fn classify_lane_cache(
         Some(CacheGcReason::Idle) => "idle",
         Some(CacheGcReason::Tombstone) => "tombstone",
         Some(CacheGcReason::Foreign) => "foreign",
+        Some(CacheGcReason::Live) => "live",
+        Some(CacheGcReason::Unobservable) => "unobservable",
         None if owner.identity.is_none() => "legacy",
         None => "live",
     };
