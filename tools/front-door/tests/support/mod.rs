@@ -8,10 +8,13 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
     provenant_supervisor::fixture::tempdir(|root| {
@@ -81,6 +84,21 @@ pub struct TestRig {
     executor: SystemExecutor,
 }
 impl TestRig {
+    /// Serialise process creation with executable copies in this test binary.
+    pub fn with_process_spawn_lock<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _guard = PROCESS_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f()
+    }
+
+    pub fn copy_executable(&self, source: &Path, destination: &Path) -> Result {
+        self.with_process_spawn_lock(|| {
+            fs::copy(source, destination)?;
+            Ok(())
+        })
+    }
+
     pub fn new() -> Result<Self> {
         // Outside the checkout: a rig beneath it lets cargo in a confined lane
         // probe find (and fail to read) the workspace manifest and config above.
@@ -183,6 +201,7 @@ impl TestRig {
             .ok_or("production binary path is only available to integration targets")?;
         self.execute_os(Path::new(binary), &arguments, None)
     }
+
     pub fn execute(
         &self,
         program: &Path,
@@ -196,6 +215,19 @@ impl TestRig {
         )
     }
     pub fn execute_os(
+        &self,
+        program: &Path,
+        args: &[OsString],
+        stdin: Option<&[u8]>,
+    ) -> Result<ExecOutcome> {
+        let _guard = PROCESS_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.execute_os_locked(program, args, stdin)
+    }
+
+    /// Run a child while `PROCESS_SPAWN_LOCK` is already held.
+    pub fn execute_os_locked(
         &self,
         program: &Path,
         args: &[OsString],

@@ -99,7 +99,7 @@ fn codex_dispatch_observes_rollout() -> Result {
         fs::write(rig.home.join(".rustup/settings.toml"), "")?;
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
-        fs::copy(std::env::current_exe()?, bin.join("codex"))?;
+        rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
         let account = rig.root.join("codex");
         fs::write(
             account.join("auth.json"),
@@ -180,7 +180,7 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     let cleanup = rig.process_cleanup();
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
-    fs::copy(std::env::current_exe()?, bin.join("claude"))?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("claude"))?;
     let account = rig.home.join(".claude-pro");
     fs::create_dir(&account)?;
     fs::write(

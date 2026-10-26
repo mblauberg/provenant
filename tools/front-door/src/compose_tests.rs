@@ -44,7 +44,7 @@ fn fixture() -> Result<TestRig> {
     )?;
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
-    fs::copy(std::env::current_exe()?, bin.join("codex"))?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
     rig.env.retain(|(key, _)| key != "PATH");
     rig.env.push((
         "PATH".into(),

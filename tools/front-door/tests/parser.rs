@@ -307,10 +307,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     let mut rig = TestRig::new()?;
     let release = rig.root.join("rélease");
     fs::create_dir_all(release.join("bin"))?;
-    fs::copy(
-        env!("CARGO_BIN_EXE_provenant"),
-        release.join("bin/provenant"),
-    )?;
+    let executable = release.join("bin/provenant");
     fs::write(release.join("release.json"), "{}")?;
     rig.env
         .push(("PROVENANT_ROOT".into(), "/intentionally/missing".into()));
@@ -324,7 +321,10 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
         "root".into(),
         "--json".into(),
     ];
-    let out = rig.execute_os(&release.join("bin/provenant"), &args, None)?;
+    let out = rig.with_process_spawn_lock(|| {
+        fs::copy(env!("CARGO_BIN_EXE_provenant"), &executable)?;
+        rig.execute_os_locked(&executable, &args, None)
+    })?;
     assert_eq!(
         code(&out),
         0,
@@ -339,7 +339,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     assert_eq!(assets.to_path_buf()?, fs::canonicalize(&release)?);
     assert_eq!(selected.to_path_buf()?, state);
     assert!(!state.exists());
-    let human = rig.execute(&release.join("bin/provenant"), &["root"], None)?;
+    let human = rig.execute(&executable, &["root"], None)?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         human.stdout.bytes,
