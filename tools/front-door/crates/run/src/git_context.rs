@@ -508,7 +508,13 @@ mod tests {
 
     #[test]
     fn git_context_ignores_worktree_binary_attributes_with_control() -> TestResult {
-        let (_temp, root, binary, executor, base) = small_history()?;
+        let HistoryFixture {
+            _temp,
+            root,
+            binary,
+            executor,
+            base,
+        } = small_history()?;
         std::fs::write(root.join(".gitattributes"), "* -diff\n")?;
         let range = format!("{base}..HEAD");
         let control = read_git(&executor, &binary, &root, &["diff", &range], 4096)?;
@@ -520,7 +526,13 @@ mod tests {
 
     #[test]
     fn git_context_ignores_worktree_mailmap_with_control() -> TestResult {
-        let (_temp, root, binary, executor, base) = small_history()?;
+        let HistoryFixture {
+            _temp,
+            root,
+            binary,
+            executor,
+            base,
+        } = small_history()?;
         std::fs::write(
             root.join(".mailmap"),
             "Rewritten <rewritten@example.test> Fixture <fixture@example.test>\n",
@@ -542,16 +554,15 @@ mod tests {
         Ok(())
     }
 
-    fn small_history() -> std::result::Result<
-        (
-            tempfile::TempDir,
-            std::path::PathBuf,
-            std::path::PathBuf,
-            SystemExecutor,
-            String,
-        ),
-        Box<dyn std::error::Error>,
-    > {
+    struct HistoryFixture {
+        _temp: tempfile::TempDir,
+        root: std::path::PathBuf,
+        binary: std::path::PathBuf,
+        executor: SystemExecutor,
+        base: String,
+    }
+
+    fn small_history() -> std::result::Result<HistoryFixture, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
         let binary = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
@@ -579,7 +590,13 @@ mod tests {
             )?;
         }
         let base = resolve_git_base(&binary, &root, "HEAD^")?;
-        Ok((temp, root, binary, executor, base))
+        Ok(HistoryFixture {
+            _temp: temp,
+            root,
+            binary,
+            executor,
+            base,
+        })
     }
 
     #[test]

@@ -79,16 +79,29 @@ Route and access inputs on `dispatch`:
   checkout. Top-level submissions reject an unresolved base as invalid input;
   nested submissions are validated on the host before provider launch.
   Manifest and Fabric MCP submission tasks accept optional `base`; a manifest
-  task overrides the CLI default. Peer writers still use `--base` to create
-  their branch.
+  task overrides the CLI default. With `--host`, read-only dispatch resolves
+  the base in the peer's clone. Peer writers use `--base` only to create
+  their branch; they receive no context field, history files or prompt prefix.
   Each candidate's `tmp/candidate-N/` contains `git-log.txt`, `git-diff.patch`
   and `git-context.json`; the generated prompt names their absolute paths.
   Each text file is capped at 1 MiB, and the JSON records the resolved base,
-  captured HEAD and truncation flags. The host disables fsmonitor, external
-  diff, text conversion, signature display and lazy fetching. Each Git read
-  has a 10-second budget. These files cover committed changes only and share
+  captured HEAD, truncation flags and `timed_out` (also recorded per file).
+  The host disables fsmonitor, external diff, text conversion, signature
+  display, mailmap rewriting and rename detection, and forces text diffs.
+  Protocol denial prevents fetching on all supported Git versions;
+  `GIT_NO_LAZY_FETCH` additionally suppresses lazy fetches on Git 2.44+.
+  Each Git read has a 10-second budget. A log or diff timeout preserves
+  partial output, records the timeout and still launches the lane. Reviewers
+  must report incomplete coverage for truncated or timed-out captures.
+  These files cover committed changes only and share
   the attempt's temporary cleanup. No history files are generated without a
   base.
+  Every adapter's OS profile grants access to attempt scratch. Claude and Agy
+  also add scratch to their tool workspace; OpenCode explicitly permits reads
+  and external-directory access to scratch. Codex bypasses its inner sandbox
+  and approvals, and Cursor disables its inner sandbox, so their tools use
+  the OS grant directly. Context files are published through the directory
+  handle retained when scratch was created.
 - Manifest: strict JSON `{schema_version:1,tasks:[...]}` with 1 to 64 tasks,
   unique optional task IDs (32 lowercase hex digits; omitted IDs are
   generated), `--concurrency` 1 to 8 (default the `lanes.max_concurrency`
