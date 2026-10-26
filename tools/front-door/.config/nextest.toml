@@ -65,14 +65,19 @@ not (
 '''
 
 [test-groups]
-serial-sqlite = { max-threads = 1 }
+serial-process = { max-threads = 1 }
 
-# These suites own SQLite stores or launch process/custody fixtures. Keep
-# them serial within a test run; independent pure-data suites remain parallel.
+# Nextest runs each test in its own process, so this group orders only state
+# shared across processes. The supervisor suites launch child processes, bind
+# Unix sockets and observe the live process table. The worktree driver copies
+# its own binary and executes the copy; a fork that inherits the copy's write
+# descriptor makes that exec fail with ETXTBSY. Other suites use per-test
+# temporary directories and pass their environment explicitly, so they run in
+# parallel.
 [[profile.ci.overrides]]
-filter = 'package(provenant-fabric-store) | package(provenant-supervisor) | package(provenant-run) | (package(provenant) & binary(parser))'
-test-group = "serial-sqlite"
+filter = 'package(provenant-supervisor) | (package(=provenant) & binary(=worktrees))'
+test-group = "serial-process"
 
 [[profile.lane.overrides]]
-filter = 'package(provenant-fabric-store) | package(provenant-supervisor) | package(provenant-run) | (package(provenant) & binary(parser))'
-test-group = "serial-sqlite"
+filter = 'package(provenant-supervisor) | (package(=provenant) & binary(=worktrees))'
+test-group = "serial-process"
