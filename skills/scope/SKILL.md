@@ -44,8 +44,9 @@ Research surviving questions through `orchestrate`; use `prototype` only for a
 timeboxed feasibility answer, then harvest it and clean only manifest-owned
 scratch.
 
-Compare correctness, cost and operations. Put costly-to-reverse choices and
-rejected alternatives in an ADR; reversible detail stays in the spec. In
+Compare correctness, cost and operations. Put architectural one-way
+decisions and rejected alternatives in an ADR; product calls and deferrals go to
+the owning issue; reversible detail stays in the spec. In
 paired-primary mode one chair asks; the peer audits. Record authorship.
 
 ## Land outputs
@@ -53,7 +54,8 @@ paired-primary mode one chair asks; the peer audits. Record authorship.
 In read-only mode, return proposals in chat without changing project files.
 Otherwise land only approved content with its declared owner: change scope,
 stories, criteria and user gates in the issue body or project-docs home,
-one-way decisions in ADRs, work items in the tracker, surviving invariants and
+architectural one-way decisions in ADRs, product calls and deferrals in the
+owning issue, work items in the tracker, surviving invariants and
 context in project docs via `engineering-docs`. Run state stays run-local.
 
 For an issue-tracker repository, the change spec lives in the issue body and

@@ -354,6 +354,14 @@ jobs:
         run: scripts/collate-release-notes --check
       - name: Test release-note collation
         run: scripts/test-collate-release-notes
+      - name: Test ADR index check
+        run: scripts/test-check-adr-index
+      - name: Check ADR index
+        run: scripts/check-adr-index
+      - name: Test skill negatives check
+        run: scripts/test-check-skill-negatives
+      - name: Check skill negatives
+        run: scripts/check-skill-negatives
       - name: Test documentation reference checks
         run: |
           scripts/test-generate-reference

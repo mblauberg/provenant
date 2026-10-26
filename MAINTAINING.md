@@ -42,8 +42,8 @@ cross-tracker routes, not a second current-work owner.
 ### Change history
 
 - Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
-- There is no changelog file; see [ADR
-  0024](docs/adr/0024-git-log-and-adrs-own-history.md)
+- Living docs are edited in place, not appended to; see
+  [engineering-docs](skills/engineering-docs/SKILL.md#binding-rules)
 - Release notes: each change adds a fragment under
   [`docs/release-notes/next.d/`](docs/release-notes/next.d/). To release, run
   `scripts/collate-release-notes vX.Y.Z`, which writes
@@ -146,18 +146,9 @@ Rust harness asset checks enforce the machine-checkable subset.
    policy values, resolved paths) or a script's output, exit code or side
    effect. Never assert the text of a document. See `tdd` for the
    exclusion list.
-8. Under [ADR 0014](docs/adr/0014-comparative-skill-evals-on-suspicion.md),
-   frozen held-out comparative evals are conditional. Run them when a routing
-   regression is suspected or observed in use; a change rewrites
-   trigger-bearing description text across several skills, at the maintainer's
-   discretion; or the harness is being prepared for publication or another
-   operator. When run, freeze held-out cases and compare candidate,
-   without-skill and previous-package arms on current primary families. Retain
-   invalid, omitted, timed-out and failed attempts with model lineage. Routine
-   skill maintenance loses a heavyweight gate; the operator accepts
-   detection-in-use as the routing-regression backstop. Publication to other
-   users re-arms the full requirement; this ADR must be revisited in any
-   public-release checklist.
+8. A skill behaviour change runs its fixtures with and without the skill and
+   records the difference for the reviewer; frozen comparative evals are
+   conditional. See [skill-craft](skills/skill-craft/SKILL.md).
 9. Re-run `provenant check harness` and the applicable targeted checks.
 
 Split a skill when its triggers, artifacts or completion gates differ
@@ -216,7 +207,7 @@ artefacts, deterministic gates, judgement gates and release meaning are
 materially distinct.
 
 Trigger fixtures remain mandatory. Contract tests follow the
-machine-enforced-invariant test in **Change a skill** step 7. The ADR 0014 eval
+machine-enforced-invariant test in **Change a skill** step 7. The eval
 triggers under **Change a skill** apply unchanged. When they fire here, use the
 held-out portfolio ([`docs/evals/skill-portfolio-2026`](docs/evals/skill-portfolio-2026/README.md))
 and lifecycle ([`docs/evals/lifecycle-routing-2026-07`](docs/evals/lifecycle-routing-2026-07/README.md))

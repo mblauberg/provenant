@@ -21,7 +21,7 @@ links and verify volatile provider or model claims at the live runtime.
 - [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
   : descriptive provenance snapshot, not implementation authority
 
-The frozen lifecycle routing dataset used by the ADR 0014 procedure lives at
+The frozen lifecycle routing dataset used by the comparative eval procedure lives at
 [`../evals/lifecycle-routing-2026-07/`](../evals/lifecycle-routing-2026-07/README.md).
 
 ## Current owners

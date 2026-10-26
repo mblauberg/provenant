@@ -1,0 +1,41 @@
+#!/bin/sh
+# Exercise inventory/link failures and the advisory decision warning.
+set -eu
+root=$(git rev-parse --show-toplevel)
+check=$root/scripts/check-adr-index
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch" "$scratch.log"' EXIT HUP INT TERM
+if sh "$check" "$scratch" >"$scratch.log" 2>&1; then
+  echo 'missing index accepted' >&2
+  exit 1
+fi
+grep -q 'missing .*README.md' "$scratch.log"
+printf '# ADR\n\n## Decision\n\nUse SQLite.\n' >"$scratch/0001-storage.md"
+printf '# Index\n\n[0001](0001-storage.md)\n' >"$scratch/README.md"
+sh "$check" "$scratch"
+
+printf 'Unindexed\n' >"$scratch/extra.md"
+if sh "$check" "$scratch" >"$scratch.log" 2>&1; then
+  echo 'unindexed file accepted' >&2
+  exit 1
+fi
+grep -q 'unindexed file: extra.md' "$scratch.log"
+printf '[audit](extra.md)\n[missing](missing.md)\n' >>"$scratch/README.md"
+if sh "$check" "$scratch" >"$scratch.log" 2>&1; then
+  echo 'broken link accepted' >&2
+  exit 1
+fi
+grep -q 'unresolved link: missing.md' "$scratch.log"
+
+printf '# Index\n\n[0001](0001-storage.md) [audit](extra.md)\n' >"$scratch/README.md"
+printf '# No decision\n' >"$scratch/0001-storage.md"
+sh "$check" "$scratch" >"$scratch.log" 2>&1
+grep -q 'warning: no decision statement: 0001-storage.md' "$scratch.log"
+printf '# Index\n\n[0001](0001-storage.md) [a](0001-storage.md#x) [b](/abs.md)\n' >"$scratch/README.md"
+if sh "$check" "$scratch" >"$scratch.log" 2>&1; then
+  echo 'anchor or absolute link accepted' >&2
+  exit 1
+fi
+grep -q 'plain relative file link' "$scratch.log"
+rm "$scratch.log"
+printf 'check-adr-index fixtures passed\n'

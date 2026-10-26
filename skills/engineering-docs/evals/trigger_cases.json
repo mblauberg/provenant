@@ -3,6 +3,46 @@
   "target_skill": "engineering-docs",
   "cases": [
     {
+      "id": "q082",
+      "relation": "positive",
+      "prompt": "Amend the accepted ADR to the current storage decision, retire its superseded predecessor, and repair the decision index.",
+      "tags": ["direct"],
+      "expected": {
+        "primary_skill": "engineering-docs",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q083",
+      "relation": "positive",
+      "prompt": "After a repeated crate-specific mistake, place a short nested AGENTS.md at that boundary and keep CLAUDE.md as its import.",
+      "tags": ["direct"],
+      "expected": {
+        "primary_skill": "engineering-docs",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q084",
+      "relation": "negative",
+      "prompt": "Tighten the wording of this paragraph about generated reference and ADRs; preserve every path, decision and placement.",
+      "tags": ["adjacent", "near-miss"],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q085",
+      "relation": "negative",
+      "prompt": "Audit the trigger description of this agent skill for overlap with neighbouring skills; do not change AGENTS.md or documentation placement.",
+      "tags": ["adjacent", "near-miss"],
+      "expected": {
+        "primary_skill": "skill-craft",
+        "companion_skills": []
+      }
+    },
+    {
       "id": "q073",
       "relation": "positive",
       "prompt": "Read the repository process declaration, then place durable specifications in the declared docs home.",

@@ -43,12 +43,12 @@ Reader's job: a future developer needs to know what was decided, why, and what i
 Skeleton:
 
 1. **Title**: short, and a decision, for example `0007. Use Postgres for the primary datastore`.
-2. **Status**: proposed, accepted, deprecated, or superseded (with a link to the ADR that replaces it).
+2. **Status**: proposed or accepted.
 3. **Context**: the forces at play, the constraints, and the options in the frame. Facts and pressures, not the decision yet.
 4. **Decision**: the choice, stated in the active voice and present tense. `We will use Postgres.`
 5. **Consequences**: what follows, positive, negative, and neutral. List the negatives honestly; every real decision has them.
 
-Discipline: one decision per record. Write it as a note to a future colleague, in full sentences. Record the alternatives you rejected and why, so no one re-litigates them. Never edit an accepted ADR's decision to match reality later; write a new ADR that supersedes it and link the two. Number ADRs sequentially and keep them in the repository (`docs/adr/`) beside the code they govern.
+Discipline: one decision per record. Write it as a note to a future colleague, in full sentences. Record the alternatives you rejected and why, so no one re-litigates them. Amend accepted ADRs in place with one `Changed:` line; git keeps history; see `engineering-docs`. Number ADRs sequentially and keep them in the repository (`docs/adr/`) beside the code they govern.
 
 ## Design document
 
