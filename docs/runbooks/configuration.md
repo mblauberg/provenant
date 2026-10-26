@@ -62,7 +62,12 @@ before applying an authorised install.
 GC also applies [terminal provider-state retention](gc.md). The separate
 `[retention] provider_state_days = 7` key accepts 1 to 3650 and is reread on
 each sweep without reinstalling. Known credential entries expire after
-24 hours. `gc.schedule = false` disables scheduled provider-state sweeps too;
+24 hours. GC also reclaims `tmp/` directories from indexed terminal attempts
+after 24 hours, across the state run store and its child stores. Nonterminal
+attempts, writer locks and retained reservations prevent deletion. GC JSON
+reports the paths and observed allocated bytes in `provider_state.attempt_tmp`;
+text output lists each path and byte count. `--dry-run` previews these removals.
+`gc.schedule = false` disables scheduled retention sweeps too;
 settlement cache pruning still runs.
 
 The optional `[gc]` section controls the macOS per-user schedule:
@@ -71,8 +76,8 @@ The optional `[gc]` section controls the macOS per-user schedule:
 [gc]
 schedule = true
 idle_days = 7
-# free_floor = "20G"
-# alert_below = "10G"
+# free_floor = "100G"
+# alert_below = "150G"
 
 # Use the project ID from `provenant fabric identity`.
 [gc.projects."PROJECT_ID"]
@@ -83,8 +88,9 @@ keep = ["web/target"]
 `gc.schedule` defaults to true. Setting it to false prevents subsequent
 scheduled collections; rerun `install` to boot out the agent and remove its
 unchanged receipt-owned plist. `gc.idle_days` accepts 1 to 3650 (default 7).
-`gc.free_floor` is unset by default. When set, it requests additional cache
-collection until available disk space reaches that size, after the usual
+`gc.free_floor` defaults to 10% of the state volume's capacity, with a minimum
+of 50 GiB. Set it to override that floor. GC requests additional cache
+collection until available disk space reaches the floor, after the usual
 orphaned, tombstoned and idle pass. Sizes are whole binary units: `B`, `K`,
 `M`, `G`, `T`, or `KiB` through `TiB`; plain numbers mean GiB.
 On APFS, local snapshots can keep deletions from increasing available space, so
@@ -93,13 +99,17 @@ Rerun `install` after changing the idle threshold or floor to update the
 agent's arguments. Edit these keys in `config.toml`; they are separate from
 the harness knob registry.
 
-The schedule runs every six hours, only for installations in the account's
+The schedule runs at load and hourly, only for installations in the account's
 default state root. Logs are `<state>/gc/stdout.log` and
 `<state>/gc/stderr.log`. It discovers registered projects without requiring a
 checkout as its working directory. Unobservable projects keep their caches.
 Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
+
+Writer dispatch refuses to launch when available space on the worktree's
+volume is below the floor. The error reports available bytes and the floor
+and directs you to `provenant gc`. Read-only dispatch remains available.
 
 Bare `provenant gc` deletes eligible caches and previews merged worktree and
 declared output cleanup. Pass `--apply` to delete those entries too, or
@@ -119,10 +129,11 @@ parent traversal are refused. Unknown or non-terminal lanes, dirty worktrees,
 recent writes within 24 hours and symlinks prevent pruning. Failures skip
 individual entries. Lane caches still use their existing GC path.
 
-`gc.alert_below` accepts the same size syntax as `free_floor` and is unset by
-default. Applied collections emit a Fabric note with entity `gc.low_disk` and
-a gc log message once per observed dip below this threshold on the state
-filesystem. A reading at or above it rearms the alert. The latch persists
+After collection, GC checks available space on the state volume against the
+floor. `gc.alert_below` can raise the alert threshold and accepts the same
+size syntax as `free_floor`. Applied collections emit a Fabric note with
+entity `gc.low_disk` and a gc log message once per observed dip below the
+threshold. A reading at or above it rearms the alert. The latch persists
 under `<state>/gc/`; a preview reports low space without changing it. An alert
 failure is logged without blocking collection. This setting is read each run
 and does not require reinstalling the agent.

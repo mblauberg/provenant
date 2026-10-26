@@ -1,4 +1,4 @@
-//! Provider-private state retention after terminal settlement.
+//! Temporary and provider-private state retention after terminal settlement.
 use crate::{
     artifacts::{seal, subdir},
     db::decode,
@@ -38,8 +38,16 @@ const CREDENTIALS: &[&str] = &[
 #[derive(Debug, Default, Serialize)]
 pub struct ProviderStateGc {
     pub removed: Vec<PathBuf>,
+    pub attempt_tmp: Vec<AttemptTmpRemoval>,
     pub kept: Vec<ProviderStateIssue>,
     pub errors: Vec<ProviderStateIssue>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttemptTmpRemoval {
+    pub path: PathBuf,
+    /// Observed allocated bytes, estimated during a dry run.
+    pub bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,11 +148,6 @@ impl RunStore {
                 let continuing: bool = observation.retry(|| Ok(self.db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM continuations c JOIN attempts a ON a.run=c.run WHERE c.target=?1 AND a.terminal=0)",
                     [&id], |row| row.get(0))?))?;
-                if continuing {
-                    return Err(RunError::Validation(
-                        "a continuation still needs this provider state",
-                    ));
-                }
                 let reservations = self.writer_registry.join("worktrees").join(project);
                 match Directory::open_anchor(&reservations) {
                     Ok(directory) => {
@@ -185,6 +188,14 @@ impl RunStore {
                 }
                 let age = now.as_micros().saturating_sub(finished_at.as_micros());
                 if age >= DAY_MICROS {
+                    collect_temporary(&attempt, &path.with_file_name("tmp"), dry_run, &mut report)?;
+                }
+                if continuing {
+                    return Err(RunError::Validation(
+                        "a continuation still needs this provider state",
+                    ));
+                }
+                if age >= DAY_MICROS {
                     credentials(&attempt, dry_run, &mut report)?;
                 }
                 prune_caches(&attempt, &record, dry_run, &mut report)?;
@@ -220,6 +231,39 @@ impl RunStore {
         }
         Ok(report)
     }
+}
+
+fn collect_temporary(
+    attempt: &Directory,
+    path: &std::path::Path,
+    dry_run: bool,
+    report: &mut ProviderStateGc,
+) -> Result<()> {
+    let name = OsStr::new("tmp");
+    match attempt.metadata_at(name, false) {
+        Ok(_) => {}
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
+    measured.measure_at("attempt_tmp", attempt, name, path);
+    if !measured.errors.is_empty() {
+        return Err(RunError::Validation(
+            "cannot measure attempt temporary directory",
+        ));
+    }
+    let bytes = measured.entries.iter().fold(0_u64, |sum, entry| {
+        sum.saturating_add(entry.allocated_bytes)
+    });
+    if !dry_run {
+        crate::artifacts::remove_unreserved_terminal_temporary(attempt)?;
+        attempt.sync()?;
+    }
+    report.attempt_tmp.push(AttemptTmpRemoval {
+        path: path.into(),
+        bytes,
+    });
+    Ok(())
 }
 
 pub(crate) fn prune_caches(
@@ -734,6 +778,56 @@ mod tests {
     }
 
     #[test]
+    fn gc_reclaims_only_old_terminal_tmp_and_previews_paths_and_bytes() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let temporary = attempt.join("tmp");
+        fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+        fs::write(temporary.join("payload"), vec![1; 8192])?;
+        assert!(
+            sweep(&store, &context, 7, 100 * DAY_MICROS, false, &call)?
+                .attempt_tmp
+                .is_empty()
+        );
+        assert!(temporary.exists());
+        withdraw(&store, &input, &call)?;
+        // Recreate the leak after settlement's best-effort removal.
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&temporary)?;
+        fs::write(temporary.join("payload"), vec![1; 8192])?;
+        fs::create_dir(temporary.join("candidate-0"))?;
+        fs::write(temporary.join("candidate-0/payload.lock"), "payload")?;
+        assert!(
+            sweep(&store, &context, 7, DAY_MICROS - 1, false, &call)?
+                .attempt_tmp
+                .is_empty()
+        );
+        assert!(temporary.exists());
+        let preview = sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        assert_eq!(preview.attempt_tmp.len(), 1);
+        assert_eq!(preview.attempt_tmp[0].path, temporary);
+        assert!(preview.attempt_tmp[0].bytes >= 8192);
+        assert!(temporary.join("candidate-0/payload.lock").exists());
+        let applied = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(applied.errors.is_empty(), "{:?}", applied.errors);
+        assert_eq!(applied.attempt_tmp.len(), 1);
+        assert_eq!(applied.attempt_tmp[0].path, temporary);
+        assert_eq!(applied.attempt_tmp[0].bytes, preview.attempt_tmp[0].bytes);
+        assert!(!temporary.exists());
+        assert!(attempt.join("terminal-pending.json").exists());
+        assert!(
+            sweep(&store, &context, 7, DAY_MICROS, false, &call)?
+                .attempt_tmp
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn gc_expires_credentials_at_one_day_and_archives_history_at_configured_age() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -823,6 +917,10 @@ mod tests {
         );
         withdraw(&store, &input, &call)?;
         let directory = Directory::open_anchor(&attempt)?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(attempt.join("tmp"))?;
+        fs::write(attempt.join("tmp/keep"), "locked payload")?;
         let run = store.run_dir(input.run_id, false)?;
         let publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Shared)?;
@@ -832,6 +930,7 @@ mod tests {
                 .len(),
             1
         );
+        assert!(attempt.join("tmp/keep").exists());
         drop(publication);
         let writer = directory.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
         assert_eq!(
@@ -840,6 +939,7 @@ mod tests {
                 .len(),
             1
         );
+        assert!(attempt.join("tmp/keep").exists());
         drop(writer);
         fs::write(attempt.join("reservation.json"), "{}")?;
         assert_eq!(
@@ -848,6 +948,7 @@ mod tests {
                 .len(),
             1
         );
+        assert!(attempt.join("tmp/keep").exists());
         assert!(
             attempt
                 .join("provider-state/candidate-0/auth.json")
@@ -857,6 +958,33 @@ mod tests {
         let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!attempt.join("provider-state").exists());
+        assert!(!attempt.join("tmp").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_temporary_never_follows_links_outside_the_attempt() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join("keep"), "outside")?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(attempt.join("tmp"))?;
+        std::os::unix::fs::symlink(outside.path(), attempt.join("tmp/escape"))?;
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.attempt_tmp.len(), 1);
+        assert!(!attempt.join("tmp").exists());
+        assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
+        std::os::unix::fs::symlink(outside.path(), attempt.join("tmp"))?;
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.attempt_tmp.len(), 1);
+        assert!(!attempt.join("tmp").exists());
+        assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
         Ok(())
     }
 
@@ -1073,12 +1201,14 @@ mod tests {
             created_at: WallTime::from_micros(300)?,
         };
         store.resume(&resume, &call)?;
-        assert_eq!(
-            sweep(&store, &context, 1, DAY_MICROS, false, &call)?
-                .kept
-                .len(),
-            1
-        );
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(attempt.join("tmp"))?;
+        fs::write(attempt.join("tmp/payload"), "disposable")?;
+        let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
+        assert_eq!(report.kept.len(), 1);
+        assert_eq!(report.attempt_tmp.len(), 1);
+        assert!(!attempt.join("tmp").exists());
         assert!(
             attempt
                 .join("provider-state/candidate-0/auth.json")

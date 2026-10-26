@@ -14,21 +14,19 @@ pub fn plist(home: &Path) -> PathBuf {
 }
 
 pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec<u8>, AgentError> {
+    let floor = match &settings.free_floor {
+        Some(floor) => floor.clone(),
+        None => format!("{}B", settings.free_floor_bytes(state)?),
+    };
     let program = xml(utf8(program)?);
     let stdout = xml(utf8(&state.join("gc/stdout.log"))?);
     let stderr = xml(utf8(&state.join("gc/stderr.log"))?);
     let state = xml(utf8(state)?);
     let idle_days = settings.idle_days;
-    let floor = settings
-        .free_floor
-        .as_ref()
-        .map(|size| {
-            format!(
-                "    <string>--free-floor</string>\n    <string>{}</string>\n",
-                xml(size)
-            )
-        })
-        .unwrap_or_default();
+    let floor = format!(
+        "    <string>--free-floor</string>\n    <string>{}</string>\n",
+        xml(&floor)
+    );
     Ok(format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -52,7 +50,9 @@ pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec
     <string>{state}</string>
   </dict>
   <key>StartInterval</key>
-  <integer>21600</integer>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
   <key>StandardOutPath</key>
   <string>{stdout}</string>
   <key>StandardErrorPath</key>
@@ -73,7 +73,7 @@ pub enum Installed {
 impl Installed {
     pub fn describe(&self) -> String {
         match self {
-            Self::Started => format!("{LABEL} scheduled every 6 hours"),
+            Self::Started => format!("{LABEL} scheduled at load and hourly"),
             Self::Skipped => {
                 "not installed (disabled or outside the macOS default state root)".into()
             }
@@ -183,7 +183,7 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("<string>dev.provenant.gc</string>"));
-        assert!(text.contains("<key>StartInterval</key>\n  <integer>21600</integer>"));
+        assert!(text.contains("<key>StartInterval</key>\n  <integer>3600</integer>"));
         assert!(text.contains("<string>/bin/a&amp;b</string>"));
         assert!(text.contains("<string>--scheduled</string>"));
         assert!(text.contains("<string>--apply</string>"));
@@ -194,16 +194,21 @@ mod tests {
             assert!(text.contains(&format!("<string>/state/a&lt;b/gc/{path}</string>")));
         }
         assert!(!text.contains("KeepAlive"));
-        assert!(!text.contains("RunAtLoad"));
+        assert!(text.contains("<key>RunAtLoad</key>\n  <true/>"));
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("new/state");
+        let floor = (provenant_os::fs::Directory::open_anchor(temp.path())
+            .unwrap()
+            .total_bytes()
+            .unwrap()
+            / 10)
+            .max(50 * 1024_u64.pow(3));
         let defaults = String::from_utf8(
-            render(
-                Path::new("/bin/provenant"),
-                Path::new("/state"),
-                &GcSettings::default(),
-            )
-            .unwrap(),
+            render(Path::new("/bin/provenant"), &state, &GcSettings::default()).unwrap(),
         )
         .unwrap();
-        assert!(!defaults.contains("--free-floor"));
+        assert!(defaults.contains(&format!(
+            "<string>--free-floor</string>\n    <string>{floor}B</string>"
+        )));
     }
 }

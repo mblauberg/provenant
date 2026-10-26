@@ -336,7 +336,7 @@ reservation or unverifiable registration keeps it. v1 owners are never idle.
 Merged worktrees go only when clean, registered and with terminal lanes;
 output pruning skips tracked and keep paths, dirty trees, symlinks and
 writes within 24 hours. Deletion detaches and re-verifies identity first.
-- Why: GC runs unattended every six hours; any doubt keeps data.
+- Why: GC runs unattended at load and hourly; any doubt keeps data.
 - Test: `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_live_or_unobservable`;
   `src/worktree_tests.rs::gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links`
 - Owner: `crates/confinement/src/cache.rs`, `crates/confinement/src/worktrees.rs`

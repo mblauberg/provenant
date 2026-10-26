@@ -57,7 +57,7 @@ sweep retries an interrupted deletion only for the authorised path and
 matching device and inode. Do not manually rename a refused tree into a
 tombstone.
 
-On macOS, the installed default-state agent runs every six hours.
+On macOS, the installed default-state agent runs at load and hourly.
 `[gc] schedule = false` disables scheduled sweeps; manual GC and settlement
 cache pruning remain available. See
 [configuration](configuration.md#lane-cache-collection) for agent installation

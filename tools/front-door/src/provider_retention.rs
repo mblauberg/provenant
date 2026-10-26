@@ -73,6 +73,7 @@ fn collect_store(
                 .with_writer_registry(host.state.as_path())
                 .gc_provider_state(&directory, days, clock.wall_now()?, dry_run, &call)?;
             report.removed.append(&mut collected.removed);
+            report.attempt_tmp.append(&mut collected.attempt_tmp);
             report.kept.append(&mut collected.kept);
             report.errors.append(&mut collected.errors);
         }
@@ -174,8 +175,26 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         &call,
     )?;
     drop(store);
+    let temporary = candidate
+        .parent()
+        .ok_or("attempt path")?
+        .parent()
+        .ok_or("attempt path")?
+        .join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    fs::write(temporary.join("payload"), vec![1; 8192])?;
+    let preview = collect(&roots, &home, &assets, 7, true);
+    assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+    assert_eq!(preview.attempt_tmp.len(), 1);
+    assert_eq!(preview.attempt_tmp[0].path, temporary);
+    assert!(preview.attempt_tmp[0].bytes >= 8192);
+    assert!(temporary.exists());
     let report = collect(&roots, &home, &assets, 7, false);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.attempt_tmp.len(), 1);
+    assert_eq!(report.attempt_tmp[0].path, temporary);
+    assert_eq!(report.attempt_tmp[0].bytes, preview.attempt_tmp[0].bytes);
+    assert!(!temporary.exists());
     assert!(!candidate.exists());
     assert!(
         child_path

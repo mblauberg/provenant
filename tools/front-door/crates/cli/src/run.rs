@@ -745,6 +745,27 @@ pub fn submit(
     submit_with_host(session, edge, submission, call, None)
 }
 
+fn check_writer_disk(
+    settings: &provenant_config::GcSettings,
+    state: &Path,
+    worktree: &Path,
+) -> Result<(), String> {
+    let floor = settings
+        .free_floor_bytes(state)
+        .map_err(|error| error.to_string())?;
+    let available = provenant_os::fs::Directory::open_anchor(worktree)
+        .map_err(|error| error.to_string())?
+        .available_bytes()
+        .map_err(|error| error.to_string())?;
+    if available < floor {
+        return Err(format!(
+            "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; run `provenant gc` before dispatching a writer",
+            worktree.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Reuse the host's pinned launch inputs after its guardian has settled.
 pub fn submit_with_host(
     session: &Session,
@@ -756,6 +777,17 @@ pub fn submit_with_host(
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    // Nested proposals are checked by the host before provider preparation.
+    // A confined parent cannot open a sibling worktree to sample its volume.
+    if parent_attempt.is_none() {
+        for task in &submission.tasks {
+            if let Some(path) = &task.worktree {
+                let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+                check_writer_disk(&config.gc, edge.roots.state.as_path(), &writer.worktree)
+                    .map_err(|message| Fail::new(Status::Refused, ErrorKind::Refused, message))?;
+            }
+        }
+    }
     let profile = config
         .dispatch_profile(&submission.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;

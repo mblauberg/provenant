@@ -110,6 +110,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
+            "dispatch_refuses_low_disk_writers",
+            "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text",
             "lane_prepare_isolates_nested_state",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
@@ -138,6 +140,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
+                "dispatch_refuses_low_disk_writers" => dispatch_refuses_low_disk_writers(),
+                "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text" => gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "read_only_dispatch_applies_bound_git_and_project_writes" => {
                     crate::compose_tests::read_only_dispatch_applies_bound_git_and_project_writes()
@@ -3522,13 +3526,131 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     Ok(())
 }
 
+fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
+    use std::os::unix::fs::DirBuilderExt;
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "gc-tmp", "--json"])?;
+    let (_, context) = writer_context(&rig)?;
+    let store = open_writer_store(&context)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let mut input = writer_run(
+        provenant_run::WriterRequest {
+            project: rig.project.clone(),
+            worktree: rig.project.join(".worktrees/gc-tmp"),
+        },
+        "gc-tmp",
+        201,
+        "fixture",
+    )?;
+    input.request.tasks[0].writer = None;
+    input.created_at = provenant_core::WallTime::from_micros(1)?;
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    store.withdraw(
+        id,
+        provenant_run::AttemptState::Queued,
+        provenant_run::Outcome::Cancelled,
+        "fixture",
+        provenant_core::WallTime::from_micros(2)?,
+        &call,
+    )?;
+    let attempt = rig
+        .state
+        .join(format!("runs/{}/attempts/{id}", input.run_id));
+    let temporary = attempt.join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    fs::write(temporary.join("payload"), vec![1; 8192])?;
+    drop(store);
+    let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    let removal = &preview["data"]["provider_state"]["attempt_tmp"][0];
+    assert_eq!(removal["path"], temporary.to_str().ok_or("tmp path")?);
+    let bytes = removal["bytes"].as_u64().ok_or("tmp bytes")?;
+    assert!(bytes >= 8192);
+    assert!(temporary.exists());
+    let text = command(&rig, &["gc", "--dry-run"])?;
+    assert_eq!(code(&text), 0);
+    let text = String::from_utf8(text.stdout.bytes)?;
+    assert!(text.contains("would remove attempt tmp"), "{text}");
+    assert!(
+        text.contains(temporary.to_str().ok_or("tmp path")?),
+        "{text}"
+    );
+    assert!(text.contains(&format!("{bytes} bytes")), "{text}");
+    assert!(temporary.exists());
+    let applied = ok(&rig, &["gc", "--json"])?;
+    assert_eq!(
+        applied["data"]["provider_state"]["attempt_tmp"][0],
+        *removal
+    );
+    assert!(!temporary.exists());
+    assert!(attempt.join("terminal-pending.json").exists());
+    Ok(())
+}
+
+fn dispatch_refuses_low_disk_writers() -> Result {
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "low-disk", "--json"])?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let prompt = rig.root.join("prompt.md");
+    fs::write(&prompt, "hello")?;
+    let output = command(
+        &rig,
+        &[
+            "dispatch",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--model",
+            "codex/id",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            ".worktrees/low-disk",
+            "--operation-id",
+            "low-disk",
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert!(
+        message.contains("available")
+            && message.contains("floor 18446744073709551615")
+            && message.contains("provenant gc"),
+        "{message}"
+    );
+    assert!(!rig.state.join("runs").exists());
+    let reader = ok(
+        &rig,
+        &[
+            "dispatch",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--model",
+            "codex/id",
+            "--operation-id",
+            "low-disk-reader",
+            "--json",
+        ],
+    )?;
+    assert_eq!(reader["status"], "ok", "{reader}");
+    assert!(rig.state.join("runs").exists());
+    Ok(())
+}
+
 fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
     let rig = repository()?;
     ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let set_floor = |floor: &str| -> Result {
         fs::write(
             rig.state.join("config.toml"),
-            format!("schema_version=1\n[gc]\nalert_below='{floor}'\n"),
+            format!("schema_version=1\n[gc]\nfree_floor='{floor}'\n"),
         )?;
         Ok(())
     };

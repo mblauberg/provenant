@@ -535,6 +535,10 @@ impl Directory {
     pub fn available_bytes(&self) -> std::io::Result<u64> {
         crate::sys::resources::available_bytes(&self.file)
     }
+    /// Total capacity of this directory's filesystem.
+    pub fn total_bytes(&self) -> std::io::Result<u64> {
+        crate::sys::resources::total_bytes(&self.file)
+    }
     /// Exclusive APFS allocation, or None when the filesystem omits it.
     /// Observes one normal component without following its final symlink.
     pub fn private_size_at(&self, name: &OsStr) -> Result<Option<u64>> {
