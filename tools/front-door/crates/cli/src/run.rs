@@ -1499,23 +1499,23 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 .result
                 .as_ref()
                 .map(|_| artifact(root, lane, "result.md"));
-            let account = lane
+            let resolved_account = lane
                 .applied_route
                 .as_ref()
-                .and_then(|r| r.account_label.as_deref())
-                .unwrap_or("unknown");
+                .and_then(|r| r.account_label.as_deref());
+            let account = resolved_account.unwrap_or("unknown");
+            let account_field = resolved_account
+                .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
+                .unwrap_or_default();
+            let route_text = plain_text(&route, usize::MAX);
+            let reason_text = reason
+                .as_deref()
+                .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
+                .unwrap_or_default();
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{} {state} {} account={}{}\n",
-                lane.run_id,
-                lane.task_id,
-                lane.attempt_id,
-                plain_text(&route, usize::MAX),
-                plain_text(account, usize::MAX),
-                reason
-                    .as_deref()
-                    .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
-                    .unwrap_or_default()
+                "{}/{}/{} {state} {route_text}{account_field}{reason_text}\n",
+                lane.run_id, lane.task_id, lane.attempt_id,
             ));
             for skipped in &lane.skipped_routes {
                 human.push_str(&format!(
@@ -2748,6 +2748,57 @@ mod tests {
         );
         assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
         assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
+        Ok(())
+    }
+
+    #[test]
+    fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error::Error>> {
+        let reason = "argv prompt exceeds 64 KiB";
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "prompt-refusal-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {
+                "state": "terminal",
+                "outcome": "rejected",
+                "finished_at": now,
+                "reason": reason
+            },
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 65537,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert_eq!(
+            human,
+            format!(
+                "{}/{}/{} rejected unresolved ({reason})\n",
+                RunId::from_bytes([2; 16]),
+                TaskId::from_bytes([4; 16]),
+                AttemptId::from_bytes([1; 16])
+            )
+        );
+        assert!(!human.contains("account="));
+        assert_eq!(data["lanes"][0]["account"], json!("unknown"));
+        assert_eq!(data["lanes"][0]["state"], "rejected");
+        assert_eq!(data["lanes"][0]["reason"], json!(reason));
+        assert!(data["lanes"][0]["applied_route"].is_null());
         Ok(())
     }
     #[test]
