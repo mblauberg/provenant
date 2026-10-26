@@ -61,8 +61,8 @@ jobs:
             echo "run_macos=false" >> "$GITHUB_OUTPUT"
           fi
 
-  docs:
-    name: Harness asset checks
+  generated-reference:
+    name: Harness assets and generated reference
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -92,6 +92,43 @@ jobs:
           PROVENANT_STATE_DIR: ${{ runner.temp }}/provenant-state
           TMPDIR: ${{ runner.temp }}
         run: cargo run --locked -q -p provenant --bin provenant -- check harness --project "$GITHUB_WORKSPACE"
+
+      - name: Check generated contract reference
+        run: scripts/generate-reference --check --binary "$CARGO_TARGET_DIR/debug/provenant"
+      - name: Share the worktree CLI with advisory documentation checks
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: doc-truth-cli
+          path: tools/front-door/target/debug/provenant
+          retention-days: 1
+          if-no-files-found: error
+
+  # Advisory references and the header inventory stay outside ci-status. The
+  # specs lane lands headers separately; the inventory may become a gate later.
+  doc-truth:
+    name: Advisory documentation truth and inventory
+    needs: generated-reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the worktree CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name doc-truth-cli --dir "$RUNNER_TEMP/doc-truth-cli"
+      - name: Report unresolved documentation references and missing headers
+        continue-on-error: true
+        run: |
+          chmod +x "$RUNNER_TEMP/doc-truth-cli/provenant"
+          scripts/check-doc-truth --binary "$RUNNER_TEMP/doc-truth-cli/provenant" > "$RUNNER_TEMP/doc-truth.txt"
+          cat "$RUNNER_TEMP/doc-truth.txt"
+          cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
   rust:
     name: Rust front door
@@ -339,6 +376,10 @@ jobs:
         run: scripts/collate-release-notes --check
       - name: Test release-note collation
         run: scripts/test-collate-release-notes
+      - name: Test documentation reference checks
+        run: |
+          scripts/test-generate-reference
+          scripts/test-check-doc-truth
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
@@ -357,7 +398,7 @@ jobs:
     permissions: {}
     needs:
       - macos-scope
-      - docs
+      - generated-reference
       - rust
       - rust-macos-release
       - rust-dependencies

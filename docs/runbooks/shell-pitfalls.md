@@ -1,4 +1,6 @@
 # Shell pitfalls
+Owner: repository maintainers
+Anchor: AGENTS.md
 
 The interactive shell most sessions run commands in is zsh. These behave
 differently from a `bash`/`sh` script and each produces a result that reads as

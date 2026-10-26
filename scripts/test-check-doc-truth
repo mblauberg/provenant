@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Focused controls for advisory references and the optional inventory gate."""
+
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+SCRIPTS = Path(__file__).resolve().parent
+FIXTURES = SCRIPTS / "fixtures/doc-truth"
+
+
+class DocTruthTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="provenant-doc-truth-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for directory in ("docs/runbooks", "docs/specs", "docs/adr", "tools/front-door"):
+            (self.root / directory).mkdir(parents=True)
+        (self.root / "AGENTS.md").write_text("# Instructions\n")
+        (self.root / "docs/adr/0001-example.md").write_text("# Example\n")
+
+    def check(self, *args, source=True):
+        command = [str(SCRIPTS / "check-doc-truth"), "--root", str(self.root)]
+        if source:
+            command += ["--help-json", str(FIXTURES / "help.json")]
+        return subprocess.run(command + list(args), capture_output=True, text=True)
+
+    def document(self, text):
+        path = self.root / "docs/runbooks/example.md"
+        path.write_text(text)
+        return path
+
+    def test_clean_fixture_is_silent(self):
+        shutil.copyfile(FIXTURES / "clean.md", self.root / "docs/runbooks/example.md")
+        result = self.check("--strict-inventory")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_each_seeded_stale_reference_warns_once_without_failing(self):
+        shutil.copyfile(FIXTURES / "stale.md", self.root / "docs/specs/example.md")
+        result = self.check("--strict-inventory")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "docs/specs/example.md:5: warning: unresolved command `provenant vanished`",
+            "docs/specs/example.md:5: warning: unresolved flag `--vanished`",
+            "docs/specs/example.md:6: warning: unresolved path `docs/vanished.md`",
+            "docs/specs/example.md:6: warning: unresolved ADR `ADR 9999`",
+        ])
+
+    def test_flags_are_scoped_to_the_command(self):
+        self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Run `provenant route list --apply`, then `provenant gc --apply`.\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertIn("unresolved flag `--apply`", result.stdout)
+
+    def test_command_must_resolve_through_all_parent_verbs(self):
+        self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Run `provenant route vanished --json`.\n")
+        result = self.check()
+        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertIn("unresolved command `provenant route vanished`", result.stdout)
+
+    def test_help_after_globals_still_checks_requested_command(self):
+        self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Run `provenant --json help route vanished`.\n")
+        result = self.check()
+        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertIn("unresolved command `provenant route vanished`", result.stdout)
+
+    def test_alternative_verbs_are_each_resolved(self):
+        self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Run `provenant config set|unset|vanished`.\n")
+        result = self.check()
+        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertIn("unresolved command `provenant config vanished`", result.stdout)
+
+    def test_missing_headers_are_advisory_unless_inventory_gate_is_requested(self):
+        self.document("# Missing inventory\n\nOwner: too late\nAnchor: too late\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("unresolved inventory"), 2)
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout.count("unresolved inventory"), 2)
+
+    def test_inline_multiline_references_keep_source_line_numbers(self):
+        self.document("# Lines\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "`provenant route\nvanished` and ``ADR 9999``.\n")
+        result = self.check()
+        self.assertIn("example.md:4: warning: unresolved command", result.stdout)
+        self.assertIn("example.md:5: warning: unresolved ADR", result.stdout)
+
+    def test_missing_help_is_a_warning_and_paths_are_still_checked(self):
+        self.document("# Sources\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Read `docs/vanished.md`.\n")
+        result = self.check("--help-json", str(self.root / "missing.json"), source=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unresolved CLI help source", result.stdout)
+        self.assertIn("unresolved path `docs/vanished.md`", result.stdout)
+
+    def test_workspace_relative_paths_resolve(self):
+        code = self.root / "tools/front-door/crates/example/src/lib.rs"
+        code.parent.mkdir(parents=True)
+        code.write_text("// example\n")
+        self.document("# Paths\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Read `crates/example/src/lib.rs#example`.\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_malformed_catalogue_warns_once(self):
+        invalid = self.root / "invalid.json"
+        invalid.write_text("[]")
+        result = self.check("--help-json", str(invalid), source=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertIn("unresolved CLI help source", result.stdout)
+
+    def test_malformed_argument_warns_as_source_gap(self):
+        invalid = self.root / "invalid.json"
+        invalid.write_text('{"commands": [{"command": "provenant", '
+                           '"arguments": [{"long": 17}]}]}')
+        result = self.check("--help-json", str(invalid), source=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertIn("unresolved CLI help source", result.stdout)
+
+    def test_deleted_tracked_basename_warns(self):
+        code = self.root / "tools/front-door/crates/example/src/removed.rs"
+        code.parent.mkdir(parents=True)
+        code.write_text("// example\n")
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", str(code)], check=True)
+        code.unlink()
+        self.document("# Paths\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Read `removed.rs`.\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertIn("unresolved path `removed.rs`", result.stdout)
+
+    def test_binary_is_used_only_for_help_and_document_snippets_never_run(self):
+        binary = self.root / "provenant"
+        binary.write_text("#!/bin/sh\n[ \"$*\" = 'help --json' ] || exit 1\n"
+                          f"cat '{FIXTURES / 'help.json'}'\n")
+        binary.chmod(0o755)
+        marker = self.root / "executed"
+        self.document("# Execution\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      f"`touch {marker}` and `provenant gc --apply`.\n")
+        result = self.check("--binary", str(binary), source=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(marker.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

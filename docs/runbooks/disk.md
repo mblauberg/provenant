@@ -1,4 +1,6 @@
 # Inspect disk use
+Owner: provenant-confinement
+Anchor: tools/front-door/crates/confinement/src/disk.rs
 
 Use this procedure to inspect Provenant storage before deciding whether to run
 an existing cleanup command. It requires read access to the selected checkout,

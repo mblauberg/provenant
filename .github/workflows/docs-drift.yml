@@ -1,0 +1,73 @@
+name: Advisory documentation drift
+
+on:
+  schedule:
+    - cron: '23 22 * * 0'
+  workflow_dispatch:
+
+permissions: {}
+
+# One writer updates one bot comment on the documentation epic.
+concurrency:
+  group: docs-drift
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      PROVENANT_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: docs-drift
+      - name: Build the worktree CLI
+        working-directory: tools/front-door
+        run: cargo build --locked --quiet -p provenant --bin provenant
+      - name: Collect advisory references and header inventory
+        run: scripts/check-doc-truth --binary "$CARGO_TARGET_DIR/debug/provenant" > "$RUNNER_TEMP/doc-truth.txt"
+      - name: Update the documentation epic summary comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          report = (temporary / 'doc-truth.txt').read_text()
+          # Keep below GitHub's comment limit while retaining one summary place.
+          if len(report) > 48000:
+              report = report[:48000].rsplit('\n', 1)[0] + '\n[report truncated]\n'
+          run = (f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+                 f"/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+          body = ('<!-- provenant-docs-drift -->\n## Advisory documentation drift\n\n'
+                  f'[{os.environ["GITHUB_SHA"][:12]}]({run})\n\n'
+                  + ('```text\n' + report + '```\n' if report else 'No unresolved references or missing headers.\n'))
+          (temporary / 'doc-truth-comment.json').write_text(json.dumps({'body': body}))
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write(body)
+          PY
+          comment_id="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/1752/comments" \
+            --jq '[.[][] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- provenant-docs-drift -->")))] | first | .id // empty')"
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
+              --input "$RUNNER_TEMP/doc-truth-comment.json" > /dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/1752/comments" \
+              --input "$RUNNER_TEMP/doc-truth-comment.json" > /dev/null
+          fi

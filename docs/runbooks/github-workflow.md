@@ -1,4 +1,6 @@
 # GitHub work-item workflow
+Owner: repository maintainers
+Anchor: .github/ISSUE_TEMPLATE/work-item.yml
 
 Use this process for user- and agent-originated repository work. Project
 Status is the sole workflow state; labels describe content or gates, not
