@@ -119,7 +119,11 @@ impl RunStore {
                 if call.cancel.is_cancelled() {
                     return Err(RunError::Cancelled);
                 }
-                let run = self.run_dir(record.run_id, false)?;
+                let run = match self.run_dir(record.run_id, false) {
+                    Ok(run) => run,
+                    Err(error) if missing_directory(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                };
                 let _publication =
                     run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
                 // Collection may spend longer than one DB wait budget
@@ -158,7 +162,11 @@ impl RunStore {
                     Err(error) if error.is_not_found() => {}
                     Err(error) => return Err(error.into()),
                 }
-                let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+                let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
+                    Ok(attempt) => attempt,
+                    Err(error) if missing_directory(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                };
                 let _writer = match attempt
                     .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
                 {
@@ -232,10 +240,15 @@ pub(crate) fn prune_caches(
     let candidates = candidates(&state)?;
     for name in &candidates {
         let candidate = subdir(&state, name, false)?;
-        let fallback = (candidates.len() == 1)
-            .then_some(record.applied_route.as_ref())
-            .flatten()
-            .and_then(|route| route.provider.as_deref());
+        let fallback = record.applied_route.as_ref().and_then(|route| {
+            route.provider.as_deref().filter(|_| {
+                candidates.len() == 1
+                    || record
+                        .session
+                        .as_deref()
+                        .is_some_and(|session| contains_session(&candidate, session))
+            })
+        });
         let provider = candidate_provider(&candidate, fallback)?;
         let first = report.removed.len();
         let removal = (|| -> Result<()> {
@@ -255,6 +268,39 @@ pub(crate) fn prune_caches(
         removal?;
     }
     Ok(())
+}
+
+fn contains_session(candidate: &Directory, session: &str) -> bool {
+    fn visit(directory: &Directory, session: &str, depth: u8, remaining: &mut u32) -> bool {
+        let Ok(entries) = directory.entries() else {
+            return false;
+        };
+        for entry in entries {
+            if *remaining == 0 {
+                return false;
+            }
+            *remaining -= 1;
+            let Ok(name) = entry else {
+                return false;
+            };
+            if name.to_string_lossy().contains(session) {
+                return true;
+            }
+            if depth > 0
+                && directory
+                    .open_verified_directory(&name)
+                    .is_ok_and(|child| visit(&child, session, depth - 1, remaining))
+            {
+                return true;
+            }
+        }
+        false
+    }
+    !session.is_empty() && visit(candidate, session, 32, &mut 100_000)
+}
+
+fn missing_directory(error: &RunError) -> bool {
+    matches!(error, RunError::Filesystem(error) if error.is_not_found())
 }
 
 fn candidate_provider(candidate: &Directory, fallback: Option<&str>) -> Result<String> {
@@ -503,7 +549,7 @@ fn remove_contents(tree: &PayloadTree, depth: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{call, clock, context, input};
+    use crate::tests::{call, clock, context, input, route};
     use provenant_core::{CancelToken, WallTime};
     use std::{
         fs,
@@ -779,6 +825,64 @@ mod tests {
         let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!attempt.join("provider-state").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_candidates_use_provider_of_candidate_holding_session() -> TestResult {
+        let (_temp, _context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let candidate0 = attempt.join("provider-state/candidate-0");
+        let candidate1 = attempt.join("provider-state/candidate-1");
+        fs::remove_file(candidate0.join("provider.txt"))?;
+        fs::remove_file(candidate1.join("provider.txt"))?;
+        fs::create_dir(candidate0.join("cache"))?;
+        fs::create_dir(candidate1.join("cache"))?;
+        fs::write(candidate0.join("cache/keep"), "first")?;
+        fs::write(candidate1.join("cache/remove"), "applied")?;
+        fs::write(candidate1.join("sessions-legacy-session"), "session")?;
+
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        record.state = AttemptState::Terminal {
+            outcome: Outcome::Cancelled,
+            exit_code: None,
+            finished_at: WallTime::from_micros(200)?,
+            reason: None,
+        };
+        let mut applied = route();
+        applied.provider = Some("codex".into());
+        record.applied_route = Some(applied);
+        record.session = Some("legacy-session".into());
+
+        let attempt_dir = Directory::open_anchor(&attempt)?;
+        let mut report = ProviderStateGc::default();
+        prune_caches(&attempt_dir, &record, false, &mut report)?;
+        assert!(candidate0.join("cache/keep").exists());
+        assert!(!candidate1.join("cache").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_ignores_indexed_attempt_with_missing_run_directory() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let terminal = withdraw(&store, &input, &call)?;
+        let run = attempt
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or("run path")?;
+        fs::remove_dir_all(&attempt)?;
+
+        let report = sweep(&store, &context, 7, 0, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.kept.is_empty(), "{:?}", report.kept);
+        assert!(store.record(terminal.attempt_id, &call).is_ok());
+
+        fs::remove_dir_all(run)?;
+        let report = sweep(&store, &context, 7, 0, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
         Ok(())
     }
 

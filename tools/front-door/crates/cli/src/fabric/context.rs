@@ -301,6 +301,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
         FacadeError::LaneDepth => (Outcome::Refused, "LANE_DEPTH"),
         FacadeError::LaneCoordinationRefused => (Outcome::Refused, "lane_coordination_refused"),
         FacadeError::OwnerUnavailable => (Outcome::Refused, "UNSUPPORTED"),
+        FacadeError::ProviderStateExpired => (Outcome::Refused, "PROVIDER_STATE_EXPIRED"),
         FacadeError::Cancelled => (Outcome::Error, "CANCELLED"),
         FacadeError::StateCorrupt => (Outcome::Error, "STATE_CORRUPT"),
         FacadeError::UpgradeRefused => (Outcome::Refused, "UPGRADE_REFUSED"),

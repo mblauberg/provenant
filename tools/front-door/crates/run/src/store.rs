@@ -328,7 +328,7 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;
-        let _writer = dir.lock(
+        let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
             call.budget,
@@ -355,7 +355,7 @@ impl RunStore {
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }
-        self.commit_terminal(
+        let result = self.commit_terminal(
             old,
             expected_revision,
             publication,
@@ -363,7 +363,12 @@ impl RunStore {
             outcome_exit,
             !exit.never_spawned,
             call,
-        )
+        );
+        drop(writer);
+        if let Ok(record) = &result {
+            self.settle_cleanup(record, call);
+        }
+        result
     }
     /// End an attempt that never reached a provider: refused before spawn or
     /// cancelled while queued. It has no custody to release and no exit.
@@ -383,7 +388,7 @@ impl RunStore {
         }
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;
-        let _writer = dir.lock(
+        let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
             call.budget,
@@ -447,8 +452,30 @@ impl RunStore {
             usage: UsageRecord::default(),
             session: None,
         };
-        self.commit_terminal(old, revision, &publication, None, None, false, call)
-            .map(Some)
+        let result = self
+            .commit_terminal(old, revision, &publication, None, None, false, call)
+            .map(Some);
+        drop(writer);
+        if let Ok(Some(record)) = &result {
+            self.settle_cleanup(record, call);
+        }
+        result
+    }
+    fn settle_cleanup(&self, record: &AttemptRecord, call: &Request<'_>) {
+        // The terminal record retains tmp before cleanup; clear that hint only
+        // after removal succeeds.
+        if let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) {
+            let _ = crate::retention::prune_caches(
+                &attempt_dir,
+                record,
+                false,
+                &mut ProviderStateGc::default(),
+            );
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            if remove_temporary_best_effort(&attempt_dir).is_ok() {
+                let _ = self.set_temporary_retained(record.attempt_id, false, call);
+            }
+        }
     }
     /// Seal result and terminal intent, then commit the attempt, run summary,
     /// operation state, released admission and event together. The caller
@@ -543,18 +570,7 @@ impl RunStore {
         }
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
-                if let Ok(attempt_dir) = self.attempt_dir(old.run_id, id, false) {
-                    let _ = crate::retention::prune_caches(
-                        &attempt_dir,
-                        &old,
-                        false,
-                        &mut ProviderStateGc::default(),
-                    );
-                    self.set_temporary_retained(id, true, call)?;
-                    if remove_temporary_best_effort(&attempt_dir).is_ok() {
-                        let _ = self.set_temporary_retained(id, false, call);
-                    }
-                }
+                // The caller releases publication.lock before settlement cleanup.
                 return Ok(old);
             }
             return Err(RunError::Conflict);
@@ -605,17 +621,6 @@ impl RunStore {
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
-        // Retained is committed with the terminal record, so a crash before
-        // removal leaves discoverable work. Clearing the hint is best effort.
-        let _ = crate::retention::prune_caches(
-            &attempt_dir,
-            &next,
-            false,
-            &mut ProviderStateGc::default(),
-        );
-        if remove_temporary_best_effort(&attempt_dir).is_ok() {
-            let _ = self.set_temporary_retained(id, false, call);
-        }
         #[cfg(test)]
         crate::tests::crash_at("committed");
         Ok(next)

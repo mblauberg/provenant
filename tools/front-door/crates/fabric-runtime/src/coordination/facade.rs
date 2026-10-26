@@ -185,6 +185,8 @@ pub enum FacadeError {
     LaunchUnknown { operation_id: OperationId },
     #[error("run continuation is unsupported")]
     ContinuationUnsupported,
+    #[error("provider state expired; use the retained result or transcripts as context")]
+    ProviderStateExpired,
     #[error("lane depth exceeds lanes.max_depth")]
     LaneDepth,
     #[error("coordination mutations are not allowed inside a lane")]
@@ -230,6 +232,7 @@ impl FacadeError {
             ("peer_version", _) => Self::PeerVersion,
             ("launch_unknown", Some(operation_id)) => Self::LaunchUnknown { operation_id },
             ("continuation_unsupported", _) => Self::ContinuationUnsupported,
+            ("provider_state_expired", _) => Self::ProviderStateExpired,
             ("confinement_refused", _) => Self::ConfinementRefused,
             ("lane_depth", _) => Self::LaneDepth,
             ("lane_coordination_refused", _) => Self::LaneCoordinationRefused,
@@ -259,6 +262,7 @@ impl FacadeError {
             Self::PeerVersion => "peer_version",
             Self::LaunchUnknown { .. } => "launch_unknown",
             Self::ContinuationUnsupported => "continuation_unsupported",
+            Self::ProviderStateExpired => "provider_state_expired",
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",

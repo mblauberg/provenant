@@ -58,5 +58,6 @@ tombstone.
 On macOS, the installed default-state agent runs every six hours.
 `[gc] schedule = false` disables scheduled sweeps; manual GC and settlement
 cache pruning remain available. See
-[configuration](configuration.md#lane-cache-collection) for agent installation and logs. Other installations need an explicit
-scheduler invoking `provenant gc`.
+[configuration](configuration.md#lane-cache-collection) for agent installation
+and logs. Other installations need an explicit scheduler invoking
+`provenant gc`.
