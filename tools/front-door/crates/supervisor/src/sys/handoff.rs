@@ -10,7 +10,8 @@ use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const MESSAGE_LIMIT: usize = 2 * 1024 * 1024;
+// A 1 MiB stdin expands to 4 MiB as a JSON byte array; leave room for argv/env.
+pub(crate) const MESSAGE_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) struct Inherited {
     pub channel: UnixStream,
     pub writer_directory: Directory,
