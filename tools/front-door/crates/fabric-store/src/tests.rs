@@ -1192,6 +1192,56 @@ fn empty_legacy_import_upgrades_and_leaves_no_trace() {
     assert_eq!(store.task(project(), t.id, &f.request()).unwrap(), t);
 }
 
+// Pins the cursor edge migration 7 leaves behind. The `imported` event it
+// deletes was the project's highest seq, so that cursor value is refused until
+// the next event takes a higher seq. Accepted rather than fixed (#1590).
+#[test]
+fn cursor_at_a_deleted_import_event_waits_for_the_next_event() {
+    let f = Fixture::new();
+    let store = f.open();
+    let note = event(
+        project(),
+        Some(actor(3)),
+        EventKind::Note,
+        None,
+        "a note".into(),
+        f.now(),
+    );
+    let first = store.note(&note, None, &f.request()).unwrap();
+    downgrade_to_six(
+        &store,
+        &format!(
+            "INSERT INTO imports VALUES('/old/fabric.db','{}','lp',0,0,0,X'7B7D'); \
+             INSERT INTO events(project,dedup,record) SELECT project,NULL,\
+             CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
+             FROM events WHERE seq=1;",
+            project()
+        ),
+    );
+    drop(store);
+    let store = f.open();
+    let deleted = first + 1;
+    assert!(matches!(
+        store.mark_events_read(project(), actor(3), deleted, &f.request()),
+        Err(Error::Invalid("event cursor"))
+    ));
+    store
+        .mark_events_read(project(), actor(3), first, &f.request())
+        .unwrap();
+    let mut next = note.clone();
+    next.detail = "another note".into();
+    assert_eq!(store.note(&next, None, &f.request()).unwrap(), deleted + 1);
+    store
+        .mark_events_read(project(), actor(3), deleted, &f.request())
+        .unwrap();
+    assert_eq!(
+        store
+            .event_cursor(project(), actor(3), &f.request())
+            .unwrap(),
+        deleted
+    );
+}
+
 #[test]
 fn empty_committed_peer_response_upgrades_unchanged() {
     let f = Fixture::new();
