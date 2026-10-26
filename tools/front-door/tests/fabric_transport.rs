@@ -690,7 +690,7 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     std::fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(
-            &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one"},{"adapter":"fixture","model":"two"}]}]}),
+            &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one","account":"work"},{"adapter":"fixture","model":"two","account":"pro"}]}]}),
         )?,
     )?;
     let run = rig.command(&[
@@ -715,11 +715,48 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     // the graph moves on to the next route rather than claiming a task failure.
     let attempts = node["attempts"].as_array().ok_or("attempts")?;
     assert_eq!(attempts.len(), 2);
-    for attempt in attempts {
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let context = provenant_run::ExecutionContext {
+        state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+        project_id: identity["data"]["project"]
+            .as_str()
+            .ok_or("project")?
+            .parse()?,
+        actor_id: identity["data"]["inbox"]["actor"]
+            .as_str()
+            .ok_or("actor")?
+            .parse()?,
+        read_prompts: false,
+    };
+    use provenant_core::Clock;
+    let clock = provenant_supervisor::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    for (attempt, account) in attempts.iter().zip(["work", "pro"]) {
         assert_eq!(attempt["state"], "terminal");
         assert_eq!(attempt["launched"], false);
         assert_eq!(attempt["outcome"], "adapter_unavailable");
         assert!(attempt["attempt_ref"].as_str().is_some());
+        let (_, id) = attempt["attempt_ref"]
+            .as_str()
+            .ok_or("reference")?
+            .split_once('/')
+            .ok_or("reference")?;
+        let record = store.record(id.parse()?, &call)?;
+        assert_eq!(
+            store.request(record.run_id, &call)?.tasks[0]
+                .account
+                .as_deref(),
+            Some(account)
+        );
     }
     // Every harness reads the same persisted checkpoint.
     let frames = mcp(
@@ -742,6 +779,68 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
         );
     }
     rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
+fn graph_resume_clears_a_recorded_advance_failure() -> Result {
+    let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    std::fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"stuck","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"one"}}]}),
+        )?,
+    )?;
+    let run = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&run),
+        0,
+        "{}",
+        String::from_utf8_lossy(&run.stderr.bytes)
+    );
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = identity["data"]["project"].as_str().ok_or("project")?;
+    // The guardian writes this beside the checkpoint when its advance fails;
+    // `dispatch_provider` covers a real failure, this seeds one to clear it.
+    let marker = rig
+        .state
+        .join("fabric/graphs")
+        .join(project)
+        .join("graph-stuck.advance-error");
+    std::fs::write(&marker, "journal lock timed out")?;
+    let status = rig.command(&["fabric", "graph", "status", "stuck", "--json"])?;
+    assert_eq!(code(&status), 0);
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert_eq!(status["data"]["advance_error"], "journal lock timed out");
+    // A successful manual advance supersedes the recorded failure.
+    let resume = rig.command(&[
+        "fabric",
+        "graph",
+        "resume",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&resume),
+        0,
+        "{}",
+        String::from_utf8_lossy(&resume.stderr.bytes)
+    );
+    assert!(!marker.exists());
+    let status = rig.command(&["fabric", "graph", "status", "stuck", "--json"])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert!(status["data"].get("advance_error").is_none(), "{status}");
     cleanup.disarm();
     Ok(())
 }

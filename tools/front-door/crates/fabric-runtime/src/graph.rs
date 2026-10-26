@@ -21,7 +21,8 @@ pub const MAX_GRAPH_EDGES: usize = 256;
 pub const MAX_ROUTES_PER_NODE: usize = 8;
 pub const MAX_NODE_PROMPT_BYTES: usize = 64 * 1024;
 pub const MAX_GRAPH_PROMPT_BYTES: usize = 256 * 1024;
-const MAX_CHECKPOINT_BYTES: u64 = 1_048_576;
+const MAX_CHECKPOINT_BYTES: u64 = 4_194_304;
+const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +44,16 @@ pub struct GraphRoute {
     pub alias: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// Host-only inputs retained for advancement after the submitting process exits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphExecution {
+    pub directory: std::path::PathBuf,
+    pub document: GraphDocument,
 }
 
 /// `route` remains the one-route form. A node may instead provide ordered
@@ -186,6 +197,9 @@ pub enum GraphStatus {
 pub struct GraphRun {
     pub status: GraphStatus,
     pub checkpoint: GraphCheckpoint,
+    /// Why the last automatic advance failed, as recorded for `status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advance_error: Option<String>,
 }
 
 /// What the checkpoint already knows about an attempt.
@@ -258,6 +272,7 @@ pub enum JournalError {
 pub struct FileJournal {
     graph_id: String,
     directory: Box<dyn SafeDir>,
+    execution: Option<GraphExecution>,
     _lock: LockGuard,
 }
 
@@ -286,11 +301,73 @@ impl FileJournal {
             cancel,
             clock,
         )?;
+        let execution =
+            load_checkpoint(graphs_dir.as_ref(), graph_id)?.map(|stored| stored.execution);
         Ok(Self {
             graph_id: graph_id.to_owned(),
             directory: graphs_dir,
+            execution,
             _lock: lock,
         })
+    }
+
+    pub fn bind(&mut self, execution: GraphExecution) -> Result<(), JournalError> {
+        if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
+            return Err(JournalError::GraphMismatch);
+        }
+        self.execution = Some(execution);
+        Ok(())
+    }
+
+    /// Discover journals without creating directories. Each is read separately
+    /// so a corrupt graph need not prevent another graph from advancing.
+    pub fn graph_ids(
+        root: &StateRoot,
+        project: ProjectId,
+        fs: &dyn SafeFs,
+    ) -> Result<Vec<String>, JournalError> {
+        let directory = match graph_directory(root, project, fs) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = Vec::new();
+        for entry in directory.entries()? {
+            let name = entry?;
+            if let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("graph-"))
+                .and_then(|name| name.strip_suffix(".json"))
+                && valid_identifier(id)
+            {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    pub fn pending_execution(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        fs: &dyn SafeFs,
+    ) -> Result<Option<GraphExecution>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = graph_directory(root, project, fs)?;
+        Ok(
+            load_checkpoint(directory.as_ref(), graph_id)?.and_then(|stored| {
+                (!stored.checkpoint.cancelled
+                    && stored
+                        .checkpoint
+                        .nodes
+                        .iter()
+                        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running)))
+                .then_some(stored.execution)
+            }),
+        )
     }
 
     /// Read an atomic checkpoint snapshot without creating directories or
@@ -304,17 +381,74 @@ impl FileJournal {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
-        let directory = (|| -> Result<Box<dyn SafeDir>, FsError> {
-            let root = fs.open_anchor(root.as_path())?;
-            let fabric = root.open_verified_directory(OsStr::new("fabric"))?;
-            let graphs = fabric.open_verified_directory(OsStr::new("graphs"))?;
-            graphs.open_verified_directory(OsStr::new(&project.to_string()))
-        })();
+        let directory = graph_directory(root, project, fs);
         match directory {
-            Ok(directory) => load_checkpoint(directory.as_ref(), graph_id),
+            Ok(directory) => {
+                Ok(load_checkpoint(directory.as_ref(), graph_id)?.map(|stored| stored.checkpoint))
+            }
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Record why an automatic advance failed, or clear the record with
+    /// `None`. It takes no graph lock, because the failure may be that lock.
+    pub fn set_advance_error(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        error: Option<&str>,
+        fs: &dyn SafeFs,
+    ) -> Result<(), JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = graph_directory(root, project, fs)?;
+        let name = advance_error_name(graph_id);
+        let Some(error) = error else {
+            return match directory.unlink(&name) {
+                Err(error) if error.is_not_found() => Ok(()),
+                other => Ok(other?),
+            };
+        };
+        let mut end = error.len().min(MAX_ADVANCE_ERROR_BYTES);
+        while !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        directory.atomic_write(
+            &name,
+            ".graph-advance-error.",
+            &error.as_bytes()[..end],
+            0o600,
+            PublishMode::Replace,
+        )?;
+        Ok(())
+    }
+
+    /// The recorded failure of the last automatic advance, if any.
+    pub fn read_advance_error(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        fs: &dyn SafeFs,
+    ) -> Result<Option<String>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = match graph_directory(root, project, fs) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let file = match directory.open_read(&advance_error_name(graph_id)) {
+            Ok(file) => file,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_ADVANCE_ERROR_BYTES as u64)
+            .read_to_end(&mut bytes)?;
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     fn checkpoint_name(&self) -> OsString {
@@ -329,18 +463,24 @@ impl GraphJournal for FileJournal {
         if graph_id != self.graph_id {
             return Err(JournalError::GraphMismatch);
         }
-        load_checkpoint(self.directory.as_ref(), graph_id)
+        Ok(load_checkpoint(self.directory.as_ref(), graph_id)?.map(|stored| stored.checkpoint))
     }
 
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
         if checkpoint.graph_id != self.graph_id {
             return Err(JournalError::GraphMismatch);
         }
+        let execution = self.execution.as_ref().ok_or(JournalError::BadEnvelope)?;
         let stored = StoredCheckpoint {
             schema_version: 1,
-            digest: CanonicalV1::record_digest("fabric-graph-checkpoint", 1, checkpoint)?
-                .to_string(),
+            digest: CanonicalV1::record_digest(
+                "fabric-graph-checkpoint",
+                2,
+                &(checkpoint, execution),
+            )?
+            .to_string(),
             checkpoint: checkpoint.clone(),
+            execution: execution.clone(),
         };
         let bytes = CanonicalV1::bytes(&stored)?;
         if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
@@ -361,10 +501,25 @@ impl GraphJournal for FileJournal {
     }
 }
 
+fn advance_error_name(graph_id: &str) -> OsString {
+    format!("graph-{graph_id}.advance-error").into()
+}
+
+fn graph_directory(
+    root: &StateRoot,
+    project: ProjectId,
+    fs: &dyn SafeFs,
+) -> Result<Box<dyn SafeDir>, FsError> {
+    let root = fs.open_anchor(root.as_path())?;
+    let fabric = root.open_verified_directory(OsStr::new("fabric"))?;
+    let graphs = fabric.open_verified_directory(OsStr::new("graphs"))?;
+    graphs.open_verified_directory(OsStr::new(&project.to_string()))
+}
+
 fn load_checkpoint(
     directory: &dyn SafeDir,
     graph_id: &str,
-) -> Result<Option<GraphCheckpoint>, JournalError> {
+) -> Result<Option<StoredCheckpoint>, JournalError> {
     let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),
@@ -381,21 +536,27 @@ fn load_checkpoint(
         Limits {
             max_bytes: MAX_CHECKPOINT_BYTES,
             max_depth: 64,
-            max_members: 10_000,
+            max_members: 100_000,
         },
     )?;
     if stored.schema_version != 1 {
         return Err(JournalError::BadEnvelope);
     }
-    let digest = CanonicalV1::record_digest("fabric-graph-checkpoint", 1, &stored.checkpoint)?;
+    let digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&stored.checkpoint, &stored.execution),
+    )?;
     if digest.to_string() != stored.digest {
         return Err(JournalError::BadDigest);
     }
-    let checkpoint = stored.checkpoint;
-    if checkpoint.graph_id != graph_id {
+    if stored.checkpoint.graph_id != graph_id
+        || stored.execution.document.graph_id != graph_id
+        || !stored.execution.directory.is_absolute()
+    {
         return Err(JournalError::GraphMismatch);
     }
-    Ok(Some(checkpoint))
+    Ok(Some(stored))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -404,6 +565,7 @@ struct StoredCheckpoint {
     schema_version: u64,
     digest: String,
     checkpoint: GraphCheckpoint,
+    execution: GraphExecution,
 }
 
 fn open_or_create(directory: &dyn SafeDir, name: &OsStr) -> Result<Box<dyn SafeDir>, FsError> {
@@ -517,6 +679,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             return Ok(GraphRun {
                 status: GraphStatus::Cancelled,
                 checkpoint,
+                advance_error: None,
             });
         }
         checkpoint.cancelled = false;
@@ -695,7 +858,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     } else {
         GraphStatus::Pending
     };
-    Ok(GraphRun { status, checkpoint })
+    Ok(GraphRun {
+        status,
+        checkpoint,
+        advance_error: None,
+    })
 }
 
 pub(crate) fn validate_access(
@@ -854,6 +1021,10 @@ fn route_is_bounded(route: &GraphRoute) -> bool {
         && route.model.as_deref().is_none_or(|value| field(value, 256))
         && route.alias.as_deref().is_none_or(|value| field(value, 128))
         && route.effort.as_deref().is_none_or(|value| field(value, 64))
+        && route
+            .account
+            .as_deref()
+            .is_none_or(|value| field(value, 64))
 }
 
 fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
@@ -1000,6 +1171,7 @@ mod tests {
 
     fn route(adapter: &str) -> GraphRoute {
         GraphRoute {
+            account: None,
             adapter: adapter.to_owned(),
             model: Some(format!("{adapter}/model")),
             alias: None,
@@ -1084,6 +1256,41 @@ mod tests {
         );
         assert_eq!(attempts[3].outcome, Some(AttemptOutcome::Succeeded));
         assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    }
+
+    #[test]
+    fn route_fallback_preserves_each_selected_account() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "accounts", "nodes": [{
+                "id": "review", "prompt": "review", "access": "read_only", "routes": [
+                    {"adapter": "claude", "model": "claude/model", "account": "work"},
+                    {"adapter": "claude", "model": "claude/model", "account": "pro"}
+                ]
+            }]
+        }))
+        .unwrap();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::AuthRequired),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..FakeOwner::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert_eq!(
+            owner
+                .calls
+                .iter()
+                .map(|call| call.1.account.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("work"), Some("pro")]
+        );
+        assert_eq!(
+            run.checkpoint.nodes[0].attempts[1].route.account.as_deref(),
+            Some("pro")
+        );
     }
 
     #[test]
@@ -1424,6 +1631,49 @@ mod file_tests {
         }
     }
     #[test]
+    fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
+        let root = crate::test_support::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("state"));
+        std::fs::create_dir(base.join("state")).unwrap();
+        std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let root = StateRoot::resolve(&inputs, &LocalFs).unwrap();
+        let project = ProjectId::from_bytes([1; 16]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"errors","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
+        let read = || FileJournal::read_advance_error(&root, project, "errors", &LocalFs).unwrap();
+        assert_eq!(read(), None);
+        let mut journal =
+            FileJournal::open(&root, project, "errors", &LocalFs, budget, &cancel, &clock).unwrap();
+        for directory in [base.clone(), base.join("state")] {
+            journal
+                .bind(GraphExecution {
+                    directory,
+                    document: document.clone(),
+                })
+                .unwrap();
+        }
+        // Recording takes no graph lock, so it works while the journal is held.
+        let set = |error| {
+            FileJournal::set_advance_error(&root, project, "errors", error, &LocalFs).unwrap()
+        };
+        set(Some("first"));
+        assert_eq!(read().as_deref(), Some("first"));
+        set(Some("second"));
+        assert_eq!(read().as_deref(), Some("second"));
+        let long = "é".repeat(MAX_ADVANCE_ERROR_BYTES);
+        set(Some(&long));
+        assert_eq!(read().unwrap().len(), MAX_ADVANCE_ERROR_BYTES);
+        set(None);
+        assert_eq!(read(), None);
+        set(None);
+    }
+    #[test]
     fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         let root = crate::test_support::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1449,6 +1699,12 @@ mod file_tests {
             let mut journal =
                 FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock)
                     .unwrap();
+            journal
+                .bind(GraphExecution {
+                    directory: base.clone(),
+                    document: document.clone(),
+                })
+                .unwrap();
             let checkpoint = advance(&document, &mut Owner, &mut journal)
                 .unwrap()
                 .checkpoint;
@@ -1459,6 +1715,17 @@ mod file_tests {
             );
             checkpoint
         };
+        assert_eq!(
+            FileJournal::graph_ids(&root, project, &LocalFs).unwrap(),
+            vec!["reopen"]
+        );
+        assert_eq!(
+            FileJournal::pending_execution(&root, project, "reopen", &LocalFs).unwrap(),
+            Some(GraphExecution {
+                directory: base.clone(),
+                document: document.clone()
+            })
+        );
         {
             let mut journal =
                 FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock)
@@ -1505,10 +1772,8 @@ mod file_tests {
             FileJournal::read_checkpoint(&root, project, "reopen", &LocalFs),
             Err(JournalError::BadDigest)
         ));
-        let mut journal =
-            FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock).unwrap();
         assert!(matches!(
-            journal.load("reopen"),
+            FileJournal::open(&root, project, "reopen", &LocalFs, budget, &cancel, &clock),
             Err(JournalError::BadDigest)
         ));
     }

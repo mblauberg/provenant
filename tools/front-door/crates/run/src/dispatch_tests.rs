@@ -14,6 +14,129 @@ use std::{
 };
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn terminal_dependency_waits_for_custody_release() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+    record.generation = 1;
+    record.state = AttemptState::Terminal {
+        outcome: Outcome::Succeeded,
+        exit_code: Some(0),
+        finished_at: record.queued_at,
+        reason: None,
+    };
+    record.provider_launched = Some(false);
+    assert!(
+        store.custody_released(&record, &call)?,
+        "a preflight refusal needs no custody lock"
+    );
+    record.provider_launched = Some(true);
+    let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+    assert!(
+        store.custody_released(&record, &call).is_err(),
+        "missing custody is not release evidence"
+    );
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+    )?;
+    assert!(!store.custody_released(&record, &call)?);
+    drop(custody);
+    assert!(store.custody_released(&record, &call)?);
+    let worktrees = store
+        .writer_registry
+        .join("worktrees")
+        .join(record.project_id.to_string());
+    let broken = worktrees.join("broken");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&broken)?;
+    std::fs::write(broken.join("reservation.json"), "{")?;
+    assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
+    assert!(
+        store.custody_released(&record, &call)?,
+        "another worktree's unreadable reservation is not this attempt's"
+    );
+    std::fs::remove_dir_all(&broken)?;
+    let writer = worktrees.join("retained");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&writer)?;
+    let lease = provenant_supervisor::custody::acquire_reader(
+        Directory::open_anchor(&writer)?,
+        RunStore::scope(&record),
+        call.budget,
+        call.cancel,
+        call.clock,
+    )?;
+    drop(lease);
+    assert!(
+        !store.custody_released(&record, &call)?,
+        "a free lock does not clear a retained writer fence"
+    );
+    record.state = AttemptState::Running;
+    assert!(!store.custody_released(&record, &call)?);
+    Ok(())
+}
+
+#[test]
+fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = input();
+    let worktree = temp.path().join("lane");
+    input.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&input, &call)?;
+    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+    record.generation = 1;
+    record.state = AttemptState::Terminal {
+        outcome: Outcome::Succeeded,
+        exit_code: Some(0),
+        finished_at: record.queued_at,
+        reason: None,
+    };
+    record.provider_launched = Some(false);
+    let worktrees = store
+        .writer_registry
+        .join("worktrees")
+        .join(record.project_id.to_string());
+    let unreadable = |name: &std::ffi::OsStr| -> TestResult {
+        let directory = worktrees.join(name);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)?;
+        std::fs::write(directory.join("reservation.json"), "{")?;
+        Ok(())
+    };
+    unreadable(std::ffi::OsStr::new("other"))?;
+    assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
+    assert!(
+        store.custody_released(&record, &call)?,
+        "another worktree's unreadable reservation is not this attempt's"
+    );
+    let own = provenant_confinement::worktrees::state_dir_name(&worktree);
+    unreadable(&own)?;
+    assert_eq!(store.writer_fence_listing()?.issues.len(), 2);
+    assert!(
+        !store.custody_released(&record, &call)?,
+        "this writer's unreadable reservation keeps custody held"
+    );
+    Ok(())
+}
+
 fn hold_child_fixture(
     store: &RunStore,
     directory: Directory,
