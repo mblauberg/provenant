@@ -136,12 +136,9 @@ fn modern_tools_list_publishes_only_supported_output_schemas() {
         panic!("expected tool catalogue")
     };
     let tools = reply["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 8);
     for tool in tools {
-        let supported = matches!(
-            tool["name"].as_str(),
-            Some("fabric_identity" | "fabric_submit")
-        );
+        let supported = matches!(tool["name"].as_str(), Some("fabric_context"));
         assert_eq!(tool.get("outputSchema").is_some(), supported);
         if supported {
             assert_eq!(tool["outputSchema"]["type"], "object");
@@ -165,7 +162,7 @@ fn legacy_tools_list_omits_modern_output_schemas() {
         panic!("expected legacy tool catalogue")
     };
     let tools = reply["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 8);
     assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
 }
 
@@ -280,7 +277,7 @@ fn modern_uncorrelated_errors_omit_id_while_legacy_keeps_null() {
 fn invalid_first_tool_calls_do_not_commit_the_protocol_era() {
     for (name, arguments) in [
         ("missing_tool", json!({})),
-        ("fabric_identity", json!({"op":"inspect","unknown":true})),
+        ("fabric_context", json!({"op":"inspect","unknown":true})),
         ("fabric_events", json!({"op":"read","limit":101})),
     ] {
         let mut protocol = Protocol::default();

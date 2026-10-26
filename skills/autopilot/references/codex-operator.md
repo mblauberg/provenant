@@ -10,7 +10,7 @@ loop driver.
 - Read the user-owned goal, current scope, and authority before acting. Check
   `STATUS` at the start and end of each work iteration.
 - Use `provenant lanes` and Fabric tasks to see what is active, ready, blocked,
-  or complete. Dispatch bounded work with `fabric_submit` through
+  or complete. Dispatch bounded work with `fabric_run` (`op: submit`) through
   `orchestrate`; read results with `provenant output`.
 - After an interruption, run `provenant reconcile --id RUN`, inspect the exact
   task and artifact, and resume the exact attempt with `fabric_run`'s `resume`

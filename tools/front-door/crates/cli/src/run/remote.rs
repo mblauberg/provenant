@@ -27,6 +27,7 @@ use provenant_supervisor::{
     clock::SystemClock,
     fs::{Directory, Publication, PublishMode},
 };
+use run::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -82,6 +83,12 @@ struct Placed {
     attempt_id: AttemptId,
 }
 impl Placement {
+    fn select_target(&self, target: &crate::Target) -> Result<Vec<(HostId, AttemptId)>, Fail> {
+        let attempt = target.attempt.filter(|id| {
+            target.run.is_some() || self.attempts.iter().any(|placed| placed.attempt_id == *id)
+        });
+        self.select(target.task, attempt)
+    }
     /// Attempts the target names, in dispatch order.
     fn select(
         &self,
@@ -98,7 +105,7 @@ impl Placement {
         if attempt.is_some() && selected.is_empty() {
             return Err(Fail::new(
                 Status::Invalid,
-                "NOT_FOUND",
+                ErrorKind::NotFound,
                 "attempt is not in that run/task",
             ));
         }
@@ -107,19 +114,19 @@ impl Placement {
 }
 
 fn io_fail(error: impl std::fmt::Display) -> Fail {
-    Fail::new(Status::Error, "IO", error.to_string())
+    Fail::new(Status::Error, ErrorKind::Io, error.to_string())
 }
 fn corrupt() -> Fail {
     Fail::new(
         Status::Error,
-        "STATE_CORRUPT",
+        ErrorKind::StateCorrupt,
         "peer reply does not match the request",
     )
 }
 fn unsupported(what: &str) -> Fail {
     Fail::new(
         Status::Refused,
-        "UNSUPPORTED",
+        ErrorKind::Unsupported,
         format!("{what} is not available for a peer run in this build"),
     )
 }
@@ -136,15 +143,15 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
     if let FacadeError::LaunchUnknown { operation_id } = &error {
         return Fail::new(
             Status::Error,
-            "LAUNCH_UNKNOWN",
+            ErrorKind::LaunchUnknown,
             format!(
                 "{message}; rerun with --operation-id {operation_id} to recover the \
                  peer's receipt before submitting new work"
             ),
         );
     }
-    let (status, code) = crate::fabric::facade_outcome(&error);
-    Fail::new(status, code, format!("peer: {message}"))
+    let (status, kind) = crate::fabric::facade_outcome(&error);
+    Fail::new(status, kind, format!("peer: {message}"))
 }
 
 fn directory(roots: &Roots) -> Result<Directory, Fail> {
@@ -173,7 +180,7 @@ fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
         {
             return Err(Fail::new(
                 Status::Refused,
-                "CONFLICT",
+                ErrorKind::Conflict,
                 "another placement already names this run",
             ));
         }
@@ -202,6 +209,52 @@ pub(super) fn find(roots: &Roots, run: RunId) -> Result<Option<Placement>, Fail>
     read(&directory(roots)?, &name, run).map(Some)
 }
 
+/// Bare attempt IDs are resolved from the host's durable peer placements.
+pub(super) fn find_target(
+    roots: &Roots,
+    target: &crate::Target,
+    allow_run: bool,
+) -> Result<Option<Placement>, Fail> {
+    if let Some(run) = target.run {
+        return find(roots, run);
+    }
+    let Some(id) = target.attempt else {
+        return Ok(None);
+    };
+    if !roots.state.as_path().join(PLACEMENTS).exists() {
+        return Ok(None);
+    }
+    let directory = directory(roots)?;
+    let mut selected = None;
+    for name in directory.entries().map_err(io_fail)? {
+        let name = name.map_err(io_fail)?;
+        let Some(run) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|id| RunId::parse(id).ok())
+        else {
+            continue;
+        };
+        let placement = read(&directory, &name.to_string_lossy(), run)?;
+        let attempt = placement
+            .attempts
+            .iter()
+            .any(|placed| placed.attempt_id == id);
+        let run = allow_run && placement.run_id.as_bytes() == id.as_bytes();
+        if attempt && run || (attempt || run) && selected.is_some() {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Conflict,
+                "bare ID is ambiguous; use RUN/TASK/ATTEMPT",
+            ));
+        }
+        if attempt || run {
+            selected = Some(placement);
+        }
+    }
+    Ok(selected)
+}
+
 /// One Fabric identity and a bounded call budget per peer request.
 struct Peer {
     context: Context,
@@ -211,7 +264,7 @@ struct Peer {
 impl Peer {
     fn open(edge: &Edge<'_>) -> Result<Self, Fail> {
         let context = Context::open(edge.roots.clone(), edge.home, edge.cwd)
-            .map_err(|error| Fail::new(Status::Error, "FABRIC", error.to_string()))?;
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Fabric, error.to_string()))?;
         Ok(Self {
             context,
             clock: SystemClock::new(),
@@ -227,7 +280,7 @@ impl Peer {
             .ok_or_else(|| {
                 Fail::new(
                     Status::Refused,
-                    "REFUSED",
+                    ErrorKind::Refused,
                     "peer placement needs a Git project inside the home directory",
                 )
             })
@@ -242,7 +295,7 @@ impl Peer {
         if placements.into_iter().any(|p| p.project != project) {
             return Err(Fail::new(
                 Status::Invalid,
-                "NOT_FOUND",
+                ErrorKind::NotFound,
                 "that run was placed from another project",
             ));
         }
@@ -333,7 +386,7 @@ fn poll_until(
                     return Ok((lanes, met));
                 }
             }
-            Err(fail) if fail.code == "PEER_UNAVAILABLE" => {
+            Err(fail) if fail.kind == ErrorKind::PeerUnavailable => {
                 if Instant::now() >= deadline {
                     return Err(fail);
                 }
@@ -386,7 +439,7 @@ pub(super) fn names_peer(edge: &Edge<'_>, host: &str) -> Result<bool, Fail> {
 pub(super) fn unknown_host(host: &str) -> Fail {
     Fail::new(
         Status::Invalid,
-        "UNKNOWN_HOST",
+        ErrorKind::UnknownHost,
         format!(
             "no configured peer named {host}; use `local` for this host or see `provenant hosts`"
         ),
@@ -402,7 +455,7 @@ pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
     let (Some(branch), Some(base)) = (&command.branch, &command.base) else {
         return Err(Fail::new(
             Status::Invalid,
-            "WORKTREE_NOT_APPLICABLE",
+            ErrorKind::WorktreeNotApplicable,
             "--worktree names a path on this host; a peer writer takes --branch and --base",
         ));
     };
@@ -411,7 +464,7 @@ pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
     {
         return Err(Fail::new(
             Status::Invalid,
-            "INVALID",
+            ErrorKind::Invalid,
             "invalid --branch or --base",
         ));
     }
@@ -421,10 +474,14 @@ pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
     })
 }
 
-fn submitted_task(task: Task, new_worktree: Option<NewWorktree>, timeout_ms: u64) -> SubmittedTask {
+fn submitted_task(
+    task: Task,
+    new_worktree: Option<NewWorktree>,
+    timeout_seconds: u64,
+) -> SubmittedTask {
     SubmittedTask {
-        // A writer's base belongs only to new_worktree. Older peers reject
-        // tasks[].base, and writer dispatch must retain its existing wire shape.
+        task_class: None,
+        // A writer's base belongs to its new worktree request.
         base: if new_worktree.is_none() {
             task.base
         } else {
@@ -439,15 +496,21 @@ fn submitted_task(task: Task, new_worktree: Option<NewWorktree>, timeout_ms: u64
         worktree: None,
         new_worktree,
         prompt: task.prompt,
-        route: RoutePreference {
-            adapter: None,
-            model: task.route.model,
-            route: task.route.route,
-            role: None,
-            task_class: None,
-            effort: task.route.effort,
+        route: match task.route.model {
+            Some(model) => {
+                let (provider, _) = model.split_once('/').unwrap_or(("", ""));
+                RoutePreference::Model {
+                    provider: provider.into(),
+                    model,
+                    effort: task.route.effort,
+                }
+            }
+            None => RoutePreference::Named {
+                name: task.route.route.unwrap_or_default(),
+                effort: task.route.effort,
+            },
         },
-        timeout_ms,
+        timeout_seconds,
         delivery_id: task.delivery_id,
         deliver: task.deliver,
     }
@@ -465,10 +528,7 @@ pub(super) fn dispatch(
         .context
         .peer_host(host)
         .ok_or_else(|| unknown_host(host))?;
-    let timeout_ms = batch
-        .provider_timeout
-        .checked_mul(1000)
-        .ok_or_else(|| Fail::new(Status::Invalid, "INVALID", "provider timeout"))?;
+    let timeout_seconds = batch.provider_timeout;
     let access = if batch.new_worktree.is_some() {
         AccessMode::WorktreeWrite
     } else {
@@ -477,13 +537,13 @@ pub(super) fn dispatch(
     let tasks = batch
         .tasks
         .into_iter()
-        .map(|task| submitted_task(task, batch.new_worktree.clone(), timeout_ms))
+        .map(|task| submitted_task(task, batch.new_worktree.clone(), timeout_seconds))
         .collect();
     let concurrency = batch
         .concurrency
         .map(u16::try_from)
         .transpose()
-        .map_err(|_| Fail::new(Status::Invalid, "INVALID", "concurrency"))?;
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "concurrency"))?;
     let input = SubmitInput::Submission {
         operation_id: batch.operation_id.clone(),
         tasks,
@@ -564,7 +624,7 @@ pub(super) fn lanes(
     let placements = command
         .id
         .iter()
-        .map(|target| find(edge.roots, target.run))
+        .map(|target| super::targets::placement(edge, target, true))
         .collect::<Result<Vec<_>, _>>()?;
     let placed: Vec<&Placement> = placements.iter().flatten().collect();
     if placed.is_empty() {
@@ -573,7 +633,7 @@ pub(super) fn lanes(
     if placed.len() != placements.len() {
         return Err(Fail::new(
             Status::Invalid,
-            "INVALID",
+            ErrorKind::Invalid,
             "list peer runs and local runs in separate lanes calls",
         ));
     }
@@ -582,7 +642,7 @@ pub(super) fn lanes(
     }
     let mut selected = Vec::new();
     for (target, placement) in command.id.iter().zip(&placed) {
-        for pair in placement.select(target.task, target.attempt)? {
+        for pair in placement.select_target(target)? {
             if !selected.contains(&pair) {
                 selected.push(pair);
             }
@@ -599,7 +659,7 @@ pub(super) fn lanes(
         .since
         .map(|since| WallTime::from_micros(since.as_microsecond()))
         .transpose()
-        .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --since value"))?;
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
     let lanes: Vec<_> = peer
         .records(&selected)?
         .into_iter()
@@ -632,7 +692,7 @@ pub(super) fn host_lanes(
         .peer_host(host)
         .ok_or_else(|| unknown_host(host))?;
     let limit = u16::try_from(command.limit)
-        .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --limit"))?;
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --limit"))?;
     let PeerResult::RunStatuses(records) = peer.call(
         id,
         PeerAction::Lanes {
@@ -650,7 +710,7 @@ pub(super) fn host_lanes(
         .since
         .map(|since| WallTime::from_micros(since.as_microsecond()))
         .transpose()
-        .map_err(|_| Fail::new(Status::Invalid, "INVALID", "invalid --since value"))?;
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
     let lanes: Vec<_> = records
         .into_iter()
         .filter(|lane| {
@@ -679,13 +739,18 @@ pub(super) fn output(
     edge: &Edge<'_>,
 ) -> Result<(Value, String), Fail> {
     let target = &command.attempt.0;
-    let [(host, attempt)] = placement.select(target.task, target.attempt)?[..] else {
-        return Err(Fail::new(Status::Invalid, "INVALID", "attempt required"));
+    let [(host, attempt)] = placement.select_target(target)?[..] else {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "attempt required",
+        ));
     };
     let part = match command.part {
-        Part::Result => OutputPart::Stdout,
+        Part::Result => OutputPart::Result,
         Part::Stderr => OutputPart::Stderr,
-        Part::Prompt | Part::Events => return Err(unsupported("--part prompt or events")),
+        Part::Prompt => OutputPart::Prompt,
+        Part::Events => OutputPart::Events,
     };
     if command.tail.is_some() {
         return Err(unsupported("--tail"));
@@ -714,9 +779,9 @@ pub(super) fn output(
     else {
         return Err(corrupt());
     };
-    let text = match bytes {
-        OutputBytes::Utf8(text) => text,
-        OutputBytes::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    let text = match &bytes {
+        OutputBytes::Utf8(text) => text.clone(),
+        OutputBytes::Base64(data) => data.clone(),
     };
     Ok((
         json!({
@@ -727,7 +792,7 @@ pub(super) fn output(
             "next_offset": next_offset,
             "eof": eof,
             "digest": digest,
-            "text": text,
+            "bytes": bytes,
         }),
         text,
     ))
@@ -741,11 +806,11 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
         "cancel",
         (|| {
             let target = &command.target;
-            let selected = placement.select(target.task, target.attempt)?;
+            let selected = placement.select_target(target)?;
             if selected.is_empty() {
                 return Err(Fail::new(
                     Status::Invalid,
-                    "NOT_FOUND",
+                    ErrorKind::NotFound,
                     "no matching attempts",
                 ));
             }
@@ -760,7 +825,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                         |_| {
                             Fail::new(
                                 Status::Invalid,
-                                "INVALID",
+                                ErrorKind::Invalid,
                                 "operation ID is too long to derive one per attempt",
                             )
                         },
@@ -792,7 +857,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                     Err(fail) => {
                         status = Status::Failed;
                         human.push_str(&format!("{attempt} error: {}\n", fail.message));
-                        json!({ "attempt_id": attempt, "host": host, "error": { "code": fail.code, "message": fail.message } })
+                        json!({ "attempt_id": attempt, "host": host, "error": { "code": fail.kind.code(), "message": fail.message } })
                     }
                 };
                 receipts.push(row);
@@ -865,7 +930,7 @@ mod tests {
             "prompt": "write the change",
             "route": {"adapter": null, "model": "fixture/model", "route": null,
                       "role": null, "task_class": null, "effort": null},
-            "timeout_ms": 60000, "delivery_id": null, "deliver": null
+            "timeout_seconds": 60000, "delivery_id": null, "deliver": null
         });
         let previous = json!({
             "op": "submission", "operation_id": "peer-writer",
@@ -948,7 +1013,41 @@ mod tests {
         save(&roots, &first).map_err(|f| f.message)?;
         assert_eq!(find(&roots, run).map_err(|f| f.message)?, Some(first));
         let other = save(&roots, &placement("other")?).err().ok_or("conflict")?;
-        assert_eq!(other.code, "CONFLICT");
+        assert_eq!(other.kind.code(), "CONFLICT");
+        Ok(())
+    }
+
+    #[test]
+    fn bare_ids_resolve_peer_attempts_and_runs() -> Result {
+        let (_scratch, roots) = roots()?;
+        let placed = placement("place")?;
+        save(&roots, &placed).map_err(|f| f.message)?;
+        let attempt: crate::Target = placed.attempts[0].attempt_id.to_string().parse()?;
+        let found = find_target(&roots, &attempt, false)
+            .map_err(|f| f.message)?
+            .ok_or("missing attempt")?;
+        assert_eq!(
+            found.select_target(&attempt).map_err(|f| f.message)?,
+            vec![(placed.host, placed.attempts[0].attempt_id)]
+        );
+        let run: crate::Target = placed.run_id.to_string().parse()?;
+        assert_eq!(
+            find_target(&roots, &run, false).map_err(|f| f.message)?,
+            None
+        );
+        let found = find_target(&roots, &run, true)
+            .map_err(|f| f.message)?
+            .ok_or("missing run")?;
+        assert_eq!(found.select_target(&run).map_err(|f| f.message)?.len(), 2);
+        let mut colliding = placement("colliding")?;
+        colliding.run_id = RunId::from_bytes(*placed.attempts[0].attempt_id.as_bytes());
+        colliding.attempts[0].attempt_id = AttemptId::from_bytes([8; 16]);
+        colliding.attempts[1].attempt_id = AttemptId::from_bytes([9; 16]);
+        save(&roots, &colliding).map_err(|f| f.message)?;
+        let failure = find_target(&roots, &attempt, true)
+            .err()
+            .ok_or("expected ambiguity")?;
+        assert_eq!(failure.kind, ErrorKind::Conflict);
         Ok(())
     }
 
@@ -970,7 +1069,7 @@ mod tests {
             )
             .err()
             .ok_or("mismatch")?;
-        assert_eq!(missing.code, "NOT_FOUND");
+        assert_eq!(missing.kind.code(), "NOT_FOUND");
         Ok(())
     }
 
@@ -982,10 +1081,12 @@ mod tests {
             }
             .into(),
         );
-        assert_eq!(fail.code, "LAUNCH_UNKNOWN");
+        assert_eq!(fail.kind.code(), "LAUNCH_UNKNOWN");
         assert!(fail.message.contains("--operation-id place"));
         assert_eq!(
-            peer_failure_fail(FacadeError::PeerVersion.into()).code,
+            peer_failure_fail(FacadeError::PeerVersion.into())
+                .kind
+                .code(),
             "PEER_VERSION"
         );
         Ok(())
@@ -1000,7 +1101,7 @@ mod tests {
     #[test]
     fn peer_failure_names_the_peer_and_cause_on_the_stable_code() {
         let fail = unavailable("workshop: ssh exited with status 255: Connection refused");
-        assert_eq!(fail.code, "PEER_UNAVAILABLE");
+        assert_eq!(fail.kind.code(), "PEER_UNAVAILABLE");
         assert!(fail.message.contains("workshop"), "{}", fail.message);
         assert!(
             fail.message.contains("Connection refused"),
@@ -1042,7 +1143,7 @@ mod tests {
             Duration::from_millis(5),
         );
         let fail = out.expect_err("budget exhausted");
-        assert_eq!(fail.code, "PEER_UNAVAILABLE");
+        assert_eq!(fail.kind.code(), "PEER_UNAVAILABLE");
         assert!(calls > 1);
         assert!(fail.message.contains(&format!("failure {calls}")));
     }
@@ -1059,7 +1160,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_millis(1),
         );
-        assert_eq!(out.err().map(|f| f.code), Some("STATE_CORRUPT"));
+        assert_eq!(out.err().map(|f| f.kind.code()), Some("STATE_CORRUPT"));
         assert_eq!(calls, 1);
     }
 }

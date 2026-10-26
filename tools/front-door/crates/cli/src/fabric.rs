@@ -725,7 +725,7 @@ fn execute(
         }) => mutate(
             Mutation::Task(TaskInput::Claim {
                 id,
-                lease_ms: ctx.lease(lease)?,
+                lease_seconds: ctx.lease(lease)?,
             }),
             operation,
         )?,
@@ -768,7 +768,7 @@ fn execute(
                 EventsInput::Read {
                     after: page.after,
                     limit: page.limit,
-                    wait_ms: wait.map(|s| s * 1000),
+                    wait_seconds: wait,
                 },
                 budget,
                 &cancel,
@@ -799,7 +799,7 @@ fn execute(
         }) => mutate(
             Mutation::Claim(ClaimInput::Acquire {
                 scope: scope.value()?,
-                lease_ms: ctx.lease(lease)?,
+                lease_seconds: ctx.lease(lease)?,
             }),
             operation,
         )?,
@@ -810,7 +810,7 @@ fn execute(
         }) => mutate(
             Mutation::Claim(ClaimInput::Renew {
                 proof: fence.proof(),
-                lease_ms: ctx.lease(lease)?,
+                lease_seconds: ctx.lease(lease)?,
             }),
             operation,
         )?,
@@ -842,7 +842,7 @@ fn execute(
                 reference,
                 expected,
                 candidate,
-                lease_ms: ctx.lease(lease)?,
+                lease_seconds: ctx.lease(lease)?,
             }),
             operation,
         )?,
@@ -853,7 +853,7 @@ fn execute(
         }) => mutate(
             Mutation::Landing(LandingInput::Renew {
                 proof: fence.proof()?,
-                lease_ms: ctx.lease(lease)?,
+                lease_seconds: ctx.lease(lease)?,
             }),
             operation,
         )?,
@@ -879,7 +879,7 @@ fn execute(
                 LandingInput::Wait {
                     reference,
                     generation,
-                    wait_ms: wait * 1000,
+                    wait_seconds: wait,
                 },
                 budget,
                 &cancel,
@@ -918,9 +918,12 @@ pub fn run(
         ),
         Err(error) => {
             let (status, code) = match &error {
-                EdgeError::Coordination(error) => {
-                    (coordination_outcome(error.code()), error.code())
-                }
+                EdgeError::Coordination(error) => (
+                    coordination_outcome(
+                        &provenant_fabric_runtime::coordination::facade::FacadeError::from(error),
+                    ),
+                    error.code(),
+                ),
                 EdgeError::Identity(_) | EdgeError::Invalid | EdgeError::Root(_) => {
                     (Outcome::Invalid, "invalid_input")
                 }
@@ -966,18 +969,22 @@ pub fn run(
     }
 }
 
-/// The command outcome for a coordination error code. Store upgrades and peer
+/// The command outcome for a typed coordination error. Store upgrades and peer
 /// versions are refusals here, as on the facade edge (`context::facade_outcome`).
-pub fn coordination_outcome(code: &str) -> Outcome {
-    match code {
-        "invalid_input" | "not_found" => Outcome::Invalid,
-        "stale_fence"
-        | "conflict"
-        | "lane_coordination_refused"
-        | "upgrade_refused"
-        | "peer_version" => Outcome::Refused,
-        "timeout" => Outcome::Timeout,
-        "cancelled" => Outcome::Cancelled,
+pub fn coordination_outcome(
+    error: &provenant_fabric_runtime::coordination::facade::FacadeError,
+) -> Outcome {
+    use provenant_fabric_runtime::coordination::facade::FacadeError;
+    match error {
+        FacadeError::InvalidInput | FacadeError::NotFound => Outcome::Invalid,
+        FacadeError::StaleFence
+        | FacadeError::Conflict
+        | FacadeError::LaneCoordinationRefused
+        | FacadeError::UpgradeRefused
+        | FacadeError::PeerVersion
+        | FacadeError::PeerProtocolMismatch { .. } => Outcome::Refused,
+        FacadeError::Timeout => Outcome::Timeout,
+        FacadeError::Cancelled => Outcome::Cancelled,
         _ => Outcome::Error,
     }
 }
@@ -988,17 +995,10 @@ mod outcome_tests {
 
     #[test]
     fn upgrade_and_peer_version_refusals_match_on_both_edges() {
-        for code in ["upgrade_refused", "peer_version"] {
-            assert_eq!(coordination_outcome(code), Outcome::Refused);
-            assert_eq!(
-                facade_outcome(
-                    &provenant_fabric_runtime::coordination::facade::FacadeError::from_code(
-                        code, None
-                    )
-                )
-                .0,
-                Outcome::Refused
-            );
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        for error in [FacadeError::UpgradeRefused, FacadeError::PeerVersion] {
+            assert_eq!(coordination_outcome(&error), Outcome::Refused);
+            assert_eq!(facade_outcome(&error).0, Outcome::Refused);
         }
     }
 }

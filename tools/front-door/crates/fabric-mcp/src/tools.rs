@@ -48,11 +48,11 @@ impl ToolCall {
             Self::Task(..) => schema::ToolKind::Task,
             Self::Events(..) => schema::ToolKind::Events,
             Self::Claim(..) => schema::ToolKind::Claim,
-            Self::Landing(..) => schema::ToolKind::Landing,
-            Self::Submit(_) => schema::ToolKind::Submit,
+            Self::Landing(..) => schema::ToolKind::Claim,
+            Self::Submit(_) => schema::ToolKind::Run,
             Self::Run(_) => schema::ToolKind::Run,
             Self::Output(_) => schema::ToolKind::Output,
-            Self::Hosts(_) => schema::ToolKind::Hosts,
+            Self::Hosts(_) => schema::ToolKind::Identity,
             Self::Graph(_) => schema::ToolKind::Graph,
         }
     }
@@ -83,9 +83,9 @@ impl ToolCall {
             }
         };
         let lease = |value: u64| {
-            if value > limits.lease_seconds.saturating_mul(1_000) {
+            if value > limits.lease_seconds {
                 Err(InputError {
-                    path: "lease_ms".to_owned(),
+                    path: "lease_seconds".to_owned(),
                 })
             } else {
                 Ok(())
@@ -118,14 +118,14 @@ impl ToolCall {
                 Ok(())
             }
             Self::Task(TaskInput::List { limit, .. }, _) => page(*limit),
-            Self::Task(TaskInput::Claim { lease_ms, .. }, _) => lease(*lease_ms),
+            Self::Task(TaskInput::Claim { lease_seconds, .. }, _) => lease(*lease_seconds),
             Self::Events(EventsInput::Read { limit, .. }, _) => page(*limit),
             Self::Events(EventsInput::Note { note, .. }, _) => body(note, "note"),
             Self::Claim(ClaimInput::List { limit, .. }, _) => page(*limit),
-            Self::Claim(ClaimInput::Acquire { lease_ms, .. }, _)
-            | Self::Claim(ClaimInput::Renew { lease_ms, .. }, _) => lease(*lease_ms),
-            Self::Landing(LandingInput::Acquire { lease_ms, .. }, _)
-            | Self::Landing(LandingInput::Renew { lease_ms, .. }, _) => lease(*lease_ms),
+            Self::Claim(ClaimInput::Acquire { lease_seconds, .. }, _)
+            | Self::Claim(ClaimInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
+            Self::Landing(LandingInput::Acquire { lease_seconds, .. }, _)
+            | Self::Landing(LandingInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
             Self::Submit(SubmitInput::Submission { tasks, .. }) => {
                 for (index, task) in tasks.iter().enumerate() {
                     body(&task.prompt, &format!("tasks[{index}].prompt"))?;
@@ -179,7 +179,8 @@ impl ToolCall {
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
         // The shared serde record accepts peer-ingress worktree creation.
         // MCP cannot request it; reject the field (including null) at its edge.
-        if schema::tool_kind(name) == Some(schema::ToolKind::Submit)
+        if schema::tool_kind(name) == Some(schema::ToolKind::Run)
+            && arguments["op"] == "submit"
             && let Some(index) =
                 arguments
                     .get("tasks")
@@ -208,8 +209,7 @@ impl ToolCall {
                     schema::ToolKind::Mail
                     | schema::ToolKind::Task
                     | schema::ToolKind::Events
-                    | schema::ToolKind::Claim
-                    | schema::ToolKind::Landing,
+                    | schema::ToolKind::Claim,
                 ) => match arguments
                     .as_object_mut()
                     .and_then(|object| object.remove("operation_id"))
@@ -228,6 +228,7 @@ impl ToolCall {
                 },
                 _ => None,
             };
+        let original_arguments = arguments.clone();
         macro_rules! parse {
             ($ty:ty, $variant:ident $(, $metadata:expr)?) => {
                 serde_json::from_value::<$ty>(arguments.clone())
@@ -238,7 +239,7 @@ impl ToolCall {
                         Ok(Self::$variant(input $(, $metadata)?))
                     })
                     .map_err(|error| InvalidInput::Arguments {
-                        path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
+                        path: schema::invalid_path(name, &original_arguments).unwrap_or_else(|| {
                             let message = error.to_string();
                             message
                                 .strip_prefix("invalid input field `")
@@ -249,21 +250,35 @@ impl ToolCall {
                     })
             };
         }
+        let operation = arguments["op"].as_str().unwrap_or("").to_owned();
         let call = match schema::tool_kind(name) {
+            Some(schema::ToolKind::Identity) if operation == "hosts" => {
+                arguments["op"] = Value::String("list".to_owned());
+                parse!(HostsInput, Hosts)
+            }
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
             Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
             Some(schema::ToolKind::Task) => parse!(TaskInput, Task, operation_id.clone()),
             Some(schema::ToolKind::Events) => parse!(EventsInput, Events, operation_id.clone()),
-            Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim, operation_id.clone()),
-            Some(schema::ToolKind::Landing) => {
+            Some(schema::ToolKind::Claim) if operation.starts_with("claim_") => {
+                arguments["op"] = Value::String(operation["claim_".len()..].to_owned());
+                parse!(ClaimInput, Claim, operation_id.clone())
+            }
+            Some(schema::ToolKind::Claim) if operation.starts_with("landing_") => {
+                arguments["op"] = Value::String(operation["landing_".len()..].to_owned());
                 parse!(LandingInput, Landing, operation_id.clone())
             }
-            Some(schema::ToolKind::Submit) => parse!(SubmitInput, Submit),
+            Some(schema::ToolKind::Run) if operation == "submit" => {
+                arguments["op"] = Value::String("submission".to_owned());
+                parse!(SubmitInput, Submit)
+            }
             Some(schema::ToolKind::Run) => parse!(RunInput, Run),
             Some(schema::ToolKind::Output) => parse!(OutputInput, Output),
-            Some(schema::ToolKind::Hosts) => parse!(HostsInput, Hosts),
             Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
-            _ => Err(InvalidInput::UnknownTool),
+            Some(_) => Err(InvalidInput::Arguments {
+                path: "arguments.op".to_owned(),
+            }),
+            None => Err(InvalidInput::UnknownTool),
         }?;
         if operation_id.is_some() && !call.is_mutation() {
             return Err(InvalidInput::Arguments {
@@ -319,15 +334,15 @@ impl ToolCall {
         let output = matches!(&self, Self::Output(_));
         let tool_name = self.name();
         let budget = service.budget(match &self {
-            Self::Run(RunInput::Wait { wait_ms, .. }) => *wait_ms,
+            Self::Run(RunInput::Wait { wait_seconds, .. }) => *wait_seconds,
             Self::Events(
                 EventsInput::Read {
-                    wait_ms: Some(wait_ms),
+                    wait_seconds: Some(wait_seconds),
                     ..
                 },
                 _,
-            ) => *wait_ms,
-            _ => crate::MAX_WAIT_MS,
+            ) => *wait_seconds,
+            _ => crate::MAX_WAIT_SECONDS,
         })?;
         macro_rules! call {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
@@ -376,7 +391,7 @@ impl ToolCall {
                 EventsInput::Read {
                     after,
                     limit,
-                    wait_ms,
+                    wait_seconds,
                 },
                 _,
             ) => {
@@ -389,7 +404,7 @@ impl ToolCall {
                                 value
                             }
                             Err(error)
-                                if wait_ms.is_some()
+                                if wait_seconds.is_some()
                                     && budget.remaining(service.clock.mono_now()).as_micros()
                                         == 0 =>
                             {
@@ -407,14 +422,14 @@ impl ToolCall {
                             EventsInput::Read {
                                 after,
                                 limit,
-                                wait_ms: None,
+                                wait_seconds: None,
                             },
                             budget,
                             cancel,
                         ) {
                             Ok(value) => value,
                             Err(_)
-                                if wait_ms.is_some()
+                                if wait_seconds.is_some()
                                     && budget.remaining(service.clock.mono_now()).as_micros()
                                         == 0 =>
                             {
@@ -435,9 +450,9 @@ impl ToolCall {
                     else {
                         return Err(ServiceError::Facade(FacadeError::StateCorrupt));
                     };
-                    let timed_out = wait_ms.is_some()
+                    let timed_out = wait_seconds.is_some()
                         && budget.remaining(service.clock.mono_now()).as_micros() == 0;
-                    if !page.items.is_empty() || wait_ms.is_none() || timed_out {
+                    if !page.items.is_empty() || wait_seconds.is_none() || timed_out {
                         let mut unknown_hosts = unknown_hosts;
                         unknown_hosts.extend(coverage.unknown_hosts);
                         unknown_hosts.sort();
@@ -641,9 +656,9 @@ impl<'a, F> Service<'a, F> {
         }
     }
 
-    fn budget(&self, milliseconds: u64) -> Result<WaitBudget, ServiceError> {
-        let micros = milliseconds
-            .checked_mul(1_000)
+    fn budget(&self, seconds: u64) -> Result<WaitBudget, ServiceError> {
+        let micros = seconds
+            .checked_mul(1_000_000)
             .ok_or(provenant_core::TimeError::Overflow)?;
         Ok(WaitBudget::new(
             self.clock.mono_now(),

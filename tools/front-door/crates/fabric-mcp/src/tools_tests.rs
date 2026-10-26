@@ -37,7 +37,7 @@ fn output_bytes_are_utf8_or_an_explicit_lossless_byte_encoding() {
     );
     assert_eq!(
         OutputBytes::from_bytes(vec![0xff, 0x00]),
-        OutputBytes::Bytes(vec![0xff, 0x00])
+        OutputBytes::Base64("/wA=".to_owned())
     );
 }
 
@@ -61,21 +61,21 @@ fn every_mcp_observation_wait_uses_the_transport_cap() {
     for (tool, mut args) in [
         (
             "fabric_events",
-            json!({"op":"read","limit":1,"wait_ms":crate::MAX_WAIT_MS}),
+            json!({"op":"read","limit":1,"wait_seconds":crate::MAX_WAIT_SECONDS}),
         ),
         (
-            "fabric_landing",
-            json!({"op":"wait","reference":"main","generation":1,"wait_ms":crate::MAX_WAIT_MS}),
+            "fabric_lease",
+            json!({"op":"landing_wait","reference":"main","generation":1,"wait_seconds":crate::MAX_WAIT_SECONDS}),
         ),
         (
             "fabric_run",
-            json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"any","wait_ms":crate::MAX_WAIT_MS}),
+            json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"any","wait_seconds":crate::MAX_WAIT_SECONDS}),
         ),
     ] {
         assert!(ToolCall::parse(tool, args.clone()).is_ok());
-        args["wait_ms"] = json!(crate::MAX_WAIT_MS + 1);
+        args["wait_seconds"] = json!(crate::MAX_WAIT_SECONDS + 1);
         assert!(
-            matches!(ToolCall::parse(tool, args), Err(InvalidInput::Arguments { path }) if path == "arguments.wait_ms")
+            matches!(ToolCall::parse(tool, args), Err(InvalidInput::Arguments { path }) if path == "arguments.wait_seconds")
         );
     }
 }
@@ -104,7 +104,7 @@ fn limits() -> Limits {
         output_lines: 1,
         output_bytes: 8,
         result_bytes: 16,
-        lease_seconds: 2,
+        lease_seconds: 0,
         peer_seconds: 30,
         graph_timeout_ms: 14_400_000,
         bundle_bytes: 67_108_864,
@@ -126,13 +126,13 @@ fn configured_limits_reject_typed_body_page_lease_and_output_values() {
             "limit",
         ),
         (
-            "fabric_claim",
-            json!({"op":"acquire","scope":{"kind":"issue","key":"x"},"lease_ms":3000}),
-            "lease_ms",
+            "fabric_lease",
+            json!({"op":"claim_acquire","scope":{"kind":"issue","key":"x"},"lease_seconds":3}),
+            "lease_seconds",
         ),
         (
             "fabric_output",
-            json!({"op":"read","target":{"attempt":"00000000000000000000000000000001"},"part":"stdout","offset":0,"max_bytes":9}),
+            json!({"op":"read","target":{"attempt":"00000000000000000000000000000001"},"part":"result","offset":0,"max_bytes":9}),
             "max_bytes",
         ),
     ] {
@@ -144,7 +144,7 @@ fn configured_limits_reject_typed_body_page_lease_and_output_values() {
 #[test]
 fn result_limit_preserves_mutation_receipts_and_rejects_oversized_observations() {
     let limits = limits();
-    let receipt = response("fabric_submit", json!({"operation_id":"op-1"})).unwrap();
+    let receipt = response("fabric_run", json!({"operation_id":"op-1"})).unwrap();
     let kept = limit_response(receipt, &limits, true, false).unwrap();
     assert_eq!(kept.structured_content["operation_id"], "op-1");
 
@@ -204,34 +204,53 @@ fn coordination_mutations_accept_only_valid_top_level_operation_ids() {
 }
 
 #[test]
-fn submit_accepts_the_single_operation_with_or_without_op() {
-    let task = json!({"prompt":"review","route":{"adapter":"codex"},"timeout_ms":1_800_000,"access":"read_only","worktree":"/tmp/work"});
-    let bare = json!({"operation_id":"review-pr1486-codex","tasks":[task]});
-    let mut tagged = bare.clone();
-    tagged["op"] = json!("submission");
+fn run_submission_requires_its_explicit_operation() {
+    let task = json!({"prompt":"review","route":{"kind":"model","provider":"codex","model":"model"},"timeout_seconds":1800,"access":"read_only","worktree":"/tmp/work"});
+    let untagged = json!({"operation_id":"submit-1","tasks":[task]});
+    assert!(ToolCall::parse("fabric_run", untagged.clone()).is_err());
+    let mut tagged = untagged;
+    tagged["op"] = json!("submit");
     assert!(matches!(
-        ToolCall::parse("fabric_submit", bare.clone()),
+        ToolCall::parse("fabric_run", tagged.clone()),
         Ok(ToolCall::Submit(_))
     ));
-    assert!(matches!(
-        ToolCall::parse("fabric_submit", tagged),
-        Ok(ToolCall::Submit(_))
-    ));
-    let schema = &crate::schema::catalogue()
-        .iter()
-        .find(|tool| tool["name"] == "fabric_submit")
-        .map(|tool| tool["inputSchema"].clone())
-        .unwrap_or_default();
-    assert!(schema.get("oneOf").is_none());
+    tagged["tasks"][0]["timeout_seconds"] = json!("soon");
     assert!(
-        !schema["required"]
-            .as_array()
-            .is_some_and(|r| r.iter().any(|f| f == "op"))
+        matches!(ToolCall::parse("fabric_run", tagged.clone()), Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].timeout_seconds")
     );
-    let mut bad = bare;
-    bad["tasks"][0]["timeout_ms"] = json!("soon");
+    tagged["op"] = json!("submission");
+    assert!(ToolCall::parse("fabric_run", tagged).is_err());
+}
+
+#[test]
+fn removed_tools_are_unknown_and_merged_operations_are_typed() {
+    for name in [
+        "fabric_identity",
+        "fabric_hosts",
+        "fabric_claim",
+        "fabric_landing",
+        "fabric_submit",
+    ] {
+        assert!(matches!(
+            ToolCall::parse(name, json!({})),
+            Err(InvalidInput::UnknownTool)
+        ));
+    }
     assert!(matches!(
-        ToolCall::parse("fabric_submit", bad),
-        Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].timeout_ms"
+        ToolCall::parse("fabric_context", json!({"op":"inspect"})),
+        Ok(ToolCall::Identity(_))
     ));
+    assert!(matches!(
+        ToolCall::parse("fabric_context", json!({"op":"hosts","limit":1})),
+        Ok(ToolCall::Hosts(_))
+    ));
+    for operation in ["claim_acquire", "landing_acquire"] {
+        let input = if operation == "claim_acquire" {
+            json!({"op":operation,"scope":{"kind":"issue","key":"1571"},"lease_seconds":1})
+        } else {
+            json!({"op":operation,"reference":"refs/heads/main","expected":"a".repeat(40),"candidate":"b".repeat(40),"lease_seconds":1})
+        };
+        let call = ToolCall::parse("fabric_lease", input).unwrap();
+        assert_eq!(call.name(), "fabric_lease");
+    }
 }

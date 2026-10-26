@@ -167,6 +167,6 @@ an internal server path. The [landing lease
 runbook](../runbooks/landing-lease.md) states the contract.
 
 *Note, 2026-10-26:* the `lease` verb is no longer a command. Agents acquire a
-lease through the `fabric_landing` MCP tool, and `provenant fabric landing`
+lease through the `fabric_lease` MCP tool, and `provenant fabric landing`
 remains for `push` and `reconcile`, and for terminals without MCP. The runbook
 states the current contract.

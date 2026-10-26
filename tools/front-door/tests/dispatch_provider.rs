@@ -229,7 +229,7 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     fs::write(
         &manifest,
         serde_json::to_vec(
-            &json!({"schema_version":1,"tasks":[{"prompt":"reply OK","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"}]}),
+            &json!({"schema_version":1,"tasks":[{"prompt":"reply OK","route":{"kind":"model","provider":"claude","model":"claude-sonnet-5-5","effort":"medium"},"account":"pro"}]}),
         )?,
     )?;
     let out = rig.command(&[

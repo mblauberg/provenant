@@ -350,7 +350,8 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   Submission refuses a child above `lanes.max_depth` (default 2), and a state
   path that is not `children/<AttemptId>` pairs below the original root. The
   limit is recursion control, not an authority boundary.
-- `fabric_submit` from a lane only seals queued child records. A host-side worker
+- `fabric_run` (`op: submit`) from a lane only seals queued child records. A
+  host-side worker
   in the parent guardian prepares and launches them, rechecks the parent
   attempt and depth, and bounds each child by the parent's sealed task. In v1
   no lane may propose a writer or delivering child: the host holds no sealed

@@ -16,10 +16,10 @@ runtime ownership.
 
 ## Decision
 
-Fabric MCP exposes `fabric_submit` for one or more ordinary configured-provider
-tasks and `fabric_graph` for checkpointed graph workflows. The typed catalogue
+Fabric MCP exposes `fabric_run` (`op: submit`) for one or more ordinary
+configured-provider tasks and `fabric_graph` for checkpointed graph workflows. The typed catalogue
 and current request contracts live in the [Rust Fabric design](../specs/fabric.md#cli-and-mcp-surfaces).
-Submission uses `op: submission`, a `tasks` list, `concurrency` and an
+Submission uses `op: submit`, a `tasks` list, `concurrency` and an
 `operation_id`. Route preferences are carried per task. Writers declare
 `access: worktree_write` and a verified registered `worktree`; read-only tasks
 use `access: read_only`. The run owner enforces access before provider launch.
@@ -48,7 +48,7 @@ façade adds no maintenance service or parallel lifecycle state.
 
 Continuation targets an explicit attempt through `fabric_run` with `op: resume`,
 `operation_id`, `prompt` and `expected_generation`. Named sessions are retired.
-Finite batches use `fabric_submit` with `op: submission` and `tasks`.
+Finite batches use `fabric_run` with `op: submit` and `tasks`.
 
 ## Amendment: plan graphs
 

@@ -10,7 +10,7 @@ Profiles are `balanced`, `economy` and `rigorous`; task-class presets include
 `mechanical` and `bulk`. Inspect effective values with
 `provenant config show --task-class mechanical` and override a wired knob for
 one run with `provenant dispatch --knob NAME=VALUE` (the terminal path; agents
-use `fabric_submit`'s `knobs`).
+use `fabric_run` (`op: submit`)'s `knobs`).
 
 ## Precedence and stamps
 
@@ -27,7 +27,7 @@ A knob in `[knobs]` wins over the profile preset, which wins over the registry
 default. There is no project JSON overlay or `PROVENANT_KNOB_*` environment
 layer. `config set|unset|show` read and write this file, and `config show
 [--task-class NAME]` reports each value and its source. Dispatch accepts
-repeated `--knob NAME=VALUE`, and `fabric_submit` accepts `knobs:
+repeated `--knob NAME=VALUE`, and `fabric_run` (`op: submit`) accepts `knobs:
 ["NAME=VALUE"]`; these validated overrides win over configuration and
 task-class presets. Each sealed task and attempt records the profile name,
 task class, effective knob values and exact dispatch overrides, and

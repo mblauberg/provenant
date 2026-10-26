@@ -49,7 +49,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     assert_eq!(lane["state"], "rejected");
     assert_eq!(lane["account"], "unknown");
     let manifest = rig.root.join("accounts.json");
-    std::fs::write(&manifest, br#"{"schema_version":1,"tasks":[{"prompt":"fixture","model":"codex/id","account":"fixture-account"}]}"#)?;
+    std::fs::write(&manifest, br#"{"schema_version":1,"tasks":[{"prompt":"fixture","route":{"kind":"model","provider":"codex","model":"id"},"account":"fixture-account"}]}"#)?;
     let placed = rig.command(&[
         "dispatch",
         "--manifest",

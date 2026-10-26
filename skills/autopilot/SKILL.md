@@ -33,7 +33,7 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
 2. Run `provenant reconcile` after an interruption or when task state may be
    stale. Inspect `provenant lanes` and the relevant Fabric tasks before
    selecting work.
-3. Dispatch bounded work through `fabric_submit` and `orchestrate`.
+3. Dispatch bounded work through `fabric_run` (`op: submit`) and `orchestrate`.
    Use Fabric tasks for assignment, coordination, and results. `orchestrate`
    owns routing, topology, and review requirements.
 4. Inspect returned work with `provenant output`; verify artifacts and checks

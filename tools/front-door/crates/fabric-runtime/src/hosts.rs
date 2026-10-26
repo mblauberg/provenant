@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 2;
+pub const PROTOCOL: u64 = 3;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(
@@ -58,22 +58,12 @@ pub enum PeerError {
     Cancelled,
     #[error("malformed peer frame")]
     Frame,
-    #[error("peer refused the operation: {code}")]
-    Refused { code: String },
+    #[error("peer refused the operation: {error}")]
+    Refused { error: facade::FacadeError },
 }
 impl PeerError {
     pub fn code(&self) -> &'static str {
-        match self {
-            Self::Version | Self::ProtocolMismatch { .. } => "peer_version",
-            Self::Project | Self::SourceHost => "invalid_input",
-            Self::Unavailable | Self::Failed(_) => "home_unavailable",
-            Self::Unknown { .. } => "launch_unknown",
-            Self::Cancelled => "cancelled",
-            Self::Frame => "state_corrupt",
-            Self::Refused { code } => {
-                crate::coordination::facade::FacadeError::from_code(code, None).code()
-            }
-        }
+        facade::FacadeError::from(self).code()
     }
 }
 
@@ -341,7 +331,9 @@ pub struct PeerHealth {
 )]
 pub enum PeerResult {
     Run(Box<crate::runs::RunResult>),
-    RunStatuses(Vec<provenant_records::run::AttemptRecord>),
+    RunStatuses(
+        #[serde(with = "crate::runs::attempts_wire")] Vec<provenant_records::run::AttemptRecord>,
+    ),
     Submitted(crate::runs::SubmissionReceipt),
     Output(crate::coordination::facade::OutputResult),
     RunEvents(crate::runs::RunEventsPage),
@@ -350,7 +342,7 @@ pub enum PeerResult {
     Coordination(CoordinationResult),
     SessionHandoff(crate::handoff::HandoffReceipt),
     Error {
-        code: String,
+        error: facade::FacadeError,
         operation_id: Option<OperationId>,
     },
 }
@@ -372,18 +364,28 @@ fn baseline_protocol() -> u64 {
 pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError> {
     let request: PeerRequest<serde_json::Value> =
         provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)?;
-    Ok((request.protocol != PROTOCOL).then(|| PeerResponse {
+    Ok((request.protocol != PROTOCOL).then_some(PeerResponse {
         version: 1,
         protocol: PROTOCOL,
         host: request.target_host,
         project: request.project.key,
         result: PeerResult::Error {
-            code: "peer_version".into(),
+            error: facade::FacadeError::PeerVersion,
             operation_id: None,
         },
     }))
 }
 pub fn decode_request(bytes: &[u8]) -> Result<PeerRequest, PeerError> {
+    provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
+}
+
+/// Recorded replies keep their protocol fence across upgrades.
+pub fn decode_recorded_response(bytes: &[u8]) -> Result<PeerResponse, PeerError> {
+    let envelope: PeerResponse<serde_json::Value> =
+        provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)?;
+    if envelope.protocol != PROTOCOL {
+        return Err(PeerError::Version);
+    }
     provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)
 }
 /// Control (Cc), format (Cf: zero-width, bidi override and isolate marks) and
@@ -613,6 +615,49 @@ mod tests {
         Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn peer_refusals_preserve_typed_errors_and_reject_unknown_codes() {
+        let error = facade::FacadeError::LaunchUnknown {
+            operation_id: OperationId::parse("typed-error-operation").unwrap(),
+        };
+        let value = serde_json::to_value(PeerResult::Error {
+            error: error.clone(),
+            operation_id: None,
+        })
+        .unwrap();
+        assert_eq!(value["data"]["error"]["code"], "launch_unknown");
+        assert!(matches!(
+            serde_json::from_value::<PeerResult>(value).unwrap(),
+            PeerResult::Error { error: actual, .. } if actual == error
+        ));
+        for error in [
+            serde_json::json!({"code": "unknown_error"}),
+            serde_json::json!({"code": "launch_unknown"}),
+            serde_json::json!({"code": "launch_unknown", "operation_id": "typed-error-operation", "unexpected": true}),
+        ] {
+            assert!(serde_json::from_value::<facade::FacadeError>(error).is_err());
+        }
+    }
+
+    #[test]
+    fn recorded_peer_responses_refuse_retired_protocols() {
+        let response = PeerResponse {
+            version: 1,
+            protocol: PROTOCOL - 1,
+            host: HostId::from_bytes([3; 16]),
+            project: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            result: serde_json::json!({"result": "error", "data": {"code": "busy", "operation_id": null}}),
+        };
+        assert!(matches!(
+            decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
+            Err(PeerError::Version)
+        ));
+    }
 
     #[test]
     fn validate_refuses_the_target_as_its_own_source() {

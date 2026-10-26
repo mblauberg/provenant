@@ -149,7 +149,8 @@ liveness or completion: verify the named artifact and run receipt.
 
 Fabric derives the project from the working directory. A repository's primary
 checkout and ordinary registered linked worktrees share messages, tasks and
-activity, while `fabric_identity` retains the caller's resolved `cwd`. Agents may
+activity, while `fabric_context` (`op: inspect`) retains the caller's resolved
+`cwd`. Agents may
 therefore keep a persistent MCP session in their own worktree without a manual
 project override. Separate repositories and copied worktree
 metadata stay isolated.
@@ -228,7 +229,7 @@ means integration or detection is not yet reliable.
 For answer-bearing Fabric work, read the correlated reply with
 `fabric_mail`'s `read` operation (`after`, `limit`) and verify its artifact.
 When there is no local work, observe the project activity events with
-`fabric_events`'s `read` operation (`after`, `limit`, `wait_ms`), then read
+`fabric_events`'s `read` operation (`after`, `limit`, `wait_seconds`), then read
 the inbox again. Each wait has an explicit budget. A deadline does not cancel work;
 pane state remains advisory and never proves completion.
 

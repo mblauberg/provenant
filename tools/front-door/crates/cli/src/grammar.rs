@@ -295,19 +295,28 @@ pub struct Dispatch {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    pub run: RunId,
+    pub run: Option<RunId>,
     pub task: Option<TaskId>,
     pub attempt: Option<provenant_core::AttemptId>,
 }
 impl FromStr for Target {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if !text.contains('/') {
+            return Ok(Self {
+                run: None,
+                task: None,
+                attempt: Some(text.parse().map_err(|_| "invalid attempt or run ID")?),
+            });
+        }
         let mut parts = text.split('/');
-        let run = parts
-            .next()
-            .ok_or("expected RUN[/TASK[/ATTEMPT]]")?
-            .parse()
-            .map_err(|_| "invalid run ID")?;
+        let run = Some(
+            parts
+                .next()
+                .ok_or("expected RUN[/TASK[/ATTEMPT]]")?
+                .parse()
+                .map_err(|_| "invalid run ID")?,
+        );
         let task = parts
             .next()
             .map(str::parse)
@@ -331,7 +340,7 @@ impl FromStr for Attempt {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let target: Target = text.parse()?;
         if target.attempt.is_none() {
-            return Err("expected full RUN/TASK/ATTEMPT");
+            return Err("expected ATTEMPT or RUN/TASK/ATTEMPT");
         }
         Ok(Self(target))
     }
@@ -387,7 +396,7 @@ impl LaneState {
 }
 #[derive(Debug, Args)]
 pub struct Lanes {
-    /// Show only this RUN[/TASK[/ATTEMPT]] (repeatable)
+    /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long, conflicts_with = "all")]
     pub id: Vec<Target>,
     /// List a configured peer's own lanes, by label or host ID
@@ -411,7 +420,7 @@ pub struct Lanes {
     /// Keep lanes in any of these states.
     #[arg(long = "state", conflicts_with = "wait")]
     pub states: Vec<LaneState>,
-    /// Keep lanes queued since a duration (such as `24h`) or RFC3339 time.
+    /// Keep lanes queued within this many seconds, or since an RFC3339 time.
     #[arg(long, value_parser = lanes_since, conflicts_with = "wait")]
     pub since: Option<jiff::Timestamp>,
 }
@@ -424,7 +433,7 @@ pub enum Part {
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt as RUN/TASK/ATTEMPT
+    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
@@ -444,7 +453,7 @@ pub struct Output {
 }
 #[derive(Debug, Args)]
 pub struct Cancel {
-    /// Target as RUN[/TASK[/ATTEMPT]]
+    /// Attempt ID or RUN[/TASK[/ATTEMPT]]
     pub target: Target,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
@@ -468,7 +477,7 @@ pub struct Prompt {
 }
 #[derive(Debug, Args)]
 pub struct Resume {
-    /// Attempt as RUN/TASK/ATTEMPT
+    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
@@ -687,28 +696,62 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
         .map_err(|_| "expected a date or RFC3339 timestamp with an offset")
 }
 fn lanes_since(value: &str) -> Result<jiff::Timestamp, String> {
-    if let Some((amount, unit)) = value.split_at_checked(value.len().saturating_sub(1))
-        && matches!(unit, "s" | "m" | "h" | "d")
-        && amount.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        let amount = amount
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = value
             .parse::<i64>()
             .map_err(|_| "invalid duration".to_owned())?;
-        if amount <= 0 {
+        if seconds <= 0 {
             return Err("duration must be positive".into());
         }
-        let seconds = amount
-            .checked_mul(match unit {
-                "s" => 1,
-                "m" => 60,
-                "h" => 3_600,
-                "d" => 86_400,
-                _ => return Err("duration must use s, m, h or d".into()),
-            })
-            .ok_or_else(|| "duration is too large".to_owned())?;
         return jiff::Timestamp::now()
             .checked_sub(jiff::SignedDuration::from_secs(seconds))
             .map_err(|error| error.to_string());
     }
     timestamp(value).map_err(str::to_owned)
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::{Attempt, Target, lanes_since};
+    use provenant_core::{AttemptId, RunId, TaskId};
+
+    #[test]
+    fn lanes_since_accepts_seconds_and_timestamps() {
+        let before = jiff::Timestamp::now();
+        let since = lanes_since("86400").unwrap();
+        let after = jiff::Timestamp::now();
+        let duration = jiff::SignedDuration::from_secs(86_400);
+        assert!(since >= before.checked_sub(duration).unwrap());
+        assert!(since <= after.checked_sub(duration).unwrap());
+        assert_eq!(
+            lanes_since("2026-10-26T10:00:00Z").unwrap(),
+            "2026-10-26T10:00:00Z".parse::<jiff::Timestamp>().unwrap()
+        );
+        for invalid in ["0", "24h", "5s", "1m", "2d", "-1", ""] {
+            assert!(lanes_since(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn attempt_accepts_bare_and_qualified_ids() {
+        let run = RunId::from_bytes([1; 16]);
+        let task = TaskId::from_bytes([2; 16]);
+        let attempt = AttemptId::from_bytes([3; 16]);
+        let bare: Attempt = attempt.to_string().parse().unwrap();
+        assert_eq!(bare.0.run, None);
+        assert_eq!(bare.0.attempt, Some(attempt));
+        let qualified: Attempt = format!("{run}/{task}/{attempt}").parse().unwrap();
+        assert_eq!(qualified.0.run, Some(run));
+        assert_eq!(qualified.0.task, Some(task));
+        assert_eq!(qualified.0.attempt, Some(attempt));
+        assert!(format!("{run}/{task}").parse::<Attempt>().is_err());
+        for invalid in [
+            "",
+            "invalid",
+            &format!("{run}//{attempt}"),
+            &format!("{run}/{task}/{attempt}/extra"),
+        ] {
+            assert!(invalid.parse::<Target>().is_err(), "{invalid}");
+        }
+    }
 }
