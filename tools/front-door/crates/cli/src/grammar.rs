@@ -543,10 +543,10 @@ pub struct Gc {
     /// Keep at least this much free space (20G, or plain GiB)
     #[arg(long, value_name = "SIZE", value_parser = provenant_config::parse_cache_size)]
     pub free_floor: Option<u64>,
-    /// Report what would be removed without deleting anything (manual default)
+    /// Report what would be removed without deleting anything
     #[arg(long, conflicts_with = "apply")]
     pub dry_run: bool,
-    /// Apply a manual collection
+    /// Also delete merged worktrees and declared output (otherwise previewed)
     #[arg(long)]
     pub apply: bool,
     /// Also remove caches with no file written for this many days
@@ -565,7 +565,8 @@ pub struct Remove {
     #[arg(long, requires_all = ["integration", "remove_scope"])]
     pub merged: bool,
     /// Integration ref to check merges against: a branch or a remote-tracking
-    /// ref such as origin/main (NAME: the primary's branch when omitted)
+    /// ref such as origin/main (NAME: fetched upstream default, falling back
+    /// to the primary's branch when unavailable)
     #[arg(long)]
     pub integration: Option<String>,
     /// Limit to this branch (repeatable)

@@ -94,10 +94,13 @@ Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
 
-Manual `provenant gc` previews cleanup by default; pass `--apply` to remove
-eligible entries. Scheduled GC applies cleanup and also removes clean merged
-worktrees after fetching `origin`'s actual default branch. It does not need a
-fresh local `main`. Failed fetches keep worktrees and report the failure.
+Bare `provenant gc` deletes eligible caches and previews merged worktree and
+declared output cleanup. Pass `--apply` to delete those entries too, or
+`--dry-run` to preview all cleanup. The installed scheduled agent passes
+`--apply`. Merged worktree cleanup fetches `origin`'s actual default branch;
+it does not need a fresh local `main`. Failed fetches keep worktrees and
+report the failure. Worktrees need known-terminal lanes and merged commits
+of their own: tips equal to upstream or on its first-parent history stay.
 
 `gc.projects` is keyed by the registered Fabric project ID. Each project's
 `regenerable` list contains directory names, matched at any depth in its

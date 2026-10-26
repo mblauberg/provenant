@@ -55,8 +55,10 @@ durable run artefacts or general state deletion.
 Merged worktree collection (#1683) is also approved: GC fetches the upstream
 default branch, proves branch ancestry against that fetched tip and removes
 clean registered linked worktrees, their expected-old local refs and their
-own lane caches. Dirty, unmerged, live or unobservable worktrees remain.
-Failed fetches grant no removal authority.
+own lane caches. Worktrees need known-terminal lanes and merged commits of
+their own. Tips equal to upstream or on its first-parent history stay, as do
+dirty, unmerged, live or unobservable worktrees. Failed fetches grant no
+removal authority.
 
 Projects may explicitly declare regenerable directory names and keep paths
 in configuration (#1687). GC prunes matching directories only in clean
@@ -65,9 +67,10 @@ unreadable and unknown lane state blocks pruning. Ignored output is allowed;
 tracked paths are protected. Anything written in the preceding 24 hours is
 kept. Collection holds writer exclusion, never follows symlinks and rechecks
 identity and recursive write times after detachment. Errors skip individual
-entries. Manual GC previews by default and requires `--apply` to delete;
-scheduled GC applies the same selection automatically. No declaration grants
-no output deletion. This scope does not cover arbitrary temporary directories
+entries. Bare GC deletes eligible caches and previews worktree and output
+cleanup. Those classes require `--apply`; `--dry-run` previews every class.
+The installed scheduled agent passes `--apply`. No declaration grants no
+output deletion. This scope does not cover arbitrary temporary directories
 or durable run artefacts.
 
 ## Consequences

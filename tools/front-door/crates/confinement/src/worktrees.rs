@@ -2216,6 +2216,197 @@ mod lifecycle_tests {
             .is_ok()
     }
 
+    fn gc_merged_worktree(
+        fixture: &Fixture,
+        context: &WorktreeContext<'_>,
+        name: &str,
+    ) -> Result<WorktreeInfo, Box<dyn Error>> {
+        let created = create(
+            context,
+            WorktreeCreate {
+                branch: name.to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        run_in_worktree(
+            fixture,
+            &created.path,
+            &["commit", "--allow-empty", "-m", name],
+        )?;
+        fixture.run(&["merge", "--no-ff", name, "-m", "merge GC fixture"])?;
+        list(context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == created.path)
+            .ok_or_else(|| "missing GC fixture worktree".into())
+    }
+
+    #[test]
+    fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let mut lane = gc_merged_worktree(&fixture, &context, "gc-output-lock")?;
+        let target = lane.path.join("target");
+        fs::create_dir(&target)?;
+        fs::write(target.join("artifact"), "output")?;
+        lane.dirty = WorktreeCondition::Ignored;
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&lane.path))?;
+        let observations = std::cell::Cell::new(None);
+        let calls = std::cell::Cell::new(0);
+        let terminal = |_: &Path| {
+            let count = calls.get() + 1;
+            calls.set(count);
+            if count == 2 {
+                let repository_free = context
+                    .project_state
+                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                    .is_ok();
+                let writer_held = matches!(
+                    state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+                    Err(FsError::LockTimeout { .. })
+                );
+                observations.set(Some((repository_free, writer_held)));
+            }
+            true
+        };
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: None,
+                terminal: &terminal,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".to_owned()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(observations.get(), Some((true, true)));
+        assert!(!target.exists());
+        assert_eq!(report.output.len(), 1);
+        assert!(report.output[0].removed);
+        Ok(())
+    }
+
+    #[test]
+    fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let first = gc_merged_worktree(&fixture, &context, "gc-prune-failed")?;
+        let second = gc_merged_worktree(&fixture, &context, "gc-prune-next")?;
+        let calls = std::cell::Cell::new(0);
+        let terminal = |path: &Path| {
+            if path == first.path {
+                let count = calls.get() + 1;
+                calls.set(count);
+                count == 1
+            } else {
+                true
+            }
+        };
+        let report = collect(
+            &context,
+            &[first.clone(), second.clone()],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &terminal,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".to_owned()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert!(first.path.is_dir());
+        assert!(branch_exists(&fixture, "gc-prune-failed"));
+        assert_eq!(report.worktrees.retained.len(), 1);
+        assert_eq!(report.worktrees.retained[0].branch, "gc-prune-failed");
+        assert_eq!(report.worktrees.removed, vec![second.clone()]);
+        assert_eq!(report.worktrees.pruned_refs, vec!["gc-prune-next"]);
+        assert!(!second.path.exists());
+        Ok(())
+    }
+
+    /// Fail the first worktree-list read after a successful removal, precisely
+    /// where branch settlement rechecks other checkouts. Later reads succeed.
+    struct FailsFirstGcSettlement<'a> {
+        executor: &'a provenant_supervisor::exec::SystemExecutor,
+        removed: std::sync::atomic::AtomicBool,
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    impl Executor for FailsFirstGcSettlement<'_> {
+        fn execute(
+            &self,
+            options: provenant_supervisor::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+            use std::sync::atomic::Ordering;
+            let worktree = options.argv.iter().any(|arg| arg == "worktree");
+            let remove = worktree && options.argv.iter().any(|arg| arg == "remove");
+            let list = worktree && options.argv.iter().any(|arg| arg == "list");
+            let mut outcome = self.executor.execute(options)?;
+            if remove && outcome.termination == Termination::Exit(0) {
+                self.removed.store(true, Ordering::SeqCst);
+            } else if list
+                && self.removed.load(Ordering::SeqCst)
+                && !self.failed.swap(true, Ordering::SeqCst)
+            {
+                outcome.termination = Termination::Exit(1);
+            }
+            Ok(outcome)
+        }
+    }
+
+    #[test]
+    fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let mut context = test_context.context();
+        let first = gc_merged_worktree(&fixture, &context, "gc-settle-failed")?;
+        let second = gc_merged_worktree(&fixture, &context, "gc-settle-next")?;
+        let faulty = FailsFirstGcSettlement {
+            executor: &fixture.executor,
+            removed: std::sync::atomic::AtomicBool::new(false),
+            failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        context.executor = &faulty;
+        let report = collect(
+            &context,
+            &[first.clone(), second.clone()],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| true,
+                no_live_lanes: &|_| true,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(
+            report.worktrees.removed,
+            vec![first.clone(), second.clone()]
+        );
+        assert_eq!(report.worktrees.retained.len(), 1);
+        assert_eq!(report.worktrees.retained[0].branch, "gc-settle-failed");
+        assert_eq!(report.worktrees.pruned_refs, vec!["gc-settle-next"]);
+        assert!(branch_exists(&fixture, "gc-settle-failed"));
+        assert!(!first.path.exists());
+        assert!(!second.path.exists());
+        Ok(())
+    }
+
     #[test]
     fn timed_out_add_rolls_back_its_checkout_and_new_branch() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;

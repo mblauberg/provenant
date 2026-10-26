@@ -68,6 +68,11 @@ fn note_kept_unmerged() {
     );
 }
 
+#[allow(clippy::print_stderr)]
+fn warn_fetch(error: &Error) {
+    eprintln!("warning: {error}; using the current integration resolution");
+}
+
 impl Error {
     fn outcome(&self) -> Outcome {
         match self {
@@ -148,24 +153,23 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                 let upstream = if args.discard {
                     None
                 } else {
-                    crate::gc_support::fetch_default(context)?
-                };
-                if let Some((reference, _)) = upstream {
-                    let branch = reference
-                        .strip_prefix("refs/remotes/origin/")
-                        .ok_or(Error::InvalidScope)?;
-                    if args.integration.as_deref().is_none_or(|name| {
-                        name == branch
-                            || name == format!("refs/heads/{branch}")
-                            || name == format!("origin/{branch}")
-                    }) {
-                        args.integration = Some(
-                            reference
-                                .strip_prefix("refs/remotes/")
-                                .ok_or(Error::InvalidScope)?
-                                .to_owned(),
-                        );
+                    match crate::gc_support::fetch_default(context) {
+                        Ok(upstream) => upstream,
+                        Err(error) => {
+                            warn_fetch(&error);
+                            None
+                        }
                     }
+                };
+                if let Some((reference, _)) = upstream
+                    && args.integration.is_none()
+                {
+                    args.integration = Some(
+                        reference
+                            .strip_prefix("refs/remotes/")
+                            .ok_or(Error::InvalidScope)?
+                            .to_owned(),
+                    );
                 }
                 let named = args.name.is_some();
                 let request = if let Some(name) = args.name {
@@ -212,8 +216,7 @@ struct GcData {
 
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
 /// worktree has a live or unobservable writer.
-pub fn run_gc(mut command: Gc, globals: &Globals) -> u8 {
-    command.dry_run |= !command.scheduled && !command.apply;
+pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
     match gc(&command, globals) {
         Ok(data) => {
             let human = gc_data_summary(&data);
@@ -257,7 +260,7 @@ fn gc_data_summary(data: &GcData) -> String {
         for tree in &project.worktrees.removed {
             human.push_str(&format!(
                 "{} merged worktree {}\n",
-                if data.report.dry_run {
+                if project.dry_run {
                     "would remove"
                 } else {
                     "removed"
@@ -405,9 +408,15 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
     .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
     let mut worktree_cleanup = Vec::new();
     for project in &mut projects {
-        let terminal = |path: &Path| {
-            crate::gc_support::terminal_worktrees(&roots, project.binding.project_id())
-                .contains(path)
+        // A single snapshot per project and sweep bounds run-store IO. Writer
+        // locks and reservations still recheck custody at each mutation.
+        let states = crate::gc_support::lane_states(&roots, project.binding.project_id()).ok();
+        let terminal =
+            |path: &Path| states.as_ref().and_then(|states| states.get(path)) == Some(&true);
+        let no_live_lanes = |path: &Path| {
+            states
+                .as_ref()
+                .is_some_and(|states| states.no_live_lanes(path))
         };
         let settings = config
             .gc
@@ -436,17 +445,11 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                     &worktrees::WorktreeGcPolicy {
                         upstream: upstream.map(|(_, oid)| oid),
                         terminal: &terminal,
-                        no_live_lanes: &|path| {
-                            crate::gc_support::no_live_lanes(
-                                &roots,
-                                project.binding.project_id(),
-                                path,
-                            )
-                        },
+                        no_live_lanes: &no_live_lanes,
                         regenerable: &settings.regenerable,
                         keep: &settings.keep,
                         written_before_ns: now_ns - 86_400 * 1_000_000_000,
-                        dry_run: command.dry_run,
+                        dry_run: command.dry_run || !command.apply,
                     },
                     cancel,
                 )?;

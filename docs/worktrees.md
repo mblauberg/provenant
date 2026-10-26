@@ -6,7 +6,8 @@ linked worktrees. Work in a registered linked worktree under the repository's
 
 ## Primary checkout stays on main
 
-Do not switch branches in the primary checkout, and keep it clean. The chair merges through the [repository workflow](runbooks/github-workflow.md).
+Do not switch branches in the primary checkout, and keep it clean. The chair
+merges through the [repository workflow](runbooks/github-workflow.md).
 
 ## Canonical location
 
@@ -24,20 +25,22 @@ provenant worktree remove fix-repo-example --discard
 
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without
-`origin`, the primary checkout's integration branch remains the fallback. This
-includes a branch still at the integration tip, which nothing is lost from. An unmerged branch
-is kept and reported as `not_merged`; `--discard` deletes it too and returns
-its head, which recovers it with `git branch NAME HEAD` while Git still holds
-the objects.
+`origin`, or if fetching fails, the primary checkout's integration branch
+remains the fallback. An explicit `--integration` always wins. This includes
+a branch still at the integration tip, which nothing is lost from. An
+unmerged branch is kept and reported as `not_merged`; `--discard` deletes it
+too and returns its head, which recovers it with `git branch NAME HEAD` while
+Git still holds the objects.
 
 Confinement validates repository identity and refuses primary, dirty
 and live writers. `worktree list` reports a tree whose only changes are
 ignored files as `ignored`; removal refuses it like a dirty tree, and a
-session hand-off treats it as clean. An unknown writer is accepted when its lease is free and the
-tree is clean. It reports `git_operation_in_progress` and refuses
-removal when the worktree's private Git directory contains an unfinished
-cherry-pick, revert, rebase, merge or sequencer operation, even if the index
-and working tree are clean. Run calls `worktrees::check_writer_terminal` before
+session hand-off treats it as clean. An unknown writer is accepted when its
+lease is free and the tree is clean. It reports `git_operation_in_progress`
+and refuses removal when the worktree's private Git directory contains an
+unfinished cherry-pick, revert, rebase, merge or sequencer operation, even if
+the index and working tree are clean. Run calls
+`worktrees::check_writer_terminal` before
 committing a writer's terminal result, including a result recovered by
 reconcile. Unfinished Git operations produce a failed result with the worktree
 path and reason.
@@ -55,10 +58,10 @@ provenant worktree remove --merged --integration OID --since PRE_MERGE_OID
 
 The integration OID and scope prevent a hook from sweeping unrelated branches.
 Install owns fixture-backed hook registration; merged pruning is an explicit
-worktree operation. Writer temporary files live in the attempt's `tmp/candidate-N`;
-terminal commit attempts removal, and reconciliation retries once no reservation
-remains. Guardian settlement removes empty `scratch/`; unknown scratch contents
-and retained history stay on disk.
+worktree operation. Writer temporary files live in the attempt's
+`tmp/candidate-N`; terminal commit attempts removal, and reconciliation
+retries once no reservation remains. Guardian settlement removes empty
+`scratch/`; unknown scratch contents and retained history stay on disk.
 
 Never share `CARGO_TARGET_DIR` across worktrees. Confined writers use
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical
@@ -77,16 +80,24 @@ GC collects idle caches (default seven days); `--free-floor SIZE` additionally
 collects eligible caches oldest-first by last write to reach a free-space
 floor. Both paths protect live writers and reservations. macOS default-state
 installs schedule cache GC every six hours; the `[gc]` configuration can
-disable or adjust it. Manual GC previews by default; `--apply` deletes.
-GC also fetches `origin`'s default branch and removes clean registered linked
-worktrees whose branch tips are ancestors of that fetched tip, including tips
-equal to it. It deletes their local branches and own lane caches, keeping
-dirty, unmerged and live or unobservable worktrees. Broken registrations are
-skipped individually. Configured regenerable output uses this same worktree
-selection, with the additional requirement that every associated lane is
-known terminal. Ignored output may be pruned; tracked paths, configured keep
-paths, symlinks and output written within 24 hours are kept. See the
+disable or adjust it. Bare `provenant gc` deletes eligible lane caches and
+previews merged worktree and declared output cleanup. `--apply` also deletes
+those entries; `--dry-run` previews every class. The installed agent passes
+`--apply`.
+GC fetches `origin`'s default branch and selects clean registered linked
+worktrees with known-terminal lanes and merged commits of their own. Tips
+equal to the fetched upstream tip or on its first-parent history are kept,
+protecting fresh worktrees. Eligible removal deletes local branches and own
+lane caches, keeping dirty, unmerged and live or unobservable worktrees.
+Broken registrations are skipped individually. Configured regenerable
+output requires a clean or ignored-only registered worktree whose associated
+lanes are all known terminal. Ignored output may be pruned; tracked paths,
+configured keep paths, symlinks and output written within 24 hours are kept.
+See the
 [configuration runbook](runbooks/configuration.md#lane-cache-collection).
+Output pruning holds the worktree's writer lock; the repository lock is held
+only for individual worktree removals. Tracked paths and their ancestors are
+indexed once per worktree.
 Cleanup recognises v1 owner markers for missing owners; existing v1 owners
 are kept and never collected as idle.
 
@@ -114,9 +125,9 @@ launch beside it. The guardian retains the lease until terminal settlement.
 
 A guardian crash leaves `reservation.json` in the worktree registry, even when
 every process descriptor closes. A free kernel lock is not proof of provider
-exit. Run `provenant reconcile --id RUN --json`: `writer_reservations` names the
-exact reservation path and scoped run, attempt and generation. Reconcile also
-reports reservations left behind after a terminal commit. Keep the worktree
+exit. Run `provenant reconcile --id RUN --json`: `writer_reservations` names
+the exact reservation path and scoped run, attempt and generation. Reconcile
+also reports reservations left behind after a terminal commit. Keep the worktree
 reserved while custody is uncertain; do not remove the lock or reservation by
 hand, or rerun the same writer alongside it.
 
@@ -131,8 +142,9 @@ authority for that exact reservation:
    safe prelaunch withdrawal automatically.
 2. For a handed-off writer, recover any durable exit through run's ordinary
    terminal path. A committed terminal and quarantine publication are required
-   before settlement; retain unknown files. `Recovery::verify_settlement` binds the resulting
-   settlement commit to the original attempt directory and scope.
+   before settlement; retain unknown files. `Recovery::verify_settlement`
+   binds the resulting settlement commit to the original attempt directory
+   and scope.
 3. With proved absence, call `Recovery::settle`. For an expressly authorised
    acceptance of lost custody, first record `Recovery::reconcile` with the
    chair actor, scope, evidence digest and `AcceptLostCustody` disposition, then
@@ -141,7 +153,7 @@ authority for that exact reservation:
 
 The CLI does not expose this clearance yet.
 When custody is lost without a durable exit, this revision cannot create the
-required terminal receipt, so the fence cannot yet be cleared. Retain it and use
-a fresh registered worktree. A failed provider or an unfinished Git operation
-with normally settled custody needs Git repair by the chair, rather than fence
-clearance.
+required terminal receipt, so the fence cannot yet be cleared. Retain it and
+use a fresh registered worktree. A failed provider or an unfinished Git
+operation with normally settled custody needs Git repair by the chair,
+rather than fence clearance.

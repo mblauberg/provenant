@@ -6,12 +6,12 @@ use provenant_run::{AttemptState, ExecutionContext, LaneQuery, RunStore};
 use provenant_supervisor::{
     clock::SystemClock,
     exec::{ExecOptions, StreamPolicy, Termination},
-    fs::{Directory, FileKind, LockMode, PublishMode, entry_names},
+    fs::{Directory, FileKind, LockMode, Metadata, PublishMode, entry_names},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -55,7 +55,7 @@ pub(crate) fn fetch_default(
                     "-c",
                     "core.fsmonitor=false",
                     "-c",
-                    "core.sshCommand=/usr/bin/ssh -oBatchMode=yes",
+                    "core.sshCommand=/usr/bin/ssh -oBatchMode=yes -oConnectTimeout=5 -oConnectionAttempts=1",
                     "-c",
                     "protocol.allow=never",
                     "-c",
@@ -76,8 +76,7 @@ pub(crate) fn fetch_default(
                 .map(OsString::from),
             )
             .collect();
-        let mut options =
-            ExecOptions::new(&argv, context.repo.root_path(), Duration::from_secs(60));
+        let mut options = ExecOptions::new(&argv, context.repo.root_path(), Duration::from_secs(5));
         options.env = Some(&environment);
         options.stdin = Some(b"");
         options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
@@ -146,44 +145,132 @@ pub(crate) fn fetch_default(
 
 /// Unknown stores or records protect every candidate. Include child stores so
 /// a nested lane is subject to the same terminal-state rule as its parent.
-pub(crate) fn terminal_worktrees(
-    roots: &Roots,
-    project: provenant_core::ProjectId,
-) -> BTreeSet<PathBuf> {
-    lane_states(roots, project)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(path, terminal)| terminal.then_some(path))
-        .collect()
+pub(crate) struct LaneSnapshot {
+    states: BTreeMap<PathBuf, bool>,
+    stores: Vec<StoreSnapshot>,
+    stale: std::cell::Cell<bool>,
 }
 
-pub(crate) fn no_live_lanes(
-    roots: &Roots,
-    project: provenant_core::ProjectId,
-    path: &std::path::Path,
-) -> bool {
-    lane_states(roots, project)
-        .is_ok_and(|states| states.get(path).is_none_or(|terminal| *terminal))
+struct StoreSnapshot {
+    path: PathBuf,
+    root: Directory,
+    database: Option<Metadata>,
+    store: Option<RunStore>,
+    version: Option<u64>,
+    children: Option<(Metadata, Vec<OsString>)>,
 }
 
-fn lane_states(
+impl LaneSnapshot {
+    pub(crate) fn get(&self, path: &Path) -> Option<&bool> {
+        self.is_current().then(|| self.states.get(path)).flatten()
+    }
+
+    pub(crate) fn no_live_lanes(&self, path: &Path) -> bool {
+        self.is_current() && self.states.get(path).is_none_or(|terminal| *terminal)
+    }
+
+    /// Reuse the lane scan only while every observed store and its child-store
+    /// membership remain unchanged. A changed snapshot never becomes valid again.
+    pub(crate) fn is_current(&self) -> bool {
+        if self.stale.get() {
+            return false;
+        }
+        let current = || -> Result<bool, Box<dyn std::error::Error>> {
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let call = provenant_run::Request {
+                clock: &clock,
+                budget: WaitBudget::cli(clock.mono_now(), 1)?,
+                cancel: &cancel,
+            };
+            for observed in &self.stores {
+                let reopened = Directory::open_anchor(&observed.path)?;
+                if !observed
+                    .root
+                    .metadata()?
+                    .same_identity(&reopened.metadata()?)
+                {
+                    return Ok(false);
+                }
+                let database = optional_metadata(&observed.root, OsStr::new("run.sqlite3"))?;
+                if !same_optional_identity(observed.database, database) {
+                    return Ok(false);
+                }
+                if let Some(store) = &observed.store
+                    && Some(store.data_version(&call)?) != observed.version
+                {
+                    return Ok(false);
+                }
+                let children = child_membership(&observed.root)?;
+                match (&observed.children, children) {
+                    (None, None) => {}
+                    (Some((before, names)), Some((after, fresh)))
+                        if before.same_identity(&after) && *names == fresh => {}
+                    _ => return Ok(false),
+                }
+            }
+            Ok(true)
+        };
+        let current = current().unwrap_or(false);
+        self.stale.set(!current);
+        current
+    }
+}
+
+fn optional_metadata(
+    root: &Directory,
+    name: &OsStr,
+) -> Result<Option<Metadata>, provenant_supervisor::fs::FsError> {
+    match root.metadata_at(name, false) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn same_optional_identity(before: Option<Metadata>, after: Option<Metadata>) -> bool {
+    match (before, after) {
+        (None, None) => true,
+        (Some(before), Some(after)) => before.same_identity(&after),
+        _ => false,
+    }
+}
+
+fn child_membership(
+    root: &Directory,
+) -> Result<Option<(Metadata, Vec<OsString>)>, provenant_supervisor::fs::FsError> {
+    let children = match root.open_verified_directory(OsStr::new("children")) {
+        Ok(children) => children,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut names = entry_names(&children, 10_000)?;
+    names.sort();
+    Ok(Some((children.metadata()?, names)))
+}
+
+pub(crate) fn lane_states(
     roots: &Roots,
     project: provenant_core::ProjectId,
-) -> Result<BTreeMap<PathBuf, bool>, Box<dyn std::error::Error>> {
+) -> Result<LaneSnapshot, Box<dyn std::error::Error>> {
     let context = ExecutionContext {
         state_root: roots.state.clone(),
         project_id: project,
         actor_id: ActorId::from_bytes([0; 16]),
         read_prompts: false,
     };
-    let mut states = BTreeMap::new();
-    scan_terminal(&context, &mut states, 0)?;
-    Ok(states)
+    let mut snapshot = LaneSnapshot {
+        states: BTreeMap::new(),
+        stores: Vec::new(),
+        stale: std::cell::Cell::new(false),
+    };
+    scan_terminal(&context, &mut snapshot, 0)?;
+    Ok(snapshot)
 }
 
 fn scan_terminal(
     context: &ExecutionContext,
-    states: &mut BTreeMap<PathBuf, bool>,
+    snapshot: &mut LaneSnapshot,
     depth: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if depth >= 16 {
@@ -197,8 +284,18 @@ fn scan_terminal(
         cancel: &cancel,
     };
     let root = Directory::open_anchor(context.state_root.as_path())?;
+    let database_before = optional_metadata(&root, OsStr::new("run.sqlite3"))?;
     let store = RunStore::open_disk_read_only(context, &call)?;
-    if let Some(store) = store {
+    let version = store
+        .as_ref()
+        .map(|store| store.data_version(&call))
+        .transpose()?;
+    let database = optional_metadata(&root, OsStr::new("run.sqlite3"))?;
+    if !same_optional_identity(database_before, database) {
+        return Err("run store changed while opening snapshot".into());
+    }
+    let children_before = child_membership(&root)?;
+    if let Some(store) = &store {
         let mut query = LaneQuery {
             targets: Vec::new(),
             all: true,
@@ -223,7 +320,7 @@ fn scan_terminal(
                     }
                     let path = writer.worktree.clone();
                     let terminal = matches!(attempt.state, AttemptState::Terminal { .. });
-                    *states.entry(path).or_insert(true) &= terminal;
+                    *snapshot.states.entry(path).or_insert(true) &= terminal;
                 }
             }
             match page.next {
@@ -248,7 +345,17 @@ fn scan_terminal(
     }
     let children = match root.open_verified_directory(OsStr::new("children")) {
         Ok(children) => children,
-        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) if error.is_not_found() => {
+            snapshot.stores.push(StoreSnapshot {
+                path: context.state_root.as_path().to_owned(),
+                root,
+                database,
+                store,
+                version,
+                children: children_before,
+            });
+            return Ok(());
+        }
         Err(error) => return Err(error.into()),
     };
     for name in entry_names(&children, 10_000)? {
@@ -261,8 +368,16 @@ fn scan_terminal(
             provenant_core::RootInputs::new(crate::roots::home()?, crate::roots::product_root()?);
         inputs.state_dir = Some(context.state_root.as_path().join("children").join(name));
         child.state_root = inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state;
-        scan_terminal(&child, states, depth + 1)?;
+        scan_terminal(&child, snapshot, depth + 1)?;
     }
+    snapshot.stores.push(StoreSnapshot {
+        path: context.state_root.as_path().to_owned(),
+        root,
+        database,
+        store,
+        version,
+        children: children_before,
+    });
     Ok(())
 }
 
