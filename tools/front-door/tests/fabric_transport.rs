@@ -164,7 +164,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
         .ok_or("hosts")?["result"]["structuredContent"]["hosts"];
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
-    assert_eq!(hosts[0]["available"], true);
+    assert_eq!(hosts[0]["available"], true, "{hosts}");
     assert_eq!(hosts[0]["protocol"], 2);
     assert!(hosts[0].get("reason").is_none());
     assert_eq!(

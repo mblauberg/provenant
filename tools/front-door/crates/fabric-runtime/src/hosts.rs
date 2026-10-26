@@ -1078,6 +1078,12 @@ mod tests {
         assert_eq!(value.as_object().unwrap().len(), 3);
         assert!(value.get("protocol").is_none());
         assert!(value.get("reason").is_none());
+        let result: PeerResult = serde_json::from_value(serde_json::json!({
+            "result": "health",
+            "data": value,
+        }))
+        .unwrap();
+        assert!(matches!(result, PeerResult::Health(_)));
     }
 
     #[test]
