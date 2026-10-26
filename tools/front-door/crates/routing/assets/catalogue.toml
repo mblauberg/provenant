@@ -1,7 +1,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261027-v1"
+revision = "route-pools-20261027-v2"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -62,14 +62,14 @@ trains_on_prompts = false
 
 [[models]]
 model = "codex/gpt-6.1-terra"
-efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]
+efforts = ["low", "medium", "high", "xhigh", "max"]
 family = "openai"
 evidence_ref = "~/.codex/models_cache.json fetched 2026-10-26T22:24Z; user-verified codex exec -m gpt-6.1-terra"
 trains_on_prompts = false
 
 [[models]]
 model = "codex/gpt-6.1-sol"
-efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]
+efforts = ["low", "medium", "high", "xhigh", "max"]
 family = "openai"
 evidence_ref = "~/.codex/models_cache.json fetched 2026-10-26T22:24Z"
 trains_on_prompts = false
@@ -140,6 +140,7 @@ utility = [
     { model = "opencode/opencode/glm-5.3-flash-free", weight = 1, efforts = [], free = true },
 ]
 junior = [
+    { model = "codex/gpt-6.1-terra", weight = 2, effort = "low", efforts = ["low", "medium"] },
     { model = "codex/gpt-6-luna", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
     { model = "claude/claude-haiku-5-5", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
     { model = "agy/gemini-3.8-flash", weight = 2, effort = "medium", efforts = ["low", "medium", "high"] },
@@ -148,7 +149,8 @@ junior = [
     { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 1, efforts = [], free = true },
 ]
 senior = [
-    { model = "codex/gpt-6.1-terra", weight = 4, effort = "high", efforts = ["low", "medium", "high", "xhigh"] },
+    { model = "codex/gpt-6.1-sol", weight = 4, effort = "medium", efforts = ["low", "medium", "high"] },
+    { model = "codex/gpt-6.1-terra", weight = 4, effort = "high", efforts = ["low", "medium", "high"] },
     { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },
     { model = "agy/gemini-3.8-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
     { model = "agy/claude-opus-4-6-thinking", weight = 1, efforts = [] },
@@ -156,7 +158,7 @@ senior = [
 ]
 principal = [
     { model = "claude/claude-opus-5-5", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
-    { model = "codex/gpt-6.1-sol", weight = 1, effort = "high", efforts = ["medium", "high", "xhigh", "max", "ultra"] },
+    { model = "codex/gpt-6.1-sol", weight = 1, effort = "high", efforts = ["medium", "high", "xhigh"] },
 ]
 writing = [
     { model = "agy/gemini-3.8-flash", weight = 4, efforts = ["low", "medium", "high"] },

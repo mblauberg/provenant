@@ -8,10 +8,9 @@ Sources for Codex subagent mechanics and model capabilities:
 - `https://developers.openai.com/api/docs/models/gpt-6.1-sol`
 - `https://developers.openai.com/api/docs/models/gpt-6.1-terra`
 
-Codex subagents are native parallel workers inside a Codex session. For eligible
-models/accounts, native `ultra` uses maximum reasoning and proactively delegates
-suitable work to subagents. At other effort levels, make fan-out concrete in the
-prompt. Ultra/native multi-agent is a first-class workflow substrate, but Codex
+Codex `ultra` is built-in subagent delegation, not an effort level, and Provenant never routes it.
+The chair fans out across providers itself. Codex subagents are native parallel
+workers inside a Codex session. Make fan-out concrete in the prompt. Codex
 does not execute Claude Code dynamic workflow JavaScript unchanged: keep the
 state machine portable and realise it through collaboration actions, run-dir
 files and root-thread reduction.
@@ -33,10 +32,12 @@ project uses them. Do not assume a custom agent exists; discover current tools a
 ## Routing rules
 
 - Prefer a GPT-6.1 Sol principal Codex lead at `xhigh` for substantial-to-terminal
-  orchestration; the pool default is `high`. GPT-6.1 Terra is the senior Codex
-  member at `high`. The Codex models cache fetched 2026-10-26T22:24Z records
-  low, medium, high, xhigh, max and ultra for both models. Keep these CLI controls
-  separate from API controls and do not assume an entitlement exists.
+  orchestration; the pool default is `high`. Senior pairs Sol at `medium` with
+  a Terra trial at `high`, both allowing low through high. Junior trials Terra
+  at `low`, allowing low and medium. The Codex models cache fetched
+  2026-10-26T22:24Z records low, medium, high, xhigh and max for both models;
+  max is excluded from every pool. Keep these CLI controls separate from API
+  controls and do not assume an entitlement exists.
 - Use Codex native subagents for same-harness fan-out. Do not use `codex exec` as a substitute for
   Codex subagents inside Codex.
 - Use `fabric_run` (`op: submit`) for an external Codex verifier when Fabric

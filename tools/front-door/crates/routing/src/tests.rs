@@ -168,17 +168,11 @@ fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
-    let mut record = availability();
-    record.observed_models = vec!["gpt-6.1-terra".into(), "gpt-6.1-sol".into()];
-    let records = [record];
     let access = [AccessContext {
         adapter: "codex",
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
-    let mut context = context(&catalogue, &config, now()?);
-    context.availability = &records;
-    context.access = &access;
     let codex_models: Vec<_> = catalogue
         .models()
         .iter()
@@ -189,34 +183,55 @@ fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
         codex_models,
         ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"]
     );
-    for (pool, model, weight, allowed) in [
+    for (pool, model, weight, default_effort, allowed) in [
+        ("junior", "gpt-6.1-terra", 2, "low", vec!["low", "medium"]),
+        (
+            "senior",
+            "gpt-6.1-sol",
+            4,
+            "medium",
+            vec!["low", "medium", "high"],
+        ),
         (
             "senior",
             "gpt-6.1-terra",
             4,
-            vec!["low", "medium", "high", "xhigh"],
+            "high",
+            vec!["low", "medium", "high"],
         ),
         (
             "principal",
             "gpt-6.1-sol",
             1,
-            vec!["medium", "high", "xhigh", "max", "ultra"],
+            "high",
+            vec!["medium", "high", "xhigh"],
         ),
     ] {
         let member = catalogue.pools[pool]
             .iter()
-            .find(|member| member.model.adapter() == "codex")
+            .find(|member| member.model.as_str() == format!("codex/{model}"))
             .ok_or("Codex pool member missing")?;
         assert_eq!(member.model.model(), model);
         assert_eq!(member.weight, weight);
         assert_eq!(member.efforts, allowed);
+        assert_eq!(member.effort.as_deref(), Some(default_effort));
+        // Check this member's effort policy independently of the weighted draw.
+        let mut isolated = catalogue.clone();
+        isolated.pools.insert(pool.into(), vec![member.clone()]);
+        let mut record = availability();
+        record.observed_models = vec![model.into()];
+        let records = [record];
+        let mut context = context(&isolated, &config, now()?);
+        context.availability = &records;
+        context.access = &access;
         let entry = catalogue.model(&member.model).ok_or("model missing")?;
         assert_eq!(entry.family.as_deref(), Some("openai"));
         assert_eq!(entry.trains_on_prompts, Some(false));
         assert!(entry.evidence_ref.contains("models_cache.json"));
+        assert_eq!(entry.efforts, ["low", "medium", "high", "xhigh", "max"]);
         let mut query = request(&format!("codex/{model}"))?;
         query.confidential = true;
-        for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
             query.effort = Some(effort.into());
             let exact = resolve(&query, &context)?;
             assert_eq!(exact.effort.as_deref(), Some(effort));
@@ -226,14 +241,14 @@ fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
         query.effort = None;
         let resolved = resolve_with_seed(&query, &context, "codex-tier", 0)?;
         assert_eq!(resolved.model, model);
-        assert_eq!(resolved.effort.as_deref(), Some("high"));
+        assert_eq!(resolved.effort.as_deref(), Some(default_effort));
         for effort in &allowed {
             query.effort = Some((*effort).into());
             let resolved = resolve_with_seed(&query, &context, "codex-tier", 0)?;
             assert_eq!(resolved.model, model);
             assert_eq!(resolved.effort.as_deref(), Some(*effort));
         }
-        for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
             if allowed.contains(&effort) {
                 continue;
             }
@@ -243,6 +258,17 @@ fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
                 Err(RoutingError::NoEligiblePoolMember { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
+        }
+    }
+    for entry in catalogue.models() {
+        assert!(entry.efforts.iter().all(|effort| {
+            ["low", "medium", "high", "xhigh", "max"].contains(&effort.as_str())
+        }));
+    }
+    for members in catalogue.pools.values() {
+        for member in members {
+            assert!(!member.efforts.iter().any(|effort| effort == "max"));
+            assert_ne!(member.effort.as_deref(), Some("max"));
         }
     }
     let principal = &catalogue.pools["principal"];
@@ -772,7 +798,7 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
             "review".into(),
             NamedRoute {
                 model: ModelId::parse("codex/gpt-6.1-sol")?,
-                effort: Some("ultra".into()),
+                effort: Some("max".into()),
             },
         )]),
         ..RoutingConfig::default()
@@ -873,7 +899,7 @@ fn availability() -> AvailabilityRecord {
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
-        catalogue_revision: "route-pools-20261027-v1".into(),
+        catalogue_revision: "route-pools-20261027-v2".into(),
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
         observed_unix_seconds: 80,

@@ -110,12 +110,16 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     let selected = rig.root.join("selected-project");
     fs::create_dir_all(&selected)?;
     let project = selected.to_str().ok_or("fixture project")?;
-    let initialized = rig.execute(
-        std::path::Path::new("/usr/bin/git"),
-        &["init", "-q", project],
-        None,
-    )?;
-    assert_eq!(code(&initialized), 0);
+    let git = std::env::var_os("PROVENANT_GIT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/bin/git"));
+    let initialized = rig.execute(&git, &["init", "-q", project], None)?;
+    assert_eq!(
+        code(&initialized),
+        0,
+        "git init stderr={}",
+        String::from_utf8_lossy(&initialized.stderr.bytes)
+    );
     assert_ne!(
         fs::canonicalize(&selected)?,
         fs::canonicalize(&rig.project)?

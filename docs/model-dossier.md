@@ -89,29 +89,65 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** consult `provenant route list`; only models exposed by the active
   Claude routes can be dispatched.
 
-### GPT-6.1 Sol (OpenAI principal)
+### GPT-6.1 Sol (OpenAI senior and principal)
 
-- **Good at:** the hard slice: correctness, edge cases and precise work on a
-  tight scope. In the owner's benchmark assessment, medium through xhigh beats
-  Terra, which places Sol in principal.
-- **Watch out for:** benchmark comparisons are priors; record task evidence.
-- **Cost:** principal-tier.
+- **Good at:** correctness, edge cases and precise work on a tight scope.
+  Medium is the senior default; high is the principal default, with xhigh
+  available there for harder work.
+- **Watch out for:** the benchmark priors below vary by task. Revisit the
+  Sol/Terra split using Provenant lane telemetry.
+- **Cost:** on the Artificial Analysis Intelligence Index, max adds one point
+  over xhigh at nearly twice the cost per task. Keep max available for exact
+  model requests, outside all pools.
 - **Reach:** `codex` adapter, `openai` family. The Codex models cache fetched
-  2026-10-26T22:24Z records low, medium, high, xhigh, max and ultra. Consult the
-  catalogue for the principal pool's narrower effort range.
+  2026-10-26T22:24Z records low, medium, high, xhigh and max. Consult the
+  catalogue for each pool's narrower effort range.
 
-### GPT-6.1 Terra (OpenAI senior)
+### GPT-6.1 Terra (OpenAI senior and junior trial)
 
-- **Good at:** Codex senior tasks: ordinary implementation, research legwork,
-  review and drafting. In the owner's benchmark assessment, low edges out Luna
-  xhigh on cost per performance and scales roughly linearly to high, where it
-  beats Sol low.
-- **Watch out for:** no standing behavioural note yet. Record what you see.
+- **Good at:** a trial for ordinary implementation, research legwork, review
+  and drafting in senior, and cheaper bounded work in junior. The benchmark
+  priors support trying it, rather than assuming it replaces Sol.
+- **Watch out for:** high and xhigh are unmeasured. Do not interpolate a
+  performance claim for either. Revisit the senior and junior trials using
+  Provenant lane telemetry.
 - **Cost:** below Sol; see the sourced rates in `config/telemetry-prices.toml`.
 - **Reach:** `codex` adapter, `openai` family. The owner verified
   `codex exec -m gpt-6.1-terra`. The Codex models cache fetched
-  2026-10-26T22:24Z records low, medium, high, xhigh, max and ultra; the senior
-  pool uses low through xhigh.
+  2026-10-26T22:24Z records low, medium, high, xhigh and max. The senior trial
+  defaults to high and allows low through high; the junior trial defaults to
+  low and allows low and medium.
+
+#### Sol/Terra benchmark priors
+
+These published results are priors, not Provenant lane measurements. Scores
+from different benchmarks are not interchangeable; task costs are USD per task,
+not token prices. Sources read 2026-10-27:
+
+| Benchmark | Model and effort | Score | Cost per task |
+|---|---|---|---|
+| AA Intelligence Index | Sol low / medium / high / xhigh / max | 42 / 48 / 50 / 51 / 52 | $0.13 / $0.21 / $0.32 / $0.39 / $0.72 |
+| AA Intelligence Index | Terra medium | 41 | $0.10 |
+| AA Intelligence Index | Terra max | 48 | $0.40 |
+| Terminal-Bench 4 | Terra low / medium / max | 24.8 / 35.8 / 50.3 | Not reported here |
+| Terminal-Bench 4 | Sol medium / max | 52.7 / 55.9 | Not reported here |
+| Agents' Last Exam | Terra low / medium / max | 55.9 / 57.6 / 60.0 | $0.16 / $0.29 / $1.01 |
+| Agents' Last Exam | Sol medium / max | 53.8 / 58.6 | $1.31 / $2.00 |
+
+The Sol Intelligence Index figures come from Artificial Analysis's
+[low](https://artificialanalysis.ai/models/gpt-6-1-sol-low),
+[medium](https://artificialanalysis.ai/models/gpt-6-1-sol-medium),
+[high](https://artificialanalysis.ai/models/gpt-6-1-sol-high),
+[xhigh](https://artificialanalysis.ai/models/gpt-6-1-sol-xhigh) and
+[max](https://artificialanalysis.ai/models/gpt-6-1-sol) entries. Terra max
+comes from [Artificial Analysis](https://artificialanalysis.ai/models/gpt-6-1-terra),
+read 2026-10-27. Terra medium is secondary evidence from
+[kingy.ai](https://kingy.ai/blog/gpt-6-1-terra/), published 2026-10-26,
+citing Artificial Analysis. Terminal-Bench 4 is OpenAI-run, reported via that
+kingy.ai article; Agents' Last Exam is OpenAI-run, reported via
+[cellcog.ai](https://cellcog.ai/blog/gpt-6-1-terra/), read 2026-10-27.
+Neither vendor-run benchmark is an independent reproduction. Terra high and
+xhigh remain unmeasured in this evidence.
 
 ### GPT-6 Luna (OpenAI junior)
 

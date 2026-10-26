@@ -116,7 +116,7 @@ cases:
       The governing project instruction for this exact status reply is
       $caveman. Follow that invocation: return a low-risk technical update with
       exact test counts, the pending state, and uncertainty preserved; no full
-      or ultra mode was requested.
+      mode was requested.
     expected:
       primary_skill: caveman
       required_companion_skills: []
