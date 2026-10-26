@@ -823,6 +823,82 @@ pub(super) fn fixture_input<'a>(
 }
 
 #[test]
+fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<(), ProviderError> {
+    let file = Path::new("/fixture/attempt/prompt.md");
+    let prompt = Prompt::from_file(file.to_owned());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for entry in REGISTRY
+            .iter()
+            .filter(|entry| matches!(entry.adapter.id(), "cursor" | "agy"))
+        {
+            let id = entry.adapter.id();
+            let authentication = match id {
+                "cursor" => Some("login"),
+                "agy" => Some("keychain"),
+                _ => None,
+            };
+            let plan = fixture_access_plan(access, authentication, false);
+            let mut route = route(id, "fixture-model");
+            route.account_key = None;
+            let spec = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                None,
+            ))?;
+            assert_eq!(spec.argv.last(), Some(&OsString::from(prompt.text())));
+            if id == "agy" {
+                assert!(
+                    spec.argv
+                        .windows(2)
+                        .any(|pair| { pair[0] == "--add-dir" && pair[1] == "/fixture/attempt" })
+                );
+            }
+            if id == "agy" && access == Access::ReadOnly {
+                assert!(
+                    !spec
+                        .argv
+                        .iter()
+                        .any(|arg| arg == "--dangerously-skip-permissions")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderError> {
+    let prompt = Prompt::new(format!(
+        "Durable output instructions\n\n{}",
+        "é".repeat(75_000)
+    ));
+    let token = fixture_token();
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for entry in REGISTRY
+            .iter()
+            .filter(|entry| matches!(entry.adapter.id(), "claude" | "codex" | "opencode"))
+        {
+            let id = entry.adapter.id();
+            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let mut route = route(id, "fixture-model");
+            route.account_key = None;
+            let spec = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            ))?;
+            assert_eq!(spec.stdin, Stdin::Bytes(prompt.text().as_bytes().to_vec()));
+            assert!(!spec.argv.iter().any(|arg| arg == "--add-dir"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();

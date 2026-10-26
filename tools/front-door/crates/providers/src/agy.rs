@@ -68,6 +68,9 @@ fn prepare(
     if access == Access::WorktreeWrite {
         argv.push("--dangerously-skip-permissions".into());
     }
+    if let Some(parent) = input.prompt.file().and_then(std::path::Path::parent) {
+        argv.extend(["--add-dir".into(), parent.as_os_str().to_owned()]);
+    }
     if session == Session::Resume {
         let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
         argv.extend(["--conversation".into(), continuation.session().into()]);

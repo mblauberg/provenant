@@ -251,10 +251,13 @@ and unsupported.
 `providers::prepare` returns a launch spec: exact argv with the canonical
 executable first, the complete child environment, stdin, cwd, setup steps and
 the confinement profile. It is held in memory; only a redacted summary persists.
-Argv prompts are bounded to 64 KiB. Continuation binds the exact adapter,
-session, account, host, model and sent controls, and rejects incompatible grants
-or identity changes. Run owns custody handoff, retries, home finalisation and
-publication.
+Launch prompts, including the preamble, are bounded to 1 MiB. Stdin adapters
+receive the full text. Argv adapters pass up to 64 KiB directly; larger
+top-level prompts use a pointer to an attempt-owned file, while nested attempts
+refuse them ([run](run.md#records-layout-and-publication)). Continuation binds
+the exact adapter, session, account, host, model and sent controls, and rejects
+incompatible grants or identity changes. Run owns custody handoff, retries,
+home finalisation and publication.
 
 Decoders use documented event positions and never search tool or subagent
 output for the answering identity. They emit assistant text, usage,
@@ -295,8 +298,8 @@ provider tests. Intent that the fixtures cannot show:
 | --- | --- |
 | Codex | `codex exec` with `--json` and the prompt on stdin. `CODEX_HOME` is attempt-private, with `auth.json` linked to the selected registration. Codex's own seatbelt is off because it cannot nest; the outer profile is the boundary. Continuation pins the same `-m`. |
 | Claude | `claude -p` with strict MCP config, Provenant-only settings, no slash commands and an explicit tool list. The host passes the OAuth token through an inherited pipe named by `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, bounded to 512 bytes and closed before spawn; no token appears in the start environment. `CLAUDE_CONFIG_DIR` is set when an account is selected. Read-only lanes add the host-bound Git common directory with `--add-dir`; the outer profile keeps it unwritable. |
-| Cursor | `cursor-agent -p` in stream-json mode with the prompt on argv. Only writers add `--force`. The launcher resolves to a shell script in the self-updated `~/.local/share/cursor-agent/versions/<version>/` payload, which runs its sibling `node`, so every lane may read and execute that one resolved version directory, `/bin` and `/usr/bin`. |
-| Agy | `agy --print` with a print timeout and no `--sandbox` (headless mode denies tools it cannot prompt for, so writers auto-approve inside the confinement profile). HOME is a private directory holding only a link to the login keychain. A print-timeout diagnostic keeps answer text as partial. Agy runs without Fabric MCP, hooks or lane environment. |
+| Cursor | `cursor-agent -p` in stream-json mode with the prompt on argv. Top-level prompts over 64 KiB spill to `prompt.md`; nested attempts refuse them. Only writers add `--force`. The launcher resolves to a shell script in the self-updated `~/.local/share/cursor-agent/versions/<version>/` payload, which runs its sibling `node`, so every lane may read and execute that one resolved version directory, `/bin` and `/usr/bin`. |
+| Agy | `agy --print` with the prompt on argv, a print timeout and no `--sandbox` (headless mode denies tools it cannot prompt for, so writers auto-approve inside the confinement profile). Top-level prompts over 64 KiB spill to `prompt.md`; nested attempts refuse them. HOME is a private directory holding only a link to the login keychain. A print-timeout diagnostic keeps answer text as partial. Agy runs without Fabric MCP, hooks or lane environment. |
 | OpenCode | `opencode run --standalone --format json` with the prompt on stdin. HOME is attempt-private. Inline config denies shell and web fetch, allows edit for writers only, and sets no MCP servers or plugins. |
 
 Provider endpoints are `*:443` because Seatbelt cannot filter by host name.
