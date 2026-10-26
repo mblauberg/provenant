@@ -967,6 +967,28 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                 false,
             )
         }
+        Err(error)
+            if matches!(
+                error.downcast_ref::<PeerError>(),
+                Some(PeerError::Refused { code }) if code == "busy"
+            ) =>
+        {
+            let message = error.to_string();
+            let mut result = provenant_records::CommandResult::new(
+                command,
+                provenant_records::Outcome::Refused,
+                serde_json::json!({"operation_id":recovery_id}),
+            );
+            result.error = Some(provenant_records::CommandError {
+                code: "QUEUE_FULL".into(),
+                message: message.clone(),
+                cause: None,
+                repair: Some(format!(
+                    "repeat {command} with the same fence and operation id"
+                )),
+            });
+            crate::emit(&result, globals, &message, false)
+        }
         Err(error) => crate::fail(
             command,
             provenant_records::Outcome::Refused,
@@ -1922,12 +1944,14 @@ impl BinaryRunOwner<'_> {
                 ref prompt,
                 expected_generation,
             } => {
-                if self.factory.context.in_lane
-                    && target
+                if self.factory.context.in_lane {
+                    if target
                         .host
                         .is_some_and(|host| host != self.factory.context.identity.host)
-                {
-                    return Err(FacadeError::LaneCoordinationRefused);
+                    {
+                        return Err(FacadeError::LaneCoordinationRefused);
+                    }
+                    return Err(FacadeError::ContinuationUnsupported);
                 }
                 if let Some(answer) = self.remote(
                     target,

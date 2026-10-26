@@ -2006,6 +2006,13 @@ pub fn continue_attempt(
     Ok((run, started))
 }
 fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
+    if crate::fabric::in_lane() {
+        return Err(Fail::new(
+            Status::Refused,
+            "UNSUPPORTED",
+            "a lane cannot continue an attempt",
+        ));
+    }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;

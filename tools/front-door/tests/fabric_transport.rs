@@ -1358,6 +1358,27 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (PeerResult::Push(wrong_push), Some("state_corrupt")),
         (
             PeerResult::Error {
+                code: "busy".into(),
+                operation_id: None,
+            },
+            Some("QUEUE_FULL"),
+        ),
+        (
+            PeerResult::Error {
+                code: "busy".into(),
+                operation_id: Some(OperationId::parse("landing-local")?),
+            },
+            Some("QUEUE_FULL"),
+        ),
+        (
+            PeerResult::Error {
+                code: "stale_fence".into(),
+                operation_id: Some(OperationId::parse("landing-local")?),
+            },
+            Some("landing_refused"),
+        ),
+        (
+            PeerResult::Error {
                 code: "launch_unknown".into(),
                 operation_id: Some(OperationId::parse("unrelated")?),
             },
@@ -1411,6 +1432,13 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 assert_eq!(result["error"]["code"], expected, "{op}: {result}");
                 if expected == "launch_unknown" {
                     assert_eq!(result["data"]["operation_id"], "landing-local");
+                }
+                if expected == "QUEUE_FULL" {
+                    assert_eq!(result["status"], "refused", "{op}: {result}");
+                    assert_eq!(result["data"]["operation_id"], "landing-local");
+                    let repair = result["error"]["repair"].as_str().ok_or("repair")?;
+                    assert!(repair.contains("same fence and operation id"), "{repair}");
+                    assert!(repair.contains(&format!("fabric landing {op}")), "{repair}");
                 }
             } else {
                 assert_eq!(status, 0, "{op}: {result}");
@@ -1582,6 +1610,7 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             json!({"jsonrpc":"2.0","id":103,"method":"tools/call","params":{"name":"fabric_events","arguments":{"op":"read","limit":10}}}),
             json!({"jsonrpc":"2.0","id":104,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"cancel","target":{"host":host,"attempt":parent},"operation_id":"lane-local-cancel"}}}),
             json!({"jsonrpc":"2.0","id":105,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"resume","target":{"host":host,"attempt":parent},"operation_id":"lane-local-resume","prompt":"continue","expected_generation":0}}}),
+            json!({"jsonrpc":"2.0","id":106,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"resume","target":{"attempt":parent},"operation_id":"lane-default-resume","prompt":"continue","expected_generation":0}}}),
         ]);
         if depth.is_some() && child_store {
             frames.push(json!({"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"lane-child","tasks":[{"prompt":"read only","route":{"adapter":"codex","model":"gpt-6.1-sol"},"timeout_ms":1000}],"concurrency":1}}}));
@@ -1620,14 +1649,23 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
                 .contains(&json!(host)),
             "{events}"
         );
-        // Explicit local hosts in child receipts still reach the local owner.
-        for id in [104, 105] {
+        // Explicit local hosts in child cancel receipts still reach the local owner.
+        let result = &replies
+            .iter()
+            .find(|r| r["id"] == 104)
+            .ok_or("local cancel")?["result"];
+        assert_ne!(
+            result["structuredContent"]["code"], "lane_coordination_refused",
+            "{result}"
+        );
+        for id in [105, 106] {
             let result = &replies
                 .iter()
                 .find(|r| r["id"] == id)
-                .ok_or("local mutation")?["result"];
-            assert_ne!(
-                result["structuredContent"]["code"], "lane_coordination_refused",
+                .ok_or("local resume")?["result"];
+            assert_eq!(result["isError"], true, "{result}");
+            assert_eq!(
+                result["structuredContent"]["code"], "continuation_unsupported",
                 "{result}"
             );
         }
@@ -1703,6 +1741,21 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             );
             assert_eq!(result["status"], "refused", "{args:?}: {result}");
         }
+        let target = format!("{parent}/{parent}/{parent}");
+        let output = rig.command(&[
+            "resume",
+            &target,
+            "--operation-id",
+            "lane-cli-resume",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ])?;
+        assert_ne!(code(&output), 0);
+        let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(result["error"]["code"], "UNSUPPORTED", "{result}");
+        assert_eq!(result["status"], "refused", "{result}");
+        assert!(!rig.state.join("runs").exists());
         assert!(!rig.state.join("fabric/graphs").exists());
         let output = rig.command(&["fabric", "events", "read", "--json"])?;
         assert_eq!(
