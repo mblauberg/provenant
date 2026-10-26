@@ -78,17 +78,7 @@ pub(crate) fn prove_nested_custody(
     if !metadata.is_file() {
         return Err(CustodyProofError::InvalidDescriptor);
     }
-    #[cfg(target_os = "macos")]
-    let held = {
-        use std::os::unix::fs::MetadataExt;
-        darwin_owner_holds_lock(identity.pid, metadata.dev(), metadata.ino())?
-    };
-    #[cfg(not(target_os = "macos"))]
-    let held = {
-        let _ = (identity, metadata);
-        return Err(CustodyProofError::Unknown);
-    };
-    if !held {
+    if !owner_holds_lock(identity.pid, &metadata)? {
         return Err(CustodyProofError::NotHeld);
     }
     match observer.observe(identity.pid) {
@@ -101,6 +91,18 @@ pub(crate) fn prove_nested_custody(
     Ok(HeldCustodyProof {
         owner: identity.clone(),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn owner_holds_lock(pid: i64, metadata: &std::fs::Metadata) -> Result<bool, CustodyProofError> {
+    use std::os::unix::fs::MetadataExt;
+    darwin_owner_holds_lock(pid, metadata.dev(), metadata.ino())
+}
+
+/// Custody is unsupported off macOS.
+#[cfg(not(target_os = "macos"))]
+fn owner_holds_lock(_pid: i64, _metadata: &std::fs::Metadata) -> Result<bool, CustodyProofError> {
+    Err(CustodyProofError::Unknown)
 }
 
 #[cfg(target_os = "macos")]
