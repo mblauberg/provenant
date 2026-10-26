@@ -1,139 +1,198 @@
 [
   {
-    "description": "Inspect the authenticated Fabric identity.",
+    "_meta": {
+      "io.provenant/schemaVersion": 2
+    },
+    "description": "Inspect the authenticated Fabric identity or list peer hosts.",
     "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "op": {
-          "const": "inspect"
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "op": {
+              "const": "hosts"
+            }
+          },
+          "required": [
+            "limit",
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "inspect"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
         }
-      },
-      "required": [],
+      ],
       "type": "object"
     },
-    "name": "fabric_identity",
+    "name": "fabric_context",
     "outputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "client": {
-          "type": "string"
-        },
-        "common_dir": {
+      "anyOf": [
+        {
           "additionalProperties": false,
           "properties": {
-            "relative_to_root": {
+            "client": {
+              "type": "string"
+            },
+            "common_dir": {
               "additionalProperties": false,
               "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
+                "relative_to_root": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "encoding": {
+                      "enum": [
+                        "utf8",
+                        "native_bytes"
+                      ],
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "encoding",
+                    "path"
                   ],
-                  "type": "string"
-                },
-                "path": {
-                  "type": "string"
+                  "type": "object"
                 }
               },
               "required": [
-                "encoding",
-                "path"
+                "relative_to_root"
               ],
               "type": "object"
-            }
-          },
-          "required": [
-            "relative_to_root"
-          ],
-          "type": "object"
-        },
-        "cwd": {
-          "additionalProperties": false,
-          "properties": {
-            "relative_to_root": {
+            },
+            "cwd": {
               "additionalProperties": false,
               "properties": {
-                "encoding": {
-                  "enum": [
-                    "utf8",
-                    "native_bytes"
+                "relative_to_root": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "encoding": {
+                      "enum": [
+                        "utf8",
+                        "native_bytes"
+                      ],
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "encoding",
+                    "path"
                   ],
-                  "type": "string"
-                },
-                "path": {
-                  "type": "string"
+                  "type": "object"
                 }
               },
               "required": [
-                "encoding",
-                "path"
+                "relative_to_root"
               ],
               "type": "object"
-            }
-          },
-          "required": [
-            "relative_to_root"
-          ],
-          "type": "object"
-        },
-        "federation": {
-          "anyOf": [
-            {
-              "type": "object"
             },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "host": {
-          "pattern": "^[0-9a-f]{32}$",
-          "type": "string"
-        },
-        "inbox": {
-          "additionalProperties": false,
-          "properties": {
-            "actor": {
-              "pattern": "^[0-9a-f]{32}$",
-              "type": "string"
-            },
-            "agent": {
-              "type": "string"
+            "federation": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "host": {
               "pattern": "^[0-9a-f]{32}$",
               "type": "string"
+            },
+            "inbox": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "host": {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "actor",
+                "agent",
+                "host"
+              ],
+              "type": "object"
+            },
+            "project": {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            },
+            "server_version": {
+              "type": "string"
             }
           },
           "required": [
-            "actor",
-            "agent",
-            "host"
+            "client",
+            "common_dir",
+            "cwd",
+            "federation",
+            "host",
+            "inbox",
+            "project",
+            "server_version"
           ],
           "type": "object"
         },
-        "project": {
-          "pattern": "^[0-9a-f]{32}$",
-          "type": "string"
-        },
-        "server_version": {
-          "type": "string"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "hosts": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "hosts"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "client",
-        "common_dir",
-        "cwd",
-        "federation",
-        "host",
-        "inbox",
-        "project",
-        "server_version"
       ],
       "type": "object"
     }
   },
   {
+    "_meta": {
+      "io.provenant/schemaVersion": 2
+    },
     "description": "Send and read mail with explicit cursors.",
     "inputSchema": {
       "$defs": {
@@ -351,6 +410,9 @@
     "name": "fabric_mail"
   },
   {
+    "_meta": {
+      "io.provenant/schemaVersion": 2
+    },
     "description": "Create and manage fenced project tasks.",
     "inputSchema": {
       "$defs": {
@@ -374,14 +436,8 @@
               "$ref": "#/$defs/Id"
             },
             "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
             }
           },
           "required": [
@@ -399,9 +455,9 @@
             "id": {
               "$ref": "#/$defs/Id"
             },
-            "lease_ms": {
-              "maximum": 3600000,
-              "minimum": 1000,
+            "lease_seconds": {
+              "maximum": 3600,
+              "minimum": 1,
               "type": "integer"
             },
             "op": {
@@ -413,7 +469,7 @@
           },
           "required": [
             "id",
-            "lease_ms",
+            "lease_seconds",
             "op"
           ],
           "type": "object"
@@ -579,6 +635,9 @@
     "name": "fabric_task"
   },
   {
+    "_meta": {
+      "io.provenant/schemaVersion": 2
+    },
     "description": "Read the activity journal or append a note.",
     "inputSchema": {
       "oneOf": [
@@ -637,11 +696,11 @@
             "op": {
               "const": "read"
             },
-            "wait_ms": {
+            "wait_seconds": {
               "anyOf": [
                 {
-                  "maximum": 55000,
-                  "minimum": 1000,
+                  "maximum": 55,
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
@@ -662,7 +721,10 @@
     "name": "fabric_events"
   },
   {
-    "description": "Manage advisory work claims.",
+    "_meta": {
+      "io.provenant/schemaVersion": 2
+    },
+    "description": "Manage advisory work claims and landing leases.",
     "inputSchema": {
       "$defs": {
         "ClaimProof": {
@@ -677,14 +739,8 @@
               "$ref": "#/$defs/Id"
             },
             "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
             }
           },
           "required": [
@@ -694,9 +750,41 @@
           ],
           "type": "object"
         },
+        "GitOid": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
         "Id": {
           "pattern": "^[0-9a-f]{32}$",
           "type": "string"
+        },
+        "LandingProof": {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "$ref": "#/$defs/Id"
+            },
+            "reference": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "token": {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "generation",
+            "id",
+            "reference",
+            "token"
+          ],
+          "type": "object"
         },
         "OperationId": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
@@ -707,13 +795,13 @@
         {
           "additionalProperties": false,
           "properties": {
-            "lease_ms": {
-              "maximum": 3600000,
-              "minimum": 1000,
+            "lease_seconds": {
+              "maximum": 3600,
+              "minimum": 1,
               "type": "integer"
             },
             "op": {
-              "const": "acquire"
+              "const": "claim_acquire"
             },
             "operation_id": {
               "$ref": "#/$defs/OperationId"
@@ -780,7 +868,7 @@
             }
           },
           "required": [
-            "lease_ms",
+            "lease_seconds",
             "op",
             "scope"
           ],
@@ -805,7 +893,7 @@
               "type": "integer"
             },
             "op": {
-              "const": "list"
+              "const": "claim_list"
             }
           },
           "required": [
@@ -818,7 +906,7 @@
           "additionalProperties": false,
           "properties": {
             "op": {
-              "const": "release"
+              "const": "claim_release"
             },
             "operation_id": {
               "$ref": "#/$defs/OperationId"
@@ -836,13 +924,13 @@
         {
           "additionalProperties": false,
           "properties": {
-            "lease_ms": {
-              "maximum": 3600000,
-              "minimum": 1000,
+            "lease_seconds": {
+              "maximum": 3600,
+              "minimum": 1,
               "type": "integer"
             },
             "op": {
-              "const": "renew"
+              "const": "claim_renew"
             },
             "operation_id": {
               "$ref": "#/$defs/OperationId"
@@ -852,7 +940,7 @@
             }
           },
           "required": [
-            "lease_ms",
+            "lease_seconds",
             "op",
             "proof"
           ],
@@ -862,7 +950,7 @@
           "additionalProperties": false,
           "properties": {
             "op": {
-              "const": "verify"
+              "const": "claim_verify"
             },
             "proof": {
               "$ref": "#/$defs/ClaimProof"
@@ -873,61 +961,7 @@
             "proof"
           ],
           "type": "object"
-        }
-      ],
-      "type": "object"
-    },
-    "name": "fabric_claim"
-  },
-  {
-    "description": "Manage landing leases and observe a generation.",
-    "inputSchema": {
-      "$defs": {
-        "GitOid": {
-          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "type": "string"
         },
-        "LandingProof": {
-          "additionalProperties": false,
-          "properties": {
-            "generation": {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "id": {
-              "pattern": "^[0-9a-f]{32}$",
-              "type": "string"
-            },
-            "reference": {
-              "maxLength": 1024,
-              "type": "string"
-            },
-            "token": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "maxItems": 16,
-              "minItems": 16,
-              "type": "array"
-            }
-          },
-          "required": [
-            "generation",
-            "id",
-            "reference",
-            "token"
-          ],
-          "type": "object"
-        },
-        "OperationId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        }
-      },
-      "oneOf": [
         {
           "additionalProperties": false,
           "properties": {
@@ -937,13 +971,13 @@
             "expected": {
               "$ref": "#/$defs/GitOid"
             },
-            "lease_ms": {
-              "maximum": 3600000,
-              "minimum": 1000,
+            "lease_seconds": {
+              "maximum": 3600,
+              "minimum": 1,
               "type": "integer"
             },
             "op": {
-              "const": "acquire"
+              "const": "landing_acquire"
             },
             "operation_id": {
               "$ref": "#/$defs/OperationId"
@@ -956,7 +990,7 @@
           "required": [
             "candidate",
             "expected",
-            "lease_ms",
+            "lease_seconds",
             "op",
             "reference"
           ],
@@ -966,7 +1000,7 @@
           "additionalProperties": false,
           "properties": {
             "op": {
-              "const": "release"
+              "const": "landing_release"
             },
             "operation_id": {
               "$ref": "#/$defs/OperationId"
@@ -984,13 +1018,13 @@
         {
           "additionalProperties": false,
           "properties": {
-            "lease_ms": {
-              "maximum": 3600000,
-              "minimum": 1000,
+            "lease_seconds": {
+              "maximum": 3600,
+              "minimum": 1,
               "type": "integer"
             },
             "op": {
-              "const": "renew"
+              "const": "landing_renew"
             },
             "operation_id": {
               "$ref": "#/$defs/OperationId"
@@ -1000,7 +1034,7 @@
             }
           },
           "required": [
-            "lease_ms",
+            "lease_seconds",
             "op",
             "proof"
           ],
@@ -1010,7 +1044,7 @@
           "additionalProperties": false,
           "properties": {
             "op": {
-              "const": "verify"
+              "const": "landing_verify"
             },
             "proof": {
               "$ref": "#/$defs/LandingProof"
@@ -1031,15 +1065,15 @@
               "type": "integer"
             },
             "op": {
-              "const": "wait"
+              "const": "landing_wait"
             },
             "reference": {
               "maxLength": 1024,
               "type": "string"
             },
-            "wait_ms": {
-              "maximum": 55000,
-              "minimum": 1000,
+            "wait_seconds": {
+              "maximum": 55,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -1047,310 +1081,20 @@
             "generation",
             "op",
             "reference",
-            "wait_ms"
+            "wait_seconds"
           ],
           "type": "object"
         }
       ],
       "type": "object"
     },
-    "name": "fabric_landing"
+    "name": "fabric_lease"
   },
   {
-    "description": "Submit one batch to the run service.",
-    "inputSchema": {
-      "$defs": {
-        "Id": {
-          "pattern": "^[0-9a-f]{32}$",
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "properties": {
-        "concurrency": {
-          "anyOf": [
-            {
-              "maximum": 8,
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "host": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "knobs": {
-          "items": {
-            "maxLength": 256,
-            "type": "string"
-          },
-          "maxItems": 64,
-          "minItems": 0,
-          "type": "array"
-        },
-        "op": {
-          "const": "submission"
-        },
-        "operation_id": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "type": "string"
-        },
-        "tasks": {
-          "items": {
-            "additionalProperties": false,
-            "properties": {
-              "access": {
-                "enum": [
-                  "read_only",
-                  "worktree_write"
-                ],
-                "type": "string"
-              },
-              "account": {
-                "anyOf": [
-                  {
-                    "maxLength": 64,
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "base": {
-                "anyOf": [
-                  {
-                    "maxLength": 1024,
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "deliver": {
-                "anyOf": [
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "branch": {
-                        "maxLength": 1024,
-                        "type": "string"
-                      },
-                      "open_pr": {
-                        "type": "boolean"
-                      },
-                      "remote": {
-                        "maxLength": 64,
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "branch",
-                      "remote"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "delivery_id": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Id"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "prompt": {
-                "maxLength": 65536,
-                "type": "string"
-              },
-              "route": {
-                "additionalProperties": false,
-                "properties": {
-                  "adapter": {
-                    "anyOf": [
-                      {
-                        "maxLength": 128,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "effort": {
-                    "anyOf": [
-                      {
-                        "maxLength": 128,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "model": {
-                    "anyOf": [
-                      {
-                        "maxLength": 128,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "role": {
-                    "anyOf": [
-                      {
-                        "maxLength": 128,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "route": {
-                    "anyOf": [
-                      {
-                        "maxLength": 128,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "task_class": {
-                    "anyOf": [
-                      {
-                        "maxLength": 128,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [],
-                "type": "object"
-              },
-              "timeout_ms": {
-                "maximum": 14400000,
-                "minimum": 1000,
-                "type": "integer"
-              },
-              "worktree": {
-                "anyOf": [
-                  {
-                    "maxLength": 4096,
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "prompt",
-              "route",
-              "timeout_ms"
-            ],
-            "type": "object"
-          },
-          "maxItems": 64,
-          "minItems": 1,
-          "type": "array"
-        }
-      },
-      "required": [
-        "operation_id",
-        "tasks"
-      ],
-      "type": "object"
+    "_meta": {
+      "io.provenant/schemaVersion": 2
     },
-    "name": "fabric_submit",
-    "outputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "operation_id": {
-          "type": "string"
-        },
-        "targets": {
-          "items": {
-            "additionalProperties": false,
-            "properties": {
-              "attempt": {
-                "pattern": "^[0-9a-f]{32}$",
-                "type": "string"
-              },
-              "host": {
-                "anyOf": [
-                  {
-                    "pattern": "^[0-9a-f]{32}$",
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "attempt",
-              "host"
-            ],
-            "type": "object"
-          },
-          "maxItems": 100,
-          "minItems": 0,
-          "type": "array"
-        },
-        "worktree": {
-          "additionalProperties": false,
-          "properties": {
-            "branch": {
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "branch",
-            "path"
-          ],
-          "type": "object"
-        }
-      },
-      "required": [
-        "operation_id",
-        "targets"
-      ],
-      "type": "object"
-    }
-  },
-  {
-    "description": "List, inspect, wait for, cancel or resume runs.",
+    "description": "Submit, list, inspect, wait for, cancel or resume runs.",
     "inputSchema": {
       "$defs": {
         "AttemptTarget": {
@@ -1483,6 +1227,222 @@
         {
           "additionalProperties": false,
           "properties": {
+            "concurrency": {
+              "anyOf": [
+                {
+                  "maximum": 8,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "host": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "knobs": {
+              "items": {
+                "maxLength": 256,
+                "type": "string"
+              },
+              "maxItems": 64,
+              "minItems": 0,
+              "type": "array"
+            },
+            "op": {
+              "const": "submit"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/OperationId"
+            },
+            "tasks": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "access": {
+                    "enum": [
+                      "read_only",
+                      "worktree_write"
+                    ],
+                    "type": "string"
+                  },
+                  "account": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "base": {
+                    "anyOf": [
+                      {
+                        "maxLength": 1024,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "deliver": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "branch": {
+                            "maxLength": 1024,
+                            "type": "string"
+                          },
+                          "open_pr": {
+                            "type": "boolean"
+                          },
+                          "remote": {
+                            "maxLength": 64,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "branch",
+                          "remote"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "delivery_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "prompt": {
+                    "maxLength": 65536,
+                    "type": "string"
+                  },
+                  "route": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "effort": {
+                            "anyOf": [
+                              {
+                                "maxLength": 128,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "kind": {
+                            "const": "model"
+                          },
+                          "model": {
+                            "maxLength": 128,
+                            "type": "string"
+                          },
+                          "provider": {
+                            "maxLength": 128,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "model",
+                          "provider"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "effort": {
+                            "anyOf": [
+                              {
+                                "maxLength": 128,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "kind": {
+                            "const": "named"
+                          },
+                          "name": {
+                            "maxLength": 128,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "timeout_seconds": {
+                    "maximum": 14400,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "worktree": {
+                    "anyOf": [
+                      {
+                        "maxLength": 4096,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "prompt",
+                  "route",
+                  "timeout_seconds"
+                ],
+                "type": "object"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "op",
+            "operation_id",
+            "tasks"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "condition": {
               "enum": [
                 "any",
@@ -1501,9 +1461,9 @@
               "minItems": 1,
               "type": "array"
             },
-            "wait_ms": {
-              "maximum": 55000,
-              "minimum": 1000,
+            "wait_seconds": {
+              "maximum": 55,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -1511,7 +1471,7 @@
             "condition",
             "op",
             "targets",
-            "wait_ms"
+            "wait_seconds"
           ],
           "type": "object"
         }
@@ -1521,6 +1481,9 @@
     "name": "fabric_run"
   },
   {
+    "_meta": {
+      "io.provenant/schemaVersion": 2
+    },
     "description": "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
     "inputSchema": {
       "oneOf": [
@@ -1598,6 +1561,9 @@
     "name": "fabric_graph"
   },
   {
+    "_meta": {
+      "io.provenant/schemaVersion": 2
+    },
     "description": "Read bounded output or fetch a manifest artefact.",
     "inputSchema": {
       "$defs": {
@@ -1712,8 +1678,10 @@
             },
             "part": {
               "enum": [
-                "stdout",
-                "stderr"
+                "prompt",
+                "result",
+                "stderr",
+                "events"
               ],
               "type": "string"
             },
@@ -1734,37 +1702,5 @@
       "type": "object"
     },
     "name": "fabric_output"
-  },
-  {
-    "description": "List peer hosts and readiness observations.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "after": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{32}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "limit": {
-          "maximum": 100,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "op": {
-          "const": "list"
-        }
-      },
-      "required": [
-        "limit"
-      ],
-      "type": "object"
-    },
-    "name": "fabric_hosts"
   }
 ]

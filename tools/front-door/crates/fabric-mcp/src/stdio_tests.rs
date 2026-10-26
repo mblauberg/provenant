@@ -98,8 +98,8 @@ fn worker_retries_service_open_on_later_jobs_after_transient_failures() {
     for index in 0..WORKERS * 2 {
         server.send(&tool_call(
             &format!("open-attempt-{index}"),
-            "fabric_hosts",
-            json!({"op":"list","after":null,"limit":1}),
+            "fabric_context",
+            json!({"op":"hosts","after":null,"limit":1}),
         ));
     }
 
@@ -128,11 +128,11 @@ fn nested_tool_arguments_apply_the_mcp_wait_cap() {
     let request = tool_call(
         "over-cap",
         "fabric_events",
-        json!({"op":"read","limit":1,"wait_ms":crate::MAX_WAIT_MS + 1}),
+        json!({"op":"read","limit":1,"wait_seconds":crate::MAX_WAIT_SECONDS + 1}),
     );
     assert_eq!(
-        request["params"]["arguments"]["wait_ms"],
-        crate::MAX_WAIT_MS + 1
+        request["params"]["arguments"]["wait_seconds"],
+        crate::MAX_WAIT_SECONDS + 1
     );
     server.send(&request);
     let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
@@ -144,7 +144,7 @@ fn nested_tool_arguments_apply_the_mcp_wait_cap() {
     );
     assert_eq!(
         frames[1]["result"]["structuredContent"]["path"],
-        "arguments.wait_ms"
+        "arguments.wait_seconds"
     );
     assert!(matches!(server.finish(), Ok(())));
 }
@@ -157,7 +157,7 @@ fn typed_tool_calls_cannot_bypass_the_mcp_wait_cap() {
         EventsInput::Read {
             after: None,
             limit: 1,
-            wait_ms: Some(crate::MAX_WAIT_MS + 1),
+            wait_seconds: Some(crate::MAX_WAIT_SECONDS + 1),
         },
         None,
     );
@@ -166,7 +166,7 @@ fn typed_tool_calls_cannot_bypass_the_mcp_wait_cap() {
     let cancel = CancelToken::new();
     cancel.cancel();
     assert!(matches!(input.execute(&mut service, &cancel),
-        Err(ServiceError::Invalid(error)) if error.path == "wait_ms"));
+        Err(ServiceError::Invalid(error)) if error.path == "wait_seconds"));
 }
 
 #[test]
@@ -178,7 +178,7 @@ fn invalid_tool_arguments_are_results_with_the_field_path() {
     server.send(&notification("notifications/initialized", json!({})));
     server.send(&tool_call(
         "bad",
-        "fabric_identity",
+        "fabric_context",
         json!({"op":"inspect","extra":true}),
     ));
     let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
@@ -219,10 +219,10 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
             server.send(&notification("notifications/initialized", json!({})));
         }
         for (index, (id, name, arguments, code, detail)) in [
-            ("identity", "fabric_identity", json!({}), "not_found", "not_found"),
-            ("submit", "fabric_submit", json!({"operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{}, "timeout_ms":1000}]}), "launch_unknown", "unknown-launch-17"),
-            ("bad-identity", "fabric_identity", json!({"extra":true}), "invalid_input", "arguments.extra"),
-            ("bad-submit", "fabric_submit", json!({"operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.tasks"),
+            ("identity", "fabric_context", json!({"op":"inspect"}), "not_found", "not_found"),
+            ("submit", "fabric_run", json!({"op":"submit","operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]}), "launch_unknown", "unknown-launch-17"),
+            ("bad-identity", "fabric_context", json!({"op":"inspect","extra":true}), "invalid_input", "arguments.extra"),
+            ("bad-submit", "fabric_run", json!({"op":"submit","operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.tasks"),
         ].into_iter().enumerate() {
             let mut request = tool_call(id, name, arguments);
             if modern {
@@ -235,7 +235,7 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
             let frames = server.wait_for_frames(index + 2, TEST_WAIT).unwrap();
             let result = &frames.iter().find(|frame| frame["id"] == id).unwrap()["result"];
             assert_eq!(result["isError"], true, "{result}");
-            assert!(result.get("structuredContent").is_none(), "{result}");
+            assert_eq!(result.get("structuredContent").is_none(), name == "fabric_context", "{result}");
             let text = result["content"][0]["text"].as_str().unwrap();
             assert!(text.contains(code) && text.contains(detail), "{text}");
             assert_eq!(result.get("resultType").is_some(), modern);
@@ -272,7 +272,7 @@ fn half_closed_stdin_drains_a_call_already_in_flight() {
     );
     server.send(&tool_call(
         "in-flight",
-        "fabric_identity",
+        "fabric_context",
         json!({"op":"inspect"}),
     ));
     assert!(
@@ -310,7 +310,7 @@ fn live_request_ids_are_rejected_until_completion_then_can_be_reused() {
     server.wait_for_frames(1, TEST_WAIT).unwrap();
     server.send(&tool_call(
         "reused",
-        "fabric_identity",
+        "fabric_context",
         json!({"op":"inspect"}),
     ));
     assert!(gate.wait_for_entered(1, TEST_WAIT));
@@ -367,7 +367,7 @@ fn worker_panic_completes_its_request_and_other_workers_remain_available() {
     server.send(&notification("notifications/initialized", json!({})));
     server.send(&tool_call(
         "panic",
-        "fabric_identity",
+        "fabric_context",
         json!({"op":"inspect"}),
     ));
     let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
@@ -382,7 +382,7 @@ fn worker_panic_completes_its_request_and_other_workers_remain_available() {
     gate.release();
     server.send(&tool_call(
         "after-panic",
-        "fabric_identity",
+        "fabric_context",
         json!({"op":"inspect"}),
     ));
     let frames = server.wait_for_frames(3, TEST_WAIT).unwrap();
@@ -413,7 +413,7 @@ fn all_workers_dead_is_fatal() {
     for id in 0..WORKERS {
         calls.extend_from_slice(&encode_line(&tool_call(
             &format!("panic-{id}"),
-            "fabric_identity",
+            "fabric_context",
             json!({"op":"inspect"}),
         )));
     }
@@ -447,7 +447,7 @@ fn all_workers_dead_after_service_open_failure_is_fatal() {
     for index in 0..=WORKERS {
         server.send(&tool_call(
             &format!("panic-{index}"),
-            "fabric_identity",
+            "fabric_context",
             json!({"op":"inspect"}),
         ));
         let frames = server.wait_for_frames(index + 2, TEST_WAIT).unwrap();
@@ -479,7 +479,7 @@ fn four_workers_and_queue_capacity_return_busy_after_thirty_six_calls() {
     for id in 0..WORKERS {
         calls.extend_from_slice(&encode_line(&tool_call(
             &id.to_string(),
-            "fabric_identity",
+            "fabric_context",
             json!({"op":"inspect"}),
         )));
     }
@@ -489,7 +489,7 @@ fn four_workers_and_queue_capacity_return_busy_after_thirty_six_calls() {
     for id in WORKERS..WORKERS + QUEUE {
         calls.extend_from_slice(&encode_line(&tool_call(
             &id.to_string(),
-            "fabric_identity",
+            "fabric_context",
             json!({"op":"inspect"}),
         )));
     }
@@ -503,7 +503,7 @@ fn four_workers_and_queue_capacity_return_busy_after_thirty_six_calls() {
     );
     server.send(&tool_call(
         "overflow",
-        "fabric_identity",
+        "fabric_context",
         json!({"op":"inspect"}),
     ));
     let frames = server.wait_for_frames(3, TEST_WAIT).unwrap();
@@ -591,7 +591,7 @@ const SHORT_TIMEOUTS: Timeouts = Timeouts {
 
 fn completed(id: &Id) -> Event {
     Event::Completed(Completion {
-        tool: "fabric_identity",
+        tool: "fabric_context",
         started: Instant::now(),
         id: id.clone(),
         reply: protocol::result(id, json!({"content":[],"isError":false}), false),
@@ -612,7 +612,7 @@ fn late_guards_unblock_when_the_full_events_queue_is_disconnected() {
                     Id::Text("late".into()),
                     false,
                     send,
-                    "fabric_identity",
+                    "fabric_context",
                     Instant::now(),
                 ));
             } else {
@@ -643,7 +643,7 @@ fn shutdown_deadline_cancels_a_straggler_and_never_writes_its_late_reply() {
     server.wait_for_frames(1, TEST_WAIT).unwrap();
     server.send(&tool_call(
         "straggler",
-        "fabric_identity",
+        "fabric_context",
         json!({"op":"inspect"}),
     ));
     assert!(gate.wait_for_entered(1, TEST_WAIT));
@@ -775,9 +775,8 @@ fn reader_join_finishes_after_a_pending_read_honours_its_deadline() {
 #[test]
 fn maximum_fetch_payloads_fit_the_real_reply_frame_without_truncation() {
     use provenant_fabric_runtime::coordination::input::MAX_FETCH_BYTES;
-    // NUL needs six JSON bytes per input byte; 255 needs three digits plus
-    // a separator in the invalid-UTF-8 byte-array representation.
-    for (byte, encoding) in [(0_u8, "utf8"), (255, "bytes")] {
+    // NUL needs six JSON bytes per input byte; invalid UTF-8 uses base64.
+    for (byte, encoding) in [(0_u8, "utf8"), (255, "base64")] {
         for modern in [false, true] {
             let gate = Arc::new(Gate::default());
             gate.state.lock().unwrap().output_bytes =
@@ -815,9 +814,11 @@ fn maximum_fetch_payloads_fit_the_real_reply_frame_without_truncation() {
                     vec![byte; usize::try_from(MAX_FETCH_BYTES).unwrap()]
                 );
             } else {
-                let data = bytes["data"].as_array().unwrap();
-                assert_eq!(data.len(), usize::try_from(MAX_FETCH_BYTES).unwrap());
-                assert!(data.iter().all(|value| *value == byte));
+                let data = provenant_fabric_runtime::handoff::decode_base64(
+                    bytes["data"].as_str().unwrap(),
+                )
+                .unwrap();
+                assert_eq!(data, vec![byte; usize::try_from(MAX_FETCH_BYTES).unwrap()]);
             }
             let output = server.shared.output.lock().unwrap();
             assert!(output.frames[1].len() <= MAX_FRAME, "including newline");

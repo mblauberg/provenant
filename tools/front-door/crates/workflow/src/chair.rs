@@ -1,8 +1,8 @@
 //! Account-switch handoffs, scoped to a canonical working directory.
 use crate::session::HostSessionId;
 use provenant_core::StateRoot;
+use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_records::CanonicalV1;
-use provenant_supervisor::fs::{Directory, FsError, LockMode, Publication, PublishMode};
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, path::PathBuf};
 const LIMIT: u64 = 32 * 1024;
@@ -49,7 +49,7 @@ impl HandoffStore {
     fn directory(&self, create: bool) -> Result<Directory, Error> {
         fn private(dir: &Directory) -> Result<(), Error> {
             let meta = dir.metadata()?;
-            if meta.mode & 0o077 != 0 || meta.uid != provenant_supervisor::fs::effective_uid() {
+            if meta.mode & 0o077 != 0 || meta.uid != provenant_os::fs::effective_uid() {
                 return Err(Error::Invalid(
                     "handoff directories must be private and owned",
                 ));
@@ -96,10 +96,9 @@ impl HandoffStore {
         if bytes.len() as u64 > LIMIT {
             return Err(Error::Invalid("handoff exceeds 32 KiB"));
         }
-        match dir.atomic_write(OsStr::new(name), ".handoff-", &bytes, PublishMode::Replace)? {
-            Publication::Durable => Ok(()),
-            Publication::VisibleDurabilityUnconfirmed { sync_error } => Err(sync_error.into()),
-        }
+        dir.atomic_write(OsStr::new(name), ".handoff-", &bytes, PublishMode::Replace)?
+            .require_durable()?;
+        Ok(())
     }
     pub fn pending(&self, now: i64) -> Result<Option<Handoff>, Error> {
         let dir = match self.directory(false) {

@@ -1,6 +1,6 @@
 use crate::*;
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
-use provenant_supervisor::fs::{Directory, FsError, LockGuard, LockMode, Metadata};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, Metadata};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::{
     ffi::OsStr,
@@ -432,7 +432,7 @@ fn companions(directory: &Directory, base: &str, request: &Request<'_>) -> Resul
 #[cfg(test)]
 fn companion(
     request: &Request<'_>,
-    mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
+    mut metadata: impl FnMut() -> provenant_os::fs::Result<Metadata>,
 ) -> Result<()> {
     provenant_sqlite::check_companion(
         &mut metadata,
@@ -514,11 +514,11 @@ mod tests {
         for unsafe_metadata in [
             Metadata { links: 2, ..safe },
             Metadata {
-                kind: provenant_supervisor::fs::FileKind::Symlink,
+                kind: provenant_os::fs::FileKind::Symlink,
                 ..safe
             },
             Metadata {
-                kind: provenant_supervisor::fs::FileKind::Directory,
+                kind: provenant_os::fs::FileKind::Directory,
                 ..safe
             },
             Metadata {

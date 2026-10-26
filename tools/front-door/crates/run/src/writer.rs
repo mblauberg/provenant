@@ -10,16 +10,15 @@ use provenant_confinement::{
     worktrees,
 };
 use provenant_core::{CancelToken, GitOid, ProjectId};
-use provenant_supervisor::{
-    custody::WriterBinding,
+use provenant_os::{
     exec::SystemExecutor,
-    fs::{Directory, LocalFs, canonicalize},
+    fs::{Directory, canonicalize},
 };
+use provenant_supervisor::custody::WriterBinding;
 use std::io::Read;
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -34,9 +33,9 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) if e.is_exists() => {}
         Err(e) => return Err(e.into()),
     }
-    let git = provenant_supervisor::git::git_executable()
+    let git = provenant_os::git::git_executable()
         .ok_or(RunError::Validation("Git executable unavailable"))?;
-    UtilityRuntime::new(Arc::new(LocalFs), canonicalize(&git)?, home).map_err(error)
+    UtilityRuntime::new(canonicalize(&git)?, home).map_err(error)
 }
 fn budget() -> Result<UtilityBudget> {
     UtilityBudget::bounded(Duration::from_secs(5)).map_err(error)
@@ -140,8 +139,7 @@ pub fn prepare_writer(
         &CancelToken::new(),
     )
     .map_err(error)?;
-    if base.termination != provenant_supervisor::exec::Termination::Exit(0) || base.stdout.truncated
-    {
+    if base.termination != provenant_os::exec::Termination::Exit(0) || base.stdout.truncated {
         return Err(RunError::Validation("writer branch cannot be resolved"));
     }
     let base = GitOid::parse(
@@ -153,7 +151,7 @@ pub fn prepare_writer(
     let state_dir = Directory::open_anchor(state)?;
     // Git knows the worktree but Provenant holds no state for it: it was not
     // created by `provenant worktree create`.
-    let unregistered = |error: provenant_supervisor::fs::FsError| {
+    let unregistered = |error: provenant_os::fs::FsError| {
         if error.is_not_found() {
             RunError::WorktreeUnregistered(request.worktree.clone())
         } else {
@@ -200,7 +198,6 @@ impl LaunchConfinement {
     ) -> Result<Vec<OsString>> {
         let executor = SystemExecutor::new(1).map_err(error)?;
         let backend = system_backend(&BackendContext {
-            safe_fs: &LocalFs,
             executor: &executor,
             cancel,
             #[cfg(target_os = "macos")]
@@ -213,18 +210,17 @@ impl LaunchConfinement {
         if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
             (writer, &self.plan.permissions().mode)
         {
-            prepare_writer_directories(&LocalFs, worktree, branch, authority, &self.home)
+            prepare_writer_directories(worktree, branch, authority, &self.home)
                 .map_err(RunError::Confinement)?;
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
-            .map(|p| AnchoredDirectory::open_canonical(&LocalFs, p))
+            .map(AnchoredDirectory::open_canonical)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(RunError::Confinement)?;
         let anchors = Anchors {
             home: &self.home,
             directories: &directories,
-            safe_fs: &LocalFs,
             worktree: writer,
         };
         self.plan
@@ -357,7 +353,7 @@ impl WriterLaunch {
                 &cancel,
             )
             .map_err(error)?;
-            if output.termination != provenant_supervisor::exec::Termination::Exit(0)
+            if output.termination != provenant_os::exec::Termination::Exit(0)
                 || output.stdout.truncated
             {
                 return Err(RunError::Validation("writer comparison cannot be resolved"));
@@ -387,7 +383,7 @@ impl WriterLaunch {
                 &cancel,
             )
             .map_err(error)?;
-            if remote_head.termination != provenant_supervisor::exec::Termination::Exit(0)
+            if remote_head.termination != provenant_os::exec::Termination::Exit(0)
                 || remote_head.stdout.truncated
             {
                 return Err(RunError::Validation(
@@ -466,7 +462,7 @@ impl WriterLaunch {
             &cancel,
         )
         .map_err(error)?;
-        if ancestry.termination != provenant_supervisor::exec::Termination::Exit(0) {
+        if ancestry.termination != provenant_os::exec::Termination::Exit(0) {
             return Err(RunError::Validation(
                 "writer branch no longer descends from its recorded base",
             ));
@@ -483,6 +479,80 @@ impl WriterLaunch {
             crate::RECORD_LIMIT,
         )?;
         Ok(review)
+    }
+}
+/// How many dirty paths a reason names before it counts the rest.
+const UNCOMMITTED_LISTED: usize = 12;
+impl WriterLaunch {
+    /// A diagnostic naming the edits a writer left uncommitted, or `None` when
+    /// it committed or its tree is clean. Call it after `terminal` succeeds.
+    pub(crate) fn uncommitted(
+        &self,
+        state: &Path,
+        custody: &provenant_supervisor::custody::Recovery,
+    ) -> Result<Option<String>> {
+        let base = custody
+            .writer_base(
+                self.worktree.repo().root_dir(),
+                self.worktree.repo().private_dir(),
+                self.branch.as_str(),
+            )
+            .map_err(error)?;
+        let utility = runtime(state)?;
+        let executor = SystemExecutor::new(1).map_err(error)?;
+        let cancel = CancelToken::new();
+        let git = provenant_confinement::Git::new(
+            &executor,
+            self.worktree.repo(),
+            &utility,
+            budget()?,
+            &cancel,
+        );
+        let paths = git.uncommitted_since(base).map_err(error)?;
+        Ok(uncommitted_reason(&paths))
+    }
+}
+fn uncommitted_reason(paths: &[Vec<u8>]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let listed: Vec<_> = paths
+        .iter()
+        .take(UNCOMMITTED_LISTED)
+        .map(|path| String::from_utf8_lossy(path))
+        .collect();
+    let more = paths.len().saturating_sub(UNCOMMITTED_LISTED);
+    let mut reason = format!(
+        "writer left uncommitted edits and no new commit: {}",
+        listed.join(", ")
+    );
+    if more > 0 {
+        reason.push_str(&format!(" and {more} more"));
+    }
+    reason.truncate(reason.floor_char_boundary(1024));
+    Some(reason)
+}
+#[cfg(test)]
+mod uncommitted_tests {
+    use super::*;
+
+    #[test]
+    fn reason_lists_dirty_paths_and_counts_the_rest() {
+        assert_eq!(uncommitted_reason(&[]), None);
+        let one = uncommitted_reason(&[b"a.rs".to_vec(), b"b/c.rs".to_vec()]);
+        assert_eq!(
+            one.as_deref(),
+            Some("writer left uncommitted edits and no new commit: a.rs, b/c.rs")
+        );
+        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n}").into_bytes()).collect();
+        let reason = uncommitted_reason(&many).unwrap();
+        assert!(
+            reason.contains("f11") && !reason.contains("f12"),
+            "{reason}"
+        );
+        assert!(reason.ends_with(" and 3 more"), "{reason}");
+        let long = uncommitted_reason(&[vec![b'x'; 4000]]).unwrap();
+        assert!(long.len() <= 1024);
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]

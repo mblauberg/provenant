@@ -2,10 +2,9 @@
 //!
 //! Exact literal prefixes and incomplete token markers stay buffered across
 //! chunks. The capture filter's EOF hook releases any unmatched tail.
+use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
-
-use provenant_supervisor::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 
 const REDACTED: &[u8] = b"[REDACTED]";
 const MAX_SECRETS: usize = 128;

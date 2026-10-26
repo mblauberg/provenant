@@ -15,24 +15,6 @@ pub struct AttemptTarget {
     pub host: Option<HostId>,
 }
 
-/// A closed set of route preferences accepted for a submission.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RoutePreference {
-    #[serde(default)]
-    pub adapter: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub route: Option<String>,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub task_class: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-}
-
 /// One task in an MCP submission. Project, actor, authority and cwd come from
 /// the service's authenticated identity rather than request supplied paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,15 +29,14 @@ pub struct SubmittedTask {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    pub route: RoutePreference,
-    pub timeout_ms: u64,
+    pub route: provenant_records::run::RequestedRoute,
+    pub timeout_seconds: u64,
     #[serde(default)]
     pub delivery_id: Option<DeliveryId>,
     #[serde(default)]
     pub deliver: Option<provenant_records::run::WriterDeliveryRequest>,
     /// A writer worktree the receiving peer creates in its own clone, in place
-    /// of a `worktree` path. Omitted when absent, so read-only requests stay
-    /// readable by a peer that predates the field.
+    /// of a `worktree` path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_worktree: Option<NewWorktree>,
 }
@@ -76,15 +57,14 @@ bounded_input! {
 
 bounded_input! {
     pub enum SubmitInput as WireSubmitInput {
-        Submission {
+        Submit {
             operation_id: OperationId,
             tasks: Vec<SubmittedTask>,
             #[serde(default)]
             concurrency: Option<u16>,
             #[serde(default)]
             knobs: Vec<String>,
-            /// Explicit peer placement; read-only tasks only. Omitted when
-            /// absent, so a peer that predates the field still accepts it.
+            /// Explicit peer placement; read-only tasks only.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             host: Option<HostId>,
         },
@@ -118,7 +98,7 @@ bounded_input! {
         Wait {
             targets: Vec<AttemptTarget>,
             condition: WaitCondition,
-            wait_ms: u64,
+            wait_seconds: u64,
         },
         Cancel { target: AttemptTarget, operation_id: OperationId },
         Resume {
@@ -133,8 +113,10 @@ bounded_input! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputPart {
-    Stdout,
+    Prompt,
+    Result,
     Stderr,
+    Events,
 }
 
 bounded_input! {
@@ -155,7 +137,7 @@ bounded_input! {
 
 bounded_input! {
     pub enum HostsInput as WireHostsInput {
-        List {
+        Hosts {
             #[serde(default)]
             after: Option<HostId>,
             limit: u16,
@@ -163,7 +145,8 @@ bounded_input! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FacadeError {
     #[error("run execution owner is unavailable")]
     OwnerUnavailable,
@@ -224,40 +207,6 @@ pub enum FacadeError {
 }
 
 impl FacadeError {
-    /// Decode a stable peer error code, retaining an operation ID for an
-    /// uncertain launch result. Unknown codes fail closed as unavailable.
-    pub fn from_code(code: &str, operation_id: Option<OperationId>) -> Self {
-        match (code, operation_id) {
-            ("owner_unavailable", _) => Self::OwnerUnavailable,
-            ("invalid_input", _) => Self::InvalidInput,
-            ("not_found", _) => Self::NotFound,
-            ("conflict", _) => Self::Conflict,
-            ("not_terminal", _) => Self::NotTerminal,
-            ("operation_conflict", _) => Self::OperationConflict,
-            ("busy", _) => Self::Busy,
-            ("stale_fence", _) => Self::StaleFence,
-            ("home_unavailable", _) => Self::HomeUnavailable,
-            ("peer_version", _) => Self::PeerVersion,
-            ("launch_unknown", Some(operation_id)) => Self::LaunchUnknown { operation_id },
-            ("continuation_unsupported", _) => Self::ContinuationUnsupported,
-            ("provider_state_expired", _) => Self::ProviderStateExpired,
-            ("confinement_refused", _) => Self::ConfinementRefused,
-            ("lane_depth", _) => Self::LaneDepth,
-            ("lane_coordination_refused", _) => Self::LaneCoordinationRefused,
-            ("worktree_missing", _) => Self::WorktreeMissing,
-            ("base_unreachable", _) => Self::BaseUnreachable,
-            ("branch_exists", _) => Self::BranchExists,
-            ("output_too_large", _) => Self::OutputTooLarge,
-            ("state_corrupt", _) => Self::StateCorrupt,
-            ("upgrade_refused", _) => Self::UpgradeRefused,
-            ("publication_failed", _) => Self::PublicationFailed,
-            ("cancelled", _) => Self::Cancelled,
-            ("timeout", _) => Self::Timeout,
-            ("io", _) => Self::Io,
-            _ => Self::HomeUnavailable,
-        }
-    }
-
     pub const fn code(&self) -> &'static str {
         match self {
             Self::OwnerUnavailable => "owner_unavailable",
@@ -286,6 +235,74 @@ impl FacadeError {
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
             Self::Io => "io",
+        }
+    }
+}
+
+impl From<&crate::hosts::PeerError> for FacadeError {
+    fn from(error: &crate::hosts::PeerError) -> Self {
+        use crate::hosts::PeerError;
+        match error {
+            PeerError::Version => Self::PeerVersion,
+            PeerError::ProtocolMismatch { peer, remote } => Self::PeerProtocolMismatch {
+                peer: peer.clone(),
+                remote: *remote,
+            },
+            PeerError::Project | PeerError::SourceHost => Self::InvalidInput,
+            PeerError::Unavailable | PeerError::Failed(_) => Self::HomeUnavailable,
+            PeerError::Unknown { operation_id } => Self::LaunchUnknown {
+                operation_id: operation_id.clone(),
+            },
+            PeerError::Cancelled => Self::Cancelled,
+            PeerError::Frame => Self::StateCorrupt,
+            PeerError::Refused { error } => error.clone(),
+        }
+    }
+}
+
+impl From<&super::CoordinationError> for FacadeError {
+    fn from(error: &super::CoordinationError) -> Self {
+        use super::CoordinationError;
+        match error {
+            CoordinationError::LaneMutation => Self::LaneCoordinationRefused,
+            CoordinationError::Peer(error) => Self::from(error),
+            CoordinationError::InvalidInput(_) | CoordinationError::Input(_) => Self::InvalidInput,
+            CoordinationError::Time(_) | CoordinationError::ResponseEncoding(_) => {
+                Self::StateCorrupt
+            }
+            CoordinationError::Cancelled => Self::Cancelled,
+            CoordinationError::Timeout => Self::Timeout,
+            CoordinationError::Busy => Self::Busy,
+            CoordinationError::Entropy(_) | CoordinationError::EntropyEncoding => Self::Io,
+            CoordinationError::UpgradeRefused(_) => Self::UpgradeRefused,
+            CoordinationError::Store(error) => Self::from(error),
+        }
+    }
+}
+
+impl From<&provenant_fabric_store::Error> for FacadeError {
+    fn from(error: &provenant_fabric_store::Error) -> Self {
+        use provenant_fabric_store::Error;
+        match error {
+            Error::NotFound => Self::NotFound,
+            Error::StaleFence => Self::StaleFence,
+            Error::Conflict
+            | Error::PushUnresolved { .. }
+            | Error::PushTransition { .. }
+            | Error::Overlap { .. } => Self::Conflict,
+            Error::Busy => Self::Busy,
+            Error::Cancelled => Self::Cancelled,
+            Error::Invalid(_) | Error::PathEncoding => Self::InvalidInput,
+            Error::Decode(_)
+            | Error::Encode(_)
+            | Error::SchemaVersion(_)
+            | Error::UnversionedDatabase
+            | Error::JournalMode(_)
+            | Error::Time(_) => Self::StateCorrupt,
+            Error::LegacyImportData { .. } => Self::UpgradeRefused,
+            Error::Sqlite(_) | Error::Filesystem(_) | Error::Io { .. } | Error::UnsafePath(_) => {
+                Self::Io
+            }
         }
     }
 }
@@ -358,14 +375,14 @@ pub trait F3Facade {
 #[serde(tag = "encoding", content = "data", rename_all = "snake_case")]
 pub enum OutputBytes {
     Utf8(String),
-    Bytes(Vec<u8>),
+    Base64(String),
 }
 
 impl OutputBytes {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         match String::from_utf8(bytes) {
             Ok(text) => Self::Utf8(text),
-            Err(error) => Self::Bytes(error.into_bytes()),
+            Err(error) => Self::Base64(crate::handoff::encode_base64(&error.into_bytes())),
         }
     }
 }

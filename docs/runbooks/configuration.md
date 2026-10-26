@@ -6,11 +6,9 @@ Use `--state-dir /absolute/path` to select an isolated root. Change the
 profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
 
-Profiles are `balanced`, `economy` and `rigorous`; task-class presets include
-`mechanical` and `bulk`. Inspect effective values with
-`provenant config show --task-class mechanical` and override a wired knob for
-one run with `provenant dispatch --knob NAME=VALUE` (the terminal path; agents
-use `fabric_submit`'s `knobs`).
+Profiles are `balanced`, `economy` and `rigorous`. Override a knob for one run
+with `provenant dispatch --knob NAME=VALUE` (the terminal path; agents use
+`fabric_run` (`op: submit`)'s `knobs`).
 
 ## Precedence and stamps
 
@@ -25,34 +23,35 @@ profile = "economy"
 
 A knob in `[knobs]` wins over the profile preset, which wins over the registry
 default. There is no project JSON overlay or `PROVENANT_KNOB_*` environment
-layer. `config set|unset|show` read and write this file, and `config show
-[--task-class NAME]` reports each value and its source. Dispatch accepts
-repeated `--knob NAME=VALUE`, and `fabric_submit` accepts `knobs:
-["NAME=VALUE"]`; these validated overrides win over configuration and
-task-class presets. Each sealed task and attempt records the profile name,
-task class, effective knob values and exact dispatch overrides, and
+layer. `config set|unset|show` read and write this file through one editor
+that validates the whole result before replacing it, and `config show` reports
+each value and its source. Dispatch accepts repeated `--knob NAME=VALUE`, and
+`fabric_run` (`op: submit`) accepts `knobs: ["NAME=VALUE"]`; these validated
+overrides win over configuration. Each sealed task and attempt records the
+profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
 
-Batch concurrency resolves `lanes.max_concurrency` from the base profile, so
-task-class values do not apply. The registry default is 8, and an explicit
-`--concurrency N` or Fabric `concurrency` wins.
+Batch concurrency resolves `lanes.max_concurrency` from the profile. The
+registry default is 8, and an explicit `--concurrency N` or Fabric
+`concurrency` wins.
 
 ## Knob registry
 
 `config/harness-knobs.json` owns the workflow knob registry and presets.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
 are not a second source for the workflow knob values. The binary embeds the
-registry at build time and `config set` validates against it. Skill-read knobs
-(review, repair, council, writing and summary policy) take effect when the
-skill reads `provenant config show`.
+registry at build time and `config set` validates against it. The review
+knobs take effect when a skill reads `provenant config show`.
 
-The registry marks these knobs `wired`: `chair.auto_switch`,
+The registry holds only knobs that code or a skill reads: `chair.auto_switch`,
 `chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,
 `lanes.max_concurrency`, `lanes.max_depth`, `review.extra_reviewers`,
 `review.cross_family`, `review.rereview_scope`, `review.polish`,
-`fabric.accept_handoff` and `usage.project_attribution`. The other eight are
-advisory and do not alter Rust runtime behaviour. Use `config show`
-to see each knob's status and source. Preview install registrations with
+`fabric.accept_handoff` and `usage.project_attribution`. Effort, council size,
+repair cycles, summary size, pool spreading, prose polish, context ceilings and
+quota pace are chair judgement, described in the
+[orchestrate skill](../../skills/orchestrate/SKILL.md). Use `config show` to
+see each knob's value and source. Preview install registrations with
 `provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 

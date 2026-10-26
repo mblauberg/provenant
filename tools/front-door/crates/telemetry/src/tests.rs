@@ -1,7 +1,9 @@
 use super::*;
-use crate::{BillingKind, ConfiguredModel, ConfiguredPrices, Rates, validate_prices};
-use provenant_core::OperationId;
+use crate::{BillingKind, ConfiguredModel, ConfiguredPrices, Hosts, Rates, validate_prices};
+use provenant_core::{HostId, OperationId};
 use provenant_records::RouteFact;
+use serde_json::json;
+use std::collections::BTreeMap;
 
 fn configured(rate: Option<u64>) -> ConfiguredPrices {
     ConfiguredPrices {
@@ -441,7 +443,7 @@ fn trace_has_chrome_event_shape() {
     let mut b = fact(2, None);
     b.started_at = Some(WallTime::from_micros(1_000).unwrap());
     b.finished_at = WallTime::from_micros(3_000).unwrap();
-    let trace = crate::trace(&[a, b], None);
+    let trace = crate::trace(&[a, b], &Hosts::default(), None);
     let events = trace["traceEvents"].as_array().unwrap();
     // 1 process + 2 thread names + 2 complete + 2 instants
     assert_eq!(events.len(), 7);
@@ -455,4 +457,71 @@ fn trace_has_chrome_event_shape() {
     assert_eq!(spans[1]["args"]["provider"], "p");
     assert_eq!(spans[1]["args"]["tokens"]["uncached_input"], 5);
     assert!(spans[0]["ts"].as_i64() <= spans[1]["ts"].as_i64());
+}
+
+#[test]
+fn trace_groups_hosts_and_links_a_child_to_its_parent_across_them() {
+    let (local, peer) = (HostId::from_bytes([1; 16]), HostId::from_bytes([2; 16]));
+    let mut parent = fact(1, None);
+    parent.started_at = Some(WallTime::from_micros(1_000).unwrap());
+    parent.finished_at = WallTime::from_micros(9_000).unwrap();
+    // Recorded before hosts were stamped: it belongs to the local host.
+    let mut child = fact(2, None);
+    child.started_at = Some(WallTime::from_micros(2_000).unwrap());
+    child.finished_at = WallTime::from_micros(5_000).unwrap();
+    child.trace.host = Some(peer);
+    child.trace.parent = Some(parent.attempt_id);
+    let hosts = Hosts {
+        local: Some(local),
+        names: BTreeMap::from([(peer, "worker".to_owned())]),
+    };
+    let trace = crate::trace(&[child.clone(), parent.clone()], &hosts, None);
+    let events = trace["traceEvents"].as_array().unwrap();
+    let processes: Vec<_> = events
+        .iter()
+        .filter(|e| e["name"] == "process_name")
+        .map(|e| {
+            (
+                e["pid"].as_u64().unwrap(),
+                e["args"]["name"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        processes,
+        [
+            (1, format!("host {local}").as_str()),
+            (2, format!("host worker ({peer})").as_str()),
+        ]
+    );
+    let spans: Vec<_> = events.iter().filter(|e| e["ph"] == "X").collect();
+    assert_eq!([&spans[0]["pid"], &spans[1]["pid"]], [1, 2]);
+    assert_eq!(spans[1]["args"]["trace"]["host"], peer.to_string());
+    let flow: Vec<_> = events.iter().filter(|e| e["cat"] == "parent").collect();
+    assert_eq!(flow.len(), 2);
+    assert_eq!(
+        [
+            &flow[0]["ph"],
+            &flow[0]["pid"],
+            &flow[1]["ph"],
+            &flow[1]["pid"]
+        ],
+        [&json!("s"), &json!(1), &json!("f"), &json!(2)]
+    );
+    assert_eq!(flow[0]["id"], flow[1]["id"]);
+    assert_eq!([&flow[0]["ts"], &flow[1]["ts"]], [2_000, 2_000]);
+    // A parent outside the export draws no arrow.
+    let orphan = crate::trace(&[child], &hosts, None);
+    let events = orphan["traceEvents"].as_array().unwrap();
+    assert!(events.iter().all(|e| e["cat"] != "parent"));
+    // Without a local host, an unstamped fact sits on an unknown host.
+    let unknown = crate::trace(&[parent], &Hosts::default(), None);
+    let names: Vec<_> = unknown["traceEvents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "process_name")
+        .map(|e| e["args"]["name"].clone())
+        .collect();
+    assert_eq!(names, ["unknown host"]);
 }

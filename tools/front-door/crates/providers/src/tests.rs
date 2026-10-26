@@ -1787,12 +1787,11 @@ struct KeychainScript {
     calls: std::sync::Mutex<Vec<Call>>,
 }
 
-impl provenant_supervisor::exec::Executor for KeychainScript {
+impl provenant_os::exec::Executor for KeychainScript {
     fn execute(
         &self,
-        options: provenant_supervisor::exec::ExecOptions<'_>,
-    ) -> Result<provenant_supervisor::exec::ExecOutcome, provenant_supervisor::exec::ExecError>
-    {
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
         let text = |items: &[OsString]| {
             items
                 .iter()
@@ -1817,9 +1816,9 @@ impl provenant_supervisor::exec::Executor for KeychainScript {
             .lock()
             .unwrap()
             .push((argv, env, options.cwd.to_owned()));
-        Ok(provenant_supervisor::exec::ExecOutcome {
-            termination: provenant_supervisor::exec::Termination::Exit(0),
-            stdout: provenant_supervisor::exec::CapturedStream {
+        Ok(provenant_os::exec::ExecOutcome {
+            termination: provenant_os::exec::Termination::Exit(0),
+            stdout: provenant_os::exec::CapturedStream {
                 bytes: stdout,
                 ..Default::default()
             },
@@ -1835,7 +1834,7 @@ impl provenant_supervisor::exec::Executor for KeychainScript {
 
 #[test]
 fn agy_account_probe_logs_under_the_host_probe_root() {
-    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
     struct Probe<'a>(&'a Path);
     impl Executor for Probe<'_> {
@@ -1862,8 +1861,8 @@ fn agy_account_probe_logs_under_the_host_probe_root() {
             )
             .unwrap();
             Ok(ExecOutcome {
-                termination: provenant_supervisor::exec::Termination::Exit(0),
-                stdout: provenant_supervisor::exec::CapturedStream {
+                termination: provenant_os::exec::Termination::Exit(0),
+                stdout: provenant_os::exec::CapturedStream {
                     bytes: br#"{"status":"SUCCESS"}"#.to_vec(),
                     ..Default::default()
                 },
@@ -1894,7 +1893,7 @@ fn agy_account_probe_logs_under_the_host_probe_root() {
 
 #[test]
 fn agy_account_probe_removes_its_log_directory_when_the_command_fails() {
-    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
     struct Fail;
     impl Executor for Fail {
@@ -1919,7 +1918,7 @@ fn agy_account_probe_removes_its_log_directory_when_the_command_fails() {
 
 #[test]
 fn agy_account_probe_reports_a_missing_probe_root_as_a_probe_failure() {
-    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Count(AtomicUsize);
@@ -1951,7 +1950,7 @@ fn agy_account_probe_reports_a_missing_probe_root_as_a_probe_failure() {
 
 #[test]
 fn registration_reports_probe_directory_failures_from_the_executor() {
-    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
     struct Fail;
     impl Executor for Fail {
@@ -1986,7 +1985,7 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
 
 #[test]
 fn registration_names_probe_directory_failures() {
-    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
     use std::os::unix::fs::PermissionsExt;
 
     struct Never;
@@ -2021,7 +2020,7 @@ fn registration_names_probe_directory_failures() {
 
 #[test]
 fn registration_keeps_other_executor_failures_as_unknown_identity() {
-    use provenant_supervisor::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
     struct Fail {
         busy: bool,
@@ -2059,7 +2058,7 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
 #[test]
 fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directories() {
     use crate::host::HostProbeExecutor;
-    use provenant_supervisor::exec::{ExecOptions, Executor};
+    use provenant_os::exec::{ExecOptions, Executor};
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
     // Check while the command is running, before the private cwd is removed.
@@ -2071,8 +2070,7 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
         fn execute(
             &self,
             options: ExecOptions<'_>,
-        ) -> Result<provenant_supervisor::exec::ExecOutcome, provenant_supervisor::exec::ExecError>
-        {
+        ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
             assert_eq!(options.cwd.parent(), Some(self.host_root));
             let metadata = std::fs::metadata(options.cwd).unwrap();
             assert_eq!(metadata.permissions().mode() & 0o777, 0o700);

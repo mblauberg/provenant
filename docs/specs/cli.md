@@ -137,10 +137,10 @@ replies and concurrent duplicates, including resume.
 | Leaf | Grammar | Notes |
 | --- | --- | --- |
 | `dispatch` | One of `--prompt-file PATH`, `--prompt-stdin` or `--manifest PATH`; required `--operation-id ID`; route and access flags below; `--task-id`, `--delivery-id`, `--provider-timeout SECONDS`, `--concurrency N`, `--knob NAME=VALUE`, `--deliver-remote`, `--deliver-branch`, `--open-pr`, `--host`, `--branch`, `--base`, `--wait SECONDS` | Input is at most 1 MiB. A single prompt needs a route; a manifest conflicts with `--task-id`, `--delivery-id`, the route and access flags and `--provider-timeout`, which are per-task fields. A manifest holds 1 to 64 unique tasks as strict `{schema_version:1,tasks:[…]}` JSON; `--concurrency` is 1 to 8. Acceptance returns IDs, the exact route, state and artifact references after commit. |
-| `lanes` | `[--id TARGET]… [--host HOST] [--all] [--state STATE]… [--since DURATION_OR_RFC3339] [--limit N] [--cursor TOKEN] [--wait SECONDS [--condition any\|all]]` | At most 100 IDs, limit 1 to 100 (default 50). `--all` conflicts with `--id`, `--cursor` conflicts with `--wait`, and `--condition` needs `--wait`. `--host` lists a configured peer's own lanes by label or host ID and conflicts with `--id`, `--wait` and `--cursor`. `--state` and `--since` filter the listing (since is a duration such as `24h` or an RFC3339 time, applied to queue time) and conflict with `--wait`. With no selector it lists the current agent's lanes in the project, excluding the caller and its ancestors. |
-| `output` | `ATTEMPT [--part result\|prompt\|stderr\|events] [--offset N \| --tail N] [--max-bytes N]` or `ATTEMPT --trace` | Part defaults to result, offset to 0 and max bytes to 65536 (1 to 65536). `--tail N` reads the last N lines (1 to 500) and conflicts with `--offset`. The reply carries the next offset, EOF, encoding and completeness, so every unread byte stays reachable. Prompt reads need dispatch-equivalent project authority. `--trace` conflicts with the read options and prints the attempt's trace, then each parent's, one line per hop (a `trace` array in `--json`); the chain stops at a parent the local store lacks. Local runs only. |
+| `lanes` | `[--id TARGET]… [--host HOST] [--all] [--state STATE]… [--since SECONDS_OR_RFC3339] [--limit N] [--cursor TOKEN] [--wait SECONDS [--condition any\|all]]` | At most 100 IDs, limit 1 to 100 (default 50). `--all` conflicts with `--id`, `--cursor` conflicts with `--wait`, and `--condition` needs `--wait`. `--host` lists a configured peer's own lanes by label or host ID and conflicts with `--id`, `--wait` and `--cursor`. `--state` and `--since` filter the listing (since is an integer number of seconds such as `86400` or an RFC3339 time, applied to queue time) and conflict with `--wait`. With no selector it lists the current agent's lanes in the project, excluding the caller and its ancestors. |
+| `output` | `ATTEMPT [--part result\|prompt\|stderr\|events] [--offset N \| --tail N] [--max-bytes N]` or `ATTEMPT --trace` | Part defaults to result, offset to 0 and max bytes to 65536 (1 to 65536). `--tail N` reads the last N lines (1 to 500) and conflicts with `--offset`. The reply carries the next offset, EOF, completeness and `bytes: {encoding: utf8|base64, data: ...}`, so every unread byte stays reachable without lossy decoding. Prompt reads need dispatch-equivalent project authority. `--trace` conflicts with the read options and prints the attempt's trace, then each parent's, one line per hop (a `trace` array in `--json`); the chain stops at a parent the local store lacks. It then lists the grants applied at launch (a `grants` object in `--json`). Trace reads are local only; all four output parts work on local and peer attempts. |
 | `cancel` | `TARGET --operation-id ID [--reason TEXT] [--wait SECONDS]` | Reason is at most 256 bytes. The reply states requested, already terminal or unobservable, with the custody observation. Acknowledgement is not process exit. There is no sibling or chair cancellation. |
-| `resume` | `ATTEMPT --operation-id ID (--prompt-file PATH \| --prompt-stdin) [--wait SECONDS]` | Creates a new immutable attempt with the exact retained provider handle, route and access. It refuses `NONTERMINAL` while the target attempt has not finished, `UNSUPPORTED` when the adapter has no enabled resume recipe, the attempt has no recorded handle or a writer is active, and it refuses an attempt already continued, naming the newer one. A new route or a fresh turn is a new `dispatch`. |
+| `resume` | `ATTEMPT --operation-id ID (--prompt-file PATH \| --prompt-stdin) [--wait SECONDS]` | Creates a new immutable attempt with the exact retained provider handle, route and access. It refuses `NONTERMINAL` while the target attempt has not finished, `CONTINUATION_UNSUPPORTED` when the adapter has no enabled resume recipe, the attempt has no recorded handle or a writer is active, and it refuses an attempt already continued, naming the newer one. A new route or a fresh turn is a new `dispatch`. |
 | `reconcile` | `[--id RUN]…` | Asks run to recover queued and orphaned work idempotently for the selected runs, or the project's recoverable runs, and reports repaired, unchanged and refused items. At most 100 IDs. It takes no operation ID or wait. |
 
 Route flags, shared by `dispatch`, `route resolve` and `bench`: one of
@@ -152,6 +152,12 @@ classifier selector exists.
 
 `dispatch` alone takes `--account NAME`, pinning a registered account key or
 label as a manifest task's `account` does. It conflicts with `--manifest`.
+
+Each manifest task requires the same tagged `route` object as a Fabric
+submission: `{"kind":"model","provider":"codex","model":"gpt-6-luna"}`
+or `{"kind":"named","name":"senior"}`. Both forms accept optional `effort`
+inside `route`. Flat task-level `model`, string `route` and `effort` fields
+are rejected.
 
 Access flags: `--mode read-only|worktree-write` (default read-only),
 `--worktree PATH`, repeatable `--read-root PATH` and `--write-root PATH`,
@@ -177,11 +183,11 @@ final head and open a pull request after verifying it.
 
 | Leaf | Grammar | Notes |
 | --- | --- | --- |
-| `root` | no flags | Reports the asset root, state directory, selected project and installation identity. Human output is the newline-terminated asset path that scripts read. Read-only; an explicit `--project` verifies the checkout with the supervisor's bounded Git runner. |
+| `root` | no flags | Reports the asset root, state directory, selected project and installation identity. Human output is the newline-terminated asset path that scripts read. Read-only; an explicit `--project` verifies the checkout with the OS crate's bounded Git runner. |
 | `hosts` | no flags | Lists the local host and configured peers with peer and adapter readiness observations. Read-only. |
 | `hosts doctor` | `[SSH_ALIAS]` | Probes sign-in on one host, or every configured host, with no inference and no credential access. |
-| `config show` | `[--task-class NAME]` | The resolved config with secrets redacted and each knob's source (default, profile or override). |
-| `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. `null` clears a nullable knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |
+| `config show` | no flags | The resolved config with secrets redacted and each knob's source (default, profile or override). |
+| `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |
 | `config unset` | `NAME` | Removes a knob override. |
 | `install` | `--source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--dry-run]` | Harnesses are claude, codex, cursor, agy and opencode. Omitting `--hooks` refreshes unchanged owned hooks and relinquishes edited entries; a first install leaves them disabled. Explicit `off` removes unchanged owned hooks. `--source` is a staged release. `--dry-run` writes nothing. See [state](state.md) for the layout and recovery. |
 | `uninstall` | `--harness NAME…` | Removes only still-owned entries. |
@@ -190,7 +196,7 @@ final head and open a pull request after verifying it.
 | `quota` | `show [--adapter]`; `display [--headline auto\|5h\|weekly] [--icon most_constrained\|ACCOUNT]`; `tick [--adapter] [--trigger timer\|panel\|manual\|wake\|power] [--power ac\|battery\|low]` | `show` never refreshes. `display` with no options changes nothing. `tick` defaults to manual and ac, and the quota menu bar app calls it. |
 | `chair switch` | `[--to ACCOUNT] [--dry-run] [--session-id ID]` | Checkpoints and continues under an allowed registered Claude account. A real run needs the session ID. When the flag is absent, it reads `CLAUDE_CODE_SESSION_ID`, then `CLAUDE_SESSION_ID`. |
 | `bench` | `mine [--limit]`; `verify TASK`; `run --route ROUTE[@effort] [--split search\|acceptance\|held-out] [--limit]` | `--route` is required, `--split` defaults to acceptance (held-out is never the default) and limits are 1 to 100. |
-| `telemetry` | `stats [--usage] [--since] [--until] [--run-id] [--detail]`; `trace [--out FILE] [--since] [--run RUN]` | `trace --out` defaults to `provenant-trace.json` in the current directory. Semantics in [telemetry](telemetry.md). |
+| `telemetry` | `stats [--usage] [--since] [--until] [--run-id] [--detail]`; `trace [--out FILE] [--since] [--run RUN] [--peers]` | `trace --out` defaults to `provenant-trace.json` in the current directory. `--peers` also reads each configured peer's newest lanes. Semantics in [telemetry](telemetry.md). |
 | `worktree` | `create BRANCH [--base REV]`; `list`; `remove NAME [--discard]`; `remove --merged --integration REF (--branch NAME… \| --since OID)` | Semantics in [supervisor](supervisor.md#worktrees). |
 | `gc` | See below. | Collect lane caches; opt into worktree and output deletion. |
 | `disk` | `report` | Read-only storage inventory; see [disk](disk.md) for measurement limits and JSON fields. |
@@ -281,7 +287,7 @@ protocols, not this table. An MCP wait that reaches its deadline reports
 | Output reads | The requested byte or line window, with next offset and EOF. This is a slice the caller asked for, not clipping. |
 
 Where a result has no existing artifact or read API, the CLI publishes a
-redacted overflow result through the supervisor's safe file API before it emits
+redacted overflow result through the OS crate's safe file API before it emits
 the error. A publication failure is exit 3, and a committed mutation stays
 committed. A JSON write failure exits 3 and cannot promise a complete
 envelope; SIGPIPE on a read-only listing succeeds. A parse failure uses the

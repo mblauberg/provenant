@@ -4,8 +4,8 @@
 //! filesystem mutation, then written into a private same-filesystem staging
 //! directory and published as one directory rename.
 use provenant_core::{Digest, HostId, RelativePath, RunId};
+use provenant_os::fs::{self, Directory, FileKind, FsError, PublishMode};
 use provenant_records::{CanonicalV1, FileDigest};
-use provenant_supervisor::fs::{self, Directory, FileKind, FsError, Publication, PublishMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::{collections::BTreeMap, ffi::OsStr};
@@ -185,7 +185,7 @@ fn validate_relative_file(path: &str) -> Result<()> {
 
 /// Verify the complete bounded transfer, then publish it beneath `fetch_root`
 /// as `fetch_root/<host>/<run>`. `fetch_root` must be a private directory
-/// opened through supervisor's safe filesystem API.
+/// opened through OS crate's safe filesystem API.
 pub fn publish_fetch(
     fetch_root: &Directory,
     host: HostId,
@@ -326,17 +326,15 @@ fn write_file(parent: &Directory, components: &[&str], bytes: &[u8]) -> Result<(
         .split_first()
         .ok_or(FetchError::Invalid("empty relative file path"))?;
     if tail.is_empty() {
-        match parent.atomic_write(
-            OsStr::new(name),
-            ".provenant-fetch-file-",
-            bytes,
-            PublishMode::NoReplace,
-        )? {
-            Publication::Durable => Ok(()),
-            Publication::VisibleDurabilityUnconfirmed { .. } => {
-                Err(FetchError::Invalid("staged file durability"))
-            }
-        }
+        parent
+            .atomic_write(
+                OsStr::new(name),
+                ".provenant-fetch-file-",
+                bytes,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()
+            .map_err(|_| FetchError::Invalid("staged file durability"))
     } else {
         let child = open_or_create_directory(parent, name)?;
         write_file(&child, tail, bytes)

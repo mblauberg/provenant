@@ -6,7 +6,7 @@ use provenant_core::{
 use provenant_fabric_store::{
     Error as StoreError, LandingRequest, PushPhase, Request as StoreRequest, ThreadWait,
 };
-use provenant_supervisor::exec::{SystemExecutor, Termination};
+use provenant_os::exec::{SystemExecutor, Termination};
 use std::{
     fs, io,
     path::{Path, PathBuf},

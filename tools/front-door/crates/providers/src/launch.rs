@@ -46,7 +46,7 @@ pub struct LaunchSpec {
     pub env: Vec<(OsString, OsString)>,
     pub stdin: Stdin,
     /// Credential bytes delivered through an inherited pipe, never the environment.
-    pub secret_input: Option<provenant_supervisor::exec::SecretInput>,
+    pub secret_input: Option<provenant_os::exec::SecretInput>,
     pub cwd: PathBuf,
     pub setup: Vec<SetupStep>,
     pub profile: ProviderProfile,

@@ -168,17 +168,13 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 #[derive(Debug, Subcommand)]
 pub enum Config {
     /// Print the effective configuration and knobs with their source layer.
-    Show {
-        /// Apply this task class's preset overrides (for example `mechanical`).
-        #[arg(long)]
-        task_class: Option<String>,
-    },
+    Show,
     /// Set `profile` (balanced, economy or rigorous) or a registry knob such
-    /// as `lanes.max_concurrency`; `null` clears a nullable knob.
+    /// as `lanes.max_concurrency`.
     Set {
         /// Setting name, such as `profile`
         name: String,
-        /// New value, or `null` to clear a nullable knob
+        /// New value
         #[arg(allow_negative_numbers = true)]
         value: String,
     },
@@ -295,19 +291,28 @@ pub struct Dispatch {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    pub run: RunId,
+    pub run: Option<RunId>,
     pub task: Option<TaskId>,
     pub attempt: Option<provenant_core::AttemptId>,
 }
 impl FromStr for Target {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if !text.contains('/') {
+            return Ok(Self {
+                run: None,
+                task: None,
+                attempt: Some(text.parse().map_err(|_| "invalid attempt or run ID")?),
+            });
+        }
         let mut parts = text.split('/');
-        let run = parts
-            .next()
-            .ok_or("expected RUN[/TASK[/ATTEMPT]]")?
-            .parse()
-            .map_err(|_| "invalid run ID")?;
+        let run = Some(
+            parts
+                .next()
+                .ok_or("expected RUN[/TASK[/ATTEMPT]]")?
+                .parse()
+                .map_err(|_| "invalid run ID")?,
+        );
         let task = parts
             .next()
             .map(str::parse)
@@ -331,7 +336,7 @@ impl FromStr for Attempt {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let target: Target = text.parse()?;
         if target.attempt.is_none() {
-            return Err("expected full RUN/TASK/ATTEMPT");
+            return Err("expected ATTEMPT or RUN/TASK/ATTEMPT");
         }
         Ok(Self(target))
     }
@@ -360,6 +365,7 @@ pub enum LaneState {
     PermissionDenied,
     Quarantined,
     Lost,
+    Uncommitted,
     Cancelled,
     InputRequired,
 }
@@ -382,6 +388,7 @@ impl LaneState {
             Self::PermissionDenied => "permission_denied",
             Self::Quarantined => "quarantined",
             Self::Lost => "lost",
+            Self::Uncommitted => "uncommitted",
             Self::Cancelled => "cancelled",
             Self::InputRequired => "input_required",
         }
@@ -389,7 +396,7 @@ impl LaneState {
 }
 #[derive(Debug, Args)]
 pub struct Lanes {
-    /// Show only this RUN[/TASK[/ATTEMPT]] (repeatable)
+    /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long, conflicts_with = "all")]
     pub id: Vec<Target>,
     /// List a configured peer's own lanes, by label or host ID
@@ -413,8 +420,8 @@ pub struct Lanes {
     /// Keep lanes in any of these states.
     #[arg(long = "state", conflicts_with = "wait")]
     pub states: Vec<LaneState>,
-    /// Keep lanes queued since a duration (such as `24h`) or RFC3339 time.
-    #[arg(long, value_parser = lanes_since, conflicts_with = "wait")]
+    /// Keep lanes queued within this many seconds, or since an RFC3339 time.
+    #[arg(long, value_parser = since, conflicts_with = "wait")]
     pub since: Option<jiff::Timestamp>,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -426,7 +433,7 @@ pub enum Part {
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt as RUN/TASK/ATTEMPT
+    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
@@ -446,7 +453,7 @@ pub struct Output {
 }
 #[derive(Debug, Args)]
 pub struct Cancel {
-    /// Target as RUN[/TASK[/ATTEMPT]]
+    /// Attempt ID or RUN[/TASK[/ATTEMPT]]
     pub target: Target,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
@@ -470,7 +477,7 @@ pub struct Prompt {
 }
 #[derive(Debug, Args)]
 pub struct Resume {
-    /// Attempt as RUN/TASK/ATTEMPT
+    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
@@ -499,20 +506,23 @@ pub struct Trace {
     /// Output file (default `provenant-trace.json`)
     #[arg(long, default_value = "provenant-trace.json")]
     pub out: std::path::PathBuf,
-    /// Include attempts finished from this date, timestamp or day count such as `7d`
-    #[arg(long, value_parser = stats_timestamp)]
+    /// Include attempts finished from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Restrict the trace to one run.
     #[arg(long)]
     pub run: Option<RunId>,
+    /// Also read the attempts of runs placed on peers, one SSH status read per peer
+    #[arg(long)]
+    pub peers: bool,
 }
 #[derive(Debug, Args)]
 pub struct Stats {
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,
-    /// Count from this date, timestamp or day count such as `7d`
-    #[arg(long, value_parser = stats_timestamp)]
+    /// Count from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Count up to this date or timestamp
     #[arg(long, value_parser = timestamp)]
@@ -523,20 +533,6 @@ pub struct Stats {
     /// Include per-attempt detail
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,
-}
-fn stats_timestamp(value: &str) -> Result<jiff::Timestamp, String> {
-    if let Some(days) = value.strip_suffix('d') {
-        let seconds = days
-            .parse::<i64>()
-            .ok()
-            .filter(|days| *days > 0)
-            .and_then(|days| days.checked_mul(86_400))
-            .ok_or_else(|| "since must be a positive day count or timestamp".to_owned())?;
-        return jiff::Timestamp::now()
-            .checked_sub(jiff::SignedDuration::from_secs(seconds))
-            .map_err(|error| error.to_string());
-    }
-    timestamp(value).map_err(str::to_owned)
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
@@ -688,29 +684,70 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
         .parse()
         .map_err(|_| "expected a date or RFC3339 timestamp with an offset")
 }
-fn lanes_since(value: &str) -> Result<jiff::Timestamp, String> {
-    if let Some((amount, unit)) = value.split_at_checked(value.len().saturating_sub(1))
-        && matches!(unit, "s" | "m" | "h" | "d")
-        && amount.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        let amount = amount
+/// A positive whole number of seconds ago, a date or an RFC3339 timestamp.
+fn since(value: &str) -> Result<jiff::Timestamp, String> {
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = value
             .parse::<i64>()
             .map_err(|_| "invalid duration".to_owned())?;
-        if amount <= 0 {
+        if seconds <= 0 {
             return Err("duration must be positive".into());
         }
-        let seconds = amount
-            .checked_mul(match unit {
-                "s" => 1,
-                "m" => 60,
-                "h" => 3_600,
-                "d" => 86_400,
-                _ => return Err("duration must use s, m, h or d".into()),
-            })
-            .ok_or_else(|| "duration is too large".to_owned())?;
         return jiff::Timestamp::now()
             .checked_sub(jiff::SignedDuration::from_secs(seconds))
             .map_err(|error| error.to_string());
     }
     timestamp(value).map_err(str::to_owned)
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::{Attempt, Target, since};
+    use provenant_core::{AttemptId, RunId, TaskId};
+
+    #[test]
+    fn since_accepts_whole_seconds_only() {
+        let before = jiff::Timestamp::now();
+        let start = since("86400").unwrap();
+        let after = jiff::Timestamp::now();
+        let duration = jiff::SignedDuration::from_secs(86_400);
+        assert!(start >= before.checked_sub(duration).unwrap());
+        assert!(start <= after.checked_sub(duration).unwrap());
+        for invalid in ["0", "24h", "5s", "1m", "2d", "7d", "-1", ""] {
+            assert!(since(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn since_accepts_timestamps() {
+        // Parsed only, never compared with the clock.
+        let fixed = "2026-10-26T10:00:00Z"; // timebomb: allow parse-only fixture
+        assert_eq!(
+            since(fixed).unwrap(),
+            fixed.parse::<jiff::Timestamp>().unwrap()
+        );
+    }
+
+    #[test]
+    fn attempt_accepts_bare_and_qualified_ids() {
+        let run = RunId::from_bytes([1; 16]);
+        let task = TaskId::from_bytes([2; 16]);
+        let attempt = AttemptId::from_bytes([3; 16]);
+        let bare: Attempt = attempt.to_string().parse().unwrap();
+        assert_eq!(bare.0.run, None);
+        assert_eq!(bare.0.attempt, Some(attempt));
+        let qualified: Attempt = format!("{run}/{task}/{attempt}").parse().unwrap();
+        assert_eq!(qualified.0.run, Some(run));
+        assert_eq!(qualified.0.task, Some(task));
+        assert_eq!(qualified.0.attempt, Some(attempt));
+        assert!(format!("{run}/{task}").parse::<Attempt>().is_err());
+        for invalid in [
+            "",
+            "invalid",
+            &format!("{run}//{attempt}"),
+            &format!("{run}/{task}/{attempt}/extra"),
+        ] {
+            assert!(invalid.parse::<Target>().is_err(), "{invalid}");
+        }
+    }
 }

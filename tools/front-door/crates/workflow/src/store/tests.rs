@@ -104,24 +104,6 @@ fn saves_one_complete_receipt_and_rejects_a_stale_revision() {
     assert_eq!(store.read().unwrap(), Some(second));
 }
 
-/// Test-only fault seam: production always uses supervisor's held handles.
-pub(super) trait FilesystemFaults {
-    fn read(&self) -> Result<(), FsError> {
-        Ok(())
-    }
-    fn lock(&self) -> Result<(), FsError> {
-        Ok(())
-    }
-    fn atomic_write(&self, dir: &Directory, bytes: &[u8]) -> Result<Publication, FsError> {
-        dir.atomic_write(
-            OsStr::new("receipt.json"),
-            ".receipt.",
-            bytes,
-            PublishMode::Replace,
-        )
-    }
-}
-
 #[cfg(test)]
 #[path = "concurrency.rs"]
 mod concurrency;
@@ -262,7 +244,7 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
         store.save(&first, 1, context(), budget, &CancelToken::new(), &expired),
         Err(StoreError::Deadline)
     ));
-    // A tiny remaining budget exercises supervisor's nonblocking lock poll.
+    // A tiny remaining budget exercises the OS layer's nonblocking lock poll.
     let almost_expired = TestClock::new(time(30), MonoTime::from_micros(999_999));
     let dir = Directory::open_anchor(&path).unwrap();
     let guard = dir
@@ -344,25 +326,43 @@ fn injected_read_and_lock_errors_are_redacted_and_preserve_the_receipt() {
             source: io::Error::other("secret value"),
         }
     }
-    impl FilesystemFaults for Fault {
-        fn read(&self) -> Result<(), FsError> {
-            if self.0 { Err(failure()) } else { Ok(()) }
+    impl StoreFilesystem for Fault {
+        fn read_bounded(&self, dir: &Directory) -> Result<Vec<u8>, FsError> {
+            if self.0 { Err(failure()) } else { Ok(()) }.and_then(|()| {
+                dir.read_bounded(OsStr::new("receipt.json"), receipt::MAX_RECEIPT_BYTES)
+            })
         }
-        fn lock(&self) -> Result<(), FsError> {
-            if self.0 { Ok(()) } else { Err(failure()) }
+        fn lock(
+            &self,
+            dir: &Directory,
+            budget: WaitBudget,
+            cancel: &CancelToken,
+            clock: &dyn Clock,
+        ) -> Result<LockGuard, FsError> {
+            if self.0 {
+                dir.lock(
+                    OsStr::new("receipt.lock"),
+                    LockMode::Exclusive,
+                    budget,
+                    cancel,
+                    clock,
+                )
+            } else {
+                Err(failure())
+            }
         }
     }
     let (_temp, mut store, r) = setup();
     let first = save(&store, &r, 0, 20).unwrap();
     for read in [true, false] {
-        store.faults = Some(Box::new(Fault(read)));
+        store.set_filesystem(Fault(read));
         let error = save(&store, &first, 1, 30).unwrap_err();
         assert!(matches!(error, StoreError::Io { .. }));
         let rendered = format!("{error:?} {error}");
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains(store.root.as_path().to_str().unwrap()));
     }
-    store.faults = None;
+    store.set_filesystem(LocalStoreFilesystem);
     assert_eq!(store.read().unwrap(), Some(first));
 }
 #[test]
@@ -634,7 +634,7 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
 
 #[test]
 fn atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors() {
-    use provenant_supervisor::fs::{AtomicWriteOperations, FileHandle};
+    use provenant_os::fs::{AtomicWriteOperations, FileHandle};
     use std::{io::Write as _, path::Path};
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Fault {
@@ -704,7 +704,7 @@ fn atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors(
             }
         }
     }
-    impl FilesystemFaults for Fault {
+    impl StoreFilesystem for Fault {
         fn atomic_write(&self, dir: &Directory, bytes: &[u8]) -> Result<Publication, FsError> {
             let mut fault = *self;
             dir.atomic_write_with_faults(
@@ -730,7 +730,7 @@ fn atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors(
             v["revision"] = 2.into();
             v["updated_at"] = 30.into();
         });
-        store.faults = Some(Box::new(fault));
+        store.set_filesystem(fault);
         let error = save(&store, &first, 1, 30).unwrap_err();
         if fault == Fault::DirectorySync {
             assert!(matches!(error, StoreError::Durability(_)));
@@ -743,7 +743,7 @@ fn atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors(
         let rendered = format!("{error:?} {error}");
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains(store.root.as_path().to_str().unwrap()));
-        store.faults = None;
+        store.set_filesystem(LocalStoreFilesystem);
         let expected = if fault == Fault::DirectorySync {
             next
         } else {

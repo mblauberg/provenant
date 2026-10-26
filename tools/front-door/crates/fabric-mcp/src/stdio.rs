@@ -31,7 +31,7 @@ const TIMEOUTS: Timeouts = Timeouts {
     event: Duration::from_secs(1),
     // The design bounds synchronous peer calls and stdout backpressure to 30s.
     write: Duration::from_secs(30),
-    shutdown: Duration::from_millis(crate::MAX_WAIT_MS + 1_000),
+    shutdown: Duration::from_millis(crate::MAX_WAIT_SECONDS * 1_000 + 1_000),
     cancel_grace: Duration::from_secs(1),
 };
 

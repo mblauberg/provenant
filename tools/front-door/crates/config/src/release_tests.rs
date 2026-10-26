@@ -3,7 +3,6 @@ use super::{Release, asset_inventory_digest, package_release};
 use crate::{InstallError, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_records::{SourceDigest, VersionInfo};
-use provenant_supervisor::fs::LocalFs;
 use std::{
     collections::BTreeMap,
     fs, io,
@@ -78,7 +77,6 @@ fn package_records_executable_asset_modes_and_checks_binary_identity() {
     let release = package_release(
         &fixture.source,
         &fixture.version,
-        &LocalFs,
         &Smoke(fixture.version.clone()),
         &CancelToken::new(),
     )
@@ -96,7 +94,6 @@ fn installed_release_read_requires_exact_recorded_modes() {
     package_release(
         &fixture.source,
         &fixture.version,
-        &LocalFs,
         &Smoke(fixture.version.clone()),
         &CancelToken::new(),
     )
@@ -126,12 +123,12 @@ fn installed_release_read_requires_exact_recorded_modes() {
             & 0o777,
         0o700
     );
-    Release::read(&fixture.source, &fixture.version.target, &LocalFs).unwrap();
+    Release::read(&fixture.source, &fixture.version.target).unwrap();
 
     let executable_asset = fixture.source.join("skills/example/run");
     fs::set_permissions(&executable_asset, fs::Permissions::from_mode(0o777)).unwrap();
     assert!(matches!(
-        Release::read(&fixture.source, &fixture.version.target, &LocalFs),
+        Release::read(&fixture.source, &fixture.version.target),
         Err(crate::InstallError::Tampered(path)) if path == executable_asset
     ));
 }
@@ -147,7 +144,6 @@ fn package_refuses_asset_drift_before_publishing_completion_marker() {
     let error = package_release(
         &fixture.source,
         &fixture.version,
-        &LocalFs,
         &Smoke(fixture.version.clone()),
         &CancelToken::new(),
     )
@@ -167,7 +163,6 @@ fn package_refuses_when_binary_smoke_identity_differs_from_manifest() {
     let error = package_release(
         &fixture.source,
         &fixture.version,
-        &LocalFs,
         &Smoke(binary_version),
         &CancelToken::new(),
     )
@@ -185,7 +180,6 @@ fn completed_release_with_a_different_manifest_returns_typed_conflict() {
     package_release(
         &fixture.source,
         &fixture.version,
-        &LocalFs,
         &Smoke(fixture.version.clone()),
         &CancelToken::new(),
     )
@@ -195,7 +189,6 @@ fn completed_release_with_a_different_manifest_returns_typed_conflict() {
     let error = package_release(
         &fixture.source,
         &changed,
-        &LocalFs,
         &Smoke(changed.clone()),
         &CancelToken::new(),
     )

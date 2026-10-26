@@ -1,6 +1,6 @@
 //! Pure provider lifecycle decisions. OS observations and effects stay outside
 //! this module; callers supply monotonic time and apply returned effects.
-pub use crate::exec::Termination;
+use provenant_os::exec::Termination;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DESCENDANT_GRACE_MS: u64 = 500;

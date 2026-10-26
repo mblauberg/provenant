@@ -1,9 +1,10 @@
 # Fabric identity
 
-Call `fabric_identity` in the intended workspace. Verify `project`, `cwd`,
-`common_dir` and `inbox` before claiming work. Linked Git worktrees share a random
-host-local project ID; their working directories remain distinct. Confinement
-verifies Git discovery, and config owns the canonical project binding.
+Call `fabric_context` (`op: inspect`) in the intended workspace. Verify
+`project`, `cwd`, `common_dir` and `inbox` before claiming work. Linked Git
+worktrees share a random host-local project ID; their working directories
+remain distinct. Confinement verifies Git discovery, and config owns the
+canonical project binding.
 
 `server_version` is the version of the MCP server that answered. A reinstall
 does not restart a running server, so compare it with `provenant --version`. If

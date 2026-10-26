@@ -1,10 +1,9 @@
-use super::facade::{
-    GraphInput, HostsInput, IdentityInput, OutputInput, RoutePreference, RunInput, SubmitInput,
-};
+use super::facade::{GraphInput, HostsInput, IdentityInput, OutputInput, RunInput, SubmitInput};
 use super::{
     ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, TaskInput, TaskState, WorkScope,
 };
 use provenant_core::WaitTransport;
+use provenant_records::run::RequestedRoute;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -27,6 +26,7 @@ macro_rules! bounded_input {
     (
         $vis:vis enum $name:ident as $wire:ident {
             $(
+                $(#[$variant_attr:meta])*
                 $variant:ident {
                     $( $(#[$field_attr:meta])* $field:ident : $field_type:ty ),* $(,)?
                 }
@@ -36,13 +36,14 @@ macro_rules! bounded_input {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
         #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
         $vis enum $name {
-            $( $variant { $( $(#[$field_attr])* $field: $field_type ),* } ),*
+            $( $(#[$variant_attr])* $variant { $( $(#[$field_attr])* $field: $field_type ),* } ),*
         }
 
         #[derive(serde::Deserialize)]
         #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
         enum $wire {
             $(
+                $(#[$variant_attr])*
                 $variant {
                     $( $(#[$field_attr])* $field: $field_type ),*
                 }
@@ -80,7 +81,7 @@ pub const MAX_REFERENCE_BYTES: usize = 1_024;
 pub const MAX_ROUTE_BYTES: usize = 128;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
 /// Leaves over 250 KiB for the MCP envelope under the 1 MiB frame cap after
-/// worst-case sixfold JSON string escaping; byte-array encoding stays below 4x.
+/// worst-case sixfold JSON string escaping; base64 encoding stays below 2x.
 pub const MAX_FETCH_BYTES: u64 = 131_072;
 
 fn field(path: &str) -> InputError {
@@ -108,16 +109,16 @@ fn page(limit: u64, path: &str) -> Result<(), InputError> {
     Ok(())
 }
 
-fn lease(milliseconds: u64) -> Result<(), InputError> {
-    if !(1_000..=3_600_000).contains(&milliseconds) {
-        return Err(field("lease_ms"));
+fn lease(seconds: u64) -> Result<(), InputError> {
+    if !(1..=3_600).contains(&seconds) {
+        return Err(field("lease_seconds"));
     }
     Ok(())
 }
 
-fn wait(milliseconds: u64, transport: WaitTransport) -> Result<(), InputError> {
-    if !(1_000..=transport.maximum_seconds() * 1_000).contains(&milliseconds) {
-        return Err(field("wait_ms"));
+fn wait(seconds: u64, transport: WaitTransport) -> Result<(), InputError> {
+    if !(1..=transport.maximum_seconds()).contains(&seconds) {
+        return Err(field("wait_seconds"));
     }
     Ok(())
 }
@@ -163,18 +164,27 @@ fn landing_reference(reference: &str, path: &str) -> Result<(), InputError> {
     bounded_text(reference, path, MAX_REFERENCE_BYTES)
 }
 
-fn route(route: &RoutePreference, path: &str) -> Result<(), InputError> {
-    for (name, value) in [
-        ("adapter", route.adapter.as_deref()),
-        ("model", route.model.as_deref()),
-        ("route", route.route.as_deref()),
-        ("role", route.role.as_deref()),
-        ("task_class", route.task_class.as_deref()),
-        ("effort", route.effort.as_deref()),
-    ] {
-        optional_text(value, &format!("{path}.{name}"), MAX_ROUTE_BYTES)?;
-    }
-    Ok(())
+fn route(route: &RequestedRoute, path: &str) -> Result<(), InputError> {
+    let effort = match route {
+        RequestedRoute::Model {
+            provider,
+            model,
+            effort,
+        } => {
+            bounded_text(provider, &format!("{path}.provider"), MAX_ROUTE_BYTES)?;
+            bounded_text(model, &format!("{path}.model"), MAX_ROUTE_BYTES)?;
+            effort
+        }
+        RequestedRoute::Named { name, effort } => {
+            bounded_text(name, &format!("{path}.name"), MAX_ROUTE_BYTES)?;
+            effort
+        }
+    };
+    optional_text(
+        effort.as_deref(),
+        &format!("{path}.effort"),
+        MAX_ROUTE_BYTES,
+    )
 }
 
 fn task_text(value: &str, path: &str) -> Result<(), InputError> {
@@ -231,7 +241,7 @@ impl ValidateInput for TaskInput {
                 }
                 page(*limit, "limit")
             }
-            Self::Claim { lease_ms, .. } => lease(*lease_ms),
+            Self::Claim { lease_seconds, .. } => lease(*lease_seconds),
             Self::Finish { state, .. }
                 if !matches!(state, TaskState::Done | TaskState::Cancelled) =>
             {
@@ -248,13 +258,13 @@ impl ValidateInput for EventsInput {
             Self::Read {
                 after,
                 limit,
-                wait_ms,
+                wait_seconds,
             } => {
                 if after.is_some_and(|value| value < 0) {
                     return Err(field("after"));
                 }
                 page(*limit, "limit")?;
-                if let Some(milliseconds) = wait_ms {
+                if let Some(milliseconds) = wait_seconds {
                     wait(*milliseconds, transport)?;
                 }
                 Ok(())
@@ -272,12 +282,12 @@ impl ValidateInput for ClaimInput {
         match self {
             Self::Acquire {
                 scope: value,
-                lease_ms,
+                lease_seconds,
             } => {
                 scope(value)?;
-                lease(*lease_ms)
+                lease(*lease_seconds)
             }
-            Self::Renew { lease_ms, .. } => lease(*lease_ms),
+            Self::Renew { lease_seconds, .. } => lease(*lease_seconds),
             Self::Verify { .. } | Self::Release { .. } => Ok(()),
             Self::List { limit, .. } => page(*limit, "limit"),
         }
@@ -289,24 +299,29 @@ impl ValidateInput for LandingInput {
         match self {
             Self::Acquire {
                 reference,
-                lease_ms,
+                lease_seconds,
                 ..
             } => {
                 landing_reference(reference, "reference")?;
-                lease(*lease_ms)
+                lease(*lease_seconds)
             }
-            Self::Renew { proof, lease_ms } => {
+            Self::Renew {
+                proof,
+                lease_seconds,
+            } => {
                 landing_reference(&proof.reference, "proof.reference")?;
-                lease(*lease_ms)
+                lease(*lease_seconds)
             }
             Self::Verify { proof } | Self::Release { proof } => {
                 landing_reference(&proof.reference, "proof.reference")
             }
             Self::Wait {
-                reference, wait_ms, ..
+                reference,
+                wait_seconds,
+                ..
             } => {
                 landing_reference(reference, "reference")?;
-                wait(*wait_ms, transport)
+                wait(*wait_seconds, transport)
             }
         }
     }
@@ -338,7 +353,7 @@ impl ValidateInput for GraphInput {
 impl ValidateInput for SubmitInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::Submission {
+            Self::Submit {
                 tasks,
                 concurrency,
                 knobs,
@@ -375,8 +390,8 @@ impl ValidateInput for SubmitInput {
                         bounded_text(&deliver.branch, &format!("{path}.deliver.branch"), 1024)?;
                     }
                     route(&task.route, &format!("{path}.route"))?;
-                    if !(1_000..=14_400_000).contains(&task.timeout_ms) {
-                        return Err(field(&format!("{path}.timeout_ms")));
+                    if !(1..=14_400).contains(&task.timeout_seconds) {
+                        return Err(field(&format!("{path}.timeout_seconds")));
                     }
                 }
                 Ok(())
@@ -391,12 +406,14 @@ impl ValidateInput for RunInput {
             Self::List { limit, .. } => page(u64::from(*limit), "limit"),
             Self::Status { .. } | Self::Cancel { .. } => Ok(()),
             Self::Wait {
-                targets, wait_ms, ..
+                targets,
+                wait_seconds,
+                ..
             } => {
                 if targets.is_empty() || targets.len() > 100 {
                     return Err(field("targets"));
                 }
-                wait(*wait_ms, transport)
+                wait(*wait_seconds, transport)
             }
             Self::Resume { prompt, .. } => task_text(prompt, "prompt"),
         }
@@ -427,7 +444,7 @@ impl ValidateInput for OutputInput {
 impl ValidateInput for HostsInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::List { limit, .. } => page(u64::from(*limit), "limit"),
+            Self::Hosts { limit, .. } => page(u64::from(*limit), "limit"),
         }
     }
 }
@@ -454,18 +471,38 @@ mod tests {
     }
 
     #[test]
-    fn submission_omits_absent_host_for_older_peers() {
+    fn receipts_freeze_the_public_request() {
+        let proof = super::super::ClaimProof {
+            id: provenant_core::ClaimId::from_bytes([1; 16]),
+            generation: 2,
+            token: [0xab; 16],
+        };
+        let mutation = super::super::Mutation::Claim(ClaimInput::Renew {
+            proof,
+            lease_seconds: 3,
+        });
+        assert_eq!(
+            serde_json::to_value(mutation).unwrap(),
+            json!({"domain":"claim","input":{
+                "op":"claim_renew","lease_seconds":3,
+                "proof":{"id":"01".repeat(16),"generation":2,"token":"ab".repeat(16)}
+            }})
+        );
+    }
+
+    #[test]
+    fn submission_omits_absent_host() {
         let input = json!({
-            "op":"submission",
+            "op":"submit",
             "operation_id":"place",
-            "tasks":[{"prompt":"x","route":{},"timeout_ms":1000}]
+            "tasks":[{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
         });
         let local: SubmitInput = serde_json::from_value(input).unwrap();
         assert!(serde_json::to_value(&local).unwrap().get("host").is_none());
         let placed: SubmitInput = serde_json::from_value(json!({
-            "op":"submission",
+            "op":"submit",
             "operation_id":"place",
-            "tasks":[{"prompt":"x","route":{},"timeout_ms":1000}],
+            "tasks":[{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1}],
             "host":"07070707070707070707070707070707"
         }))
         .unwrap();
@@ -490,42 +527,48 @@ mod tests {
     fn serde_rejects_bounds_on_nested_string_fields() {
         rejects::<LandingInput>(
             json!({
-                "op":"acquire",
+                "op":"landing_acquire",
                 "reference":"r".repeat(1_025),
                 "expected":"0123456789012345678901234567890123456789",
                 "candidate":"abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-                "lease_ms":1_000
+                "lease_seconds":1
             }),
             "reference",
         );
         rejects::<ClaimInput>(
-            json!({"op":"acquire","scope":{"kind":"issue","key":"k".repeat(1_025)},"lease_ms":1_000}),
+            json!({"op":"claim_acquire","scope":{"kind":"issue","key":"k".repeat(1_025)},"lease_seconds":1}),
             "scope.key",
         );
         rejects::<ClaimInput>(
-            json!({"op":"acquire","scope":{"kind":"worktree","path":"/".to_owned() + &"p".repeat(4_096)},"lease_ms":1_000}),
+            json!({"op":"claim_acquire","scope":{"kind":"worktree","path":"/".to_owned() + &"p".repeat(4_096)},"lease_seconds":1}),
             "scope.path",
         );
         rejects::<ClaimInput>(
-            json!({"op":"acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_ms":1_000}),
+            json!({"op":"claim_acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_seconds":1}),
             "scope.paths[0]",
         );
-        let task = json!({"prompt":"do work","route":{},"timeout_ms":1_000});
+        let task = json!({"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1});
         rejects::<SubmitInput>(
-            json!({"op":"submission","operation_id":"work-1","tasks":vec![task; 65]}),
+            json!({"op":"submit","operation_id":"work-1","tasks":vec![task; 65]}),
             "tasks",
         );
-        for name in ["adapter", "model", "route", "role", "task_class", "effort"] {
-            let mut route = json!({});
+        for name in ["provider", "model", "effort"] {
+            let mut route = json!({"kind":"model","provider":"codex","model":"model"});
             route[name] = json!("m".repeat(129));
             rejects::<SubmitInput>(
                 json!({
-                    "op":"submission","operation_id":"work-1","concurrency":1,
-                    "tasks":[{"prompt":"do work","route":route,"timeout_ms":1_000}]
+                    "op":"submit","operation_id":"work-1","concurrency":1,
+                    "tasks":[{"prompt":"do work","route":route,"timeout_seconds":1}]
                 }),
                 &format!("tasks[0].route.{name}"),
             );
         }
+        rejects::<SubmitInput>(
+            json!({"op":"submit","operation_id":"work-1","tasks":[{
+                "prompt":"do work","route":{"kind":"named","name":"m".repeat(129)},"timeout_seconds":1
+            }]}),
+            "tasks[0].route.name",
+        );
         rejects::<OutputInput>(
             json!({
                 "op":"fetch","target":{"attempt":"00000000000000000000000000000001"},
@@ -536,8 +579,8 @@ mod tests {
         );
         rejects::<LandingInput>(
             json!({
-                "op":"verify","proof":{"reference":"r".repeat(1_025),"id":"00000000000000000000000000000001",
-                    "generation":0,"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}
+                "op":"landing_verify","proof":{"reference":"r".repeat(1_025),"id":"00000000000000000000000000000001",
+                    "generation":0,"token":"00000000000000000000000000000000"}
             }),
             "proof.reference",
         );
@@ -546,17 +589,17 @@ mod tests {
     #[test]
     fn serde_rejects_numeric_and_collection_bounds() {
         rejects::<TaskInput>(
-            json!({"op":"claim","id":"00000000000000000000000000000001","lease_ms":999}),
-            "lease_ms",
+            json!({"op":"claim","id":"00000000000000000000000000000001","lease_seconds":0}),
+            "lease_seconds",
         );
         rejects::<TaskInput>(json!({"op":"list","state":"active","limit":1}), "state");
         rejects::<super::super::EventsInput>(
-            json!({"op":"read","limit":1,"wait_ms":999}),
-            "wait_ms",
+            json!({"op":"read","limit":1,"wait_seconds":0}),
+            "wait_seconds",
         );
         rejects::<RunInput>(
             json!({
-                "op":"wait","condition":"any","wait_ms":1_000,
+                "op":"wait","condition":"any","wait_seconds":1,
                 "targets":vec![json!({"attempt":"00000000000000000000000000000001"}); 101]
             }),
             "targets",
@@ -569,6 +612,60 @@ mod tests {
             }),
             "max_bytes",
         );
+    }
+
+    #[test]
+    fn proof_tokens_are_hex_and_binary_output_is_base64() {
+        use crate::coordination::TaskProof;
+        use crate::coordination::facade::OutputBytes;
+        let proof = TaskProof {
+            task: provenant_core::TaskId::from_bytes([1; 16]),
+            generation: 2,
+            token: [0xab; 16],
+        };
+        let value = serde_json::to_value(&proof).unwrap();
+        assert_eq!(value["token"], "ab".repeat(16));
+        assert_eq!(
+            serde_json::from_value::<TaskProof>(value.clone()).unwrap(),
+            proof
+        );
+        for token in [json!(vec![0; 16]), json!("AB".repeat(16)), json!("ab")] {
+            let mut invalid = value.clone();
+            invalid["token"] = token;
+            assert!(serde_json::from_value::<TaskProof>(invalid).is_err());
+        }
+        let bytes = OutputBytes::from_bytes(vec![0xff, 0x00]);
+        let encoded = serde_json::to_value(&bytes).unwrap();
+        assert_eq!(encoded, json!({"encoding":"base64","data":"/wA="}));
+        assert_eq!(
+            serde_json::from_value::<OutputBytes>(encoded).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn submission_rejects_old_duration_and_route_shapes() {
+        let valid = json!({
+            "op":"submit","operation_id":"submit",
+            "tasks":[{"prompt":"work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
+        });
+        assert!(serde_json::from_value::<SubmitInput>(valid.clone()).is_ok());
+        let mut old_duration = valid.clone();
+        old_duration["tasks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeout_seconds");
+        old_duration["tasks"][0]["timeout_ms"] = json!(1000);
+        assert!(serde_json::from_value::<SubmitInput>(old_duration).is_err());
+        for route in [
+            json!({}),
+            json!({"adapter":"codex","model":"model"}),
+            json!({"route":"utility"}),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["tasks"][0]["route"] = route;
+            assert!(serde_json::from_value::<SubmitInput>(invalid).is_err());
+        }
     }
 
     struct Resolver;
@@ -624,7 +721,7 @@ mod tests {
             &service,
             crate::coordination::Mutation::Task(TaskInput::Claim {
                 id: provenant_core::TaskId::from_bytes([3; 16]),
-                lease_ms: 999,
+                lease_seconds: 0,
             }),
             None,
             budget,
@@ -633,7 +730,36 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            CoordinationError::Input(error) if error.path == "lease_ms"
+            CoordinationError::Input(error) if error.path == "lease_seconds"
         ));
+    }
+}
+
+/// Fencing tokens are opaque, lower-case hex at every JSON boundary.
+pub(crate) mod hex_token {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(token: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error> {
+        let text: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
+        serializer.serialize_str(&text)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 16], D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if text.len() != 32
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(serde::de::Error::custom(
+                "expected a 32-character lower-case hex token",
+            ));
+        }
+        let mut token = [0; 16];
+        for (index, byte) in token.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(token)
     }
 }

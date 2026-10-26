@@ -4,8 +4,8 @@ use crate::launch::{
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use provenant_records::CanonicalV1;
-use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -164,10 +164,10 @@ impl CredentialAuthority {
 }
 fn credential_source(login: &Login<'_>) -> Result<CredentialSource, ProviderError> {
     let path = login.config_dir.join(".credentials.json");
-    let directory = provenant_supervisor::fs::Directory::open_anchor(login.config_dir)
+    let directory = provenant_os::fs::Directory::open_anchor(login.config_dir)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
     match directory.metadata_at(OsStr::new(".credentials.json"), false) {
-        Ok(meta) if meta.kind == provenant_supervisor::fs::FileKind::Regular && meta.links == 1 => {
+        Ok(meta) if meta.kind == provenant_os::fs::FileKind::Regular && meta.links == 1 => {
             return Ok(CredentialSource::File { path });
         }
         Ok(_) => return Err(ProviderError::CredentialUnavailable),
@@ -242,7 +242,7 @@ pub fn refresh_if_expiring(
             authority.check(&source, now_ms())?;
         }
         if let CredentialSource::File { path } = &source {
-            let directory = provenant_supervisor::fs::Directory::open_anchor(
+            let directory = provenant_os::fs::Directory::open_anchor(
                 path.parent().ok_or(ProviderError::CredentialUnavailable)?,
             )
             .map_err(|_| ProviderError::CredentialUnavailable)?;
@@ -585,7 +585,7 @@ fn prepare(
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
-        secret_input: Some(provenant_supervisor::exec::SecretInput {
+        secret_input: Some(provenant_os::exec::SecretInput {
             descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
             bytes: token.access.as_bytes().to_vec(),
         }),

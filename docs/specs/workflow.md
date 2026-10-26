@@ -2,9 +2,12 @@
 
 Workflow is a small synchronous policy library with a minimal delivery receipt,
 a pure review coverage check, bounded Markdown session checkpoints, a data-driven
-writing matcher and a session handoff between hosts. For pull request work the
-pull request carries the evidence. Skills conduct the work with `git`, `gh`,
-Fabric and browser tools.
+writing matcher and session models. The hand-off session edge lives in
+`tools/front-door/crates/fabric-runtime/src/handoff/session` because it needs
+supervised execution and Fabric's `HandoffReceipt` and `plain_text` helpers;
+placing it in workflow would violate the safe-filesystem-only dependency
+boundary. For pull request work the pull request carries the evidence. Skills
+conduct the work with `git`, `gh`, Fabric and browser tools.
 
 The [cross-cutting decisions](README.md#cross-cutting-decisions) govern state,
 layout, commands, waits, records and hooks, and the
@@ -14,7 +17,7 @@ This document grants no merge, install or release authority.
 ## Purpose and ownership
 
 `tools/front-door/crates/workflow` is `#![forbid(unsafe_code)]`. Its internal
-dependencies are core, records and supervisor's safe filesystem API (the
+dependencies are core, records and the OS crate's concrete filesystem API (the
 [workspace table](rust-workspace.md#crate-layering) lists the allowed maximum),
 plus serde, serde_json, thiserror and regex. It holds no SQLite, process
 runner, scheduler or MCP tool.
@@ -152,7 +155,7 @@ corrupt stored receipt fails closed with no repair path, and a leftover
 temporary file is ignored by the next save.
 
 Lock acquisition polls a non-blocking `flock` against a monotonic deadline
-through supervisor's safe filesystem API. No lock is held across routing
+through the OS crate's concrete filesystem API. No lock is held across routing
 probes, provider waits or GitHub reads: gather facts first, then recheck the
 subject and expiry under the lock. Time is read after the lock is taken, and
 `updated_at` is the later of the previous value and now. Workflow starts no
@@ -310,4 +313,4 @@ push and destructive action stay gated by current user authority.
 | `crates/workflow/src` tests (`coverage`, `review`, `receipt`, `store`, `session`, `writing`) and `crates/workflow/tests/fixtures` | Duplicate actors, author and decision-maker exclusion, tier, lens and family fallback, `Unknown`, `ChairAttested` and `Observed` provenance, terminal adversarial counting, stale subject, required approval; bounds, version and revision; concurrent saves with a single winner; symlink and traversal refusal, SHA-1 and SHA-256, wrong PR head; writing exclusions, Unicode coordinates and malformed or oversized rules; hook decoding and the SessionStart cases |
 | `tools/front-door/tests/workflow.rs` | The envelope and exit snapshots with isolated roots, side-effect-free help, and the receipt, review and session flows |
 | `tools/front-door/tests/hooks.rs` | Native hook stdin and stdout behaviour |
-| Tests in `tools/front-door/src/handoff.rs` | The handoff plan, replay and refusal paths against a recording launcher, so no test opens Terminal or starts `claude` |
+| `crates/fabric-runtime/src/handoff/session/tests.rs` and tests in `tools/front-door/src/handoff.rs` | The session handoff plan, replay and refusal paths against a recording launcher, so no test opens Terminal or starts `claude` |

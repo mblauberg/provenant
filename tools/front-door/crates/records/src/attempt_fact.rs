@@ -22,6 +22,7 @@ pub enum AttemptOutcome {
     PermissionDenied,
     Quarantined,
     Lost,
+    Uncommitted,
     InputRequired,
 }
 

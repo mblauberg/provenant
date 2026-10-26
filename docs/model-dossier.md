@@ -24,8 +24,8 @@ or a gate, and no script parses this file. It exists so preferences can be
 written in a sentence, changed in a sentence, and read by whoever is about to
 dispatch a leg.
 
-- Task-class knob presets affect configuration values; the Rust routing
-  catalogue and current provider observations determine route availability.
+- The Rust routing catalogue and current provider observations determine route
+  availability.
 - The dossier only ranks options that are *already* admissible. It never widens
   authority, never reaches an unavailable route, and never blocks a dispatch.
 - If a preference here disagrees with a resolved route, the resolved route wins
@@ -33,7 +33,6 @@ dispatch a leg.
 
 ```mermaid
 flowchart LR
-  A[task-class preset] -->|knob values| R[route]
   D[model dossier] -->|ADVISORY: which mind fits| R
   G[route eligibility] -->|VETO| R
 ```
@@ -42,7 +41,7 @@ flowchart LR
 
 | Content | Owner |
 |---|---|
-| Task classes, tiers, roles, efforts, degradation policy | `orchestrate` skill, routing reference |
+| Tiers, roles, efforts, degradation policy | `orchestrate` skill, routing reference |
 | Route catalogue, resolution and receipt behaviour | `provenant route list` and `provenant route resolve` |
 | Review-pressure ladder and risk tiers | `HARNESS.md` |
 | Correlated-error caveat on cross-family review | `orchestrate` skill, routing reference |
@@ -52,10 +51,10 @@ those. This file only helps you pick among what they already allow.
 
 ### Checking the live catalogue
 
-The bundled catalogue defines models and default pools; `[routing]` config
-adds named routes and overrides; dispatch decides availability. Use `provenant
-route list` to inspect them and `provenant route resolve` to check a route or
-exact model. This dossier records advisory preferences; it does not set
+The bundled catalogue defines models and default pools; `[domains.routing]`
+config adds named routes and overrides; dispatch decides availability. Use
+`provenant route list` to inspect them and `provenant route resolve` to check a
+route or exact model. This dossier records advisory preferences; it does not set
 aliases, weights or admissibility.
 
 For numbers rather than judgement, see the
@@ -123,7 +122,7 @@ not read an absent `Watch out for` as an endorsement.
 - **Cost:** very cheap; the owner's standing preference is to use Luna for
   smaller implementation and fixes where the catalogue offers it.
 - **Reach:** `codex` adapter, `openai` family, in the `utility` pool after
-  Claude Haiku. Task-class presets do not select models.
+  Claude Haiku.
 
 ### Sonnet 5.5 (Anthropic senior)
 
@@ -172,8 +171,7 @@ Use `utility` for mechanical work: Claude Haiku has no explicit effort, Codex
 Luna uses its recorded `low` control, and the OpenCode free models come last.
 Use the named junior, senior or principal pools for increasing judgement, or
 the writing and design pools for those crafts. Check `route list` for pool
-membership and weights. Task-class presets adjust knobs; they do not map
-task classes to routes.
+membership and weights.
 
 ### Human-facing final polish
 

@@ -4,7 +4,7 @@ mod release_smoke;
 
 use provenant_core::{CancelToken, PathResolver};
 use provenant_records::{SourceDigest, VersionInfo};
-use provenant_supervisor::fs::LocalFs;
+
 use std::{
     env,
     ffi::OsStr,
@@ -26,7 +26,8 @@ fn output_directory(output: &Path) -> io::Result<PathBuf> {
             "--out must be an absolute path without ..",
         ));
     }
-    let output = PathResolver::resolve_existing_ancestor(&LocalFs, output)?;
+    let output =
+        PathResolver::resolve_existing_ancestor(&provenant_os::fs::SystemPathResolver, output)?;
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -110,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(destination.parent().ok_or("release asset has no parent")?)?;
         fs::copy(source, destination)?;
     }
-    let release = provenant_config::package_release(&output, &identity, &LocalFs, &smoke, &cancel)?;
+    let release = provenant_config::package_release(&output, &identity, &smoke, &cancel)?;
     writeln!(
         io::stdout().lock(),
         "Packaged {} files: {}\nSource digest: {}",

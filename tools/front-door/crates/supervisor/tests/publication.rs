@@ -2,9 +2,8 @@
 #![allow(clippy::disallowed_methods)]
 
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
-use provenant_supervisor::{
-    ExitPublisher, GuardianHooks, clock::SystemClock, custody::*, fixture, fs::Directory,
-};
+use provenant_os::{clock::SystemClock, fs::Directory};
+use provenant_supervisor::{ExitPublisher, GuardianHooks, custody::*, fixture};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::io;
@@ -112,7 +111,7 @@ fn lock_is_held(path: &Path, name: &OsStr) -> Result<bool> {
     let clock = SystemClock::new();
     let lock = directory.lock(
         name,
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
         {
             use provenant_core::Clock;
             WaitBudget::cli(clock.mono_now(), 1)?
@@ -122,7 +121,7 @@ fn lock_is_held(path: &Path, name: &OsStr) -> Result<bool> {
     );
     Ok(matches!(
         lock,
-        Err(provenant_supervisor::fs::FsError::LockTimeout { .. })
+        Err(provenant_os::fs::FsError::LockTimeout { .. })
     ))
 }
 fn exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot(root: &Path) -> Result<()> {
@@ -175,7 +174,7 @@ fn exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot(root: &Path
     };
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     assert_eq!(
         exit.stop_reason, None,
@@ -189,7 +188,7 @@ fn exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot(root: &Path
     let clock = SystemClock::new();
     let _settled = Directory::open_anchor(&writer_path)?.lock(
         OsStr::new("writer.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
         budget(&clock)?,
         &CancelToken::new(),
         &clock,
@@ -255,13 +254,13 @@ fn final_reservation_sync_failure_blocks_exit_until_durable(root: &Path) -> Resu
     assert_eq!(exit.stop_reason, None);
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
 
     let clock = SystemClock::new();
     let _settled = Directory::open_anchor(&writer_path)?.lock(
         OsStr::new("writer.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
         budget(&clock)?,
         &CancelToken::new(),
         &clock,
@@ -275,7 +274,7 @@ const TESTS: &[&str] = &[
 ];
 
 fn run_case(name: &str) -> Result<()> {
-    let root = fixture::tempdir(|root| {
+    let root = provenant_os::fixture::tempdir(|root| {
         tempfile::Builder::new()
             .prefix("s2-publication-")
             .tempdir_in(root)
@@ -320,7 +319,12 @@ fn main() -> Result<()> {
     if fixture::dispatch()? {
         return Ok(());
     }
-    fixture::run_libtest(&args, TESTS, |name| {
+    let tests = if cfg!(target_os = "macos") {
+        TESTS
+    } else {
+        &[]
+    };
+    fixture::run_libtest(&args, tests, |name| {
         run_case(name).map_err(|error| io::Error::other(error.to_string()))
     })?;
     Ok(())

@@ -7,8 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-core = { workspace = true }
 jiff = { workspace = true }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -16,7 +18,6 @@ provenant-config = { workspace = true }
 provenant-records = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-quota = { workspace = true }
-provenant-supervisor = { workspace = true }
 
 [features]
 # Enables the recorder example for collecting redacted replay fixtures.

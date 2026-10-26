@@ -14,16 +14,16 @@ use crate::utility::{
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
 use provenant_core::{CancelToken, GitOid, ProjectId, RelativePath, WaitBudget, hex};
+use provenant_os::exec::{ExecOutcome, Executor, Termination};
+use provenant_os::fs::{
+    Directory, FsError, LockGuard, LockMode, Metadata, PublishMode, canonicalize,
+};
+use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
     ProcessFact, ProcessObservation, ProcessObserver, SystemProcessObserver, current_process,
 };
 use provenant_supervisor::custody::WriterBinding;
-use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
-use provenant_supervisor::fs::{
-    Directory, FsError, LockGuard, LockMode, Metadata, PublishMode, SafeDir, canonicalize,
-};
-use provenant_supervisor::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
@@ -98,7 +98,7 @@ pub struct WorktreeContext<'a> {
     pub home: &'a Path,
     pub repo: &'a VerifiedRepo,
     pub binding: &'a ProjectBinding,
-    pub project_state: &'a dyn SafeDir,
+    pub project_state: &'a Directory,
     pub executor: &'a dyn Executor,
     pub utility: &'a UtilityRuntime,
     pub workers: &'a dyn WorkerObserver,
@@ -676,7 +676,7 @@ fn identity_for(
     }
 }
 
-fn read_bounded(directory: &dyn SafeDir, name: &OsStr, limit: u64) -> Result<Vec<u8>, FsError> {
+fn read_bounded(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u8>, FsError> {
     crate::stable_read::read_regular(directory, name, limit)
         .map(|(bytes, _)| bytes)
         .map_err(|error| match error {
@@ -693,17 +693,15 @@ fn read_bounded(directory: &dyn SafeDir, name: &OsStr, limit: u64) -> Result<Vec
 }
 
 fn write_identity(
-    directory: &dyn SafeDir,
+    directory: &Directory,
     identity: &WorktreeIdentity,
     mode: PublishMode,
 ) -> Result<(), WorktreeError> {
     let bytes = serde_json::to_vec(identity).map_err(|_| WorktreeError::InvalidOutput)?;
-    match directory.atomic_write(OsStr::new(IDENTITY), ".identity-", &bytes, 0o600, mode)? {
-        provenant_supervisor::fs::Publication::Durable => Ok(()),
-        provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { .. } => {
-            Err(WorktreeError::RegistrationUnconfirmed)
-        }
-    }
+    directory
+        .atomic_write(OsStr::new(IDENTITY), ".identity-", &bytes, mode)?
+        .require_durable()
+        .map_err(|_| WorktreeError::RegistrationUnconfirmed)
 }
 
 fn writer_state(
@@ -717,7 +715,7 @@ fn writer_state(
         Ok(directory) => directory,
         Err(_) => return WorkerState::Unknown,
     };
-    let bytes = match read_bounded(directory.as_ref(), OsStr::new(IDENTITY), MAX_STATE_RECORD) {
+    let bytes = match read_bounded(&directory, OsStr::new(IDENTITY), MAX_STATE_RECORD) {
         Ok(bytes) => bytes,
         Err(_) => return WorkerState::Unknown,
     };
@@ -827,7 +825,7 @@ fn worktree_dirty_at(
 
 struct LockedWorktree {
     verified: VerifiedWorktree,
-    state: Box<dyn SafeDir>,
+    state: Directory,
     identity: WorktreeIdentity,
     writer: Option<LockGuard>,
 }
@@ -836,7 +834,7 @@ fn read_worktree_identity(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
     require_active: bool,
-) -> Result<(VerifiedWorktree, Box<dyn SafeDir>, WorktreeIdentity), WorktreeError> {
+) -> Result<(VerifiedWorktree, Directory, WorktreeIdentity), WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::UnknownWriter);
     }
@@ -848,7 +846,7 @@ fn read_worktree_identity(
         .project_state
         .open_verified_directory(&name)
         .map_err(|_| WorktreeError::UnknownWriter)?;
-    let bytes = read_bounded(state.as_ref(), OsStr::new(IDENTITY), MAX_STATE_RECORD)
+    let bytes = read_bounded(&state, OsStr::new(IDENTITY), MAX_STATE_RECORD)
         .map_err(|_| WorktreeError::UnknownWriter)?;
     let identity: WorktreeIdentity =
         serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
@@ -916,7 +914,7 @@ pub fn writer_custody(
     Ok((state, binding))
 }
 
-fn ensure_unreserved(state: &dyn SafeDir) -> Result<(), WorktreeError> {
+fn ensure_unreserved(state: &Directory) -> Result<(), WorktreeError> {
     match state.metadata_at(OsStr::new(RESERVATION), false) {
         Ok(_) => Err(WorktreeError::UnknownWriter),
         Err(error) if error.is_not_found() => Ok(()),
@@ -930,7 +928,7 @@ fn lock_worktree_for_mutation(
     cancel: &CancelToken,
 ) -> Result<LockedWorktree, WorktreeError> {
     let (verified, state, identity) = read_worktree_identity(context, entry, true)?;
-    ensure_unreserved(state.as_ref())?;
+    ensure_unreserved(&state)?;
     let writer = match state.lock(
         OsStr::new(WRITER_LOCK),
         LockMode::Exclusive,
@@ -943,7 +941,7 @@ fn lock_worktree_for_mutation(
         Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
         Err(_) => return Err(WorktreeError::UnknownWriter),
     };
-    ensure_unreserved(state.as_ref())?;
+    ensure_unreserved(&state)?;
     let canonical = canonicalize(verified.path())?;
     let observations = context
         .workers
@@ -1071,13 +1069,13 @@ pub(crate) fn disk_writer_state(
 /// reservations are unobservable; a busy existing lock identifies a live writer.
 pub fn cache_writer_guard(
     binding: &ProjectBinding,
-    project_state: &dyn SafeDir,
+    project_state: &Directory,
     path: &Path,
     branch: Option<&str>,
 ) -> Result<LockGuard, WorkerState> {
     let observe = || -> Result<LockGuard, WorktreeError> {
         let directory = project_state.open_verified_directory(&state_dir_name(path))?;
-        let bytes = read_bounded(directory.as_ref(), OsStr::new(IDENTITY), MAX_STATE_RECORD)?;
+        let bytes = read_bounded(&directory, OsStr::new(IDENTITY), MAX_STATE_RECORD)?;
         let identity: WorktreeIdentity =
             serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
         let root = Directory::open_anchor(path)?.metadata()?;
@@ -1168,7 +1166,7 @@ pub fn create(
         Err(error) => return Err(error.into()),
     };
     let root_identity = worktree_root.metadata()?;
-    if root_identity.uid != provenant_supervisor::fs::effective_uid()
+    if root_identity.uid != provenant_os::fs::effective_uid()
         || root_identity.mode & 0o022 != 0
         || root_identity.device != context.repo.root_identity().device
     {
@@ -1195,8 +1193,8 @@ pub fn create(
     let prior_state = match context.project_state.metadata_at(&state_name, false) {
         Ok(_) => {
             let state = context.project_state.open_verified_directory(&state_name)?;
-            ensure_unreserved(state.as_ref())?;
-            let bytes = read_bounded(state.as_ref(), OsStr::new(IDENTITY), MAX_STATE_RECORD)
+            ensure_unreserved(&state)?;
+            let bytes = read_bounded(&state, OsStr::new(IDENTITY), MAX_STATE_RECORD)
                 .map_err(|_| WorktreeError::UnknownWriter)?;
             let prior: WorktreeIdentity =
                 serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
@@ -1220,7 +1218,7 @@ pub fn create(
                 Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
                 Err(_) => return Err(WorktreeError::UnknownWriter),
             };
-            ensure_unreserved(state.as_ref())?;
+            ensure_unreserved(&state)?;
             Some((state, writer))
         }
         Err(error) if error.is_not_found() => None,
@@ -1296,12 +1294,12 @@ pub fn create(
                 cancel,
                 context.clock,
             )?;
-            ensure_unreserved(state.as_ref())?;
+            ensure_unreserved(&state)?;
             (state, writer)
         }
     };
     let identity = identity_for(context, &target, &branch, verified.identity());
-    write_identity(state.as_ref(), &identity, PublishMode::Replace)?;
+    write_identity(&state, &identity, PublishMode::Replace)?;
     let worker = context.workers.observe_roots(std::slice::from_ref(&target));
     let writer = worker.get(&target).copied().unwrap_or(WorkerState::Unknown);
     Ok(WorktreeInfo {
@@ -1511,7 +1509,7 @@ fn checked_out_elsewhere(
 fn tombstone_identity(locked: &LockedWorktree) -> Result<(), WorktreeError> {
     let mut identity = locked.identity.clone();
     identity.active = false;
-    write_identity(locked.state.as_ref(), &identity, PublishMode::Replace)
+    write_identity(&locked.state, &identity, PublishMode::Replace)
 }
 
 fn remove_tree(
@@ -1999,7 +1997,7 @@ pub fn remove(
     drop(repository);
     for removed in detached {
         if let Some(cache) = removed.lane_cache.as_deref()
-            && let Err(error) = crate::permissions::prune_worktree_cargo_cache(context.home, cache)
+            && let Err(error) = crate::cache::prune_worktree_cargo_cache(context.home, cache)
         {
             warn_cache_removal(&error);
         }
@@ -2089,8 +2087,8 @@ mod lifecycle_tests {
     };
     use crate::utility::{GitMutation, execute_git_mutation};
     use provenant_core::Clock;
-    use provenant_supervisor::clock::SystemClock;
-    use provenant_supervisor::fs::{LocalFs, SafeDir, SafeFs};
+    use provenant_os::clock::SystemClock;
+    use provenant_os::fs::Directory;
     use std::error::Error;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -2122,7 +2120,7 @@ mod lifecycle_tests {
     struct TestContext<'a> {
         fixture: &'a Fixture,
         binding: ProjectBinding,
-        project_state: Box<dyn SafeDir>,
+        project_state: Directory,
         workers: FreeWorkers,
         clock: SystemClock,
         lock_budget: WaitBudget,
@@ -2132,17 +2130,15 @@ mod lifecycle_tests {
 
     impl<'a> TestContext<'a> {
         fn new(fixture: &'a Fixture) -> Result<Self, Box<dyn Error>> {
-            let fs = LocalFs;
             let binding_state = fixture._temp.path().join("bindings");
             fs::create_dir(&binding_state)?;
             let mut inputs =
                 provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
             inputs.state_dir = Some(binding_state);
-            let roots = inputs.resolve(&fs)?;
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
             let binding = provenant_config::bind_project(
                 &roots,
                 provenant_config::ProjectLocation::new(fixture.repo.common_git_dir())?,
-                &fs,
             )?;
             let state_root = fixture._temp.path().join("worktrees");
             fs::create_dir(&state_root)?;
@@ -2150,7 +2146,7 @@ mod lifecycle_tests {
             let state_path = state_root.join(binding.project_id().to_string());
             fs::create_dir(&state_path)?;
             fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
-            let project_state = fs.open_anchor(&state_path)?;
+            let project_state = Directory::open_anchor(&state_path)?;
             let clock = SystemClock;
             let lock_budget = WaitBudget::cli(clock.mono_now(), 5)?;
             Ok(Self {
@@ -2170,7 +2166,7 @@ mod lifecycle_tests {
                 home: &self.fixture.home,
                 repo: &self.fixture.repo,
                 binding: &self.binding,
-                project_state: self.project_state.as_ref(),
+                project_state: &self.project_state,
                 executor: &self.fixture.executor,
                 utility: &self.fixture.runtime,
                 workers: &self.workers,
@@ -2207,13 +2203,13 @@ mod lifecycle_tests {
 
     /// Runs `git worktree add` to completion, then reports it timed out: the
     /// tree and branch exist, as when a slow checkout is killed part-way.
-    struct TimesOutWorktreeAdd<'a>(&'a provenant_supervisor::exec::SystemExecutor);
+    struct TimesOutWorktreeAdd<'a>(&'a provenant_os::exec::SystemExecutor);
 
     impl Executor for TimesOutWorktreeAdd<'_> {
         fn execute(
             &self,
-            options: provenant_supervisor::exec::ExecOptions<'_>,
-        ) -> Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
             let adds = options.argv.iter().any(|arg| arg == "add");
             let mut outcome = self.0.execute(options)?;
             if adds {
@@ -2475,7 +2471,7 @@ mod lifecycle_tests {
     /// Fail the first worktree-list read after a successful removal, precisely
     /// where branch settlement rechecks other checkouts. Later reads succeed.
     struct FailsFirstGcSettlement<'a> {
-        executor: &'a provenant_supervisor::exec::SystemExecutor,
+        executor: &'a provenant_os::exec::SystemExecutor,
         removed: std::sync::atomic::AtomicBool,
         failed: std::sync::atomic::AtomicBool,
     }
@@ -2483,8 +2479,8 @@ mod lifecycle_tests {
     impl Executor for FailsFirstGcSettlement<'_> {
         fn execute(
             &self,
-            options: provenant_supervisor::exec::ExecOptions<'_>,
-        ) -> Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
             use std::sync::atomic::Ordering;
             let worktree = options.argv.iter().any(|arg| arg == "worktree");
             let remove = worktree && options.argv.iter().any(|arg| arg == "remove");
@@ -2955,7 +2951,6 @@ mod lifecycle_tests {
             OsStr::new(RESERVATION),
             ".reservation-",
             b"malformed reservations remain authoritative",
-            0o600,
             PublishMode::Replace,
         )?;
         assert!(matches!(

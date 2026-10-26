@@ -4,7 +4,6 @@ use crate::{
 };
 use provenant_core::Roots;
 use provenant_records::Limits;
-use provenant_supervisor::fs::SafeFs;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, ffi::OsStr, io::Read, ops::Range, path::Path};
 use toml_edit::{Document, DocumentMut, Item, Table, Value};
@@ -68,32 +67,29 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
 
 /// No-follow, read-only boundary. Links, directories and I/O failures are not
 /// absence. Neither a missing root nor a missing file creates any state.
-pub fn read(roots: &Roots, fs: &impl SafeFs) -> Result<ResolvedConfig, ConfigError> {
-    read_with_domains(roots, fs, &NO_DOMAINS)
+pub fn read(roots: &Roots) -> Result<ResolvedConfig, ConfigError> {
+    read_with_domains(roots, &NO_DOMAINS)
 }
 pub fn read_with_domains<T: DeserializeOwned + Serialize>(
     roots: &Roots,
-    fs: &impl SafeFs,
     sections: &DomainSections<T>,
 ) -> Result<ResolvedConfig<T>, ConfigError> {
-    load_with_domains(roots, open(roots, fs)?, sections)
+    load_with_domains(roots, open(roots)?, sections)
 }
 pub fn config_show<T: DeserializeOwned + Serialize>(
     roots: &Roots,
-    fs: &impl SafeFs,
     sections: &DomainSections<T>,
 ) -> Result<ResolvedConfig<T>, ConfigError> {
-    read_with_domains(roots, fs, sections)
+    read_with_domains(roots, sections)
 }
 
 /// Inspect every finding within the existing config bounds. The digest binds
 /// exact file bytes and presence, including edits that preserve every finding.
 pub fn inspect_config<T: DeserializeOwned + Serialize>(
     roots: &Roots,
-    fs: &impl SafeFs,
     sections: &DomainSections<T>,
 ) -> Result<ConfigInspection, ConfigError> {
-    let text = open(roots, fs)?
+    let text = open(roots)?
         .map(|r| bounded_text(r, &roots.state.as_path().join("config.toml")))
         .transpose()?;
     let mut evidence = crate::inspection::InspectionEvidence::default();
@@ -153,12 +149,9 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
         input_digest,
     })
 }
-pub(crate) fn open(
-    roots: &Roots,
-    fs: &impl SafeFs,
-) -> Result<Option<Box<dyn provenant_supervisor::fs::SafeFile>>, ConfigError> {
+pub(crate) fn open(roots: &Roots) -> Result<Option<provenant_os::fs::FileHandle>, ConfigError> {
     let path = roots.state.as_path().join("config.toml");
-    let dir = match fs.open_anchor(roots.state.as_path()) {
+    let dir = match provenant_os::fs::Directory::open_anchor(roots.state.as_path()) {
         Ok(dir) => dir,
         Err(e) if e.is_not_found() => return Ok(None),
         Err(source) => return Err(ConfigError::Read { path, source }),
@@ -193,7 +186,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .map(|text| parse(text, &user_origin, ""))
         .transpose()?
         .unwrap_or_default();
-    let mut user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
+    let user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
     let install_item = user.remove("install");
     let install = if let Some(item) = &install_item {
         let mut table = Table::new();
@@ -267,7 +260,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
     };
 
     let knobs_item = user.remove("knobs");
-    apply_root_aliases(&mut user, sections, &mut user_sites, &user_origin)?;
     let version = user.get("schema_version");
     if text.is_some() {
         let location = site(&user_sites, "schema_version", &user_origin, false);
@@ -451,76 +443,6 @@ fn qualify(name: &str, field: &str) -> String {
         format!("domains.{name}")
     } else {
         format!("domains.{name}.{field}")
-    }
-}
-
-fn apply_root_aliases<T>(
-    user: &mut Table,
-    sections: &DomainSections<T>,
-    sites: &mut BTreeMap<String, Site>,
-    origin: &Origin,
-) -> Result<(), ConfigError> {
-    for section in sections.entries.iter().filter(|section| section.root_alias) {
-        let Some(alias) = user.remove(section.name) else {
-            continue;
-        };
-        let alias_path = section.name;
-        let alias_table = alias.into_table().map_err(|_| ConfigError::Schema {
-            location: site(sites, alias_path, origin, false),
-            rule: "type",
-        })?;
-        let mut domains = match user.remove("domains") {
-            Some(item) => item.into_table().map_err(|_| ConfigError::Schema {
-                location: site(sites, "domains", origin, false),
-                rule: "type",
-            })?,
-            None => Table::new(),
-        };
-        let mut domain = match domains.remove(section.name) {
-            Some(item) => item.into_table().map_err(|_| ConfigError::Schema {
-                location: site(sites, &format!("domains.{}", section.name), origin, false),
-                rule: "type",
-            })?,
-            None => Table::new(),
-        };
-        merge_tables(&mut domain, alias_table);
-        domains.insert(section.name, Item::Table(domain));
-        user.insert("domains", Item::Table(domains));
-
-        let prefix = format!("{}.", section.name);
-        let aliases: Vec<_> = sites
-            .iter()
-            .filter_map(|(key, value)| {
-                if key == section.name {
-                    Some((format!("domains.{}", section.name), value.clone()))
-                } else {
-                    key.strip_prefix(&prefix).map(|suffix| {
-                        (
-                            format!("domains.{}.{}", section.name, suffix),
-                            value.clone(),
-                        )
-                    })
-                }
-            })
-            .collect();
-        for (key, value) in aliases {
-            sites.insert(key, value);
-        }
-    }
-    Ok(())
-}
-
-fn merge_tables(target: &mut Table, overlay: Table) {
-    for (key, item) in overlay {
-        let nested = target
-            .get_mut(&key)
-            .and_then(Item::as_table_mut)
-            .zip(item.as_table().cloned());
-        if let Some((target, source)) = nested {
-            merge_tables(target, source);
-        } else {
-            target.insert(&key, item);
-        }
     }
 }
 
@@ -884,7 +806,7 @@ pub(crate) fn bounded_text(reader: impl Read, path: &Path) -> Result<String, Con
         .read_to_end(&mut bytes)
         .map_err(|source| ConfigError::Read {
             path: path.into(),
-            source: provenant_supervisor::fs::FsError::Io {
+            source: provenant_os::fs::FsError::Io {
                 operation: "read",
                 path: path.into(),
                 source,

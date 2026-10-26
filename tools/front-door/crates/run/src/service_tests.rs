@@ -1,0 +1,139 @@
+use super::tests::{call, clock, context};
+use super::*;
+use provenant_core::{CancelToken, OperationId, TaskId};
+
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+fn submission(prompt: &str) -> DispatchRequest {
+    DispatchRequest {
+        operation_id: OperationId::parse("service-dispatch").unwrap(),
+        tasks: vec![DispatchTask {
+            task_id: TaskId::from_bytes([3; 16]),
+            prompt: prompt.into(),
+            base: None,
+            route: RequestedRoute::Named {
+                name: "senior".into(),
+                effort: None,
+            },
+            account: None,
+            fallback: vec![],
+            profile: HarnessProfile::default(),
+            timeout_seconds: 60,
+            delivery_id: None,
+            deliver: None,
+            worktree: None,
+            access: LaneAccess::default(),
+        }],
+        concurrency: 1,
+        lane_depth: 1,
+        parent_attempt: None,
+    }
+}
+
+#[test]
+fn dispatch_replay_output_and_cancel_share_the_service() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let service = Service::new(&store);
+    let run = service.dispatch(submission("review this code"), temp.path(), &call)?;
+    let replay = service.dispatch(submission("review this code"), temp.path(), &call)?;
+    assert_eq!(run.run_id, replay.run_id);
+    let page = service.lanes(
+        &LaneQuery {
+            targets: vec![],
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    assert_eq!(page.lanes.len(), 1);
+    let id = page.lanes[0].attempt_id;
+    assert_eq!(
+        service
+            .output(id, ArtifactPart::Prompt, ByteRange::default(), &call)?
+            .bytes,
+        b"review this code"
+    );
+    let operation = OperationId::parse("service-cancel")?;
+    service.bind_cancel(&operation, &id.to_string(), &call)?;
+    service.cancel(id, "stop", &call)?;
+    assert!(matches!(
+        service.bind_cancel(&operation, "another target", &call),
+        Err(RunError::OperationConflict)
+    ));
+    assert!(matches!(
+        service.status(id, &call)?.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Cancelled,
+            ..
+        }
+    ));
+    assert!(matches!(
+        service.dispatch(submission("changed prompt"), temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn secret_input_is_refused_before_publication() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let input = submission("sk-abcdefghijklmnopqrstuvwxyz123456");
+    let operation = input.operation_id.clone();
+    let error = Service::new(&store)
+        .dispatch(input, temp.path(), &call)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RunError::Input {
+            kind: ErrorKind::SecretInput,
+            ..
+        }
+    ));
+    assert!(store.operation(&operation, &call)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let service = Service::new(&store);
+    let model = |id: &str| RequestedRoute::Model {
+        provider: "fixture".into(),
+        model: id.into(),
+        effort: None,
+    };
+    let mut input = submission("review this code");
+    input.tasks[0].route = model("model");
+    let run = service.dispatch(input, temp.path(), &call)?;
+    let mut input = submission("review this code");
+    input.tasks[0].route = model("fixture/model");
+    assert_eq!(
+        service.dispatch(input, temp.path(), &call)?.run_id,
+        run.run_id
+    );
+    assert_eq!(
+        store.request(run.run_id, &call)?.tasks[0].route,
+        model("fixture/model")
+    );
+    assert!(matches!(
+        Service::route(model("other/model")),
+        Err(RunError::Input {
+            kind: ErrorKind::Invalid,
+            ..
+        })
+    ));
+    Ok(())
+}

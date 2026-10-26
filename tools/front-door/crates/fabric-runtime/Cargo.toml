@@ -7,10 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-config = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
-provenant-supervisor = { workspace = true }
 provenant-fabric-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,7 +18,7 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-provenant-supervisor = { workspace = true, features = ["fixture"] }
+provenant-os = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 
 [lints]

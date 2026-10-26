@@ -1045,7 +1045,7 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
             MonoTime::from_micros(0)
         }
         fn wait_until(&self, _deadline: MonoTime) -> std::result::Result<(), TimeError> {
-            Ok(())
+            unreachable!("fixed-time test clock never waits")
         }
     }
     let f = Fixture::new();

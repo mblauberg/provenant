@@ -6,11 +6,11 @@ use provenant_confinement::{
     GitRead, ReadOnlyRepo, UtilityBudget, UtilityRuntime, run_read_utility,
 };
 use provenant_core::{CancelToken, GitOid, RelativePath};
-use provenant_records::{CanonicalV1, FileDigest, Finding, Outcome, PathWire};
-use provenant_supervisor::{
+use provenant_os::{
     exec::{ExecOutcome, Executor, Termination},
-    fs::{FileKind, FsError, Metadata, SafeDir},
+    fs::{FileKind, FsError, Metadata},
 };
+use provenant_records::{CanonicalV1, FileDigest, Finding, Outcome, PathWire};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Read,
@@ -297,7 +297,7 @@ pub(super) enum WorkingFile {
     Missing,
 }
 pub(super) fn read_file(
-    root: &dyn SafeDir,
+    root: &provenant_os::fs::Directory,
     path: &Path,
     limit: u64,
 ) -> Result<WorkingFile, CheckError> {
@@ -306,7 +306,7 @@ pub(super) fn read_file(
     read_file_at(root, &mut components, limit, 0)
 }
 fn read_file_at<'a>(
-    directory: &dyn SafeDir,
+    directory: &provenant_os::fs::Directory,
     components: &mut std::iter::Peekable<std::path::Components<'a>>,
     limit: u64,
     depth: usize,
@@ -345,7 +345,7 @@ fn read_file_at<'a>(
         if !before.same_identity(&child.metadata()?) {
             return Err(CheckError::Evidence("tracked directory changed"));
         }
-        let result = read_file_at(child.as_ref(), components, limit, depth + 1)?;
+        let result = read_file_at(&child, components, limit, depth + 1)?;
         if !same_metadata(&before, &directory.metadata_at(name, false)?) {
             return Err(CheckError::Evidence("tracked directory changed"));
         }

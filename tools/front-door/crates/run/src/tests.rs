@@ -3,11 +3,10 @@ use provenant_core::{
     ActorId, AttemptId, CancelToken, Digest, MonoTime, OperationId, ProjectId, RootInputs, RunId,
     TaskId, TestClock, WaitBudget, WallTime,
 };
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
-use provenant_supervisor::{
-    custody::{CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence},
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-    fs::LocalFs,
+use provenant_supervisor::custody::{
+    CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence,
 };
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -20,7 +19,7 @@ pub(super) fn context(
     let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
     inputs.state_dir = Some(base.join("state"));
     Ok(ExecutionContext {
-        state_root: inputs.resolve(&LocalFs)?.state,
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
         project_id: ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
         read_prompts: true,
@@ -127,7 +126,7 @@ pub(super) fn exit() -> ExitObservation {
         terminal_observed: false,
         unresolved_cleanup: false,
         unresolved_pids: vec![],
-        settlement_evidence: SettlementEvidence::LinuxKernelChildren,
+        settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),
     }
@@ -247,7 +246,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
 }
 #[test]
 fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
-    use provenant_supervisor::fs::LockMode;
+    use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
 
     let temp = tempfile::tempdir()?;
@@ -279,7 +278,7 @@ fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
 #[test]
 fn reopening_a_current_store_does_not_wait_for_a_writer() -> TestResult {
     use provenant_core::Clock;
-    use provenant_supervisor::clock::SystemClock;
+    use provenant_os::clock::SystemClock;
 
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -331,7 +330,7 @@ fn concurrent_first_opens_create_a_ready_store() -> TestResult {
 
 #[test]
 fn opens_refuse_unsafe_database_companions() -> TestResult {
-    use provenant_supervisor::fs::Directory;
+    use provenant_os::fs::Directory;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -392,6 +391,49 @@ fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     assert!(reader.has_runs(&call)?);
     Ok(())
 }
+
+#[test]
+fn historical_task_class_preserves_request_verification_and_lane_listing() -> TestResult {
+    for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut input = input();
+        let mut sealed = serde_json::to_value(&input.request)?;
+        sealed["tasks"][0]["profile"] = serde_json::json!({
+            "name": "", "knobs": {}, "overrides": [], "task_class": task_class
+        });
+        let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
+        input.request = serde_json::from_value(sealed.clone())?;
+        store.create(&input, &call)?;
+        assert_eq!(store.run(input.run_id, &call)?.request_digest, digest);
+        assert_eq!(
+            serde_json::to_value(store.request(input.run_id, &call)?)?,
+            sealed
+        );
+        let page = store.lanes(
+            &LaneQuery {
+                targets: Vec::new(),
+                all: true,
+                limit: 10,
+                after: 0,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            &call,
+        )?;
+        assert_eq!(page.lanes.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&page.lanes[0].profile)?,
+            sealed["tasks"][0]["profile"]
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -771,7 +813,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
             &call
         ),
         Err(RunError::Filesystem(
-            provenant_supervisor::fs::FsError::TooLarge { .. }
+            provenant_os::fs::FsError::TooLarge { .. }
         ))
     ));
     Ok(())

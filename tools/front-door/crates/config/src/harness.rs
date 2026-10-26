@@ -4,7 +4,6 @@ use crate::{Harness, Release};
 use provenant_records::{
     AbsolutePath, InstallReceipt, Limits, OwnedEntry, OwnedValue, ResolvedHarnessTarget,
 };
-use provenant_supervisor::fs::SafeFs;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::{
@@ -346,12 +345,11 @@ pub(crate) struct HarnessPlan {
 fn capture_one(
     path: &Path,
     entries: &mut BTreeMap<PathBuf, Option<Snapshot>>,
-    fs: &dyn SafeFs,
 ) -> Result<Option<Snapshot>, InstallError> {
     if let Some(s) = entries.get(path) {
         return Ok(s.clone());
     }
-    let s = managed::snapshot(path, fs)?;
+    let s = managed::snapshot(path)?;
     entries.insert(path.into(), s.clone());
     Ok(s)
 }
@@ -378,7 +376,6 @@ pub(crate) fn capture(
     targets: &Targets,
     entries: &mut BTreeMap<PathBuf, Option<Snapshot>>,
     previous: Option<&InstallReceipt>,
-    fs: &dyn SafeFs,
 ) -> Result<HarnessPlan, InstallError> {
     let mut plan = HarnessPlan::default();
     let root = managed::release_root(
@@ -387,7 +384,7 @@ pub(crate) fn capture(
     );
     for target in &targets.harnesses {
         let path = &target.mcp_file;
-        let snap = capture_one(path, entries, fs)?;
+        let snap = capture_one(path, entries)?;
         let (mut bytes, mode) = file_for(&snap, path, target.harness)?;
         if snap.is_none() && target.harness == Harness::Codex {
             bytes.clear();
@@ -434,7 +431,7 @@ pub(crate) fn capture(
             && (hooks || targets.remove_hooks)
             && target.harness == Harness::Claude
         {
-            let hook_snapshot = capture_one(hook, entries, fs)?;
+            let hook_snapshot = capture_one(hook, entries)?;
             let (old, hook_mode) = file(&hook_snapshot, hook)?;
             let mut base = Value::File {
                 bytes: old.clone(),
@@ -790,13 +787,12 @@ impl Targets {
 }
 pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serialize>(
     targets: &mut Targets,
-    fs: &dyn SafeFs,
     sections: &crate::DomainSections<T>,
 ) -> Result<(), InstallError> {
     // `load` accepts a bounded optional reader and validates the entire user
     // configuration; no unrelated domain policy is interpreted by installation.
     let path = targets.roots.state.as_path().join("config.toml");
-    let snapshot = managed::snapshot_scoped(&path, targets.roots.state.as_path(), fs)?;
+    let snapshot = managed::snapshot_scoped(&path, targets.roots.state.as_path())?;
     let Some(Snapshot {
         value: Value::File { bytes, .. },
         ..

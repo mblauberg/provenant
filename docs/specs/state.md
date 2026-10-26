@@ -434,7 +434,8 @@ owned or audited by install, uninstall or `check install`.
 | Cut | Reason |
 | --- | --- |
 | Fused or split roots, root pointers, seeded defaults, three-way refresh | Fresh state and immutable release assets remove copied-catalogue reconciliation. No `AGENTS_HOME` or `AGENT_FABRIC_*` root fallback and no stale-checkout probe. |
-| `config reset`, profile listing, project overlays, task-class tables, per-knob environment variables | Never used in the usage audit. Domain policy still enforces authority, confinement and review minima. |
+| `config reset`, profile listing, project overlays, task classes, per-knob environment variables | Never used in the usage audit. Domain policy still enforces authority, confinement and review minima. |
+| Advisory knobs and the root `[routing]` alias | No code read the advisory knobs; their defaults are chair judgement in the `orchestrate` skill. Routing config lives only under `[domains.routing]`. |
 | Generic installer transactions (bundle, plan, apply, recover, rollback journal, binary backup) | Re-applying `install` is the recovery path. |
 | Kiro registration | No observed use. |
 | `_shared`, JavaScript workflows, old link layouts | Retained skills are replaced individually. Obsolete links require manual cleanup; custom skill contents and old receipts are not read. |

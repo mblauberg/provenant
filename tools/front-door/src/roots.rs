@@ -1,8 +1,6 @@
 //! Read-only edge resolution. No provider, database, or legacy-content reads.
-use provenant_core::{PathResolver, RootInputs, Roots};
-use provenant_supervisor::exec::{
-    ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-};
+use provenant_core::{RootInputs, Roots};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
     fs, io,
@@ -39,8 +37,6 @@ pub fn product_root() -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
-pub(crate) use provenant_supervisor::git::git_executable as git_binary;
-
 pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf, RootError> {
     let path = match selected {
         Some(path) => path.to_path_buf(),
@@ -64,7 +60,7 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
-    let git = git_binary().ok_or(RootError::Checkout)?;
+    let git = provenant_os::git::git_executable().ok_or(RootError::Checkout)?;
     let argv: Vec<OsString> = [
         git.as_os_str(),
         OsStr::new("--no-pager"),
@@ -125,67 +121,158 @@ fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
 /// Validate caller-selected roots before composing any leaf. This creates no
 /// state and does not require a product installation for an unavailable owner.
 pub fn validate_globals(globals: &provenant_cli::Globals) -> Result<(), RootError> {
-    let project = if globals.project.is_some() {
-        Some(selected_project(globals.project.as_deref(), false)?)
-    } else {
-        None
-    };
     if globals.state_dir.is_some() {
-        let project = project.unwrap_or(std::env::current_dir()?);
-        let assets = product_root().unwrap_or_else(|_| project.clone());
-        roots(globals, &assets, &project)?;
+        resolve(globals, Workspace::Project, Product::Optional)?;
+    } else if globals.project.is_some() {
+        selected_project(globals.project.as_deref(), false)?;
     }
     Ok(())
 }
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
-        let mut ancestor = path;
-        let mut missing = Vec::new();
-        loop {
-            // Distinguish a missing component from an unreadable/dangling link.
-            match fs::symlink_metadata(ancestor) {
-                Ok(_) => {
-                    let mut bound = fs::canonicalize(ancestor)?;
-                    for tail in missing.iter().rev() {
-                        bound.push(tail);
-                    }
-                    return Ok(bound);
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    missing.push(
-                        ancestor
-                            .file_name()
-                            .ok_or_else(|| io::Error::other("missing root"))?
-                            .to_owned(),
-                    );
-                    ancestor = ancestor
-                        .parent()
-                        .ok_or_else(|| io::Error::other("missing parent"))?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-}
-pub fn roots(
-    globals: &provenant_cli::Globals,
-    assets: &Path,
-    project: &Path,
-) -> Result<Roots, RootError> {
-    let home = home()?;
-    let mut inputs = RootInputs::new(home, assets.into());
-    inputs.state_dir = globals.state_dir.clone();
-    inputs.environment_state_dir = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from);
-    inputs.workspaces.push(project.into());
-    Ok(inputs.resolve(&Resolver)?)
+
+/// Where a command's workspace comes from.
+#[derive(Clone, Copy)]
+pub enum Workspace<'a> {
+    /// The selected or working directory, without a Git probe.
+    Directory,
+    /// As `Directory`, except that a selected project must be a checkout.
+    Project,
+    /// The Git checkout holding the selected or working directory.
+    Checkout,
+    /// The home directory, for host-wide commands.
+    Home,
+    /// A canonical directory the command has already chosen.
+    At(&'a Path),
 }
 
+/// Whether a command needs the installed product root. An optional product
+/// root falls back to the workspace, which it then protects instead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Product {
+    Required,
+    Optional,
+}
+
+/// One command's roots. Production reads `HOME`, the state root and harness
+/// config roots from the environment only in [`resolve`].
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub assets: PathBuf,
+    pub home: PathBuf,
+    pub project: PathBuf,
+    pub roots: Roots,
+    /// `CLAUDE_CONFIG_DIR`, as the environment names it.
+    pub claude_config: Option<PathBuf>,
+    /// `CODEX_HOME`, as the environment names it.
+    pub codex_home: Option<PathBuf>,
+}
+
+/// The one root resolver: the product root, the workspace, the canonical
+/// home, the state root and the harness config roots, in that order.
+pub fn resolve(
+    globals: &provenant_cli::Globals,
+    workspace: Workspace<'_>,
+    product: Product,
+) -> Result<Resolved, RootError> {
+    let installed = match product {
+        Product::Required => Some(product_root()?),
+        Product::Optional => None,
+    };
+    let (project, home) = match workspace {
+        Workspace::Home => {
+            let home = home()?;
+            (home.clone(), home)
+        }
+        Workspace::Directory => {
+            let project = match &globals.project {
+                Some(project) => fs::canonicalize(project).map_err(|_| RootError::Checkout)?,
+                None => fs::canonicalize(std::env::current_dir()?)?,
+            };
+            (project, home()?)
+        }
+        Workspace::Project => (
+            selected_project(globals.project.as_deref(), false)?,
+            home()?,
+        ),
+        Workspace::Checkout => (selected_project(globals.project.as_deref(), true)?, home()?),
+        Workspace::At(path) => (path.to_owned(), home()?),
+    };
+    let assets = match installed {
+        Some(assets) => assets,
+        None => product_root().unwrap_or_else(|_| project.clone()),
+    };
+    let mut inputs = RootInputs::new(home.clone(), assets.clone());
+    inputs.state_dir = globals.state_dir.clone();
+    inputs.environment_state_dir =
+        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
+    inputs.workspaces.push(project.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    Ok(Resolved {
+        assets,
+        home,
+        project,
+        roots,
+        claude_config: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+        codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+    })
+}
+
+/// Bind a child store's `state_dir` with its resolved parent's `home` and
+/// `assets`. No environment is read.
+pub fn child(home: &Path, assets: &Path, state_dir: PathBuf) -> Result<Roots, RootError> {
+    let mut inputs = RootInputs::new(home.to_owned(), assets.to_owned());
+    inputs.state_dir = Some(state_dir);
+    Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
+}
 /// Canonical home used by root selection and home-relative Fabric identity.
-pub fn home() -> Result<PathBuf, RootError> {
+fn home() -> Result<PathBuf, RootError> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or(RootError::Home)?);
     if !home.is_absolute() {
         return Err(RootError::Home);
     }
     Ok(fs::canonicalize(home)?)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn resolve_directory_workspace_uses_the_current_directory() {
+        let globals = provenant_cli::Globals::default();
+        let resolved = crate::roots::resolve(
+            &globals,
+            crate::roots::Workspace::Directory,
+            crate::roots::Product::Optional,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.project,
+            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_at_workspace_uses_the_supplied_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(temp.path()).unwrap();
+        let globals = provenant_cli::Globals::default();
+        let resolved = crate::roots::resolve(
+            &globals,
+            crate::roots::Workspace::At(&path),
+            crate::roots::Product::Optional,
+        )
+        .unwrap();
+        assert_eq!(resolved.project, path);
+    }
+
+    #[test]
+    fn child_resolves_the_supplied_state_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let home = base.join("home");
+        let assets = base.join("assets");
+        let state = base.join("state").join("child");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&assets).unwrap();
+        let roots = crate::roots::child(&home, &assets, state.clone()).unwrap();
+        assert_eq!(roots.state.as_path(), state);
+    }
 }

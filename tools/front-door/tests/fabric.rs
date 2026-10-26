@@ -19,12 +19,15 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
     Ok(value)
 }
 fn token(proof: &Value) -> Result<String> {
-    let values = proof["token"].as_array().ok_or("token array")?;
-    let mut bytes = Vec::new();
-    for value in values {
-        bytes.push(u8::try_from(value.as_u64().ok_or("token byte")?)?);
-    }
-    Ok(provenant_core::hex(&bytes))
+    let token = proof["token"].as_str().ok_or("token string")?;
+    assert_eq!(token.len(), 32, "{token}");
+    assert!(
+        token
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{token}"
+    );
+    Ok(token.to_owned())
 }
 
 #[test]

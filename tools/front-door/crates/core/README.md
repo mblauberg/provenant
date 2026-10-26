@@ -22,7 +22,7 @@ Pure shared values for the [state spec](../../../../docs/specs/state.md).
   `PathResolver` is the real filesystem seam: supervisor must resolve existing
   ancestor aliases and append a normal missing tail without creating anything.
   Core checks both the selected and bound path against protected roots. Owners
-  must still use supervisor's safe handles for containment during I/O.
+  must still use OS crate's safe handles for containment during I/O.
 
 Core reads no environment, filesystem, entropy, clock or process state. Tests
 inject those observations; no test discovers the user's home or old state.

@@ -4,9 +4,11 @@ use crate::status::{StatusError, StatusKind, parse_index_entries, parse_porcelai
 use crate::utility::{GitRead, UtilityBudget, UtilityError, UtilityRuntime, run_utility};
 use provenant_core::CancelToken;
 use provenant_core::{GitOid, RelativePath};
+use provenant_os::{
+    exec::{ExecOutcome, Executor, Termination},
+    fs::{Directory, FsError, Metadata},
+};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
-use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
-use provenant_supervisor::fs::{FsError, Metadata, SafeDir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -256,6 +258,23 @@ impl<'a> Git<'a> {
         Ok(())
     }
 
+    /// Changed and untracked paths when HEAD is still `base`; empty once the
+    /// writer committed. Ignored paths and `.review-snapshots/` never count.
+    pub fn uncommitted_since(&self, base: GitOid) -> Result<Vec<Vec<u8>>, GitEvidenceError> {
+        if self.head()? != base {
+            return Ok(Vec::new());
+        }
+        // Lists each untracked file, not its directory, whatever
+        // `status.showUntrackedFiles` says.
+        let status = self.read(GitRead::StatusIncludingIgnored)?;
+        Ok(parse_porcelain_v2_z(&status.stdout.bytes)?
+            .into_iter()
+            .filter(|record| record.kind != StatusKind::Ignored)
+            .map(|record| record.path)
+            .filter(|path| !path.starts_with(b".review-snapshots/"))
+            .collect())
+    }
+
     pub fn verify_tip(&self, expected: GitOid) -> Result<GitOid, GitEvidenceError> {
         self.repo
             .revalidate()
@@ -391,16 +410,16 @@ fn absent_fingerprint(path: &RepoPath) -> Result<TrackedFingerprint, GitEvidence
     })
 }
 
-/// Reads a single tracked leaf through held SafeDir handles. Symlinks, hard
+/// Reads a single tracked leaf through held Directory handles. Symlinks, hard
 /// links, special files, path drift and oversized files cannot become evidence.
 pub(crate) fn read_tracked_file(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<FileSnapshot, GitEvidenceError> {
     let (parent, leaf) = open_parent(root, path)?;
     let (bytes, after) =
-        crate::stable_read::read_regular(&*parent, &leaf, limit).map_err(map_stable_read_error)?;
+        crate::stable_read::read_regular(&parent, &leaf, limit).map_err(map_stable_read_error)?;
     let fingerprint = fingerprint(path, &bytes, after)?;
     Ok(FileSnapshot { bytes, fingerprint })
 }
@@ -420,7 +439,7 @@ fn map_stable_read_error(error: crate::stable_read::ReadError) -> GitEvidenceErr
 }
 
 pub(crate) fn read_optional_file(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<Option<FileSnapshot>, GitEvidenceError> {
@@ -439,14 +458,14 @@ pub(crate) fn read_optional_file(
 /// Like `read_tracked_file`, but a symlink leaf is evidence too: its bytes are
 /// the link target, read with readlink and never followed.
 pub(crate) fn read_protected_entry(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<FileSnapshot, GitEvidenceError> {
     use std::os::unix::ffi::OsStrExt;
     let (parent, leaf) = open_parent(root, path)?;
     let before = parent.metadata_at(&leaf, false)?;
-    if before.kind != provenant_supervisor::fs::FileKind::Symlink {
+    if before.kind != provenant_os::fs::FileKind::Symlink {
         return read_tracked_file(root, path, limit);
     }
     let target = parent.read_link(&leaf)?;
@@ -455,7 +474,7 @@ pub(crate) fn read_protected_entry(
         return Err(GitEvidenceError::TooLarge);
     }
     let after = parent.metadata_at(&leaf, false)?;
-    if !crate::stable_read::same_metadata(&before, &after) {
+    if !before.unchanged(&after) {
         return Err(GitEvidenceError::ConcurrentChange);
     }
     let fingerprint = fingerprint(path, &bytes, after)?;
@@ -463,7 +482,7 @@ pub(crate) fn read_protected_entry(
 }
 
 pub(crate) fn read_optional_protected_entry(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<Option<FileSnapshot>, GitEvidenceError> {
@@ -480,7 +499,7 @@ pub(crate) fn read_optional_protected_entry(
 }
 
 pub(crate) fn open_parent<'a>(
-    root: &'a dyn SafeDir,
+    root: &'a Directory,
     path: &RepoPath,
 ) -> Result<(HeldDir<'a>, OsString), GitEvidenceError> {
     let mut normals = Vec::new();
@@ -503,21 +522,21 @@ pub(crate) fn open_parent<'a>(
 }
 
 pub(crate) enum HeldDir<'a> {
-    Borrowed(&'a dyn SafeDir),
-    Owned(Box<dyn SafeDir>),
+    Borrowed(&'a Directory),
+    Owned(Directory),
 }
-impl<'a> Deref for HeldDir<'a> {
-    type Target = dyn SafeDir + 'a;
+impl Deref for HeldDir<'_> {
+    type Target = Directory;
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::Borrowed(directory) => *directory,
-            Self::Owned(directory) => directory.as_ref(),
+            Self::Borrowed(directory) => directory,
+            Self::Owned(directory) => directory,
         }
     }
 }
 
 pub(crate) fn read_index_fingerprint(
-    directory: &dyn SafeDir,
+    directory: &Directory,
 ) -> Result<IndexFingerprint, GitEvidenceError> {
     let (bytes, after) =
         crate::stable_read::read_regular(directory, OsStr::new("index"), MAX_GIT_RECORD_BYTES)
@@ -540,7 +559,7 @@ pub(crate) fn read_index_fingerprint(
     })
 }
 
-pub(crate) fn refuse_index_lock(directory: &dyn SafeDir) -> Result<(), GitEvidenceError> {
+pub(crate) fn refuse_index_lock(directory: &Directory) -> Result<(), GitEvidenceError> {
     match directory.metadata_at(OsStr::new("index.lock"), false) {
         Ok(_) => Err(GitEvidenceError::ConcurrentChange),
         Err(error) if error.is_not_found() => Ok(()),
@@ -567,8 +586,49 @@ fn digest_diff_parts(commit: &[u8], index: &[u8], worktree: &[u8]) -> FileDigest
 
 #[cfg(test)]
 mod tests {
-    use super::digest_diff_parts;
+    use super::{Git, digest_diff_parts};
+    use crate::test_support::Fixture;
+    use provenant_core::CancelToken;
     use provenant_records::CanonicalV1;
+    use std::{error::Error, fs};
+
+    #[test]
+    fn uncommitted_paths_skip_ignored_and_snapshots_and_need_an_unmoved_head()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let base = fixture.head()?;
+        let token = CancelToken::new();
+        let git = Git::new(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &token,
+        );
+        assert!(git.uncommitted_since(base)?.is_empty());
+        fs::write(fixture.root.join(".gitignore"), "ignored.log\n")?;
+        fs::write(fixture.root.join("ignored.log"), "noise")?;
+        fs::write(fixture.root.join("edit.txt"), "work")?;
+        fs::create_dir(fixture.root.join("new"))?;
+        fs::write(fixture.root.join("new/file.rs"), "work")?;
+        fs::create_dir(fixture.root.join(".review-snapshots"))?;
+        fs::write(fixture.root.join(".review-snapshots/1.md"), "issue")?;
+        let mut dirty = git.uncommitted_since(base)?;
+        dirty.sort();
+        assert_eq!(
+            dirty,
+            [
+                b".gitignore".to_vec(),
+                b"edit.txt".to_vec(),
+                b"new/file.rs".to_vec()
+            ]
+        );
+        // A commit moves HEAD past the base: the lane delivered something.
+        fixture.run(&["add", "--", "edit.txt"])?;
+        fixture.run(&["commit", "-m", "work"])?;
+        assert!(git.uncommitted_since(base)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn diff_digest_separates_views_and_preserves_empty_views() {

@@ -37,7 +37,8 @@ project uses them. Do not assume a custom agent exists; discover current tools a
   not assume an entitlement exists.
 - Use Codex native subagents for same-harness fan-out. Do not use `codex exec` as a substitute for
   Codex subagents inside Codex.
-- Use `fabric_submit` with its `submission` operation for an external Codex verifier when Fabric is available; direct `codex exec` is the degraded path.
+- Use `fabric_run` (`op: submit`) for an external Codex verifier when Fabric
+  is available; direct `codex exec` is the degraded path.
 - Under `-s read-only`, a synthesis written via `apply_patch` is rejected. Analysis and report
   workers use `-o <path>` to persist the final message directly outside the sandbox. Because
   `-o` saves the final message and nothing else, a brief that demotes that message to a
@@ -64,7 +65,6 @@ Good Codex worker prompt fields:
 
 ```
 role:              explorer | worker | default
-task-class:        mechanical | legwork | critical-review | orchestration
 tier:              junior | senior | principal
 catalogue-model:     Astra | Sol | Luna
 effort:            <effective effort from route receipt>

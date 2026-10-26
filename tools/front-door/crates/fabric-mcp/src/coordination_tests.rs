@@ -153,7 +153,7 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
     let claimed = call(
         &mut service,
         "fabric_task",
-        json!({"op":"claim","id":task["task"]["id"],"lease_ms":1000}),
+        json!({"op":"claim","id":task["task"]["id"],"lease_seconds":1}),
     )?;
     let finished = call(
         &mut service,
@@ -169,40 +169,40 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
     assert!(noted["seq"].as_i64().is_some_and(|seq| seq > 0));
     let work = call(
         &mut service,
-        "fabric_claim",
-        json!({"op":"acquire","scope":{"kind":"issue","key":"F8a"},"lease_ms":1000}),
+        "fabric_lease",
+        json!({"op":"claim_acquire","scope":{"kind":"issue","key":"F8a"},"lease_seconds":1}),
     )?;
     let verified = call(
         &mut service,
-        "fabric_claim",
-        json!({"op":"verify","proof":work["proof"]}),
+        "fabric_lease",
+        json!({"op":"claim_verify","proof":work["proof"]}),
     )?;
     assert_eq!(verified["claim"]["holder"], json!(actor));
     call(
         &mut service,
-        "fabric_claim",
-        json!({"op":"release","proof":work["proof"]}),
+        "fabric_lease",
+        json!({"op":"claim_release","proof":work["proof"]}),
     )?;
     let oid = "a".repeat(40);
     let landing = call(
         &mut service,
-        "fabric_landing",
-        json!({"op":"acquire","reference":"refs/heads/main","expected":oid,"candidate":"b".repeat(40),"lease_ms":1000}),
+        "fabric_lease",
+        json!({"op":"landing_acquire","reference":"refs/heads/main","expected":oid,"candidate":"b".repeat(40),"lease_seconds":1}),
     )?;
     let verified = call(
         &mut service,
-        "fabric_landing",
-        json!({"op":"verify","proof":landing["proof"]}),
+        "fabric_lease",
+        json!({"op":"landing_verify","proof":landing["proof"]}),
     )?;
     assert_eq!(verified["landing"]["holder"], json!(actor));
     call(
         &mut service,
-        "fabric_landing",
-        json!({"op":"release","proof":landing["proof"]}),
+        "fabric_lease",
+        json!({"op":"landing_release","proof":landing["proof"]}),
     )?;
     // F3 is explicitly injected, with no production placeholder.
     assert_eq!(
-        call(&mut service, "fabric_identity", json!({"op":"inspect"}))?["state"],
+        call(&mut service, "fabric_context", json!({"op":"inspect"}))?["state"],
         "identity"
     );
     Ok(())

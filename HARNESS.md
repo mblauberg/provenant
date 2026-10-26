@@ -111,17 +111,15 @@ one exact model; a pool makes a deterministic weighted draw among ready
 positive-weight members, with zero-weight members reserved as ordered fallbacks.
 Provider pacing policies are wired: under `pace` the factor scales quota
 headroom against the remaining window (clamped to 0.25 to 2.0), and `spend` and
-`max` stay at 1.0. The `quota.pace_tolerance` knob is advisory and routing does
-not read it.
-Routing overrides live in the state root's `config.toml`. Use
-`provenant route set` or `provenant route pacing` to change routing, and
-`provenant route list` to inspect configured weights; it does not probe, and
-pacing and readiness apply at dispatch.
-`task_class` presets affect knobs only and do not alias routes.
+`max` stay at 1.0.
+Routing overrides live under `[domains.routing]` in the state root's
+`config.toml`. Use `provenant route set` or `provenant route pacing` to change
+routing, and `provenant route list` to inspect configured weights; it does not
+probe, and pacing and readiness apply at dispatch.
 When several families are available, use the tiered-council method by
 submitting separate tasks for distinct exact models, then synthesise in the
 chair. Bind the applied route and effort from each attempt to the receipt.
-Unsupported effort is refused; never invent task-class, role or effort values.
+Unsupported effort is refused; never invent role or effort values.
 The runtime governs routing, the bundled catalogue supplies default pool
 membership and pacing, and the mechanics live in `orchestrate`. Prefer per-dispatch
 controls: editing a global provider configuration, such as

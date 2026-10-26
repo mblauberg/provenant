@@ -1,0 +1,248 @@
+//! Local demand counters: a bounded, rotated JSON-lines log in the state root.
+//! The command edge decides what to count; this module owns the log.
+use provenant_core::{Clock, ProjectId, Roots};
+use provenant_os::fs::{Directory, FsError, LockMode};
+use provenant_records::Trace;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    io::{self, Read, Write},
+};
+use thiserror::Error;
+
+pub const EVENT_KINDS: &[&str] = &["cli.verb", "mcp.tool"];
+const CAP: u64 = 5_000_000;
+const LOG: &str = "usage.jsonl";
+const BACKUP: &str = "usage.jsonl.1";
+const LOCK: &str = "usage.lock";
+const LINE_CAP: usize = 512;
+
+#[derive(Debug, Error)]
+pub enum UsageError {
+    #[error(transparent)]
+    Filesystem(#[from] FsError),
+    #[error("cannot read the usage log: {0}")]
+    Io(#[from] io::Error),
+}
+
+#[derive(Serialize, Deserialize)]
+struct Event {
+    kind: String,
+    unit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    duration_ms: u64,
+    timestamp: String,
+    /// Only the project, and only when attribution is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<Trace>,
+}
+
+fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
+    project_id.map(|project| Trace {
+        project: Some(project),
+        ..Trace::default()
+    })
+}
+
+fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
+    let size = || {
+        directory
+            .open_read(OsStr::new(LOG))
+            .ok()?
+            .metadata()
+            .ok()
+            .map(|m| m.size)
+    };
+    if size()?.saturating_add(incoming) <= CAP {
+        return Some(());
+    }
+    // Only rotation locks. Contending appenders keep their single write.
+    let _lock = directory
+        .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
+        .ok()?;
+    if size()?.saturating_add(incoming) > CAP {
+        directory
+            .replace(OsStr::new(LOG), directory, OsStr::new(BACKUP))
+            .ok()?;
+    }
+    Some(())
+}
+
+/// Called by existing MCP workers, never by the transport event loop.
+pub fn maintain_tools(roots: &Roots) {
+    if let Ok(directory) = Directory::open_anchor(roots.state.as_path()) {
+        let _ = rotate(&directory, LINE_CAP as u64);
+    }
+}
+
+fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
+    let mut line = serde_json::to_vec(&event).ok()?;
+    line.push(b'\n');
+    if line.len() > LINE_CAP {
+        return None;
+    }
+    // Counting never creates the state root: reads and help create no state.
+    let directory = Directory::open_anchor(roots.state.as_path()).ok()?;
+    if rotate_log {
+        let _ = rotate(&directory, line.len() as u64);
+    }
+    let mut file = directory.open_append(OsStr::new(LOG)).ok()?;
+    // O_APPEND and one small write; readers skip torn/malformed lines.
+    (file.write(&line).ok()? == line.len()).then_some(())
+}
+
+pub fn record_cli(
+    roots: &Roots,
+    clock: &dyn Clock,
+    verb: &str,
+    exit_code: u8,
+    duration_ms: u64,
+    project_id: Option<ProjectId>,
+) {
+    let Ok(now) = clock.wall_now() else { return };
+    let _ = append(
+        roots,
+        Event {
+            kind: EVENT_KINDS[0].into(),
+            unit: verb.into(),
+            exit_code: Some(exit_code),
+            outcome: None,
+            duration_ms,
+            timestamp: now.to_string(),
+            trace: project_trace(project_id),
+        },
+        true,
+    );
+}
+pub fn record_tool(
+    roots: &Roots,
+    clock: &dyn Clock,
+    tool: &str,
+    outcome: &str,
+    duration_ms: u64,
+    project_id: Option<ProjectId>,
+) {
+    let Ok(now) = clock.wall_now() else { return };
+    let _ = append(
+        roots,
+        Event {
+            kind: EVENT_KINDS[1].into(),
+            unit: tool.into(),
+            exit_code: None,
+            outcome: Some(outcome.into()),
+            duration_ms,
+            timestamp: now.to_string(),
+            trace: project_trace(project_id),
+        },
+        false,
+    );
+}
+
+#[derive(Serialize)]
+pub struct Unit {
+    pub kind: String,
+    pub unit: String,
+    pub calls: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<&'static str>,
+}
+#[derive(Serialize)]
+pub struct Report {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub units: Vec<Unit>,
+}
+
+/// Count events in `[since, until)` over the installed `inventory` of
+/// `(kind, unit)` pairs, which report zero calls until used.
+pub fn report(
+    roots: &Roots,
+    inventory: impl IntoIterator<Item = (String, String)>,
+    since: Option<jiff::Timestamp>,
+    until: Option<jiff::Timestamp>,
+) -> Result<Report, UsageError> {
+    let mut units: BTreeMap<(String, String, Option<ProjectId>), u64> = inventory
+        .into_iter()
+        .map(|(kind, unit)| ((kind, unit, None), 0))
+        .collect();
+    let directory = match Directory::open_anchor(roots.state.as_path()) {
+        Ok(directory) => Some(directory),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(directory) = directory {
+        for name in [BACKUP, LOG] {
+            let mut file = match directory.open_read(OsStr::new(name)) {
+                Ok(file) => file,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let mut bytes = Vec::new();
+            // A writer can cross the cap while rotation is busy. Bound the read,
+            // rather than failing the report when the file grows.
+            (&mut file).take(CAP).read_to_end(&mut bytes)?;
+            // Ignore torn or malformed records; only complete bounded lines count.
+            for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                if line.len() > LINE_CAP || !line.ends_with(b"\n") {
+                    continue;
+                }
+                let Ok(event) = serde_json::from_slice::<Event>(line) else {
+                    continue;
+                };
+                if !EVENT_KINDS.contains(&event.kind.as_str()) || event.unit.len() > 128 {
+                    continue;
+                }
+                let Ok(time) = event.timestamp.parse::<provenant_core::WallTime>() else {
+                    continue;
+                };
+                let time = time.as_timestamp();
+                if since.is_some_and(|since| time < since)
+                    || until.is_some_and(|until| time >= until)
+                {
+                    continue;
+                }
+                let calls = units
+                    .entry((event.kind.clone(), event.unit.clone(), None))
+                    .or_default();
+                *calls = calls.saturating_add(1);
+                if let Some(project_id) = event.trace.and_then(|trace| trace.project) {
+                    let calls = units
+                        .entry((event.kind, event.unit, Some(project_id)))
+                        .or_default();
+                    *calls = calls.saturating_add(1);
+                }
+            }
+        }
+    }
+    let mut units: Vec<_> = units
+        .into_iter()
+        .map(|((kind, unit, project_id), calls)| Unit {
+            kind,
+            unit,
+            calls,
+            project_id,
+            scope: project_id.map(|_| "project"),
+        })
+        .collect();
+    units.sort_by(|a, b| {
+        b.calls
+            .cmp(&a.calls)
+            .then(a.kind.cmp(&b.kind))
+            .then(a.unit.cmp(&b.unit))
+            .then(a.project_id.cmp(&b.project_id))
+    });
+    Ok(Report {
+        since: since.map(|s| s.to_string()),
+        until: until.map(|s| s.to_string()),
+        units,
+    })
+}
+
+#[cfg(test)]
+mod tests;

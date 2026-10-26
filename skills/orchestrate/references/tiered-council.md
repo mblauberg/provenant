@@ -17,8 +17,7 @@ list` shows members in preference order.
 Rust routing resolves a pool in order and does not rotate members. A repeated
 `route: "junior"` can select the same model each time. To seat distinct
 families, inspect the pool and submit a separate task for each exact model.
-`task_class` applies configured knob presets; it does not alias a route. Claude
-chairs use native Claude subagents. Claude models stay in the pools for
+Claude chairs use native Claude subagents. Claude models stay in the pools for
 non-Claude chairs, which can dispatch them through Fabric.
 
 | Craft pool | Route | Job |
