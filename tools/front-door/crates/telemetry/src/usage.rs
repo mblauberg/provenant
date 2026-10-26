@@ -21,7 +21,7 @@ const LINE_CAP: usize = 512;
 pub enum UsageError {
     #[error(transparent)]
     Filesystem(#[from] FsError),
-    #[error("cannot read the usage log")]
+    #[error("cannot read the usage log: {0}")]
     Io(#[from] io::Error),
 }
 

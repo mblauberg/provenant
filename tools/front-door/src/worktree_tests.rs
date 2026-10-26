@@ -213,7 +213,7 @@ fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
 }
 
 pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let git = crate::roots::git_binary().ok_or("Git executable unavailable")?;
+    let git = provenant_supervisor::git::git_executable().ok_or("Git executable unavailable")?;
     let output = rig.execute(&git, args, None)?;
     assert_eq!(
         code(&output),
@@ -1173,7 +1173,9 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
 
     let runtime = UtilityRuntime::new(
         std::sync::Arc::new(LocalFs),
-        fs::canonicalize(crate::roots::git_binary().ok_or("Git executable unavailable")?)?,
+        fs::canonicalize(
+            provenant_supervisor::git::git_executable().ok_or("Git executable unavailable")?,
+        )?,
         rig.state.join("utility-home"),
     )?;
     let executor = SystemExecutor::new(1)?;
@@ -2117,7 +2119,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 .any(|(key, value)| key == provenant_run::LANE_DEPTH_ENV && value == "1")
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
-        let selected_git = fs::canonicalize(crate::roots::git_binary().ok_or("host Git")?)?;
+        let selected_git =
+            fs::canonicalize(provenant_supervisor::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
         if adapter == "claude" && writer {
             // Claude's env scrub drops GIT_CONFIG_GLOBAL, so scratch git wraps

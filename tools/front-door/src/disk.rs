@@ -156,7 +156,8 @@ fn collect_resolved(
         project_owners: Default::default(),
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let git = roots::git_binary().ok_or("Git executable unavailable")?;
+        let git =
+            provenant_supervisor::git::git_executable().ok_or("Git executable unavailable")?;
         let utility = UtilityRuntime::read_only(Arc::new(LocalFs), git)?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;

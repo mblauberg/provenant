@@ -253,7 +253,7 @@ fn with_git<T>(
     let name = LocalFs.temporary_name()?;
     anchor.mkdir(&name, 0o700)?;
     let result = (|| {
-        let git = super::roots::git_binary().ok_or("Git unavailable")?;
+        let git = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
         let git = std::fs::canonicalize(git)?;
         let runtime = UtilityRuntime::new(Arc::new(LocalFs), git, temp.join(&name))?;
         let executor = SystemExecutor::new(1)?;

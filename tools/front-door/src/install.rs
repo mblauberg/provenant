@@ -50,7 +50,7 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
             provenant_fabric_runtime::peer_agent::install_plist(
                 &program,
                 &targets.roots,
-                provenant_confinement::worktrees::state_dir_name,
+                peer_agent_registry_name,
             )
             .map_err(EdgeError::Peer)?,
         );
@@ -67,6 +67,10 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
         }
     }
     Ok(())
+}
+
+fn peer_agent_registry_name(path: &Path) -> std::ffi::OsString {
+    provenant_confinement::worktrees::state_dir_name(path)
 }
 
 fn environment(globals: &cli::Globals) -> Result<Resolved, EdgeError> {
@@ -585,6 +589,15 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn peer_agent_registry_name_uses_the_worktree_registry_key() {
+        let path = std::path::Path::new("/worktrees/project-a");
+        assert_eq!(
+            super::peer_agent_registry_name(path),
+            provenant_confinement::worktrees::state_dir_name(path)
+        );
+    }
+
     #[test]
     fn peer_agent_removal_accepts_canonical_home_and_refuses_other_paths()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -17,10 +17,13 @@ use provenant_core::{CancelToken, Clock, HostId, OperationId, WaitBudget};
 use provenant_fabric_runtime::{
     coordination::facade::FacadeError,
     handoff::{
-        ATTACHMENT_COUNT, ATTACHMENT_LIMIT, Attachment, Delivery, HandoffReceipt, HandoffWorktree,
-        Launcher, Owner, PROMPT_LIMIT, PromptInput, SessionHandoff, Tree, admit, compose, deliver,
-        encode_base64, handoff_dir, read_owner, refusal_code, short_branch, takes_lease,
-        valid_attachment_name, valid_model, vet_receipt, write_owner,
+        ATTACHMENT_COUNT, ATTACHMENT_LIMIT, Attachment, HandoffReceipt, HandoffWorktree,
+        PROMPT_LIMIT, SessionHandoff, encode_base64,
+        session::{
+            Delivery, Launcher, Owner, PromptInput, Tree, admit, compose, deliver, handoff_dir,
+            read_owner, refusal_code, short_branch, takes_lease, vet_receipt, write_owner,
+        },
+        valid_attachment_name, valid_model,
     },
     hosts::{PeerAction, PeerResult},
 };
@@ -88,7 +91,7 @@ fn now_unix() -> i64 {
 }
 
 fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), Refusal> {
-    let binary = crate::roots::git_binary()
+    let binary = provenant_supervisor::git::git_executable()
         .ok_or_else(|| Refusal::new(Outcome::Error, "GIT", "Git executable unavailable"))?;
     let environment: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(key, _)| {

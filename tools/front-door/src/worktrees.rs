@@ -658,7 +658,7 @@ pub(crate) fn with_context<T>(
         }
     }
     let utility_home = child(&state, "utility-home")?;
-    let git = super::roots::git_binary().ok_or(Error::GitUnavailable)?;
+    let git = provenant_supervisor::git::git_executable().ok_or(Error::GitUnavailable)?;
     let runtime = UtilityRuntime::new(
         Arc::new(LocalFs),
         canonicalize(&git)?,

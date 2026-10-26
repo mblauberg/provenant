@@ -327,7 +327,8 @@ fn git_page(
 ) -> Result<CheckPage, Error> {
     private_home(|home| {
         let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-        let git = roots::git_binary().ok_or(CheckError::Evidence("Git executable unavailable"))?;
+        let git = provenant_supervisor::git::git_executable()
+            .ok_or(CheckError::Evidence("Git executable unavailable"))?;
         let git = fs::canonicalize(&git)?;
         let runtime = provenant_confinement::UtilityRuntime::new(fs, git, home)?;
         let executor = SystemExecutor::new(1)?;

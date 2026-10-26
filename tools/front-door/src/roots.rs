@@ -1,8 +1,9 @@
 //! Read-only edge resolution. No provider, database, or legacy-content reads.
-use provenant_core::{PathResolver, RootInputs, Roots};
+use provenant_core::{RootInputs, Roots};
 use provenant_supervisor::exec::{
     ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
 };
+use provenant_supervisor::fs::LocalFs;
 use std::{
     ffi::{OsStr, OsString},
     fs, io,
@@ -39,8 +40,6 @@ pub fn product_root() -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
-pub(crate) use provenant_supervisor::git::git_executable as git_binary;
-
 pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf, RootError> {
     let path = match selected {
         Some(path) => path.to_path_buf(),
@@ -64,7 +63,7 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
-    let git = git_binary().ok_or(RootError::Checkout)?;
+    let git = provenant_supervisor::git::git_executable().ok_or(RootError::Checkout)?;
     let argv: Vec<OsString> = [
         git.as_os_str(),
         OsStr::new("--no-pager"),
@@ -209,7 +208,7 @@ pub fn resolve(
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
-    let roots = inputs.resolve(&Resolver)?;
+    let roots = inputs.resolve(&LocalFs)?;
     Ok(Resolved {
         assets,
         home,
@@ -225,38 +224,7 @@ pub fn resolve(
 pub fn child(home: &Path, assets: &Path, state_dir: PathBuf) -> Result<Roots, RootError> {
     let mut inputs = RootInputs::new(home.to_owned(), assets.to_owned());
     inputs.state_dir = Some(state_dir);
-    Ok(inputs.resolve(&Resolver)?)
-}
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
-        let mut ancestor = path;
-        let mut missing = Vec::new();
-        loop {
-            // Distinguish a missing component from an unreadable/dangling link.
-            match fs::symlink_metadata(ancestor) {
-                Ok(_) => {
-                    let mut bound = fs::canonicalize(ancestor)?;
-                    for tail in missing.iter().rev() {
-                        bound.push(tail);
-                    }
-                    return Ok(bound);
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    missing.push(
-                        ancestor
-                            .file_name()
-                            .ok_or_else(|| io::Error::other("missing root"))?
-                            .to_owned(),
-                    );
-                    ancestor = ancestor
-                        .parent()
-                        .ok_or_else(|| io::Error::other("missing parent"))?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
+    Ok(inputs.resolve(&LocalFs)?)
 }
 /// Canonical home used by root selection and home-relative Fabric identity.
 fn home() -> Result<PathBuf, RootError> {
@@ -265,4 +233,48 @@ fn home() -> Result<PathBuf, RootError> {
         return Err(RootError::Home);
     }
     Ok(fs::canonicalize(home)?)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn resolve_directory_workspace_uses_the_current_directory() {
+        let globals = provenant_cli::Globals::default();
+        let resolved = crate::roots::resolve(
+            &globals,
+            crate::roots::Workspace::Directory,
+            crate::roots::Product::Optional,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.project,
+            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_at_workspace_uses_the_supplied_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(temp.path()).unwrap();
+        let globals = provenant_cli::Globals::default();
+        let resolved = crate::roots::resolve(
+            &globals,
+            crate::roots::Workspace::At(&path),
+            crate::roots::Product::Optional,
+        )
+        .unwrap();
+        assert_eq!(resolved.project, path);
+    }
+
+    #[test]
+    fn child_resolves_the_supplied_state_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let assets = temp.path().join("assets");
+        let state = temp.path().join("state").join("child");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&assets).unwrap();
+        let roots = crate::roots::child(&home, &assets, state.clone()).unwrap();
+        assert_eq!(roots.state.as_path(), state);
+    }
 }

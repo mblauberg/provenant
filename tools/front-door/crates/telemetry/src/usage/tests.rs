@@ -24,6 +24,15 @@ fn inventory() -> Vec<(String, String)> {
         (EVENT_KINDS[1].into(), "fabric_identity".into()),
     ]
 }
+
+#[test]
+fn usage_log_read_errors_include_the_os_cause() {
+    let error = UsageError::Io(std::io::Error::from_raw_os_error(13));
+    let rendered = error.to_string();
+    assert!(rendered.starts_with("cannot read the usage log: "));
+    assert!(rendered.contains("os error 13"));
+}
+
 /// A clock fixed at one wall time.
 const CLOCK: &dyn Clock = &Fixed;
 struct Fixed;

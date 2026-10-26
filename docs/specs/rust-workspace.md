@@ -33,7 +33,7 @@ responsibility or edges lands in this table in the same PR.
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime; fabric-store in tests only, to check store error rendering |
 | workflow | Delivery/review validators, session, tracker and writing tools | core, records, supervisor's safe filesystem API |
 | cli | Argument parsing and output/exit rendering for all commands | core, records, config, confinement, providers, quota, telemetry, routing, run, fabric-runtime, workflow, supervisor |
-| provenant | Binary composition, install identity and process-level setup | core, records, config, supervisor, confinement, providers, quota, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
+| provenant | Binary composition, install identity and process-level setup | core, records, config, supervisor, confinement, providers, quota, telemetry, run, fabric-store, fabric-runtime, fabric-mcp, workflow, cli |
 
 `records::ADAPTER_SPECS` is the compiled, closed adapter fact table. Config names,
 CLI values, executable aliases and shared capability lookups use those rows.

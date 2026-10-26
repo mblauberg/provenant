@@ -566,7 +566,7 @@ pub fn peer(
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let seconds = if let PeerAction::SessionHandoff { budget_seconds, .. } = &request.action {
-            provenant_fabric_runtime::handoff::peer_seconds(
+            provenant_fabric_runtime::handoff::session::peer_seconds(
                 *budget_seconds,
                 context.config.limits.peer_seconds,
             )
@@ -647,7 +647,7 @@ pub fn peer(
                         budget,
                     },
                     input,
-                    &provenant_fabric_runtime::handoff::Terminal,
+                    &provenant_fabric_runtime::handoff::session::Terminal,
                 ))
             }
             PeerAction::Health => PeerResult::Health(provenant_fabric_runtime::hosts::PeerHealth {
@@ -1116,7 +1116,7 @@ pub(crate) fn remote_base(
     fetch: bool,
 ) -> Result<provenant_core::GitOid, FacadeError> {
     use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-    let git = crate::roots::git_binary().ok_or(FacadeError::OwnerUnavailable)?;
+    let git = provenant_supervisor::git::git_executable().ok_or(FacadeError::OwnerUnavailable)?;
     let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter(|(key, _)| !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key)))
         .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])

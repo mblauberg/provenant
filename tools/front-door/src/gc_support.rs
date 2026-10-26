@@ -21,7 +21,7 @@ use std::{
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
 ) -> Result<Option<(String, GitOid)>, Error> {
-    let git = crate::roots::git_binary().ok_or(Error::GitUnavailable)?;
+    let git = provenant_supervisor::git::git_executable().ok_or(Error::GitUnavailable)?;
     let environment: Vec<(OsString, OsString)> = [
         "HOME",
         "SSH_AUTH_SOCK",

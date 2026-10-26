@@ -21,7 +21,7 @@ pub fn project_id(resolved: &Resolved) -> Option<ProjectId> {
     }
     use provenant_supervisor::fs::LocalFs;
     use std::{sync::Arc, time::Duration};
-    let git = roots::git_binary()?;
+    let git = provenant_supervisor::git::git_executable()?;
     let runtime = provenant_confinement::UtilityRuntime::read_only(
         Arc::new(LocalFs),
         std::fs::canonicalize(git).ok()?,
@@ -149,7 +149,7 @@ mod tests {
         )?;
         assert!(attribution_enabled(&resolved.roots));
         // No Git installation means best-effort attribution stays unavailable.
-        let expected = roots::git_binary().map(|_| expected_id);
+        let expected = provenant_supervisor::git::git_executable().map(|_| expected_id);
         assert_eq!(project_id(&resolved), expected);
         Ok(())
     }
