@@ -2326,13 +2326,23 @@ fn render_profile(
             PathScope::Subtree,
         )?;
     }
-    // A writer may run what it builds into a configured write root (build
-    // scripts under a shared CARGO_TARGET_DIR). It can already run code it
-    // writes in the worktree, so this adds no capability.
+    // Writers run build scripts in configured write roots and fixture binaries
+    // in their own attempt tmp/candidate-N. Scratch already has a read grant.
     if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
         for root in &plan.write_roots {
             push_rule(&mut source, "allow", "process-exec", &root.path, root.scope)?;
         }
+        push_rule(
+            &mut source,
+            "allow",
+            "process-exec",
+            &plan.scratch.path,
+            PathScope::Subtree,
+        )?;
+        source.push_str(concat!(
+            "(allow signal (target children))\n",
+            "(allow file-read* (subpath \"/dev/fd\"))\n",
+        ));
     }
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
@@ -3049,9 +3059,7 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut plan, profile) = write_grants_fixture();
+    fn worktree_grants_fixture() -> WorktreeWriteGrants {
         let exact = |name: &str| PathGrant {
             path: Path::new("/fixture/git").join(name),
             scope: PathScope::Exact,
@@ -3060,7 +3068,7 @@ mod tests {
             path: path.into(),
             scope: PathScope::Subtree,
         };
-        let git = WorktreeWriteGrants {
+        WorktreeWriteGrants {
             worktree: subtree("/fixture/repo"),
             private_git_dir: subtree("/fixture/git/private"),
             common_git_dir: subtree("/fixture/git"),
@@ -3072,6 +3080,85 @@ mod tests {
             head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
             objects: subtree("/fixture/git/objects"),
             selected_ref: std::array::from_fn(|i| exact(&format!("ref-{i}"))),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writer_test_grants_stay_within_the_attempt_and_mode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut plan, profile) = write_grants_fixture();
+        let scratch = "/fixture/runs/run/attempts/own/tmp/candidate-0";
+        plan.scratch.path = scratch.into();
+        let git = worktree_grants_fixture();
+        for writer in [false, true] {
+            if writer {
+                plan.read_only = None;
+                plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
+                    git_grants_digest: [7; 32],
+                    cargo_cache: PathGrant {
+                        path: "/fixture/cache".into(),
+                        scope: PathScope::Subtree,
+                    },
+                }));
+            }
+            let rendered = String::from_utf8(render_profile(
+                &plan,
+                &profile,
+                &[],
+                &[],
+                writer.then_some(&git),
+                Path::new("/fixture/home"),
+            )?)?;
+            let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
+            assert_eq!(rendered.lines().any(|line| line == exec), writer);
+            assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
+            for outside in [
+                "/fixture/runs",
+                "/fixture/runs/run",
+                "/fixture/runs/run/attempts/own",
+                "/fixture/runs/run/attempts/own/tmp",
+                "/fixture/runs/run/attempts/own/tmp/candidate-1",
+                "/fixture/runs/run/attempts/other/tmp/candidate-0",
+            ] {
+                for operation in ["process-exec", "file-read*"] {
+                    assert!(
+                        !rendered.contains(&format!("(allow {operation} (subpath \"{outside}\"))")),
+                        "{outside}"
+                    );
+                }
+            }
+            assert!(!rendered.contains("(allow process-exec (subpath \"/fixture/private\"))"));
+            let signals: Vec<_> = rendered
+                .lines()
+                .filter(|line| line.starts_with("(allow signal"))
+                .collect();
+            assert_eq!(
+                signals,
+                if writer {
+                    vec!["(allow signal (target children))"]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                rendered.contains("(allow file-read* (subpath \"/dev/fd\"))"),
+                writer
+            );
+            assert!(!rendered.contains("(allow file-read* (subpath \"/dev\"))"));
+            assert!(!rendered.contains("(allow file-write* (subpath \"/dev/fd\"))"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut plan, profile) = write_grants_fixture();
+        let git = worktree_grants_fixture();
+        let subtree = |path: &str| PathGrant {
+            path: path.into(),
+            scope: PathScope::Subtree,
         };
         for writer in [false, true] {
             if writer {
@@ -4444,6 +4531,29 @@ mod tests {
                 run(&executables[0], &[&project_locks.join("lock")]),
             ),
             ("write root exec", run(&build_script, &[])),
+            ("attempt tmp exec", run(&scratch_script, &[])),
+            (
+                "child signal",
+                run(
+                    &executables[3],
+                    &[
+                        Path::new("-c"),
+                        Path::new(
+                            "/bin/sleep 1 & child=$!; kill -TERM \"$child\"; result=$?; wait \"$child\"; exit \"$result\"",
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "descriptor read",
+                run(
+                    &executables[3],
+                    &[
+                        Path::new("-c"),
+                        Path::new("test \"$(printf ok | /bin/cat /dev/fd/0)\" = ok"),
+                    ],
+                ),
+            ),
             (
                 "new symlink in worktree",
                 run(
@@ -4459,8 +4569,14 @@ mod tests {
             );
         }
         let mut probes = vec![
-            ("scratch exec", run(&scratch_script, &[])),
             ("undeclared target exec", run(&undeclared_script, &[])),
+            (
+                "parent signal probe",
+                run(
+                    &executables[3],
+                    &[Path::new("-c"), Path::new("kill -0 \"$PPID\"")],
+                ),
+            ),
             (
                 "git config write",
                 run(&executables[0], &[&common.join("config")]),
