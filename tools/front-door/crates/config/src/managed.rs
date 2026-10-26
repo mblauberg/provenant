@@ -1923,17 +1923,8 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         else {
             continue;
         };
-        for (recorded, default) in [
-            (Some(&recorded.skills_dir), Some(&default.skills_dir)),
-            (Some(&recorded.mcp_file), Some(&default.mcp_file)),
-            (recorded.hook_file.as_ref(), default.hook_file.as_ref()),
-            (recorded.instruction.as_ref(), default.instruction.as_ref()),
-        ] {
-            if let (Some(recorded), Some(default)) = (recorded, default)
-                && let Ok(tail) = default.strip_prefix(&home)
-            {
-                old_homes.push(before_tail(&recorded.to_path_buf()?, tail));
-            }
+        if let Ok(tail) = default.skills_dir.strip_prefix(&home) {
+            old_homes.push(before_tail(&recorded.skills_dir.to_path_buf()?, tail));
         }
     }
     old_homes.push(legacy_home.clone());

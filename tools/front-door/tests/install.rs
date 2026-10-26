@@ -651,14 +651,75 @@ fn recorded_legacy_hooks_replace_in_place_and_keep_herdr_during_dry_run() -> Res
 }
 
 #[test]
+fn external_claude_config_without_home_move_keeps_ownership() -> Result {
+    let executable = std::env::current_exe()?;
+    let rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    let first = staged(&rig)?;
+    let second = staged_named(&rig, "new-release", b"new release")?;
+    let config = rig.root.join("claude");
+    assert!(!config.starts_with(&rig.home));
+    for (stage, hooks) in [(&first, true), (&second, false)] {
+        let mut args = vec![
+            "install",
+            "--source",
+            stage.to_str().ok_or("stage")?,
+            "--harness",
+            "claude",
+            "--json",
+        ];
+        if hooks {
+            args.extend(["--hooks", "on"]);
+        }
+        let installed = rig.command(&args)?;
+        assert_eq!(
+            code(&installed),
+            0,
+            "{}",
+            String::from_utf8_lossy(&installed.stdout.bytes)
+        );
+        let checked = rig.command(&["check", "install", "--json"])?;
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+        assert_eq!(code(&checked), 0, "{report}");
+        assert_eq!(report["data"]["findings"], serde_json::json!([]));
+        let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+            fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
+            provenant_records::Limits::CONFIG,
+        )?;
+        for selector in ["skill", "json:/mcpServers/fabric", "hook:"] {
+            assert!(receipt.entries.iter().any(|entry| {
+                entry.harness == Some(provenant_records::Harness::Claude)
+                    && entry.selector.starts_with(selector)
+            }));
+        }
+        let mcp: serde_json::Value =
+            serde_json::from_slice(&fs::read(config.join(".claude.json"))?)?;
+        assert!(mcp["mcpServers"]["fabric"].is_object());
+        assert!(config.join("skills/example").is_symlink());
+        assert!(fs::read_to_string(config.join("settings.json"))?.contains("'hook' 'claude'"));
+    }
+    let removed = rig.command(&["uninstall", "--harness", "claude", "--json"])?;
+    assert_eq!(code(&removed), 0, "{removed:?}");
+    let report: serde_json::Value = serde_json::from_slice(&removed.stdout.bytes)?;
+    assert_eq!(report["data"]["outcome"]["findings"], serde_json::json!([]));
+    assert!(fs::symlink_metadata(config.join("skills/example")).is_err());
+    let mcp: serde_json::Value = serde_json::from_slice(&fs::read(config.join(".claude.json"))?)?;
+    assert!(mcp["mcpServers"]["fabric"].is_null());
+    assert!(!fs::read_to_string(config.join("settings.json"))?.contains("'hook' 'claude'"));
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -> Result {
+    let executable = std::env::current_exe()?;
+    let fixture_root = executable.parent().ok_or("test executable parent")?;
+    let git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
     for (explicit_off, modified) in [(false, false), (true, false), (true, true)] {
-        let rig = TestRig::new()?;
+        let rig = TestRig::in_directory(fixture_root)?;
         let first = staged(&rig)?;
         let second = staged_named(&rig, "new-release", b"new release")?;
         let legacy = rig.root.join("legacy");
         let init = rig.execute(
-            Path::new("/usr/bin/git"),
+            &git,
             &["init", "-q", legacy.to_str().ok_or("legacy")?],
             None,
         )?;
@@ -794,11 +855,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
         } else {
             let receipt_before = fs::read(rig.state.join("install/receipt.json"))?;
             let other = rig.root.join("another-legacy");
-            let init = rig.execute(
-                Path::new("/usr/bin/git"),
-                &["init", "-q", other.to_str().ok_or("other")?],
-                None,
-            )?;
+            let init = rig.execute(&git, &["init", "-q", other.to_str().ok_or("other")?], None)?;
             assert_eq!(code(&init), 0);
             std::os::unix::fs::symlink(
                 other.join("scripts/hooks/pre-push"),
