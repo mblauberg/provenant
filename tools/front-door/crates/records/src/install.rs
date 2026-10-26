@@ -92,7 +92,6 @@ pub struct InstallReceipt {
     pub harnesses: Vec<Harness>,
     pub harness_targets: Vec<ResolvedHarnessTarget>,
     pub entries: Vec<OwnedEntry>,
-    pub legacy: Option<LegacyInstall>,
 }
 
 /// Build identity emitted at the binary edge without ambient source discovery.
@@ -104,18 +103,4 @@ pub struct VersionInfo {
     pub toolchain: String,
     pub record_schema_version: u64,
     pub config_schema_version: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyInstall {
-    pub checkout: AbsolutePath,
-    pub home: AbsolutePath,
-    pub manifest_digest: FileDigest,
-    pub git_hooks_dir: Option<AbsolutePath>,
-    /// Hooks in `git_hooks_dir` whose ownership ended (edited, missing or
-    /// removed). Whatever sits there now is user state, so audits skip them;
-    /// other legacy hooks stay audited.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub relinquished_hooks: Vec<String>,
 }

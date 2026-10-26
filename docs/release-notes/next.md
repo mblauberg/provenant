@@ -9,6 +9,14 @@ configuration, the release packager (`examples/package-release.rs`) and the
 bundled assets. Edits under a member's `tests/`, `benches/` and other `examples/`
 no longer change it.
 
+## Breaking changes
+
+- Installer cut-over support is removed: `install --legacy-checkout` is no
+  longer accepted, receipts with legacy fields fail with a reinstall error,
+  and pre-1.0 cleanup, legacy `check install` findings and Git launcher
+  ownership are removed. Move the old receipt aside and reinstall; see
+  [receipt recovery](../runbooks/install.md#receipt-recovery) (#1571).
+
 ## Behaviour changes
 
 - `provenant output` on a terminal attempt that has no requested part now

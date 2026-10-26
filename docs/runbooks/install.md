@@ -100,15 +100,12 @@ Repeat the account registration for each account, with a unique label and
 Review every planned change before applying it; a failed preview prevents
 writes. `--dry-run` creates no state root, lock or receipt. A first install
 leaves hooks disabled unless requested. Re-install without `--hooks` keeps
-ownership of previously installed hooks, including the legacy Git pre-push
-launcher, and refreshes unchanged entries for the new installation. Edited
-hooks and launchers stay in place, leave the receipt and produce findings.
-Missing launchers also leave the receipt. The legacy checkout flag need not
-be repeated. `--hooks off` removes unchanged owned hooks and relinquishes
-modified ones, reporting them. Explicit `--hooks on` refuses an edited Claude
-hook; use `--hooks off` to relinquish its ownership before reinstalling.
-The receipt records one legacy checkout. Remove or relinquish its pre-push
-launcher with `--hooks off` before migrating another checkout.
+ownership of previously installed hooks and refreshes unchanged entries for the
+new installation. Edited hooks stay in place, leave the receipt and produce
+findings. Missing hooks also leave the receipt. `--hooks off` removes unchanged
+owned hooks and relinquishes modified ones, reporting them. Explicit
+`--hooks on` refuses an edited Claude hook; use `--hooks off` to relinquish its
+ownership before reinstalling.
 `--hooks on` registers hooks for each selected harness that has a
 fixture-backed hook specification (Claude today). At least one selected
 harness must have a specification. Unmanaged paths are preserved, and
@@ -175,23 +172,15 @@ produces the typed `release.json`. The CLI grammar is described in
 [cli.md](../specs/cli.md); `help --json` describes the command
 surface without resolving roots or creating state.
 
-## Migrating from a pre-1.0 install
+## Receipt recovery
 
-Only an install that predates the Rust binary needs this. Pass
-`--legacy-checkout PATH` to name the one old checkout whose compiled entries
-the installer may match, and choose a fresh state root outside every legacy
-root. The installer does not discover an old checkout or import an old receipt.
-
-```sh
-LEGACY_CHECKOUT=/absolute/path/to/old/checkout
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --legacy-checkout "$LEGACY_CHECKOUT" --dry-run
-```
-
-The preview prints each matched change and each unresolved entry. An exact
-legacy entry marked `replace` is replaced only when that handler is available.
-Otherwise the installer preserves it byte for byte and reports it as
-unresolved, and `check install` reports unresolved entries as findings with
-exit 1. Apply the same command without `--dry-run` once the preview is right.
+Receipts carrying removed legacy fields fail to decode with a reinstall error.
+Move `<state>/install/receipt.json` aside, then preview and reapply `install`
+with the desired release and harnesses. Existing exact desired files and links
+remain no-ops. Use `--adopt-existing` for occupied managed MCP selectors or a
+stable regular executable that must be replaced, and inspect the preview before
+applying it. Remove obsolete entries manually; install, uninstall and
+`check install` no longer clean up or audit pre-1.0 entries or Git launchers.
 
 ## Fabric MCP registration
 

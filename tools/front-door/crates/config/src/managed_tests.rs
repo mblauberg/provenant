@@ -135,7 +135,6 @@ fn peer_agent_accepts_a_symlinked_home() {
     f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
     let release = f.release();
     let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
-    f.targets.legacy_checkout = Some(f.base.join("legacy-checkout"));
     let plan = plan_install(release, f.targets.clone(), snapshots).unwrap();
     assert!(plan.actions().iter().any(|action| {
         action.selector == "peer-agent"
@@ -413,7 +412,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
 #[test]
 fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
     for state_in_home in [true, false] {
-        for (custom_bin, legacy) in [(false, false), (true, false), (true, true)] {
+        for (custom_bin, home_alias) in [(false, false), (true, false), (true, true)] {
             let mut f = Fixture::new();
             let state = if state_in_home {
                 f.home.join("custom-state")
@@ -426,10 +425,9 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             if custom_bin {
                 f.targets.bin_dir = f.home.join("tools/bin");
             }
-            let alias = if legacy {
+            let alias = if home_alias {
                 let alias = f.base.join("home-alias");
                 symlink(&f.home, &alias).unwrap();
-                f.targets.legacy_checkout = Some(f.base.join("legacy-checkout"));
                 Some(alias)
             } else {
                 None
@@ -439,8 +437,8 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             let ctx = context(&clock, &cancel);
             let release = f.release();
             let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
-            // Keep the caller's HOME spelling in the legacy record after
-            // capturing the resolved destinations.
+            // Keep the caller's HOME spelling after capturing the resolved
+            // destinations.
             if let Some(alias) = alias {
                 f.targets.home = alias;
             }
@@ -473,7 +471,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
                     Value::Other => panic!("unexpected canary"),
                 }
             }
-            // Legacy auditing must not parse this recreated old-home file.
+            // Inspection must not parse this recreated old-home file.
             fs::write(f.home.join(".claude.json"), b"invalid JSON\0").unwrap();
             let mut inputs = RootInputs::new(moved_home.clone(), f.base.join("checkout"));
             inputs.environment_state_dir = Some(if state_in_home {
@@ -531,66 +529,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
 }
 
 #[test]
-fn changing_bin_dir_without_moving_home_preserves_legacy_ownership() {
-    let mut f = Fixture::new();
-    f.targets.harnesses = Targets::new(
-        f.targets.roots.clone(),
-        &f.home,
-        &[Harness::Claude, Harness::Codex],
-    )
-    .harnesses;
-    let checkout = f.base.join("legacy-checkout");
-    let hooks = checkout.join(".git/hooks");
-    fs::create_dir_all(&hooks).unwrap();
-    let launcher = hooks.join("pre-push");
-    symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
-    f.targets.legacy_checkout = Some(checkout);
-    f.targets.git_hooks_dir = Some(hooks);
-    f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
-    f.targets.hook_specs.push(HookRegistration {
-        harness: None,
-        event: "pre-push",
-        matcher: None,
-        timeout: None,
-        command: &["hook", "git", "pre-push"],
-    });
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let original = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
-    // The tail "bin" also matches the old .local/bin, but .local is not an old home.
-    f.targets.bin_dir = f.home.join("bin");
-    f.targets.legacy_checkout = None;
-    f.targets.git_hooks_dir = None;
-    f.targets.hooks = false;
-    let outcome = install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert!(outcome.findings.is_empty(), "{:?}", outcome.findings);
-    let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
-    assert_eq!(receipt.legacy, original.legacy);
-    assert!(receipt.entries.iter().any(|entry| {
-        entry.selector == "git-hook:pre-push" && entry.path.to_path_buf().unwrap() == launcher
-    }));
-    // The retained legacy record must still be audited.
-    fs::write(f.home.join(".claude.json"), b"invalid JSON\0").unwrap();
-    assert!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &cancel
-        )
-        .unwrap()
-        .error
-        .is_some()
-    );
-}
-
-#[test]
-fn direct_reinstall_after_home_rename_drops_old_targets_and_legacy() {
+fn direct_reinstall_after_home_rename_drops_old_targets() {
     let mut f = Fixture::new();
     f.targets.harnesses = Targets::new(
         f.targets.roots.clone(),
@@ -601,28 +540,13 @@ fn direct_reinstall_after_home_rename_drops_old_targets_and_legacy() {
     // A mixed target must lose its outside-home selector ownership too when
     // its old-home skills destination is forgotten.
     f.targets.harnesses[0].mcp_file = f.base.join("claude.json");
-    let checkout = f.base.join("legacy-checkout");
-    let hooks = checkout.join(".git/hooks");
-    fs::create_dir_all(&hooks).unwrap();
-    let launcher = hooks.join("pre-push");
-    symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
-    f.targets.legacy_checkout = Some(checkout);
-    f.targets.git_hooks_dir = Some(hooks);
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
-    f.targets.hook_specs.push(HookRegistration {
-        harness: None,
-        event: "pre-push",
-        matcher: None,
-        timeout: None,
-        command: &["hook", "git", "pre-push"],
-    });
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let outside_config = fs::read(f.base.join("claude.json")).unwrap();
-    let old_launcher = fs::read(&launcher).unwrap();
     let old_receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
@@ -638,14 +562,6 @@ fn direct_reinstall_after_home_rename_drops_old_targets_and_legacy() {
     let receipt = read_receipt(&targets, &LocalFs).unwrap().unwrap();
     assert_eq!(receipt.harnesses, [Harness::Codex]);
     assert_eq!(receipt.harness_targets.len(), 1);
-    assert!(receipt.legacy.is_none());
-    assert!(
-        !receipt
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "git-hook:pre-push")
-    );
-    assert_ne!(fs::read(&launcher).unwrap(), old_launcher);
     assert!(
         receipt
             .entries
@@ -661,10 +577,9 @@ fn direct_reinstall_after_home_rename_drops_old_targets_and_legacy() {
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
 
-    // Earlier reinstalls refreshed the binary while carrying old target and
-    // legacy metadata. Recover that persisted shape too.
+    // Earlier reinstalls refreshed the binary while carrying old target
+    // metadata. Recover that persisted shape too.
     let mut historical = receipt;
-    historical.legacy = old_receipt.legacy;
     historical.harnesses.push(Harness::Claude);
     historical
         .harness_targets
@@ -687,18 +602,16 @@ fn direct_reinstall_after_home_rename_drops_old_targets_and_legacy() {
     let plan = plan_install(release, targets.clone(), snapshots).unwrap();
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let receipt = read_receipt(&targets, &LocalFs).unwrap().unwrap();
-    assert!(receipt.legacy.is_none());
     assert_eq!(receipt.harness_targets.len(), 1);
     assert_eq!(fs::read(&canary).unwrap(), b"AGENT_FABRIC_LABEL\n");
 }
 
 #[test]
-fn check_after_home_rename_never_inspects_old_legacy_paths() {
+fn check_after_home_rename_never_inspects_old_config_paths() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
         .resolve(&Resolver)
         .unwrap();
-    f.targets.legacy_checkout = Some(f.base.join("legacy-checkout"));
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     install(
@@ -770,75 +683,6 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
         Some(f.targets.bin_dir.join("provenant"))
     );
     assert_eq!(fs::read(&old_binary).unwrap(), b"old release canary\n");
-}
-
-#[test]
-fn full_uninstall_after_home_rename_retains_stale_git_hook_ownership() {
-    let mut f = Fixture::new();
-    let roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    f.targets = Targets::new(roots, &f.home, &[Harness::Claude]);
-    f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
-    f.targets.hook_specs.push(HookRegistration {
-        harness: None,
-        event: "pre-push",
-        matcher: None,
-        timeout: None,
-        command: &["hook", "git", "pre-push"],
-    });
-    let checkout = f.home.join("old-checkout");
-    let hooks = checkout.join(".git/hooks");
-    fs::create_dir_all(&hooks).unwrap();
-    let launcher = hooks.join("pre-push");
-    symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
-    f.targets.legacy_checkout = Some(checkout);
-    f.targets.git_hooks_dir = Some(hooks);
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let bytes = fs::read(&launcher).unwrap();
-    let mode = fs::metadata(&launcher).unwrap().permissions();
-    let moved_home = f.base.join("home-moved");
-    fs::rename(&f.home, &moved_home).unwrap();
-    fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-    fs::write(&launcher, &bytes).unwrap();
-    fs::set_permissions(&launcher, mode).unwrap();
-    let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    let targets = Targets::new(roots, &moved_home, &[Harness::Claude]);
-    let outcome = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
-    assert!(
-        outcome
-            .actions
-            .iter()
-            .all(|action| action.selector == "receipt")
-    );
-    assert!(
-        outcome
-            .findings
-            .iter()
-            .any(|finding| finding.rule == "relocated_stale_entry"
-                && finding.path.to_path_buf().unwrap() == launcher)
-    );
-    assert_eq!(fs::read(&launcher).unwrap(), bytes);
-    let receipt_bytes =
-        fs::read(targets.roots.state.as_path().join("install/receipt.json")).unwrap();
-    let receipt: InstallReceipt =
-        provenant_records::decode_v1(receipt_bytes.as_slice(), Limits::CONFIG).unwrap();
-    assert!(receipt.harness_targets.is_empty());
-    assert!(receipt.harnesses.is_empty());
-    assert!(receipt.legacy.is_some());
-    assert!(
-        receipt
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "git-hook:pre-push"
-                && entry.path.to_path_buf().unwrap() == launcher)
-    );
 }
 
 #[test]
@@ -1182,225 +1026,6 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
             crate::hooks::get(&fs::read(&hook).unwrap(), &selector).unwrap(),
             Some(edited)
         );
-    }
-}
-
-#[test]
-fn uninstall_trusts_only_the_rederived_legacy_hooks_directory() {
-    for checkout_present in [true, false] {
-        let mut f = Fixture::new();
-        f.targets.harnesses =
-            Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
-        f.targets.hooks = true;
-        f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
-        f.targets.hook_specs.push(HookRegistration {
-            harness: None,
-            event: "pre-push",
-            matcher: None,
-            timeout: None,
-            command: &["hook", "git", "pre-push"],
-        });
-        // The receipt records a hooks directory outside its checkout, as an
-        // edited receipt would.
-        let checkout = f.home.join("old-checkout");
-        let derived = checkout.join(".git/hooks");
-        let recorded = f.home.join("elsewhere/hooks");
-        fs::create_dir_all(&derived).unwrap();
-        fs::create_dir_all(&recorded).unwrap();
-        let launcher = recorded.join("pre-push");
-        symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
-        f.targets.legacy_checkout = Some(checkout.clone());
-        f.targets.git_hooks_dir = Some(recorded);
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let ctx = context(&clock, &cancel);
-        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        assert!(launcher.is_file());
-        assert_eq!(
-            recorded_hook_checkout(&f.targets, &LocalFs).unwrap(),
-            Some(checkout)
-        );
-        f.targets.legacy_checkout = None;
-        f.targets.git_hooks_dir = checkout_present.then_some(derived);
-        let result = uninstall(&f.targets, &ctx, &mut Reporter::default());
-        if checkout_present {
-            assert!(matches!(result, Err(InstallError::Conflict(path)) if path == launcher));
-        } else {
-            assert!(result.unwrap().findings.iter().any(|finding| {
-                finding.rule == "legacy_checkout_unavailable"
-                    && finding.path.to_path_buf().unwrap() == launcher
-            }));
-        }
-        assert!(launcher.is_file());
-    }
-}
-
-#[test]
-fn partial_uninstall_needs_no_legacy_hooks_directory() {
-    let mut f = Fixture::new();
-    f.targets.harnesses = Targets::new(
-        f.targets.roots.clone(),
-        &f.home,
-        &[Harness::Claude, Harness::Codex],
-    )
-    .harnesses;
-    f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
-    f.targets.hook_specs.push(HookRegistration {
-        harness: None,
-        event: "pre-push",
-        matcher: None,
-        timeout: None,
-        command: &["hook", "git", "pre-push"],
-    });
-    let checkout = f.home.join("old-checkout");
-    let hooks = checkout.join(".git/hooks");
-    fs::create_dir_all(&hooks).unwrap();
-    let launcher = hooks.join("pre-push");
-    symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
-    f.targets.legacy_checkout = Some(checkout.clone());
-    f.targets.git_hooks_dir = Some(hooks);
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    f.targets.hooks = false;
-    f.targets.legacy_checkout = None;
-    f.targets.git_hooks_dir = None;
-    assert_eq!(
-        recorded_hook_checkout(&f.targets, &LocalFs).unwrap(),
-        Some(checkout)
-    );
-    // Claude keeps the shared launcher, so uninstalling only Codex needs no
-    // hooks directory, even when the checkout has lost its Git metadata.
-    let mut codex = f.targets.clone();
-    codex
-        .harnesses
-        .retain(|target| target.harness == Harness::Codex);
-    assert_eq!(recorded_hook_checkout(&codex, &LocalFs).unwrap(), None);
-    let outcome = uninstall(&codex, &ctx, &mut Reporter::default()).unwrap();
-    assert!(outcome.findings.is_empty());
-    assert!(launcher.is_file());
-    let receipt = read_receipt(&codex, &LocalFs).unwrap().unwrap();
-    assert_eq!(receipt.harnesses, vec![Harness::Claude]);
-    assert!(
-        receipt
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "git-hook:pre-push")
-    );
-}
-
-#[test]
-fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migration() {
-    for missing in [false, true] {
-        let mut f = Fixture::new();
-        f.targets.harnesses =
-            Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
-        f.targets.hooks = true;
-        f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
-        f.targets.hook_specs.push(HookRegistration {
-            harness: None,
-            event: "pre-push",
-            matcher: None,
-            timeout: None,
-            command: &["hook", "git", "pre-push"],
-        });
-        let checkout = f.home.join("old-checkout");
-        let hooks = checkout.join(".git/hooks");
-        fs::create_dir_all(&hooks).unwrap();
-        let launcher = hooks.join("pre-push");
-        symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
-        // A never-owned neighbour stays audited after pre-push is relinquished.
-        let foreign = hooks.join("post-merge");
-        fs::write(&foreign, b"foreign hook\n").unwrap();
-        f.targets.legacy_checkout = Some(checkout);
-        f.targets.git_hooks_dir = Some(hooks);
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let ctx = context(&clock, &cancel);
-        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        assert!(
-            read_receipt(&f.targets, &LocalFs)
-                .unwrap()
-                .unwrap()
-                .entries
-                .iter()
-                .any(|entry| entry.selector == "git-hook:pre-push")
-        );
-        if missing {
-            fs::remove_file(&launcher).unwrap();
-        } else {
-            fs::write(&launcher, b"user launcher\n").unwrap();
-        }
-        f.targets.hooks = false;
-        f.targets.legacy_checkout = None;
-        f.targets.git_hooks_dir = None;
-        let outcome = install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        assert_eq!(
-            outcome
-                .findings
-                .iter()
-                .any(|finding| finding.rule == "relinquished_modified_entry"
-                    && finding.path.to_path_buf().unwrap() == launcher),
-            !missing
-        );
-        assert!(
-            !read_receipt(&f.targets, &LocalFs)
-                .unwrap()
-                .unwrap()
-                .entries
-                .iter()
-                .any(|entry| entry.selector == "git-hook:pre-push")
-        );
-        for _ in 0..2 {
-            install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        }
-        assert_eq!(
-            read_receipt(&f.targets, &LocalFs)
-                .unwrap()
-                .unwrap()
-                .legacy
-                .unwrap()
-                .relinquished_hooks,
-            ["pre-push"]
-        );
-        let inspection = inspect_install(
-            &f.targets,
-            Some(&f.release()),
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &cancel,
-        )
-        .unwrap();
-        assert!(inspection.error.is_none());
-        assert_eq!(
-            inspection
-                .findings
-                .iter()
-                .map(|finding| (finding.rule.as_str(), finding.path.to_path_buf().unwrap()))
-                .collect::<Vec<_>>(),
-            [("legacy_hook_conflict", foreign.clone())],
-            "{:?}",
-            inspection.findings
-        );
-        let other = f.home.join("other-checkout");
-        let hooks = other.join(".git/hooks");
-        fs::create_dir_all(&hooks).unwrap();
-        symlink(other.join("scripts/hooks/pre-push"), hooks.join("pre-push")).unwrap();
-        f.targets.hooks = true;
-        f.targets.legacy_checkout = Some(other);
-        f.targets.git_hooks_dir = Some(hooks.clone());
-        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        assert!(hooks.join("pre-push").is_file());
-        uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
-        assert!(!hooks.join("pre-push").exists());
-        if missing {
-            assert!(!launcher.exists());
-        } else {
-            assert_eq!(fs::read(launcher).unwrap(), b"user launcher\n");
-        }
     }
 }
 
@@ -2609,25 +2234,6 @@ fn manual_include_advice_is_omitted_when_shared_agents_is_installed_and_referenc
 }
 
 #[test]
-fn legacy_link_targets_match_after_canonicalization() {
-    let f = Fixture::new();
-    let checkout = f.home.join("LegacyCheckout");
-    fs::create_dir_all(&checkout).unwrap();
-    let alias = f.home.join("checkout-alias");
-    symlink(&checkout, &alias).unwrap();
-
-    let actual = alias.join("AGENTS.md");
-    let expected = checkout.join("AGENTS.md");
-    fs::write(&expected, "legacy instructions").unwrap();
-    assert!(crate::managed::same_link_target(&actual, &expected));
-
-    let case_variant = f.home.join("legacycheckout/AGENTS.md");
-    if case_variant.exists() {
-        assert!(crate::managed::same_link_target(&case_variant, &expected));
-    }
-}
-
-#[test]
 fn completed_immutable_release_missing_a_file_is_not_repaired() {
     let f = Fixture::new();
     let plan = f.plan();
@@ -3407,9 +3013,8 @@ fn mcp_conflict_does_not_adopt_foreign_env_or_create_state() {
 }
 
 #[test]
-fn five_client_cutover_is_exact_preserves_herdr_comments_and_reapplies() {
+fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
     let mut f = Fixture::new();
-    let legacy = f.home.join("old-checkout");
     f.targets = Targets::new(
         f.targets.roots.clone(),
         &f.home,
@@ -3421,27 +3026,13 @@ fn five_client_cutover_is_exact_preserves_herdr_comments_and_reapplies() {
             Harness::Opencode,
         ],
     );
-    f.targets.legacy_checkout = Some(legacy.clone());
     for target in &f.targets.harnesses {
         fs::create_dir_all(&target.skills_dir).unwrap();
         symlink(
-            legacy.join("skills/autopilot-near"),
+            f.home.join("personal-skills/autopilot"),
             target.skills_dir.join("autopilot"),
         )
         .unwrap();
-        symlink(
-            legacy.join("skills/_shared"),
-            target.skills_dir.join("_shared"),
-        )
-        .unwrap();
-        if let Some(instruction) = &target.instruction {
-            let source = if matches!(target.harness, Harness::Claude | Harness::Codex) {
-                f.home.join(".agents/AGENTS.md")
-            } else {
-                legacy.join("AGENTS.md")
-            };
-            symlink(source, instruction).unwrap();
-        }
     }
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     for name in ["AGENTS.md", "HARNESS.md"] {
@@ -3449,29 +3040,21 @@ fn five_client_cutover_is_exact_preserves_herdr_comments_and_reapplies() {
         fs::write(&p, b"PROVENANT_AGENT_LABEL instructions\n").unwrap();
         fs::set_permissions(p, fs::Permissions::from_mode(0o600)).unwrap();
     }
-    fs::create_dir_all(f.home.join(".agents")).unwrap();
-    fs::write(
-        f.home.join(".agents/AGENTS.md"),
-        b"Set AGENT_FABRIC_LABEL for messages\n",
-    )
-    .unwrap();
     let hook = f.home.join(".claude/settings.json");
-    let old_hook = format!(
-        "python3 \"{}/skills/session/scripts/state_check.py\" --hook",
-        legacy.display()
-    );
-    let owned =
-        serde_json::to_string(&serde_json::json!({"type":"command","command":old_hook})).unwrap();
     let herdr = r#"{"type":"command", "command":"herdr capture", "timeout":2}"#;
     let before = format!(
-        "{{\n // herdr stays\n \"user\": 7,\n \"hooks\": {{\"PreCompact\":[{{\"hooks\":[{owned}, {herdr}]}}]}}\n}}\n"
+        "{{\n // herdr stays\n \"user\": 7,\n \"hooks\": {{\"PreCompact\":[{{\"hooks\":[{herdr}]}}]}}\n}}\n"
     );
     fs::write(&hook, &before).unwrap();
     let codex_hooks = f.home.join(".codex/hooks.json");
     let codex_foreign = b"{\n // Herdr\n \"hooks\":{\"Stop\":[{\"command\":\"herdr\"}]}\n}\n";
     fs::write(&codex_hooks, codex_foreign).unwrap();
     let opencode = f.home.join(".config/opencode/opencode.jsonc");
-    fs::write(&opencode,format!("{{// foreign comment\n\"instructions\":[\"foreign.md\",{},],\n\"theme\": \"user\",}}\n",serde_json::to_string(&f.home.join(".agents/AGENTS.md").to_str().unwrap()).unwrap())).unwrap();
+    fs::write(
+        &opencode,
+        "{// foreign comment\n\"instructions\":[\"foreign.md\",],\n\"theme\": \"user\",}\n",
+    )
+    .unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -3479,10 +3062,9 @@ fn five_client_cutover_is_exact_preserves_herdr_comments_and_reapplies() {
     assert!(plan.actions().iter().any(|a| !a.edits.is_empty()));
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     for target in &f.targets.harnesses {
-        assert!(fs::symlink_metadata(target.skills_dir.join("_shared")).is_err());
         assert_eq!(
             fs::read_link(target.skills_dir.join("autopilot")).unwrap(),
-            legacy.join("skills/autopilot-near")
+            f.home.join("personal-skills/autopilot")
         );
         assert!(target.mcp_file.is_file());
         if let Some(instruction) = &target.instruction {
@@ -3493,37 +3075,25 @@ fn five_client_cutover_is_exact_preserves_herdr_comments_and_reapplies() {
             );
         }
     }
-    let after = fs::read_to_string(&hook).unwrap();
-    assert!(after.contains(herdr));
-    assert!(after.contains("// herdr stays"));
-    assert_eq!(after, before);
+    assert_eq!(fs::read_to_string(&hook).unwrap(), before);
     assert_eq!(fs::read(codex_hooks).unwrap(), codex_foreign);
-    assert_eq!(
-        fs::read_to_string(f.home.join(".agents/AGENTS.md")).unwrap(),
-        "Set PROVENANT_AGENT_LABEL for messages\n"
-    );
     assert!(
         fs::read_to_string(&opencode)
             .unwrap()
             .contains("// foreign comment")
     );
     assert!(f.plan().actions().is_empty());
-    assert!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .findings
-        .iter()
-        .any(
-            |finding| finding.rule == "legacy_entry" && finding.path.to_path_buf().unwrap() == hook
-        )
-    );
+    let inspection = inspect_install(
+        &f.targets,
+        None,
+        "fixture-target",
+        &LocalFs,
+        &Smoke,
+        &cancel,
+    )
+    .unwrap();
+    assert!(inspection.error.is_none(), "{:?}", inspection.error);
+    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
     uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
     let after = fs::read_to_string(opencode).unwrap();
     assert!(after.contains("foreign.md"));
@@ -3532,35 +3102,9 @@ fn five_client_cutover_is_exact_preserves_herdr_comments_and_reapplies() {
 }
 
 #[test]
-fn whole_skills_link_is_unlinked_without_reading_its_target() {
+fn duplicate_owned_instruction_values_refuse_before_writes() {
     let mut f = Fixture::new();
-    let legacy = f.home.join("unread-old-checkout");
-    f.targets.legacy_checkout = Some(legacy.clone());
-    fs::create_dir_all(f.home.join(".codex")).unwrap();
-    symlink(legacy.join("skills"), f.home.join(".codex/skills")).unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(f.home.join(".codex/skills").is_dir());
-    assert!(!f.home.join(".codex/skills").is_symlink());
-    assert!(f.link().is_symlink());
-    assert!(!legacy.exists());
-    assert!(f.plan().actions().is_empty());
-}
-
-#[test]
-fn legacy_checkout_destinations_and_duplicate_owned_instruction_values_refuse() {
-    let mut f = Fixture::new();
-    let legacy = f.home.join("old-checkout");
-    f.targets.legacy_checkout = Some(legacy.clone());
-    f.targets.bin_dir = legacy.join("bin");
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     fs::write(
         f.source.join("instructions/AGENTS.md"),
@@ -3568,26 +3112,15 @@ fn legacy_checkout_destinations_and_duplicate_owned_instruction_values_refuse() 
     )
     .unwrap();
     let release = f.release();
-    let error = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "unmanaged destination conflicts: {}",
-            legacy.join("bin/provenant").display()
-        )
-    );
-    assert!(!legacy.exists());
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
-    f.targets.legacy_checkout = Some(legacy);
+    let instruction = release_root(
+        f.targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    )
+    .join("instructions/AGENTS.md");
     let config = f.targets.harnesses[0].mcp_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let old = f
-        .home
-        .join(".agents/AGENTS.md")
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let bytes = serde_json::to_vec(&serde_json::json!({"instructions":[old,old]})).unwrap();
+    let bytes =
+        serde_json::to_vec(&serde_json::json!({"instructions":[instruction,instruction]})).unwrap();
     fs::write(&config, &bytes).unwrap();
     assert_eq!(
         Snapshots::capture(&release, &f.targets, &LocalFs)
@@ -3802,111 +3335,6 @@ fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
 }
 
 #[test]
-fn only_manifest_matched_utility_hooks_refuse_and_check_reports_findings() {
-    let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
-    let checkout = f.home.join("legacy-checkout");
-    f.targets.legacy_checkout = Some(checkout.clone());
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    let config = f.home.join(".claude/settings.json");
-    let foreign = b"{\"hooks\":{\"PostToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"foreign command remains unchanged\"}]}]}}\n";
-    fs::write(&config, foreign).unwrap();
-    assert!(f.plan().actions().is_empty());
-    assert!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .findings
-        .is_empty()
-    );
-    assert_eq!(fs::read(&config).unwrap(), foreign);
-    let command = format!(
-        "/unrecorded/python '{}'",
-        checkout.join("scripts/utility_output_hook.py").display()
-    );
-    let ambiguous = serde_json::to_vec(&serde_json::json!({"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":command,"timeout":30}]}]}})).unwrap();
-    fs::write(&config, &ambiguous).unwrap();
-    let release = f.release();
-    assert!(matches!(
-        Snapshots::capture(&release, &f.targets, &LocalFs),
-        Err(InstallError::LegacyUnresolved(_))
-    ));
-    assert!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .findings
-        .iter()
-        .any(|finding| finding.rule == "legacy_entry"
-            && finding.path.to_path_buf().unwrap() == config)
-    );
-    assert_eq!(fs::read(&config).unwrap(), ambiguous);
-}
-
-#[test]
-fn check_install_detects_reintroduced_global_legacy_link() {
-    let mut f = Fixture::new();
-    f.targets.legacy_checkout = Some(f.home.join("legacy-checkout"));
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    fs::create_dir_all(f.home.join(".agents")).unwrap();
-    let global = f.home.join(".agents/AGENTS.md");
-    symlink(
-        f.targets
-            .legacy_checkout
-            .as_ref()
-            .unwrap()
-            .join("AGENTS.md"),
-        &global,
-    )
-    .unwrap();
-    let findings = inspect_install(
-        &f.targets,
-        None,
-        "fixture-target",
-        &LocalFs,
-        &Smoke,
-        &CancelToken::new(),
-    )
-    .unwrap()
-    .findings;
-    assert!(
-        findings
-            .iter()
-            .any(|f| f.rule == "legacy_entry" && f.path.to_path_buf().unwrap() == global)
-    );
-}
-
-#[test]
 fn install_uses_strict_configuration_before_planning() {
     let mut f = Fixture::new();
     let state = f.targets.roots.state.as_path();
@@ -4062,36 +3490,14 @@ fn mcp_registry_matches_recorded_client_config_contracts() {
 }
 
 #[test]
-fn compiled_replace_disposition_refuses_missing_assets_and_links_library_skills() {
-    let mut f = Fixture::new();
-    let legacy = f.home.join("legacy-checkout");
-    f.targets.legacy_checkout = Some(legacy.clone());
+fn install_links_manifest_skills_and_library_skills() {
+    let f = Fixture::new();
     let skills = f.targets.harnesses[0].skills_dir.clone();
-    fs::create_dir_all(&skills).unwrap();
-    symlink(legacy.join("skills/autopilot"), skills.join("autopilot")).unwrap();
-    assert_eq!(
-        Snapshots::capture(&f.release(), &f.targets, &LocalFs)
-            .unwrap_err()
-            .to_string(),
-        "invalid release manifest: missing legacy replacement asset"
-    );
-    assert_eq!(
-        fs::read_link(skills.join("autopilot")).unwrap(),
-        legacy.join("skills/autopilot")
-    );
-    assert!(!f.targets.roots.state.as_path().exists());
-    let mut f = Fixture::new();
-    let legacy = f.home.join("legacy-checkout");
-    f.targets.legacy_checkout = Some(legacy.clone());
-    let skills = f.targets.harnesses[0].skills_dir.clone();
-    fs::create_dir_all(&skills).unwrap();
-    symlink(legacy.join("skills/autopilot"), skills.join("autopilot")).unwrap();
     for relative in ["skills/autopilot", "library/playwright"] {
         let dir = f.source.join(relative);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("SKILL.md"), "---\nname: retained\n---\n").unwrap();
     }
-    symlink(legacy.join("library/playwright"), skills.join("playwright")).unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     install(
@@ -4179,29 +3585,6 @@ fn source_mount_descendant_refuses_before_reading_manifest_assets() {
 }
 
 #[test]
-fn protected_legacy_removal_refuses_before_writes() {
-    let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
-    let checkout = f.home.join("legacy-checkout");
-    f.targets.legacy_checkout = Some(checkout.clone());
-    let workflows = f.home.join(".claude/workflows");
-    fs::create_dir_all(&workflows).unwrap();
-    let leaf = workflows.join("cross-verify.js");
-    symlink(checkout.join("workflows/cross-verify.js"), &leaf).unwrap();
-    f.targets.protected_roots.push(workflows);
-    let release = f.release();
-    let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
-    assert!(
-        matches!(plan_install(release, f.targets.clone(), snapshots), Err(InstallError::Conflict(p)) if p == leaf)
-    );
-    assert_eq!(
-        fs::read_link(&leaf).unwrap(),
-        checkout.join("workflows/cross-verify.js")
-    );
-    assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
 fn uninstall_without_receipt_reports_nothing_installed() {
     let f = Fixture::new();
     let clock = SystemClock::new();
@@ -4215,75 +3598,6 @@ fn uninstall_without_receipt_reports_nothing_installed() {
     assert!(outcome.actions.is_empty());
     assert_eq!(outcome.findings[0].rule, "not_installed");
     assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn foreign_git_hooks_are_preserved_and_reported() {
-    for foreign_link in [false, true] {
-        let mut f = Fixture::new();
-        let checkout = f.home.join("legacy-checkout");
-        let hooks = checkout.join(".git/hooks");
-        fs::create_dir_all(&hooks).unwrap();
-        f.targets.legacy_checkout = Some(checkout);
-        f.targets.git_hooks_dir = Some(hooks.clone());
-        let path = hooks.join("post-merge");
-        if foreign_link {
-            symlink("/foreign/hook", &path).unwrap();
-        } else {
-            fs::write(&path, b"personal hook\n").unwrap();
-        }
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let plan = f.plan();
-        assert!(
-            plan.actions()
-                .iter()
-                .all(|a| a.path.to_path_buf().unwrap() != path)
-        );
-        let outcome = install(
-            &plan,
-            &context(&clock, &cancel),
-            &mut Reporter::default(),
-            &Smoke,
-            false,
-        )
-        .unwrap();
-        assert!(
-            outcome
-                .findings
-                .iter()
-                .any(|f| f.path.to_path_buf().unwrap() == path)
-        );
-        if foreign_link {
-            assert_eq!(fs::read_link(&path).unwrap(), Path::new("/foreign/hook"));
-        } else {
-            assert_eq!(fs::read(&path).unwrap(), b"personal hook\n");
-        }
-        f.targets.legacy_checkout = None;
-        f.targets.git_hooks_dir = None;
-        install(
-            &f.plan(),
-            &context(&clock, &cancel),
-            &mut Reporter::default(),
-            &Smoke,
-            false,
-        )
-        .unwrap();
-        assert!(
-            inspect_install(
-                &f.targets,
-                None,
-                "fixture-target",
-                &LocalFs,
-                &Smoke,
-                &CancelToken::new()
-            )
-            .unwrap()
-            .findings
-            .iter()
-            .any(|f| f.rule == "legacy_hook_conflict" && f.path.to_path_buf().unwrap() == path)
-        );
-    }
 }
 
 #[test]
@@ -4318,167 +3632,23 @@ fn claude_large_harness_config_is_bounded_and_byte_preserved() {
 }
 
 #[test]
-fn install_replaces_only_the_exact_legacy_command_file_form() {
-    for recognised in [true, false] {
-        let mut f = Fixture::new();
-        f.targets.legacy_checkout = Some(f.home.join("old-checkout"));
-        fs::create_dir_all(&f.targets.bin_dir).unwrap();
-        let binary = f.targets.bin_dir.join("provenant");
-        // ELF/Mach-O bytes contain the old front door's embedded identity.
-        let mut before = b"\x7fELFfixture\n# Managed by scripts/install-harness; local edits to an installed copy are not preserved.\nprovenant-front-door source-sha256=".to_vec();
-        before.extend_from_slice(
-            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ncompiled payload",
-        );
-        if !recognised {
-            before[0] = b'x';
-        }
-        fs::write(&binary, &before).unwrap();
-        let release = f.release();
-        let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
-        let plan = plan_install(release, f.targets.clone(), snapshots);
-        if recognised {
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let plan = plan.unwrap();
-            install(
-                &plan,
-                &context(&clock, &cancel),
-                &mut Reporter::default(),
-                &Smoke,
-                true,
-            )
-            .unwrap();
-            assert_eq!(fs::read(&binary).unwrap(), before);
-            install(
-                &plan,
-                &context(&clock, &cancel),
-                &mut Reporter::default(),
-                &Smoke,
-                false,
-            )
-            .unwrap();
-            assert!(binary.is_symlink());
-        } else {
-            assert!(matches!(plan, Err(InstallError::Conflict(p)) if p == binary));
-            assert_eq!(fs::read(&binary).unwrap(), before);
-            assert!(!f.targets.roots.state.as_path().exists());
-        }
-    }
-}
-
-#[test]
-fn manifest_git_link_exception_never_authorises_state_or_source_removal() {
-    for in_state in [true, false] {
-        let mut f = Fixture::new();
-        let checkout = if in_state {
-            f.targets.roots.state.as_path().join("old-checkout")
-        } else {
-            f.source.join("old-checkout")
-        };
-        let hooks = checkout.join(".git/hooks");
-        // Package first: the fixture release must never inventory this checkout.
-        let release = f.release();
-        fs::create_dir_all(&hooks).unwrap();
-        let path = hooks.join("post-merge");
-        let target = checkout.join("scripts/hooks/post-merge");
-        symlink(&target, &path).unwrap();
-        f.targets.legacy_checkout = Some(checkout);
-        f.targets.git_hooks_dir = Some(hooks);
-        let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
-        assert!(
-            matches!(plan_install(release, f.targets.clone(), snapshots), Err(InstallError::Conflict(p)) if p == path)
-        );
-        assert_eq!(fs::read_link(path).unwrap(), target);
-        assert!(!f.receipt().exists());
-    }
-}
-
-#[test]
-fn install_removes_each_retired_workflow_and_keeps_replace_git_hook() {
-    let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
-    let checkout = f.home.join("legacy-checkout");
-    let hooks = checkout.join(".git/hooks");
-    let workflows = f.home.join(".claude/workflows");
-    fs::create_dir_all(&hooks).unwrap();
-    fs::create_dir_all(&workflows).unwrap();
-    f.targets.legacy_checkout = Some(checkout.clone());
-    f.targets.git_hooks_dir = Some(hooks.clone());
-    for name in ["codebase-polish.js", "cross-verify.js", "implement-run.js"] {
-        symlink(checkout.join("workflows").join(name), workflows.join(name)).unwrap();
-    }
-    for name in ["pre-push", "post-merge"] {
-        symlink(checkout.join("scripts/hooks").join(name), hooks.join(name)).unwrap();
-    }
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let plan = f.plan();
-    assert!(
-        plan.findings()
-            .iter()
-            .any(|finding| finding.path.to_path_buf().unwrap() == hooks.join("pre-push"))
-    );
-    let outcome = install(
-        &plan,
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(
-        outcome
-            .findings
-            .iter()
-            .any(|finding| finding.path.to_path_buf().unwrap() == hooks.join("pre-push"))
-    );
-    for name in ["codebase-polish.js", "cross-verify.js", "implement-run.js"] {
-        assert!(fs::symlink_metadata(workflows.join(name)).is_err());
-    }
-    assert!(fs::symlink_metadata(hooks.join("post-merge")).is_err());
-    assert_eq!(
-        fs::read_link(hooks.join("pre-push")).unwrap(),
-        checkout.join("scripts/hooks/pre-push")
-    );
-    assert!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .findings
-        .iter()
-        .any(|finding| finding.rule == "legacy_entry"
-            && finding.path.to_path_buf().unwrap() == hooks.join("pre-push"))
-    );
-}
-
-#[test]
-fn opencode_reapply_without_legacy_flag_drops_old_release_and_keeps_receipt_ownership() {
+fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
-    f.targets.legacy_checkout = Some(f.home.join("legacy-checkout"));
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     for name in ["AGENTS.md", "HARNESS.md"] {
         fs::write(f.source.join("instructions").join(name), b"instructions").unwrap();
     }
     let config = f.targets.harnesses[0].mcp_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(
-        &config,
-        serde_json::to_vec(
-            &serde_json::json!({"instructions":[f.home.join(".agents/AGENTS.md"), "personal.md"]}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
     let a = f.release();
     let old = release_root(f.targets.roots.state.as_path(), a.manifest.source_digest)
         .join("instructions/AGENTS.md");
+    fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({"instructions":[old, "personal.md"]})).unwrap(),
+    )
+    .unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -4512,7 +3682,6 @@ fn opencode_reapply_without_legacy_flag_drops_old_release_and_keeps_receipt_owne
         .unwrap()
         .push(serde_json::json!(new));
     fs::write(&config, serde_json::to_vec(&document).unwrap()).unwrap();
-    f.targets.legacy_checkout = None;
     install(
         &f.plan_for(b.clone()),
         &ctx,
@@ -4912,5 +4081,63 @@ fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
                 .iter()
                 .any(|entry| entry.selector == "gc-agent")
         );
+    }
+}
+
+#[test]
+fn receipt_legacy_fields_require_reinstall_without_mutation() {
+    for legacy in [
+        serde_json::Value::Null,
+        serde_json::json!({"git_hooks_dir":"/old/hooks"}),
+    ] {
+        let f = Fixture::new();
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let ctx = context(&clock, &cancel);
+        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        let release = f.release();
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+        receipt["legacy"] = legacy;
+        let bytes = serde_json::to_vec(&receipt).unwrap();
+        fs::write(f.receipt(), &bytes).unwrap();
+        let binary = fs::read_link(f.targets.bin_dir.join("provenant")).unwrap();
+        let skill = fs::read_link(f.link()).unwrap();
+        let config = fs::read(&f.targets.harnesses[0].mcp_file).unwrap();
+
+        let error = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap_err();
+        assert!(matches!(error, InstallError::ReceiptDecode(_)));
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid installation receipt:")
+        );
+        assert!(error.to_string().ends_with("; reinstall Provenant"));
+        let inspection = inspect_install(
+            &f.targets,
+            None,
+            "fixture-target",
+            &LocalFs,
+            &Smoke,
+            &cancel,
+        )
+        .unwrap();
+        assert!(inspection.error.as_ref().is_some_and(|error| {
+            error
+                .to_string()
+                .starts_with("invalid installation receipt:")
+                && error.to_string().ends_with("; reinstall Provenant")
+        }));
+        let error = uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap_err();
+        assert!(matches!(error, InstallError::ReceiptDecode(_)));
+        assert!(error.to_string().ends_with("; reinstall Provenant"));
+
+        assert_eq!(fs::read(f.receipt()).unwrap(), bytes);
+        assert_eq!(
+            fs::read_link(f.targets.bin_dir.join("provenant")).unwrap(),
+            binary
+        );
+        assert_eq!(fs::read_link(f.link()).unwrap(), skill);
+        assert_eq!(fs::read(&f.targets.harnesses[0].mcp_file).unwrap(), config);
     }
 }

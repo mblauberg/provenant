@@ -198,7 +198,7 @@ re-apply instruction. Harness changes are printed before they are applied
 | --- | --- |
 | `root` | Prints the absolute release root as one line, so `$(provenant root)/skills/...` works. No Git, SQLite, state creation or provider probes. |
 | `config show\|set\|unset`, `check config` | Effective configuration and origins, knob edits, and validation findings. |
-| `install [--dry-run]` | Requires `--source ABS` (a staged release) and one or more `--harness NAME` (`claude`, `codex`, `cursor`, `agy`, `opencode`). Optional `--bin-dir`, `--hooks on\|off` (omission preserves hook ownership; disabled on first install), `--adopt-existing`, `--legacy-checkout ABS`. Validates every destination and prints every replace, remove and create before writing. Dry-run creates no root, lock or receipt. |
+| `install [--dry-run]` | Requires `--source ABS` (a staged release) and one or more `--harness NAME` (`claude`, `codex`, `cursor`, `agy`, `opencode`). Optional `--bin-dir`, `--hooks on\|off` (omission preserves hook ownership; disabled on first install), `--adopt-existing`. Validates every destination and prints every replace, remove and create before writing. Dry-run creates no root, lock or receipt. |
 | `check install` | Optional `--source ABS`. Compares the installed binary, assets, receipt and owned harness selectors without repair. |
 | `uninstall` | Explicit `--harness NAME`. Removes unchanged owned entries only and keeps state, release assets, user skills, config and the running binary. |
 
@@ -238,11 +238,10 @@ source digests with different manifest bytes fail with a typed
 a target no longer ships and leave changed or unmanaged entries. The only lock
 is `<state>/install/install.lock`.
 
-The receipt records the release identity, resolved targets, selectors,
-expected owned values and, when given, the `legacy_checkout` root and compiled
-manifest digest. It is published last. A target is a harness plus its resolved
-skills directory, so one receipt may hold several targets of a harness (for
-example one per `CLAUDE_CONFIG_DIR`). Targets never share a destination.
+The receipt records the release identity, resolved targets, selectors and
+expected owned values. It is published last. A target is a harness plus its
+resolved skills directory, so one receipt may hold several targets of a harness
+(for example one per `CLAUDE_CONFIG_DIR`). Targets never share a destination.
 Install replaces only the selected targets and carries the rest over, and
 `check install` verifies every recorded target. Uninstall selects the target
 matching the environment's home, or else every recorded target of the harness.
@@ -250,44 +249,27 @@ No cross-file or cross-host atomicity is claimed.
 
 After a home or state-root move, the recorded binary link identifies the old
 state root. Old-home candidates come from the current bin-directory tail, the
-recorded default bin directory, the moved default state root, recorded harness
-skills directories compared with defaults, then the legacy home. The first
-candidate that neither contains nor sits within the current home identifies the
-old home, independently of the current bin setting or state layout. Legacy
-staleness depends only on its recorded home. Detection is heuristic: an unchanged
-external harness directory with a default name, such as `/data/profile/.codex`,
-can resemble an old home through its `skills` path. Stale entries produce
+recorded default bin directory, the moved default state root, and recorded
+harness skills directories compared with defaults. The first candidate that
+neither contains nor sits within the current home identifies the
+old home, independently of the current bin setting or state layout. Detection
+is heuristic: an unchanged external harness directory with a default name, such
+as `/data/profile/.codex`, can resemble an old home through its `skills` path.
+Stale entries produce
 `relocated_stale_entry` findings without inspecting or changing their paths;
 a moved state root also produces `state_root_moved`. These findings remain
 visible when no target is selected. Uninstall forgets selected stale ownership
-and retains unselected entries and the binary record. A stale
-`git-hook:pre-push` entry and its legacy
-record also remain in the receipt after a full uninstall; its old path stays
-untouched. Selectors and Git hooks outside the old home retain their existing
-behaviour. Reinstall drops stale targets and an old-home legacy record from
-the fresh receipt. A Git hook outside the old home may still be refreshed, but
-its ownership is omitted when that legacy record is dropped. Reinstall
-requires manual cleanup of dangling links; see the
+and retains unselected entries and the binary record. Selectors outside the old
+home retain their existing behaviour. Reinstall drops stale targets from the
+fresh receipt and requires manual cleanup of dangling links; see the
 [install runbook](../runbooks/install.md).
 
 Omitting `--hooks` on re-install retains and refreshes the selected target's
-unchanged owned hook registrations and the shared legacy Git pre-push launcher.
-Edited hooks and launchers are preserved, relinquished from the receipt and
-reported. The receipt's legacy record names each relinquished Git hook in
-`relinquished_hooks`, so `check install` stops auditing that hook while other
-legacy hooks in the same directory stay audited. Missing launchers also leave
-the receipt. The legacy checkout flag
-need not be repeated. Explicit `--hooks on` refuses edited Claude hooks and
-names `--hooks off` as recovery. Explicit `--hooks off` removes exact owned
+unchanged owned hook registrations. Edited hooks are preserved, relinquished
+from the receipt and reported. Missing hooks also leave the receipt. Explicit
+`--hooks on` refuses edited Claude hooks and names `--hooks off` as recovery.
+Explicit `--hooks off` removes exact owned
 matches, relinquishes modified entries and reports them.
-
-The receipt's Git hooks directory is user-editable evidence, not authority.
-Uninstall re-derives it with Git from the recorded checkout and refuses a
-recorded launcher anywhere else. If the checkout is gone, the launcher is
-kept, relinquished and reported as `legacy_checkout_unavailable`. A checkout
-that exists but no longer resolves its hooks directory refuses an uninstall
-that removes the launcher. Uninstalling some recorded targets keeps the
-shared launcher, so it needs no hooks directory.
 
 On macOS, installation into the account's default state root also owns
 `~/Library/LaunchAgents/dev.provenant.peer.plist`. The plist participates in
@@ -384,29 +366,6 @@ owned link can be installed the preview reports a manual include.
 - Git object formats (SHA-1 and SHA-256) arrive through confinement's
   discovery. State does no Git work.
 
-### Migrating from a pre-1.0 install
-
-`--legacy-checkout ABS` authorises matching only the finite entries in the
-compiled manifest `assets/install/legacy.toml`, at the selected harness paths.
-Each entry names the harness, selector, exact command or link template and a
-`replace` or `remove` disposition. Only captured home and the explicit
-checkout substitute into templates. Ownership is never inferred from a
-basename, substring, shell parsing, a prefix or glob, or an old receipt, and
-nothing under the checkout or `~/.agents` is scanned. Unsupported commands are
-conflicts, not guessed matches.
-
-The manifest covers the old stable command (managed Mach-O or ELF form only),
-Git hook links, the four Claude hook commands, skill links in all five skills
-directories (including a whole-directory link, which is unlinked and replaced
-without traversal), the three JavaScript workflow links, instruction and
-`HARNESS.md` links, the OpenCode `instructions[]` strings and old MCP
-entries. Install prints each matched selector, disposition and replacement
-before writing. An unresolved entry is preserved, reported in the outcome and
-raised as a `check install` finding. Instruction files linked to
-`~/.agents/AGENTS.md` have `AGENT_FABRIC_LABEL` rewritten to
-`PROVENANT_AGENT_LABEL`, printed first, as the one authorised edit under an
-old root.
-
 ## Failure and recovery
 
 Locks cover the install root and selected destination parents in stable
@@ -424,8 +383,14 @@ idempotent even when no receipt was published. There are no automatic
 inverses, saved binaries or displaced user files. Removal compares current
 values with the receipt and unlinks only unchanged owned entries, never
 recursively. ENOSPC, broken output and uncertain publication are typed
-failures, never silent success. To go back to a pre-1.0 install, reinstall it
-from its own checkout.
+failures, never silent success.
+
+Receipts carrying removed legacy fields fail to decode with a clear reinstall
+error. Move `<state>/install/receipt.json` aside and reapply `install`; use
+`--adopt-existing` for occupied managed selectors or a stable regular executable
+when needed. See the [install runbook](../runbooks/install.md#receipt-recovery).
+Obsolete pre-1.0 entries and Git launchers require manual cleanup and are not
+owned or audited by install, uninstall or `check install`.
 
 ## Deliberate cuts
 
@@ -435,7 +400,7 @@ from its own checkout.
 | `config reset`, profile listing, project overlays, task-class tables, per-knob environment variables | Never used in the usage audit. Domain policy still enforces authority, confinement and review minima. |
 | Generic installer transactions (bundle, plan, apply, recover, rollback journal, binary backup) | Re-applying `install` is the recovery path. |
 | Kiro registration | No observed use. |
-| `_shared`, JavaScript workflows, old link layouts | Retained skills are replaced individually; exact retired links are removed by the legacy manifest. Custom skill contents and old receipts are not read. |
+| `_shared`, JavaScript workflows, old link layouts | Retained skills are replaced individually. Obsolete links require manual cleanup; custom skill contents and old receipts are not read. |
 | Runtime provisioning and Codex skill overrides | The product needs no Python, Node or daemon. Another tool's skill preferences are left alone. |
 | Telemetry ledger and generic import | Telemetry reduces run records. Nothing imports old state; an old Fabric store is left untouched. |
 | Configuration includes, interpolation, automatic migration | Executable or implicit configuration cannot be audited. |
@@ -449,7 +414,7 @@ from its own checkout.
 - Config tests (`crates/config/src/tests.rs`, `release_tests.rs`,
   `managed_tests.rs`) cover typed TOML, presets, knob resolution, origins,
   editor byte preservation, first install, no-op, partial failure then
-  re-apply, drift, malformed config, adoption, exact legacy removals and
+  re-apply, drift, malformed config, adoption and
   `uninstall`.
 - `tools/front-door/tests/install.rs` and `checks.rs` drive the real commands
   with synthetic release, provider and MCP fixtures, and assert that help and

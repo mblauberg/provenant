@@ -10,17 +10,14 @@ use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
 use provenant_records::{CommandError, CommandResult, Harness, Outcome};
 use provenant_supervisor::{
     clock::SystemClock,
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::{LocalFs, SafeFs},
 };
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     io,
-    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -37,7 +34,6 @@ struct InstallCounts {
 enum EdgeError {
     Root(super::roots::RootError),
     Install(InstallError),
-    Git,
     Home,
     Peer(super::peer_agent::AgentError),
 }
@@ -73,13 +69,9 @@ struct Environment {
     assets: PathBuf,
     claude: Option<PathBuf>,
     codex: Option<PathBuf>,
-    git_hooks_dir: Option<PathBuf>,
 }
 
-fn environment(
-    globals: &cli::Globals,
-    legacy_checkout: Option<&Path>,
-) -> Result<Environment, EdgeError> {
+fn environment(globals: &cli::Globals) -> Result<Environment, EdgeError> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or(EdgeError::Home)?;
@@ -89,23 +81,20 @@ fn environment(
     let roots = super::roots::roots(globals, &assets, &project).map_err(EdgeError::Root)?;
     let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
-    let git_hooks_dir = legacy_checkout.map(git_hooks_dir).transpose()?;
     Ok(Environment {
         home,
         roots,
         assets,
         claude,
         codex,
-        git_hooks_dir,
     })
 }
 
 fn selected_targets(
     globals: &cli::Globals,
     harnesses: &[Harness],
-    legacy_checkout: Option<&Path>,
 ) -> Result<(Environment, Targets), EdgeError> {
-    let environment = environment(globals, legacy_checkout)?;
+    let environment = environment(globals)?;
     let fs = LocalFs;
     let mut targets = cli::install::configured_targets(
         environment.roots.clone(),
@@ -114,7 +103,6 @@ fn selected_targets(
         &fs,
         environment.claude.as_deref(),
         environment.codex.as_deref(),
-        environment.git_hooks_dir.clone(),
     )
     .map_err(EdgeError::Install)?;
     if !environment
@@ -123,17 +111,6 @@ fn selected_targets(
     {
         targets.protected_roots.push(environment.assets.clone());
     }
-    if let Some(legacy) = legacy_checkout {
-        let canonical = provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, legacy)
-            .map_err(|source| {
-            EdgeError::Install(InstallError::Fs(provenant_supervisor::fs::FsError::Io {
-                operation: "resolve legacy checkout",
-                path: legacy.into(),
-                source,
-            }))
-        })?;
-        targets.protected_roots.push(canonical);
-    }
     Ok((environment, targets))
 }
 
@@ -141,7 +118,7 @@ fn selected_targets(
 /// select the matching recorded target. Without them, uninstall acts on every
 /// recorded target of each harness, at its recorded paths.
 fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targets, EdgeError> {
-    let environment = environment(globals, None)?;
+    let environment = environment(globals)?;
     let mut targets = cli::install::configured_targets(
         environment.roots,
         &environment.home,
@@ -149,92 +126,12 @@ fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targ
         &LocalFs,
         environment.claude.as_deref(),
         environment.codex.as_deref(),
-        None,
     )
     .map_err(EdgeError::Install)?;
     targets
         .resolve_destinations(&LocalFs)
         .map_err(EdgeError::Install)?;
-    // Re-derive the legacy hooks directory rather than trust the receipt's
-    // copy, and only when uninstall removes the launcher. A checkout that is
-    // gone yields none, so uninstall reports its launcher instead.
-    targets.git_hooks_dir = match provenant_config::recorded_hook_checkout(&targets, &LocalFs)
-        .map_err(EdgeError::Install)?
-    {
-        Some(checkout) => match std::fs::metadata(&checkout) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            _ => Some(git_hooks_dir(&checkout)?),
-        },
-        None => None,
-    };
     Ok(targets)
-}
-
-fn git_hooks_dir(checkout: &Path) -> Result<PathBuf, EdgeError> {
-    let git = super::roots::git_binary().ok_or(EdgeError::Git)?;
-    let argv: Vec<OsString> = [
-        git.as_os_str(),
-        OsStr::new("--no-pager"),
-        OsStr::new("--no-optional-locks"),
-        OsStr::new("-c"),
-        OsStr::new("core.fsmonitor=false"),
-        OsStr::new("rev-parse"),
-        OsStr::new("--path-format=absolute"),
-        OsStr::new("--git-path"),
-        OsStr::new("hooks"),
-    ]
-    .into_iter()
-    .map(OsStr::to_owned)
-    .collect();
-    let env: Vec<(OsString, OsString)> = [
-        ("HOME", "/nonexistent"),
-        ("XDG_CONFIG_HOME", "/nonexistent"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_SYSTEM", "/dev/null"),
-        ("GIT_NO_REPLACE_OBJECTS", "1"),
-        ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_TERMINAL_PROMPT", "0"),
-        ("LC_ALL", "C"),
-    ]
-    .map(|(key, value)| (key.into(), value.into()))
-    .into();
-    let mut options = ExecOptions::new(&argv, checkout, Duration::from_secs(2));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-    options.stderr = StreamPolicy::Discard;
-    options.stop_on_output_limit = true;
-    let executor = SystemExecutor::new(1).map_err(|_| EdgeError::Git)?;
-    let result = executor.execute(options).map_err(|_| EdgeError::Git)?;
-    if result.termination != Termination::Exit(0)
-        || result.timed_out
-        || result.drain_truncated
-        || result.stdout.truncated
-        || result.stdout.read_failed
-    {
-        return Err(EdgeError::Git);
-    }
-    let bytes = result
-        .stdout
-        .bytes
-        .strip_suffix(b"\n")
-        .ok_or(EdgeError::Git)?;
-    if bytes.is_empty() || bytes.contains(&0) || bytes.contains(&b'\n') {
-        return Err(EdgeError::Git);
-    }
-    let path = PathBuf::from(OsString::from_vec(bytes.to_vec()));
-    if !path.is_absolute() {
-        return Err(EdgeError::Git);
-    }
-    // core.hooksPath is repository-controlled evidence, not authority to
-    // write another directory. Bind aliases before enforcing the selected root.
-    let checkout = std::fs::canonicalize(checkout).map_err(|_| EdgeError::Git)?;
-    let path = provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, &path)
-        .map_err(|_| EdgeError::Git)?;
-    if !path.starts_with(&checkout) {
-        return Err(EdgeError::Git);
-    }
-    Ok(path)
 }
 
 #[derive(Default)]
@@ -342,9 +239,7 @@ impl InstallData {
 
 fn error_class(error: &InstallError) -> (Outcome, &'static str) {
     match error {
-        InstallError::HooksUnavailable | InstallError::LegacyUnresolved(_) => {
-            (Outcome::Refused, "HOOKS_UNAVAILABLE")
-        }
+        InstallError::HooksUnavailable => (Outcome::Refused, "HOOKS_UNAVAILABLE"),
         InstallError::Conflict(_)
         | InstallError::PeerAgentConflict(_)
         | InstallError::Drift(_)
@@ -362,6 +257,7 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
         | InstallError::InvalidConfig(_)
         | InstallError::ConfigFile(_)
         | InstallError::Decode(_)
+        | InstallError::ReceiptDecode(_)
         | InstallError::Encode(_)
         | InstallError::PathWire(_) => (Outcome::Invalid, "INSTALL_INVALID"),
         InstallError::Fs(_) | InstallError::Preview(_) | InstallError::Smoke(_) => {
@@ -389,13 +285,6 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
             Outcome::Invalid,
             "INSTALL_ROOT",
             &error.to_string(),
-            globals,
-        ),
-        EdgeError::Git => super::fail(
-            command,
-            Outcome::Invalid,
-            "LEGACY_CHECKOUT",
-            "cannot resolve legacy checkout Git hooks directory",
             globals,
         ),
         EdgeError::Peer(error) => super::fail(
@@ -605,56 +494,15 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
             );
         }
     }
-    if let Some(checkout) = &args.legacy_checkout {
-        match provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, checkout) {
-            Ok(canonical) => args.legacy_checkout = Some(canonical),
-            Err(source) => {
-                return install_error(
-                    "install",
-                    &InstallError::Fs(provenant_supervisor::fs::FsError::Io {
-                        operation: "resolve legacy checkout",
-                        path: checkout.clone(),
-                        source,
-                    }),
-                    globals,
-                );
-            }
-        }
-    }
-    let (_environment, mut targets) =
-        match selected_targets(globals, &args.harness, args.legacy_checkout.as_deref()) {
-            Ok(value) => value,
-            Err(error) => return edge_error("install", error, globals),
-        };
+    let (_environment, mut targets) = match selected_targets(globals, &args.harness) {
+        Ok(value) => value,
+        Err(error) => return edge_error("install", error, globals),
+    };
     targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
     if let Err(error) = targets.resolve_destinations(&LocalFs) {
         return install_error("install", &error, globals);
     }
     args.bin_dir = Some(targets.bin_dir.clone());
-    if let Some(checkout) = &args.legacy_checkout {
-        let resolve = |path: &Path| {
-            provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, path).map_err(
-                |source| {
-                    EdgeError::Install(InstallError::Fs(provenant_supervisor::fs::FsError::Io {
-                        operation: "resolve install source boundary",
-                        path: path.into(),
-                        source,
-                    }))
-                },
-            )
-        };
-        match (resolve(checkout), resolve(&args.source)) {
-            (Ok(checkout), Ok(source)) if source.starts_with(&checkout) => {
-                return install_error(
-                    "install",
-                    &InstallError::Conflict(args.source.clone()),
-                    globals,
-                );
-            }
-            (Err(error), _) | (_, Err(error)) => return edge_error("install", error, globals),
-            _ => {}
-        }
-    }
     let fs = LocalFs;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
