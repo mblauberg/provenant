@@ -21,7 +21,7 @@ use provenant_supervisor::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termina
 use provenant_supervisor::fs::Metadata;
 #[cfg(target_os = "macos")]
 use provenant_supervisor::fs::SafeDir;
-use provenant_supervisor::fs::{FileKind, FsError, PublishMode, SafeFs, entry_names};
+use provenant_supervisor::fs::{FileKind, FsError, PayloadTree, PublishMode, SafeFs, entry_names};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -679,13 +679,13 @@ fn prune_worktree_cache(
             }
         };
         remove_cache_contents(
-            detached_cache.as_ref(),
+            &detached_cache,
             Path::new(removal_name),
             &mut report.bytes_freed,
         )?;
         // The top-level marker survives every earlier failure.
         let marker_name = OsStr::new(CARGO_CACHE_OWNER);
-        match detached_cache.metadata_at(marker_name, false) {
+        match detached_cache.metadata_at(marker_name) {
             Ok(marker) => {
                 detached_cache.unlink(marker_name).map_err(cache_fs_error(
                     "unlink",
@@ -719,7 +719,7 @@ fn verify_detached_cache(
     name: &OsStr,
     expected: &provenant_supervisor::fs::Metadata,
     owner: &Option<CacheOwner>,
-) -> Result<Box<dyn provenant_supervisor::fs::SafeDir>, PermissionError> {
+) -> Result<PayloadTree, PermissionError> {
     // The held original descriptor alone cannot identify what was renamed.
     let after = root
         .metadata_at(name, false)
@@ -728,15 +728,20 @@ fn verify_detached_cache(
     if !expected.same_identity(&after) {
         return Err(PermissionError::AnchorMismatch);
     }
-    let cache = root
-        .open_verified_directory(name)
-        .map_err(cache_fs_error("open verified directory", Path::new(name)))?;
+    // Only a verified tombstone may dispose of lock-named cache payload.
+    // Verified-open failures keep their operation and path.
+    let cache = PayloadTree::claim(root, name, expected).map_err(|error| match error {
+        FsError::PayloadMismatch { .. } | FsError::NotPrivate { .. } => {
+            PermissionError::AnchorMismatch
+        }
+        error => cache_fs_error("open verified directory", Path::new(name))(error),
+    })?;
     let verified = cache
         .metadata()
         .map_err(cache_fs_error("fstat", Path::new(name)))?;
     verify_cache_metadata(&verified)?;
     if !expected.same_identity(&verified)
-        || &read_cache_owner(cache.as_ref(), Path::new(name))? != owner
+        || &read_cache_owner(cache.directory(), Path::new(name))? != owner
     {
         return Err(PermissionError::AnchorMismatch);
     }
@@ -944,7 +949,7 @@ fn measure_cache(
 }
 
 fn remove_cache_contents(
-    directory: &dyn provenant_supervisor::fs::SafeDir,
+    directory: &PayloadTree,
     relative: &Path,
     bytes_freed: &mut u64,
 ) -> Result<(), PermissionError> {
@@ -971,7 +976,7 @@ fn cache_io_error(operation: &'static str, path: &Path, source: std::io::Error) 
 }
 
 fn remove_cache_contents_at(
-    directory: &dyn provenant_supervisor::fs::SafeDir,
+    directory: &PayloadTree,
     relative: &Path,
     depth: usize,
     bytes_freed: &mut u64,
@@ -979,7 +984,7 @@ fn remove_cache_contents_at(
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
     }
-    let names = entry_names(directory, MAX_CACHE_DIRECTORY_ENTRIES)
+    let names = entry_names(directory.directory(), MAX_CACHE_DIRECTORY_ENTRIES)
         .map_err(cache_fs_error("readdir", relative))?;
     for name in names {
         if depth == 0 && name == CARGO_CACHE_OWNER {
@@ -987,20 +992,20 @@ fn remove_cache_contents_at(
         }
         let path = relative.join(&name);
         let metadata = directory
-            .metadata_at(&name, false)
+            .metadata_at(&name)
             .map_err(cache_fs_error("stat", &path))?;
         if metadata.kind == FileKind::Directory {
             let child = directory
-                .open_verified_directory(&name)
+                .child(&name)
                 .map_err(cache_fs_error("open verified directory", &path))?;
-            remove_cache_contents_at(child.as_ref(), &path, depth + 1, bytes_freed)?;
+            remove_cache_contents_at(&child, &path, depth + 1, bytes_freed)?;
             drop(child);
             directory
-                .rmdir_payload(&name)
+                .rmdir(&name)
                 .map_err(cache_fs_error("rmdir", &path))?;
         } else {
             directory
-                .unlink_payload(&name)
+                .unlink(&name)
                 .map_err(cache_fs_error("unlink", &path))?;
         }
         *bytes_freed = bytes_freed.saturating_add(metadata.allocated.max(metadata.size));
@@ -4901,7 +4906,8 @@ mod tests {
         use super::*;
         use provenant_core::{Clock, WaitBudget};
         use provenant_supervisor::fs::{
-            FsError, LocalFs, LockGuard, LockMode, Metadata, Publication, SafeDir, SafeFile,
+            FsError, LocalFs, LockGuard, LockMode, Metadata, PayloadRemoval, Publication, SafeDir,
+            SafeFile,
         };
         use std::{io, os::unix::fs::PermissionsExt, sync::Arc};
 
@@ -4949,6 +4955,9 @@ mod tests {
                 replace_link(name: &OsStr, target: &Path) -> Result<Publication, FsError>;
             }
             fn open_verified_directory(&self, name: &OsStr) -> Result<Box<dyn SafeDir>, FsError> {
+                // A failed hook stands in for a swap detected inside the open.
+                self.notify("open verified", name)
+                    .map_err(|_| FsError::RaceRefused { name: name.into() })?;
                 Ok(Box::new(Self {
                     inner: self.inner.open_verified_directory(name)?,
                     path: self.path.join(name),
@@ -4990,13 +4999,14 @@ mod tests {
                 self.notify("rmdir", name)?;
                 self.inner.rmdir(name)
             }
-            fn unlink_payload(&self, name: &OsStr) -> Result<(), FsError> {
-                self.notify("unlink", name)?;
-                self.inner.unlink_payload(name)
-            }
-            fn rmdir_payload(&self, name: &OsStr) -> Result<(), FsError> {
-                self.notify("rmdir", name)?;
-                self.inner.rmdir_payload(name)
+            fn remove_payload(
+                &self,
+                name: &OsStr,
+                directory: bool,
+                grant: PayloadRemoval,
+            ) -> Result<(), FsError> {
+                self.notify(if directory { "rmdir" } else { "unlink" }, name)?;
+                self.inner.remove_payload(name, directory, grant)
             }
         }
 
@@ -5408,6 +5418,33 @@ mod tests {
                     .is_empty()
             );
             assert!(tombstone.path().join("replacement").is_file());
+            Ok(())
+        }
+
+        #[test]
+        fn gc_reports_swap_during_verified_open() -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            cache(home, &"a".repeat(64), &home.join("missing"))?;
+            let error = sweep(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|event, path| {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if event == "open verified" && name.starts_with(".gc-") {
+                        return Err(io::Error::other("swapped"));
+                    }
+                    Ok(())
+                }),
+            )
+            .expect_err("swapped tombstone must be refused");
+            let message = error.to_string();
+            assert!(
+                message.contains("lane cache open verified directory failed at \".gc-"),
+                "{message}"
+            );
+            assert!(message.contains("entry changed identity"), "{message}");
+            assert_eq!(error.report.bytes_freed, 0);
             Ok(())
         }
 
