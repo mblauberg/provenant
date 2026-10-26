@@ -252,8 +252,10 @@ home or tmp grants.
   `/dev/ttysN` terminals that its own sandbox allocates (the
   `com.apple.sandbox.pty` extension). Other terminals and the rest of `/dev`
   stay denied. The tool runs each command through `SHELL`, which Agy pins to
-  `/bin/zsh`; Agy writers may execute that exact binary, but no system program
-  directory.
+  `/bin/zsh`; Agy writers get the exec grants of Codex and Claude writers
+  (`/bin`, `/usr/bin`, `/usr/libexec` and the shared Rust, Git, Node and
+  working-directory tools). Read-only Agy lanes run no commands and, like
+  Claude's, get none.
 - **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
   `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
   grants.

@@ -1364,39 +1364,41 @@ fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), Provide
 }
 
 #[test]
-fn agy_writers_may_exec_only_their_pinned_shell() -> Result<(), ProviderError> {
-    use provenant_confinement::permissions::{PathGrant, PathScope};
+fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
-    let route = route("agy", "fixture-model");
+    let repo = Path::new("/fixture/repo");
+    let agy_route = route("agy", "fixture-model");
+    let mut codex_route = route("codex", "fixture-model");
+    codex_route.account_key = None;
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
-        let spec = agy::Agy.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None,
-        ))?;
+        let spec = agy::Agy.prepare(fixture_input(&agy_route, &plan, &prompt, repo, None))?;
         assert!(
             spec.env
                 .iter()
                 .any(|(key, value)| key == "SHELL" && value == "/bin/zsh")
         );
-        let shell = PathGrant {
-            path: "/bin/zsh".into(),
-            scope: PathScope::Exact,
-        };
-        let executables = &spec.profile.spec.process_executables;
-        assert_eq!(
-            executables.contains(&shell),
-            access == Access::WorktreeWrite
-        );
-        // The one shell binary, never a directory of programs.
-        assert_eq!(
-            executables.len(),
-            2 + usize::from(access == Access::WorktreeWrite)
-        );
-        assert!(spec.profile.spec.tool_exec_roots.is_empty());
+        assert_eq!(spec.profile.spec.process_executables.len(), 2);
+        let exec = &spec.profile.spec.tool_exec_roots;
+        if access == Access::ReadOnly {
+            // Like Claude's read-only lanes, which run no commands either.
+            assert!(exec.is_empty());
+            continue;
+        }
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let codex =
+            codex::Codex.prepare(fixture_input(&codex_route, &plan, &prompt, repo, None))?;
+        // Everything but Codex's own package directory.
+        let package = Path::new("/opt/homebrew/Cellar/provider/1.0");
+        let expected: Vec<_> = codex
+            .profile
+            .spec
+            .tool_exec_roots
+            .into_iter()
+            .filter(|grant| grant.path != package)
+            .collect();
+        assert_eq!(exec, &expected);
+        assert!(exec.iter().any(|grant| grant.path == Path::new("/bin")));
     }
     Ok(())
 }
@@ -2607,7 +2609,14 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
             [crate::launch::exact(keychain)]
         );
         assert!(spec.authentication[0].in_place_writes.is_empty());
-        assert!(spec.state_writes.is_empty() && spec.runtime_reads.is_empty());
+        assert!(spec.state_writes.is_empty());
+        // Writers read only the shared toolchains their commands run.
+        assert_eq!(spec.runtime_reads.is_empty(), !edits);
+        assert!(
+            spec.runtime_reads
+                .iter()
+                .all(|grant| !grant.path.starts_with("/fixture/home/.gemini"))
+        );
     }
     Ok(())
 }
