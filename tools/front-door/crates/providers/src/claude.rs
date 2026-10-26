@@ -282,7 +282,8 @@ pub fn refresh_if_expiring(
     };
     match read() {
         Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
-        Ok(_) | Err(_) => {}
+        Ok(_) => {}
+        Err(error) => return Err(error),
     }
     if authority.is_some() && credential_source(login)? != source {
         return Err(ProviderError::CredentialUnavailable);

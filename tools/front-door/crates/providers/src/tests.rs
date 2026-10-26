@@ -2250,15 +2250,64 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
         vec![b"not json".to_vec(), b"not json".to_vec()],
     );
     assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+    assert_eq!(calls.len(), 1, "an unreadable keychain item must not refresh");
     let (argv, env, _) = &calls[0];
     let suffix = crate::claude::keychain_suffix(b"/home/u/.claude-work");
     assert_eq!(argv[3], format!("Claude Code-credentials-{suffix}"));
     assert!(env.contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned()));
-    assert!(
-        calls[1]
-            .1
-            .contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned())
-    );
+}
+
+#[test]
+fn claude_keychain_read_failure_does_not_spawn_refresh_probe() {
+    use crate::claude::{Login, refresh_if_expiring};
+
+    struct FailedKeychainRead(std::sync::Mutex<Vec<Call>>);
+
+    impl provenant_os::exec::Executor for FailedKeychainRead {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+            let argv: Vec<String> = options
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            self.0
+                .lock()
+                .unwrap()
+                .push((argv.clone(), vec![], options.cwd.into()));
+            Ok(provenant_os::exec::ExecOutcome {
+                termination: if argv.first().is_some_and(|arg| arg == "/usr/bin/security") {
+                    provenant_os::exec::Termination::Exit(1)
+                } else {
+                    provenant_os::exec::Termination::Exit(0)
+                },
+                stdout: Default::default(),
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
+    let executor = FailedKeychainRead(Default::default());
+    let login = Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: Path::new("/home/u"),
+        user: OsStr::new("u"),
+        config_dir: Path::new("/home/u/.claude"),
+    };
+
+    let result = refresh_if_expiring(&executor, &login, &|| 1_000_000, 2_000_000, None);
+
+    assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));
+    let calls = executor.0.lock().unwrap();
+    assert_eq!(calls.len(), 1, "a failed keychain read must not start a refresh");
+    assert_eq!(calls[0].0[0], "/usr/bin/security");
 }
 
 #[test]
