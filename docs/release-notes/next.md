@@ -46,3 +46,9 @@ peers on different versions are not supported.
   reports `NOT_FOUND` (exit 2). It used to report `NONTERMINAL` (exit 1)
   locally and `CONFLICT` over a peer. Over MCP the facade code is
   `not_found`. Active attempts still report `NONTERMINAL` (#1673).
+
+## Fixes
+
+- Agy turns are no longer cut off at agy's own 15-minute print timeout. Agy
+  runs with `--print-timeout 0s`, so a long turn runs until the lane deadline
+  and is reported as timed out, not as an empty result (#1722).
