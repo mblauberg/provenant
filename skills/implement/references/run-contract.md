@@ -23,7 +23,7 @@ tracked docs or the PR. Production promotion requires separate user authority.
 
 ## Implementation detail
 
-Writer tier follows task size. Migrations may need behaviour tests and
+Migrations may need behaviour tests and
 equivalence evidence. Use source grounding for version-sensitive external
 interfaces and compatibility checks for migrations; see
 [source grounding](source-grounding.md) and
