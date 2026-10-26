@@ -1363,6 +1363,14 @@ fn state_name(state: &run::AttemptState) -> String {
             .unwrap_or_default(),
     }
 }
+/// The state name and, for a terminal attempt, its recorded reason.
+pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
+    let reason = match state {
+        run::AttemptState::Terminal { reason, .. } => reason.clone(),
+        _ => None,
+    };
+    (state_name(state), reason)
+}
 fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
@@ -1802,14 +1810,11 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     // The text alone cannot tell a clean success from one that needs the chair.
-    let reason = match &record.state {
-        run::AttemptState::Terminal { reason, .. } => reason.clone(),
-        _ => None,
-    };
+    let (state, reason) = state_and_reason(&record.state);
     Ok((
         json!({
             "attempt_id": id,
-            "state": state_name(&record.state),
+            "state": state,
             "reason": reason,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,

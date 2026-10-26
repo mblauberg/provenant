@@ -1677,6 +1677,7 @@ impl BinaryRunOwner<'_> {
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
+        let (state, reason) = provenant_cli::run::state_and_reason(&record.state);
         let digest = |chunk: &provenant_run::OutputChunk| {
             provenant_core::Digest::from_bytes(*chunk.digest.bytes())
         };
@@ -1709,6 +1710,8 @@ impl BinaryRunOwner<'_> {
                     return Ok(OutputResult::Chunk {
                         target,
                         part,
+                        state,
+                        reason,
                         offset,
                         next_offset,
                         eof,
@@ -1737,6 +1740,8 @@ impl BinaryRunOwner<'_> {
                 Ok(OutputResult::Chunk {
                     target,
                     part,
+                    state,
+                    reason,
                     offset: chunk.offset,
                     next_offset: chunk.next_offset,
                     eof: chunk.eof,
