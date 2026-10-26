@@ -152,7 +152,8 @@ impl DomainConfig for RoutingConfig {
 fn defaults(_: Profile) -> &'static str {
     "[routes]\n[pools]\n[pacing]\n"
 }
-pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
+pub const SECTION: DomainSection =
+    DomainSection::new_root_alias::<RoutingConfig>("routing", defaults);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

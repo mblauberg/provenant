@@ -23,8 +23,7 @@ effect.
 ## Boundaries
 
 - Routing never starts a process. `route list` reads the bundled catalogue
-  and `[domains.routing]` config; `route resolve` also reads cached quota
-  snapshots.
+  and `[routing]` config; `route resolve` also reads cached quota snapshots.
 - Providers never signal a process or publish run completion. Terminal answer
   and process exit are separate facts.
 - Quota never imports providers. The binary injects the providers' registry of
@@ -48,8 +47,7 @@ separator. No adapter, model upgrade, effort default or downgrade is inferred.
 An unknown explicit ID is unverified: it runs only if executable availability,
 disclosure and confinement are independently established.
 
-Named routes come from the bundled catalogue or `config.toml`
-`[domains.routing]`:
+Named routes come from the bundled catalogue or `config.toml` `[routing]`:
 
 - A personal route maps a name to one exact model and optional effort.
 - A pool route draws among ready members that allow the effective effort. The

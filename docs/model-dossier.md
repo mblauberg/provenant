@@ -52,10 +52,10 @@ those. This file only helps you pick among what they already allow.
 
 ### Checking the live catalogue
 
-The bundled catalogue defines models and default pools; `[domains.routing]`
-config adds named routes and overrides; dispatch decides availability. Use
-`provenant route list` to inspect them and `provenant route resolve` to check a
-route or exact model. This dossier records advisory preferences; it does not set
+The bundled catalogue defines models and default pools; `[routing]` config
+adds named routes and overrides; dispatch decides availability. Use `provenant
+route list` to inspect them and `provenant route resolve` to check a route or
+exact model. This dossier records advisory preferences; it does not set
 aliases, weights or admissibility.
 
 For numbers rather than judgement, see the

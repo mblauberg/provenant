@@ -46,7 +46,7 @@ is accepted only when the catalogue records that control; unsupported effort
 is refused. An unknown exact model remains unverified until a current provider
 observation and the activation, disclosure and confinement checks permit it.
 There is no classifier or synonym inference. The bundled Rust catalogue owns
-default pool membership and weights; `[domains.routing]` in the state root's
+default pool membership and weights; `[routing]` in the state root's
 `config.toml` overrides pools and provider pacing. To change routing, run
 `provenant route set` or `provenant route pacing`. A Fabric submission carries
 one route preference; the task schema rejects unknown fields.

@@ -172,8 +172,7 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
     )?;
     assert_eq!(set["command"], "route set");
     let persisted = fs::read_to_string(rig.state.join("config.toml"))?;
-    assert!(persisted.contains("[domains.routing.pools]"));
-    assert!(!persisted.contains("[routing"));
+    assert!(persisted.contains("[routing]"));
 
     let listed = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
     let member = listed["data"]["pools"]["junior"]
@@ -217,7 +216,7 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
     fs::write(
         rig.state.join("config.toml"),
         r#"schema_version = 1
-[domains.routing]
+[routing]
 pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high", efforts = ["high"] }] }
 "#,
     )?;
@@ -228,19 +227,6 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
         .as_str()
         .ok_or("config error")?;
     assert!(message.contains("routing") && message.contains("weight"));
-
-    // The root `[routing]` table is not a config key.
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version = 1\n[routing.pacing]\ncodex = \"spend\"\n",
-    )?;
-    let out = rig.command(&["route", "list", "--json"])?;
-    assert_eq!(code(&out), 2);
-    let rejected: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let message = rejected["error"]["message"]
-        .as_str()
-        .ok_or("config error")?;
-    assert!(message.contains("routing"), "{message}");
     Ok(())
 }
 

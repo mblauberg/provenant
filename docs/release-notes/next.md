@@ -11,10 +11,6 @@ no longer change it.
 
 ## Breaking changes
 
-- Routing config lives only under `[domains.routing]`. The root `[routing]`
-  table is no longer an alias and is refused as an unknown key. `route set`,
-  `route remove`, `route reset` and `route pacing` now write
-  `[domains.routing]`; move any existing `[routing]` table there by hand.
 - `route list --json` no longer reports each pool member's `readiness` and
   `factor_basis_points`. Listing never probes, so they were always
   `unknown_availability` and 10000. Resolve and dispatch receipts still record
