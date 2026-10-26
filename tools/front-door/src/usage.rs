@@ -50,10 +50,14 @@ pub fn attribution_enabled(roots: &Roots) -> bool {
         .unwrap_or(false)
 }
 
-pub fn project_id(roots: &Roots, project: &std::path::Path) -> Option<ProjectId> {
+pub fn project_id(roots: &Roots, globals: &Globals) -> Option<ProjectId> {
     if !attribution_enabled(roots) {
         return None;
     }
+    let project = match &globals.project {
+        Some(project) => project.clone(),
+        None => std::env::current_dir().ok()?,
+    };
     use provenant_supervisor::fs::LocalFs;
     use std::{sync::Arc, time::Duration};
     let git = crate::roots::git_binary()?;
@@ -63,11 +67,11 @@ pub fn project_id(roots: &Roots, project: &std::path::Path) -> Option<ProjectId>
     )
     .ok()?;
     let executor = provenant_supervisor::exec::SystemExecutor::new(1).ok()?;
-    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(1)).ok()?;
     let location = runtime
         .project_location(
             &executor,
-            project,
+            &project,
             budget,
             &provenant_core::CancelToken::new(),
         )
@@ -185,6 +189,8 @@ struct Unit {
     calls: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_id: Option<ProjectId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'static str>,
 }
 #[derive(Serialize)]
 struct Report {
@@ -265,6 +271,7 @@ fn report(roots: &Roots, stats: &Stats) -> Result<Report, Box<dyn std::error::Er
             unit,
             calls,
             project_id,
+            scope: project_id.map(|_| "project"),
         })
         .collect();
     units.sort_by(|a, b| {
@@ -295,7 +302,13 @@ pub fn run(stats: &Stats, globals: &Globals) -> u8 {
             let text = data
                 .units
                 .iter()
-                .map(|unit| format!("{:>8}  {}  {}\n", unit.calls, unit.kind, unit.unit))
+                .map(|unit| {
+                    let project = unit
+                        .project_id
+                        .map(|id| format!("  project={id}"))
+                        .unwrap_or_default();
+                    format!("{:>8}  {}  {}{project}\n", unit.calls, unit.kind, unit.unit)
+                })
                 .collect::<String>();
             crate::emit(
                 &CommandResult::new("telemetry stats", Outcome::Ok, data),

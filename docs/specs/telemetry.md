@@ -147,8 +147,13 @@ tolerates a missing backup, then sorts units by call count. The CLI grammar and
 MCP catalogue supply zero-call rows. Retention is bounded by size, not days, so
 counts are observed demand, not proof of inactivity beyond the retained logs.
 The `usage.project_attribution` knob is off by default; when enabled, events
-include the existing `ProjectId` and reports include per-project rows. This
-reveals which projects use Provenant to anyone who can read the local logs.
+include the existing `ProjectId` hash, rather than a path or name, and reports
+include per-project rows. This reveals which projects use Provenant to anyone
+who can read the local logs. Each per-project row is a subset of the aggregate
+row for its kind and unit; summing them with the aggregate double-counts calls.
+Text output labels per-project rows with `project=<id>`. JSON includes
+`project_id` and `scope: "project"` on these rows; aggregate rows omit both
+fields.
 
 ### Quota display
 

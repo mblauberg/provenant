@@ -47,6 +47,7 @@ pub enum EdgeError {
 
 struct Factory {
     context: Context,
+    project_attribution: bool,
     clock: SystemClock,
     backoff: ThreadWait,
     executor: SystemExecutor,
@@ -82,7 +83,8 @@ impl stdio::Factory for Factory {
         crate::usage::maintain_tools(&self.context.roots);
     }
     fn record_usage(&self, tool: &str, outcome: &str, duration_ms: u64) {
-        let project_id = crate::usage::attribution_enabled(&self.context.roots)
+        let project_id = self
+            .project_attribution
             .then_some(self.context.identity.project);
         crate::usage::record_tool(&self.context.roots, tool, outcome, duration_ms, project_id);
     }
@@ -374,6 +376,7 @@ pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::
             }
         }
         let factory = Factory {
+            project_attribution: crate::usage::attribution_enabled(&context.roots),
             context,
             clock: SystemClock::new(),
             backoff: ThreadWait,
@@ -403,6 +406,7 @@ fn factory(globals: &provenant_cli::Globals) -> Result<Factory, Box<dyn std::err
     let home = crate::roots::home()?;
     let context = Context::open(roots, &home, &cwd)?;
     Ok(Factory {
+        project_attribution: crate::usage::attribution_enabled(&context.roots),
         context,
         clock: SystemClock::new(),
         backoff: ThreadWait,
@@ -518,6 +522,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
         context.identity.inbox =
             provenant_fabric_runtime::identity::Address::new(request.source_host, &request.agent)?;
         let peer_factory = Factory {
+            project_attribution: crate::usage::attribution_enabled(&context.roots),
             context,
             clock: SystemClock::new(),
             backoff: ThreadWait,

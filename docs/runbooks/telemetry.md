@@ -30,8 +30,12 @@ not counted. These counters are separate from token and cost reports, and do
 not enable OTel prompt or tool logging.
 
 Set `usage.project_attribution` to `true` to include the existing `ProjectId`
-in usage events and group counts by project. This reveals which projects use
-Provenant to anyone who can read the local usage log, so it is off by default.
+hash, rather than a path or name, in usage events and group counts by project.
+This reveals which projects use Provenant to anyone who can read the local
+usage log, so it is off by default. Per-project rows are subsets of the
+aggregate row for each kind and unit; do not sum them with the aggregate.
+Text output labels these rows with `project=<id>`. JSON includes `project_id`
+and `scope: "project"` on these rows; aggregate rows omit both fields.
 
 Writes are best effort: one small `O_APPEND` write, no sync or background
 collector. I/O failures leave command results unchanged. Only rotation takes

@@ -26,7 +26,7 @@ fn recording_on_a_missing_root_creates_nothing() -> Result {
 }
 
 #[test]
-fn attributed_events_are_reported_under_their_project_id() -> Result {
+fn project_attribution_requires_the_knob_and_an_available_resolver() -> Result {
     let temp = crate::worktree_tests::support::tempdir()?;
     let roots = roots(temp.path())?;
     std::fs::create_dir(roots.state.as_path())?;
@@ -40,17 +40,62 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     let binding =
         provenant_config::bind_project(&roots, location, &provenant_supervisor::fs::LocalFs)?;
     let expected_id = binding.project_id();
-    assert_eq!(project_id(&roots, &project), None);
+    let globals = Globals {
+        project: Some(project),
+        ..Globals::default()
+    };
+    assert!(!attribution_enabled(&roots));
+    assert_eq!(project_id(&roots, &globals), None);
     std::fs::write(
         roots.state.as_path().join("config.toml"),
         "schema_version = 1\n[knobs]\n\"usage.project_attribution\" = true\n",
     )?;
-    assert_eq!(project_id(&roots, &project), Some(expected_id));
-    record_cli(&roots, "root", 0, 4, Some(expected_id));
+    assert!(attribution_enabled(&roots));
+    // No Git installation means best-effort attribution stays unavailable.
+    let expected = crate::roots::git_binary().map(|_| expected_id);
+    assert_eq!(project_id(&roots, &globals), expected);
+    Ok(())
+}
 
-    let line = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
-    let event: serde_json::Value = serde_json::from_str(line.trim())?;
-    assert_eq!(event["project_id"], expected_id.to_string());
+#[test]
+fn unattributed_events_omit_project_id_from_json() -> Result {
+    let temp = crate::worktree_tests::support::tempdir()?;
+    let roots = roots(temp.path())?;
+    std::fs::create_dir(roots.state.as_path())?;
+    record_cli(&roots, "root", 0, 4, None);
+    record_tool(&roots, "fabric_identity", "ok", 1, None);
+    let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
+    let events = log
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.get("project_id").is_none()));
+    Ok(())
+}
+
+#[test]
+fn attributed_events_are_reported_under_their_project_id() -> Result {
+    let temp = crate::worktree_tests::support::tempdir()?;
+    let roots = roots(temp.path())?;
+    std::fs::create_dir(roots.state.as_path())?;
+    let expected_id = ProjectId::from_bytes([1; 16]);
+    record_cli(&roots, "root", 0, 4, Some(expected_id));
+    record_tool(&roots, "fabric_identity", "ok", 1, Some(expected_id));
+
+    let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
+    let events = log
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["kind"], "cli.verb");
+    assert_eq!(events[1]["kind"], "mcp.tool");
+    assert!(
+        events
+            .iter()
+            .all(|event| event["project_id"] == expected_id.to_string())
+    );
 
     let stats = Stats {
         usage: true,
@@ -61,7 +106,13 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     };
     let report = report(&roots, &stats)?;
     assert!(report.units.iter().any(|unit| {
-        unit.unit == "root" && unit.calls == 1 && unit.project_id == Some(expected_id)
+        unit.unit == "root"
+            && unit.calls == 1
+            && unit.project_id == Some(expected_id)
+            && unit.scope == Some("project")
+    }));
+    assert!(report.units.iter().any(|unit| {
+        unit.unit == "fabric_identity" && unit.calls == 1 && unit.project_id == Some(expected_id)
     }));
     assert!(
         report
