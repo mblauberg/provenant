@@ -77,18 +77,21 @@ fn prepare(
             .to_str()
             .ok_or(ProviderError::InvalidPath)?
     );
+    let mut permission = serde_json::json!({
+        "edit": edit,
+        "bash": edit,
+        "webfetch": "deny",
+    });
+    if input.git_context {
+        permission["external_directory"] = serde_json::json!({scratch.clone(): "allow"});
+        permission["read"] = serde_json::json!({scratch: "allow"});
+    }
     let config = serde_json::json!({
         "autoupdate": false,
         "share": "disabled",
         "mcp": {},
         "plugin": [],
-        "permission": {
-            "edit": edit,
-            "bash": edit,
-            "webfetch": "deny",
-            "external_directory": {scratch.clone(): "allow"},
-            "read": {scratch: "allow"},
-        },
+        "permission": permission,
     })
     .to_string();
     let package = package_root(input.executable)?;

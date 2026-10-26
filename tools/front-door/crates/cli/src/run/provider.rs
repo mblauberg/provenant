@@ -446,6 +446,7 @@ fn prepare_with(
             account: account.as_ref(),
             token,
             cwd: &cwd,
+            git_context: git_context.is_some(),
             nonce,
             provenant: LaneRuntime {
                 executable: &provenant_executable,
