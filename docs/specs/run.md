@@ -58,7 +58,8 @@ and `provenant help <verb>` lists the flags.
 | `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. It never replays an uncertain launch. |
 
 When a terminal attempt has no requested output, local and peer reads report
-`not_found`.
+`NOT_FOUND` (facade code `not_found`, exit 2). An active attempt still
+reports `NONTERMINAL`.
 
 Route and access inputs on `dispatch`:
 
