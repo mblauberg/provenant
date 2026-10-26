@@ -237,7 +237,10 @@ and unsupported.
 `providers::prepare` returns a launch spec: exact argv with the canonical
 executable first, the complete child environment, stdin, cwd, setup steps and
 the confinement profile. It is held in memory; only a redacted summary persists.
-Argv prompts are bounded to 64 KiB. Continuation binds the exact adapter,
+Argv prompts are bounded to 64 KiB; dispatch replaces larger prompts with a
+pointer to a readable attempt-owned file
+([run](run.md#records-layout-and-publication)).
+Continuation binds the exact adapter,
 session, account, host, model and sent controls, and rejects incompatible grants
 or identity changes. Run owns custody handoff, retries, home finalisation and
 publication.

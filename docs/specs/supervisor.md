@@ -354,6 +354,7 @@ runs/<RunId>/
   children/{journal.lock,<ChildId>.json}
   attempts/<AttemptId>/
     prompt.txt  result.md      # run-owned, immutable once sealed
+    prompt.md                 # optional run-owned full launch prompt for spilling
     custody.lock
     launch.json                # redacted summary
     process.json               # replaceable observation

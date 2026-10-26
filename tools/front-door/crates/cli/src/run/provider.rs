@@ -76,8 +76,7 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
-    let prompt = Prompt::new(prompt_text.to_owned());
-    prompt.check_argv().map_err(|error| error.to_string())?;
+    let prompt = launch_prompt(prompt_text, paths)?;
     let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -189,6 +188,7 @@ fn prepare_with(
                 scratch: &paths.scratch,
                 private_state: &paths.provider_state,
                 assets,
+                prompt_file: prompt.file(),
             },
             writer.as_ref(),
             &task.access,
@@ -340,6 +340,7 @@ fn prepare_with(
                 scratch,
                 private_state,
                 assets,
+                prompt_file: prompt.file(),
             },
             writer.as_ref(),
             &task.access,
@@ -1046,12 +1047,58 @@ fn credential_authority(
     Ok(authority)
 }
 
+fn launch_prompt(text: &str, paths: &run::LaunchPaths) -> Result<Prompt, String> {
+    let prompt = Prompt::new(text.to_owned());
+    if prompt.check_argv().is_ok() {
+        return Ok(prompt);
+    }
+    let attempt = paths
+        .provider_state
+        .parent()
+        .ok_or("attempt directory missing")?;
+    let directory = Directory::open_anchor(attempt).map_err(|error| error.to_string())?;
+    // The stored prompt may lack the launch's durable-output preamble.
+    let matches = |name: &str| -> Result<bool, String> {
+        match directory.read_bounded(name.as_ref(), text.len() as u64) {
+            Ok(bytes) => Ok(bytes == text.as_bytes()),
+            Err(error) if error.is_not_found() => Ok(false),
+            Err(FsError::TooLarge { .. }) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        }
+    };
+    let name = if matches("prompt.txt")? {
+        "prompt.txt"
+    } else {
+        let name = "prompt.md";
+        match directory.atomic_write(
+            name.as_ref(),
+            ".prompt-",
+            text.as_bytes(),
+            PublishMode::NoReplace,
+        ) {
+            Ok(provenant_supervisor::fs::Publication::Durable) => {}
+            Ok(provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed {
+                sync_error,
+            }) => {
+                return Err(sync_error.to_string());
+            }
+            Err(error) if error.is_exists() && matches(name)? => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        name
+    };
+    let prompt = Prompt::from_file(attempt.join(name));
+    prompt.check_argv().map_err(|error| error.to_string())?;
+    Ok(prompt)
+}
+
 struct ConfinementRoots<'a> {
     cwd: &'a Path,
     home: &'a Path,
     scratch: &'a Path,
     private_state: &'a Path,
     assets: &'a Path,
+    prompt_file: Option<&'a Path>,
 }
 
 /// Dispatch write roots, plus host-configured shared run state for writers only.
@@ -1106,6 +1153,10 @@ fn confinement_request(
             read_roots: std::iter::once(grant(roots.assets))
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
                 .chain(access.read_roots.iter().map(|path| grant(path)))
+                .chain(roots.prompt_file.map(|path| PathGrant {
+                    path: path.to_owned(),
+                    scope: PathScope::Exact,
+                }))
                 .collect(),
             protected_roots: vec![PathGrant {
                 path: roots.cwd.join("AGENTS.md"),
@@ -1390,6 +1441,7 @@ pub fn writer_fixture_plan(
             scratch: &scratch,
             private_state: &paths.provider_state,
             assets,
+            prompt_file: None,
         },
         Some(writer),
         &run::LaneAccess::default(),
@@ -1424,6 +1476,46 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_prompt_preserves_small_text_and_reuses_the_full_prompt_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = canonical(temp.path())?;
+        let paths = run::LaunchPaths {
+            attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
+            operation_id: provenant_core::OperationId::parse("spill-prompt")?,
+            task_index: 0,
+            lane_depth: 1,
+            run_id: provenant_core::RunId::from_bytes([2; 16]),
+            deadline_unix_ms: u64::MAX,
+            scratch: attempt.join("scratch"),
+            provider_state: attempt.join("provider-state"),
+            temporary: attempt.join("tmp"),
+        };
+        for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
+            let prompt = launch_prompt(&text, &paths)?;
+            assert_eq!(prompt.text(), text);
+            assert!(prompt.file().is_none());
+            assert!(!attempt.join("prompt.md").exists());
+        }
+        let text = "é".repeat(75_000);
+        std::fs::write(attempt.join("prompt.txt"), &text)?;
+        let prompt = launch_prompt(&text, &paths)?;
+        assert_eq!(prompt.file(), Some(attempt.join("prompt.txt").as_path()));
+        assert!(prompt.text().len() < 1024);
+        assert!(!attempt.join("prompt.md").exists());
+
+        let full = format!("Durable output instructions\n\n{text}");
+        for _ in 0..2 {
+            let prompt = launch_prompt(&full, &paths)?;
+            assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
+            assert!(prompt.text().len() < 1024);
+            assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, full);
+            assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, text);
+        }
+        Ok(())
+    }
 
     #[test]
     fn detect_failure_distinguishes_probe_directory_from_unknown_identity()
@@ -1557,25 +1649,31 @@ mod tests {
         std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
         std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-        let attempt = state.join("attempt");
+        let run_id = RunId::from_bytes([2; 16]);
+        let attempt_id = AttemptId::from_bytes([1; 16]);
+        let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
         let paths = run::LaunchPaths {
-            attempt_id: AttemptId::from_bytes([1; 16]),
+            attempt_id,
             operation_id: OperationId::parse("writer-temporary")?,
             task_index: 0,
             lane_depth: 1,
-            run_id: RunId::from_bytes([2; 16]),
+            run_id,
             deadline_unix_ms: u64::MAX,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
         };
         for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-            std::fs::create_dir_all(path)?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)?;
         }
+        let prompt = "é".repeat(75_000);
         let task = run::TaskRequest {
             task_id: TaskId::from_bytes([3; 16]),
             profile: Default::default(),
-            prompt_digest: provenant_records::CanonicalV1::file_digest(b"fixture prompt"),
+            prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
             route: run::RequestedRoute::Model {
                 provider: "cursor".into(),
                 model: "cursor/gpt-5.3-codex-low".into(),
@@ -1602,10 +1700,46 @@ mod tests {
             project_id: Some(binding.project_id()),
             host: None,
         };
+        let call = run::Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 5)?,
+            cancel: &cancel,
+        };
+        let store = run::RunStore::open(
+            &run::ExecutionContext {
+                state_root: roots.state.clone(),
+                project_id: binding.project_id(),
+                actor_id: provenant_core::ActorId::from_bytes([5; 16]),
+                read_prompts: true,
+            },
+            &call,
+        )?;
+        store.create(
+            &run::PreparedRun {
+                run_id,
+                operation_id: paths.operation_id.clone(),
+                request: run::CanonicalRequest {
+                    schema_version: 1,
+                    tasks: vec![task.clone()],
+                    concurrency: 1,
+                    parent: None,
+                    lane_depth: Some(1),
+                    parent_attempt: None,
+                },
+                attempts: vec![run::NewAttempt {
+                    task_id: task.task_id,
+                    attempt_id,
+                    prompt: prompt.clone(),
+                }],
+                created_at: provenant_core::WallTime::from_micros(100)?,
+            },
+            &call,
+        )?;
+        let full = format!("Durable output instructions\n\n{prompt}");
         let launch = prepare_with(
             &registry,
             &task,
-            "fixture prompt",
+            &full,
             &paths,
             None,
             |adapter| {
@@ -1623,8 +1757,37 @@ mod tests {
             Some("cursor/gpt-5.3-codex-low")
         );
         assert_eq!(launch.argv[0], executable.as_os_str());
+        let pointer = launch
+            .argv
+            .last()
+            .ok_or("prompt missing")?
+            .to_str()
+            .ok_or("prompt UTF-8")?;
+        assert!(pointer.len() < 1024);
+        let spilled = attempt.join("prompt.md");
+        assert!(pointer.contains(spilled.to_str().ok_or("path UTF-8")?));
+        assert_eq!(std::fs::read_to_string(&spilled)?, full);
+        assert_eq!(
+            store.record(attempt_id, &call)?.prompt.digest,
+            task.prompt_digest
+        );
+        assert_ne!(
+            task.prompt_digest,
+            provenant_records::CanonicalV1::file_digest(pointer.as_bytes())
+        );
+        assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, prompt);
         let confinement = launch.confinement.ok_or("writer confinement missing")?;
         assert!(confinement.writer.is_some());
+        assert!(
+            confinement
+                .plan
+                .permissions()
+                .read_roots
+                .contains(&PathGrant {
+                    path: spilled,
+                    scope: PathScope::Exact,
+                })
+        );
         assert_eq!(
             confinement.plan.permissions().scratch.path,
             paths.temporary.join("candidate-0")
@@ -2183,25 +2346,41 @@ mod tests {
         let assets = Path::new("/release/sha256:active");
         let home = Path::new("/home/user");
         let scratch = Path::new("/tmp/lane-scratch");
-        let private_state = Path::new("/state/attempt");
-        let request = confinement_request(
-            ProjectId::parse("0123456789abcdef0123456789abcdef")?,
-            ConfinementRoots {
-                cwd,
-                home,
-                scratch,
-                private_state,
-                assets,
-            },
-            None,
-            &run::LaneAccess::default(),
-            &Default::default(),
-            "codex",
-        )?;
-        assert!(request.permissions.read_roots.contains(&PathGrant {
-            path: assets.to_owned(),
-            scope: PathScope::Subtree,
-        }));
+        let private_state = Path::new("/state/attempt/provider-state");
+        let prompt = Path::new("/state/attempt/prompt.md");
+        for entry in REGISTRY {
+            let request = confinement_request(
+                ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+                ConfinementRoots {
+                    cwd,
+                    home,
+                    scratch,
+                    private_state,
+                    assets,
+                    prompt_file: Some(prompt),
+                },
+                None,
+                &run::LaneAccess::default(),
+                &Default::default(),
+                entry.adapter.id(),
+            )?;
+            assert!(request.permissions.read_roots.contains(&PathGrant {
+                path: assets.to_owned(),
+                scope: PathScope::Subtree,
+            }));
+            let plan = ConfinedPlan::new(request)?;
+            assert!(plan.permissions().read_roots.contains(&PathGrant {
+                path: prompt.to_owned(),
+                scope: PathScope::Exact,
+            }));
+            assert!(
+                !plan
+                    .permissions()
+                    .read_roots
+                    .iter()
+                    .any(|grant| { grant.path == prompt.parent().expect("attempt") })
+            );
+        }
         Ok(())
     }
 

@@ -105,6 +105,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
   request.json                 # immutable canonical submission and prompt digests
   attempts/<AttemptId>/
     prompt.txt                 # run-owned immutable prompt
+    prompt.md                  # full launch prompt, only when spilling needs a copy
     result.md                  # run-owned sealed result, including failure
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
     provider-state/            # retained provider history; no credentials
@@ -115,6 +116,17 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
 
 The supervisor file names inside an attempt directory are the run and
 supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
+
+Launch prompts up to 64 KiB keep their existing provider transport unchanged. When
+the full launch prompt, including the durable-output preamble, exceeds that
+argv limit, dispatch sends a short instruction to read a run-owned file first
+and treat its contents as the full task. It reuses `prompt.txt` if the bytes
+match; otherwise it seals the full launch text as `prompt.md`. Every adapter
+receives an exact read grant for that file and any provider-specific tool
+permission needed to read it. The submission and attempt prompt digests still
+cover the full submitted text in `prompt.txt`, never the pointer. Both files
+remain retained with the attempt.
+
 Structured events live in SQLite, and provider parsing uses the live stream, not
 a second copy. Writer and read-only lanes stage provider temporary files in
 `tmp/candidate-N`, with a separate directory for each fallback candidate.
