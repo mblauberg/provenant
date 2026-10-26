@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+script=$(cd "$(dirname "$0")" && pwd -P)/collate-release-notes
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-release-notes.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+git -C "$tmp" init -q
+cd "$tmp"
+dir=docs/release-notes/next.d
+mkdir -p "$dir"
+printf 'Release introduction.\n' > "$dir/_intro.md"
+printf '## Additions\n\n- A valid fragment.\n### Details\n' > "$dir/valid.md"
+"$script" --check
+for heading in '## Fixes' '## Unexpected'; do
+  printf '## Additions\n\n- First section.\n%s\n- Second section.\n' "$heading" > "$dir/invalid.md"
+  if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
+    echo "collate-release-notes accepted a second heading: $heading" >&2
+    exit 1
+  fi
+  grep -F "$dir/invalid.md" "$tmp/err" > /dev/null
+done
+echo 'release notes heading validation passed'

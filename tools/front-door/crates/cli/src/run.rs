@@ -73,6 +73,7 @@ impl From<run::RunError> for Fail {
             E::OperationConflict => (Status::Invalid, "OPERATION_CONFLICT"),
             E::NotFound => (Status::Invalid, "NOT_FOUND"),
             E::Nonterminal => (Status::Refused, "NONTERMINAL"),
+            E::ProviderStateExpired => (Status::Refused, "PROVIDER_STATE_EXPIRED"),
             E::Conflict => (Status::Refused, "CONFLICT"),
             E::Cancelled => (Status::Error, "CANCELLED"),
             E::Refused => (Status::Refused, "REFUSED"),

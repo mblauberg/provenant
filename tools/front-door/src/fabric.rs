@@ -1196,6 +1196,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         "CANCELLED" => FacadeError::Cancelled,
         "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
         "UNSUPPORTED" => FacadeError::ConfinementRefused,
+        "PROVIDER_STATE_EXPIRED" => FacadeError::ProviderStateExpired,
         "OWNER_UNAVAILABLE" => FacadeError::OwnerUnavailable,
         _ => FacadeError::Io,
     }
@@ -2893,6 +2894,22 @@ mod peer_tests {
             super::resume_fail_error(fail("NOT_FOUND")),
             super::FacadeError::NotFound
         ));
+    }
+
+    #[test]
+    fn expired_provider_state_keeps_its_facade_code() {
+        assert!(matches!(
+            super::resume_fail_error(fail("PROVIDER_STATE_EXPIRED")),
+            super::FacadeError::ProviderStateExpired
+        ));
+        assert!(matches!(
+            super::fail_error(fail("PROVIDER_STATE_EXPIRED")),
+            super::FacadeError::ProviderStateExpired
+        ));
+        assert_eq!(
+            super::FacadeError::from_code("provider_state_expired", None).code(),
+            "provider_state_expired"
+        );
     }
 
     #[test]

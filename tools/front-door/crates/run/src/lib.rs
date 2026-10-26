@@ -12,6 +12,7 @@ mod launch;
 mod ledger;
 mod plan;
 mod reader;
+mod retention;
 mod store;
 mod writer;
 
@@ -27,6 +28,7 @@ pub use launch::{
     concurrency,
 };
 pub use plan::read_only_plan;
+pub use retention::{ProviderStateGc, ProviderStateIssue, TOMBSTONE};
 pub use writer::{
     LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer,
     resolve_writer_proposal,
@@ -88,6 +90,10 @@ pub enum RunError {
     NotFound,
     #[error("attempt is not terminal")]
     Nonterminal,
+    #[error(
+        "provider state has expired under retention.provider_state_days; this attempt can no longer be resumed; dispatch a new lane with its retained result or transcripts as context"
+    )]
+    ProviderStateExpired,
     #[error("run record revision conflicts or is immutable")]
     Conflict,
     #[error("read or record exceeds byte limit {limit}")]

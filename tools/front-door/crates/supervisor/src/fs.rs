@@ -714,6 +714,20 @@ impl Directory {
             .set_permissions(std::fs::Permissions::from_mode(permissions.mode() | 0o700))
             .map_err(error("fchmod directory", &self.path))
     }
+    /// Narrow an owned directory through its held descriptor. Detached
+    /// provider payloads may have been created with group-readable modes
+    /// beneath a private attempt root.
+    pub fn make_private(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        if self.metadata()?.uid != effective_uid() {
+            return Err(FsError::NotPrivate {
+                name: self.path.clone().into_os_string(),
+            });
+        }
+        self.file
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(error("fchmod private directory", &self.path))
+    }
     /// A fresh descriptor stream on each call, independent of prior enumeration.
     pub fn entries(&self) -> Result<Entries> {
         os::entries(&self.file)
