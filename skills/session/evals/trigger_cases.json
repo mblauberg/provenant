@@ -128,6 +128,32 @@
         "primary_skill": "session",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q17560",
+      "relation": "negative",
+      "prompt": "Implement the approved change to the host-session checkpoint save command and test its size limit.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q17561",
+      "relation": "negative",
+      "prompt": "Put this permanent invariant discovered during the session into its owning project document; no checkpoint or handoff is needed.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "engineering-docs",
+        "companion_skills": []
+      }
     }
   ]
 }

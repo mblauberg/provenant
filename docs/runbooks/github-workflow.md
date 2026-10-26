@@ -25,6 +25,27 @@ acceptance is required only for `terminal` work or when the approved scope
 asks for it. A project may name its landing gate as acceptance; this does not
 grant merge or promotion authority.
 
+## Change spec
+
+The issue body owns the ephemeral change spec; its authority ends with the
+delivering PR. Write it with the [`scope`](../../skills/scope/SKILL.md) skill,
+including the optional fresh-reader check. `scripts/check-scratch-paths` warns
+about possible scratch citations in tracked Markdown and issue templates; its
+findings are advisory. Spec drift is a reviewer check at acceptance, never an
+automatic gate.
+
+## Agent filing
+
+Filing follows the [`tracker`](../../skills/tracker/SKILL.md) skill: evidence
+first, recorded duplicate searches, `source:agent` and the `Filed-by:`
+trailer. This repository's Ready cap is advisory, set at about three times the
+concurrent writer lanes, which follow provider quota and the chair's judgement.
+Pause new filing at the cap and deliver or reconcile existing work.
+
+Re-check issue content when a referenced PR merges, a dependency closes or
+evidence moves. Age, silence and `updatedAt` cannot establish staleness or
+completion; bulk edits refresh timestamps without resolving the issue.
+
 ## Triage
 
 1. Check the evidence, desired outcome, scope, acceptance evidence,
@@ -45,8 +66,9 @@ grant merge or promotion authority.
 ### Native sub-issues
 
 The parent issue owns change scope, story and remaining gates. Native child
-issues own independently deliverable slices. Create or link a child through
-GitHub's `sub_issues` API, not a checklist or title.
+issues own independently deliverable slices; the tracker skill covers when a
+leaf is created. Create or link a child through GitHub's `sub_issues` API, not
+a checklist or title.
 
 The POST requires explicit external-write authority. Without it, return the
 proposed parent/child relation and do not call `gh`.
@@ -71,6 +93,8 @@ handled.
    external-action gate. Otherwise use `References #N` and keep the issue open.
 3. Set `In review` while exact-head checks and independent review run. A new
    commit invalidates that exact-head evidence and it must be rerun.
+   At acceptance, the reviewer checks spec drift and records any mismatch for
+   resolution; this judgement is advisory, not an automatic gate.
 4. If machine gates pass but a user gate remains, set `Awaiting user`.
 5. A user decision comment names the selected choice, artifact or exact head,
    supporting evidence and every remaining gate.
