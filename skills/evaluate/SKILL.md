@@ -57,19 +57,9 @@ receipt; link safe relative artifacts and SHA-256 digests.
 Never claim impossibility from a stochastic search: solve it exactly, or say
 "best found in this sample".
 
-Before you call a receipt final, read it against this checklist:
-
-- `plan.digest` still matches the plan frozen before results were seen, and
-  `plan.frozen_at` precedes the first attempt;
-- every declared artifact resolves to a safe relative path whose live SHA-256
-  matches its recorded digest;
-- attempts, case rows, exclusions and grader records account for the whole
-  frozen schedule, with no silent drops;
-- reported aggregates recompute from the retained rows;
-- `status` matches the threshold comparison, and `pass` is claimed only when
-  every applicable threshold and regression margin held;
-- the enclosing delivery run, evaluation ID and plan digest match the binding
-  the delivery receipt records.
+Before finalising, apply the [receipt checklist](references/receipt.md#final-checklist):
+verify frozen anchors, safe paths and live digests, complete accounting,
+recomputable aggregates, thresholds and delivery binding.
 
 `pass` is a machine assurance result for the named distribution, not general
 safety or delivery acceptance. Attach it to the canonical delivery receipt;

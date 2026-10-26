@@ -27,7 +27,7 @@ same PR. The binary `provenant` is the only executable.
 Direct dependencies come only from the `DIRECT` list in
 `tests/workspace_policy.rs` (ADR 0028 decision 3), declared once in
 `[workspace.dependencies]`; `tempfile` is dev-only. A new crate, feature or
-material transitive addition needs a recorded reason and an update to this rule. So far,
+material transitive addition needs a recorded reason and an update to this rule.
 `rusqlite` also serves run's store, keeping admission atomic in one
 database. `toml_edit` enables `serde` for typed config. There is no
 async runtime and no daemon.

@@ -93,3 +93,19 @@ summary fields.
 Unsupported receipts lack sufficient lineage and provenance to migrate
 truthfully. Preserve them as historical evidence and rerun from a fresh frozen
 plan.
+
+## Final checklist
+
+Before calling a receipt final, confirm:
+
+- `plan.digest` matches the plan frozen before results were seen, and
+  `plan.frozen_at` precedes the first attempt;
+- every artifact resolves to a safe relative path whose live SHA-256 matches
+  its recorded digest;
+- attempts, case rows, exclusions and grader records account for the whole
+  frozen schedule;
+- aggregates recompute from retained rows;
+- `status` matches threshold comparison; `pass` requires every applicable
+  threshold and regression margin;
+- the enclosing delivery run, evaluation ID and plan digest match the binding
+  recorded by the delivery receipt.

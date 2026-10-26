@@ -8,9 +8,8 @@ description: "Use for TypeScript compiler and type-safety work: tsconfig, TS 6/7
 Check the installed compiler first. A repository may pin TypeScript 6.x as
 `typescript` and install 7.x under an alias such as `typescript-native`.
 
-General habits are assumed: discriminated unions, `unknown` over `any`,
-`satisfies`, `never` exhaustiveness and schema parsing at boundaries. This file
-covers recent changes and the defects reviews keep finding.
+Use discriminated unions, `unknown`, `satisfies`, `never` exhaustiveness
+and boundary schemas.
 
 ## TypeScript 6 and 7
 

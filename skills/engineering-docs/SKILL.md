@@ -17,19 +17,8 @@ Link-only files are unavailable or cross-tracker fallbacks.
 
 ## Default homes
 
-Use these only with setup-repo write authority; advisory mode proposes paths.
-
-| Type | Home | Convention |
-|---|---|---|
-| Invariant specifications | `docs/specs/` | non-derivable intent; semantic paths |
-| Generated reference | `docs/reference/` | code-derived inventories; generator command on first line |
-| Architectural decisions | `docs/adr/` | current decisions; indexed |
-| Architecture map | `docs/ARCHITECTURE.md` | current boundaries; link ADRs |
-| Runbooks | `docs/runbooks/` | operator steps and verification |
-| Open-decision register | declared project-docs path | never in issue-tracker mode |
-| Diagrams | owning doc or `docs/diagrams/` | separate only for distinct ownership or reuse |
-| Threat models | `docs/threat-models/` | STRIDE/LINDDUN |
-| Continuity / archive | declared owner / `docs/archive/` | session owns handoff lifecycle; index archives |
+Use [placement defaults](references/placement.md#default-homes) only with
+setup-repo write authority; advisory mode proposes paths.
 
 ## Binding rules
 

@@ -1,6 +1,6 @@
 # Lifecycle routing baseline
 
-Acceptance policy note (21 October 2026): historical references below to a
+Historical references below to a
 mandatory final human gate describe the policy at the recorded revision.
 Current delivery acceptance is met by objective checks and tier-required review;
 explicit user acceptance applies only to `terminal` work or approved scope.
