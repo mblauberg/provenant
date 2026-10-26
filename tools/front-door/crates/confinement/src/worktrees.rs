@@ -49,6 +49,8 @@ pub enum WorktreeError {
     InvalidRequest,
     #[error("worktree or branch was not found")]
     NotFound,
+    #[error("base {base} did not resolve to a commit")]
+    BaseNotFound { base: String },
     #[error("worktree is dirty")]
     Dirty,
     #[error("worktree has an in-progress Git operation")]
@@ -1424,15 +1426,34 @@ fn pin_revision(
     revision: &str,
     cancel: &CancelToken,
 ) -> Result<GitOid, WorktreeError> {
-    let revision = GitRevision::new(revision).map_err(|_| WorktreeError::InvalidRequest)?;
-    let outcome = run_git(
-        context,
-        context.repo,
-        GitRead::ResolveRevision { revision },
-        cancel,
-    )?;
+    let parsed = GitRevision::new(revision).map_err(|_| WorktreeError::InvalidRequest)?;
+    let resolve = || {
+        run_git(
+            context,
+            context.repo,
+            GitRead::ResolveRevision {
+                revision: parsed.clone(),
+            },
+            cancel,
+        )
+    };
+    let mut outcome = resolve()?;
     if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::NotFound);
+        crate::utility::fetch_missing_remote_branch(
+            context.executor,
+            context.repo,
+            context.utility,
+            context.home,
+            revision,
+            context.mutation_budget,
+            cancel,
+        )?;
+        outcome = resolve()?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::BaseNotFound {
+                base: revision.to_owned(),
+            });
+        }
     }
     parse_oid(trim_ascii(&outcome.stdout.bytes))
 }
@@ -2207,6 +2228,29 @@ mod lifecycle_tests {
     /// tree and branch exist, as when a slow checkout is killed part-way.
     struct TimesOutWorktreeAdd<'a>(&'a provenant_os::exec::SystemExecutor);
 
+    struct ObservesFetch<'a> {
+        executor: &'a dyn Executor,
+        seen: std::sync::atomic::AtomicBool,
+    }
+
+    impl Executor for ObservesFetch<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options.argv.iter().any(|arg| arg == "fetch") {
+                self.seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                assert!(
+                    options
+                        .argv
+                        .iter()
+                        .any(|arg| arg == "--no-auto-maintenance")
+                );
+            }
+            self.executor.execute(options)
+        }
+    }
+
     impl Executor for TimesOutWorktreeAdd<'_> {
         fn execute(
             &self,
@@ -2611,19 +2655,52 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn create_accepts_a_remote_tracking_revision_as_its_base() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let base = fixture.head()?;
-        let base_text = base.to_string();
+    fn create_fetches_a_remote_base_with_a_main_only_refspec() -> Result<(), Box<dyn Error>> {
+        let source = Fixture::new()?;
+        source.run(&["branch", "-M", "main"])?;
+        source.run(&["checkout", "-b", "chore/cleanup-code-sweep"])?;
+        source.run(&["commit", "--allow-empty", "-m", "remote-only commit"])?;
+        let base = source.head()?;
+        source.run(&["checkout", "main"])?;
+        let mut fixture = Fixture::new()?;
+        let clone = fixture._temp.path().join("clone");
         fixture.run(&[
-            "update-ref",
-            "refs/remotes/origin/chore/cleanup-code-sweep",
-            &base_text,
+            "clone",
+            "--single-branch",
+            "--branch",
+            "main",
+            source.root.to_str().ok_or("non-UTF8 source")?,
+            clone.to_str().ok_or("non-UTF8 clone")?,
         ])?;
+        fixture.root = clone;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        let refspec = fixture.run(&["config", "--get-all", "remote.origin.fetch"])?;
+        assert_eq!(
+            refspec.stdout.bytes,
+            b"+refs/heads/main:refs/remotes/origin/main\n"
+        );
+        assert!(
+            fixture
+                .run(&["for-each-ref", "refs/remotes/origin/chore/"])?
+                .stdout
+                .bytes
+                .is_empty()
+        );
         let test_context = TestContext::new(&fixture)?;
 
+        let observes_fetch = ObservesFetch {
+            executor: &fixture.executor,
+            seen: std::sync::atomic::AtomicBool::new(false),
+        };
+        let mut context = test_context.context();
+        context.executor = &observes_fetch;
         let created = create(
-            &test_context.context(),
+            &context,
             WorktreeCreate {
                 branch: "chore/cleanup-code-sweep-2".to_owned(),
                 base: Some("origin/chore/cleanup-code-sweep".to_owned()),
@@ -2632,6 +2709,58 @@ mod lifecycle_tests {
         )?;
 
         assert_eq!(created.head, base);
+        assert!(
+            observes_fetch
+                .seen
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let tracking =
+            fixture.run(&["rev-parse", "refs/remotes/origin/chore/cleanup-code-sweep"])?;
+        assert_eq!(
+            String::from_utf8(tracking.stdout.bytes)?.trim(),
+            base.to_string()
+        );
+        assert_eq!(
+            fixture
+                .run(&["config", "--get-all", "remote.origin.fetch"])?
+                .stdout
+                .bytes,
+            refspec.stdout.bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_base_error_names_the_base() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        fixture.run(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.root.to_str().ok_or("non-UTF8 root")?,
+        ])?;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        let test_context = TestContext::new(&fixture)?;
+        for base in ["unknown/branch", "origin/missing"] {
+            let error = create(
+                &test_context.context(),
+                WorktreeCreate {
+                    branch: "feature/missing-base".to_owned(),
+                    base: Some(base.to_owned()),
+                },
+                &cancel(),
+            )
+            .expect_err("missing base must fail");
+            assert_eq!(
+                error.to_string(),
+                format!("base {base} did not resolve to a commit")
+            );
+        }
         Ok(())
     }
 
