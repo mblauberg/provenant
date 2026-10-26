@@ -6,6 +6,153 @@ leak-timeout = { period = "500ms", result = "fail" }
 [profile.ci.junit]
 path = "junit.xml"
 
+[profile.lane]
+# Filtersets cannot contain comments, so reasons are keyed by test name here.
+# CI still runs these host-only fixtures.
+#
+# Hard links are denied:
+# install_refuses_oversize_and_linked_sources: creates a linked source.
+# linked_worktree_grants_derive_from_verified_git_paths_and_ref: links Git logs.
+# native_sandbox_blocks_path_escape_probes: creates hard-link escape probes.
+# cleanup_refuses_hard_links: creates a linked cleanup entry.
+# measurement_counts_hard_links_once_and_sizes_target_contents: links two files.
+# owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors: links a lock.
+# retained_state_never_follows_a_symlink: also creates a hard-linked state file.
+# retained_state_copy_refuses_a_file_swapped_for_a_hard_link: swaps in a hard link.
+#
+# Scratch executable access and launch are denied:
+# override_wins_and_invalid_override_does_not_fall_back: checks scratch Git exec.
+# candidates_use_preference_order_and_require_an_executable_file: checks Git exec.
+# access_follows_links_and_checks_real_id_execution: checks scratch exec access.
+# writer_plan_stages_scratch_in_private_temporary_directory: probes scratch Cursor.
+# read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store:
+#   launches a scratch Git wrapper.
+# register_creates_a_missing_state_root_before_probing: launches scratch Claude.
+# register_writes_typed_quota_options_to_state_config: launches scratch Claude.
+# chair_dry_run_reports_registered_target_and_creates_no_checkpoint: probes Claude.
+# chair_herdr_launch_uses_only_the_returned_new_pane_and_runs_once: launches Herdr.
+# chair_snapshot_allows_slow_identity_without_initialising_a_run_store: runs Git.
+# hosts_probe_only_the_requested_page: launches scratch SSH.
+# read_only_dispatch_places_on_a_peer_and_forwards_by_id: launches scratch SSH.
+# peer_writer_creates_its_worktree_from_a_pushed_base: launches scratch SSH.
+# mcp_submission_places_read_only_work_on_a_named_peer: launches scratch SSH.
+# real_install_check_uninstall_use_only_the_isolated_home: runs staged smoke.
+# legacy_git_hook_location_comes_from_the_explicit_checkout: runs staged smoke.
+# recorded_legacy_hooks_replace_in_place_and_keep_herdr_during_dry_run:
+#   applied install runs staged smoke.
+# hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it:
+#   applied install runs staged smoke.
+# hosts_doctor_uses_non_billing_status_and_preserves_identity_selection:
+#   launches scratch Claude.
+# hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses:
+#   launches scratch SSH.
+# agy_registration_and_quota_follow_the_google_identity: launches scratch agy.
+# codex_dispatch_observes_rollout: launches a copied scratch provider.
+# claude_dispatch_refreshes_registered_account: launches a copied scratch provider.
+# lane_prepare_isolates_nested_state: probes a copied scratch provider.
+# read_only_dispatch_applies_bound_git_and_project_writes: runs a copied provider.
+# writer_dispatch_uses_lane_cache_and_narrow_provider_state: runs a copied provider.
+# provider_path_preserves_a_symlinked_command_name_and_drops_other_search_entries:
+#   checks scratch exec access.
+#
+# post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot:
+#   SIGKILL to its own child is denied.
+# secret_input_arrives_by_descriptor_with_eof_and_no_token_environment:
+#   opening /dev/fd/N is denied.
+#
+# Pathname socket binds are denied; /tmp is unwritable and lane TMPDIR paths
+# also exceed Unix socket limits:
+# process and custody binaries: every case unconditionally calls short_tempdir.
+# process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes:
+#   needs a short socket root and SIGKILL.
+# concurrent_process_writers_on_one_revision_have_one_winner: short socket root.
+# retained_state_copy_skips_entries_swapped_after_their_check: binds a socket.
+# forward_falls_back_only_when_no_agent_accepts: binds a socket.
+# a_request_refused_at_the_cap_is_busy_not_unknown: binds a socket.
+# listen_replaces_a_stale_socket_but_not_a_live_agent: binds a socket.
+# lane_mcp_refuses_coordination_but_allows_reads_and_child_submission: binds a socket.
+default-filter = '''
+not (
+    (package(=provenant-confinement) & (
+        test(=output_custody::tests::install_refuses_oversize_and_linked_sources) |
+        test(=permissions::tests::linked_worktree_grants_derive_from_verified_git_paths_and_ref) |
+        test(=permissions::tests::native_sandbox_blocks_path_escape_probes)
+    )) |
+    (package(=provenant-fabric-runtime) & test(=fetch::tests::cleanup_refuses_hard_links)) |
+    (package(=provenant-supervisor) & (
+        test(=disk::tests::measurement_counts_hard_links_once_and_sizes_target_contents) |
+        test(=fs::tests::owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors)
+    )) |
+    (package(=provenant-cli) & (
+        test(=run::provider::tests::retained_state_never_follows_a_symlink) |
+        test(=run::provider::tests::retained_state_copy_refuses_a_file_swapped_for_a_hard_link)
+    )) |
+    (package(=provenant-supervisor) & (
+        test(=git::tests::override_wins_and_invalid_override_does_not_fall_back) |
+        test(=git::tests::candidates_use_preference_order_and_require_an_executable_file) |
+        test(=sys::tests::access_follows_links_and_checks_real_id_execution)
+    )) |
+    (package(=provenant-cli) & (
+        test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory) |
+        test(=run::provider::tests::read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store)
+    )) |
+    (package(=provenant) & (
+        (binary(=accounts) & (
+            test(=register_creates_a_missing_state_root_before_probing) |
+            test(=register_writes_typed_quota_options_to_state_config)
+        )) |
+        (binary(=chair) & (
+            test(=chair_dry_run_reports_registered_target_and_creates_no_checkpoint) |
+            test(=chair_herdr_launch_uses_only_the_returned_new_pane_and_runs_once) |
+            test(=chair_snapshot_allows_slow_identity_without_initialising_a_run_store)
+        )) |
+        (binary(=fabric_transport) & (
+            test(=hosts_probe_only_the_requested_page) |
+            test(=read_only_dispatch_places_on_a_peer_and_forwards_by_id) |
+            test(=peer_writer_creates_its_worktree_from_a_pushed_base) |
+            test(=mcp_submission_places_read_only_work_on_a_named_peer)
+        )) |
+        (binary(=install) & (
+            test(=real_install_check_uninstall_use_only_the_isolated_home) |
+            test(=legacy_git_hook_location_comes_from_the_explicit_checkout) |
+            test(=recorded_legacy_hooks_replace_in_place_and_keep_herdr_during_dry_run) |
+            test(=hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it)
+        )) |
+        (binary(=parser) & (
+            test(=hosts_doctor_uses_non_billing_status_and_preserves_identity_selection) |
+            test(=hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses)
+        )) |
+        (binary(=quota) & test(=agy_registration_and_quota_follow_the_google_identity)) |
+        (binary(=dispatch_provider) & (
+            test(=codex_dispatch_observes_rollout) |
+            test(=claude_dispatch_refreshes_registered_account)
+        )) |
+        (binary(=worktrees) & (
+            test(=lane_prepare_isolates_nested_state) |
+            test(=read_only_dispatch_applies_bound_git_and_project_writes) |
+            test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
+        )) |
+        (binary(=provenant) & test(=peer_agent::tests::provider_path_preserves_a_symlinked_command_name_and_drops_other_search_entries))
+    )) |
+    (package(=provenant-supervisor) & test(=exec::tests::post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot)) |
+    (package(=provenant-supervisor) & test(=exec::tests::secret_input_arrives_by_descriptor_with_eof_and_no_token_environment)) |
+    (package(=provenant-supervisor) & (
+        binary(=process) | binary(=custody) |
+        test(=fs::tests::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes)
+    )) |
+    (package(=provenant-workflow) & test(=store::tests::concurrency::concurrent_process_writers_on_one_revision_have_one_winner)) |
+    (package(=provenant-cli) & test(=run::provider::tests::retained_state_copy_skips_entries_swapped_after_their_check)) |
+    (package(=provenant) & (
+        (binary(=provenant) & (
+            test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
+            test(=peer_agent::tests::a_request_refused_at_the_cap_is_busy_not_unknown) |
+            test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
+        )) |
+        (binary(=fabric_transport) & test(=lane_mcp_refuses_coordination_but_allows_reads_and_child_submission))
+    ))
+)
+'''
+
 [test-groups]
 serial-sqlite = { max-threads = 1 }
 
