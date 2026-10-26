@@ -14,6 +14,66 @@ use std::{
 };
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn terminal_dependency_waits_for_custody_release() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+    record.generation = 1;
+    record.state = AttemptState::Terminal {
+        outcome: Outcome::Succeeded,
+        exit_code: Some(0),
+        finished_at: record.queued_at,
+        reason: None,
+    };
+    record.provider_launched = Some(false);
+    assert!(
+        store.custody_released(&record)?,
+        "a preflight refusal needs no custody lock"
+    );
+    record.provider_launched = Some(true);
+    let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+    assert!(
+        store.custody_released(&record).is_err(),
+        "missing custody is not release evidence"
+    );
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+    )?;
+    assert!(!store.custody_released(&record)?);
+    drop(custody);
+    assert!(store.custody_released(&record)?);
+    let writer = store
+        .writer_registry
+        .join("worktrees")
+        .join(record.project_id.to_string())
+        .join("retained");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&writer)?;
+    let lease = provenant_supervisor::custody::acquire_reader(
+        Directory::open_anchor(&writer)?,
+        RunStore::scope(&record),
+        call.budget,
+        call.cancel,
+        call.clock,
+    )?;
+    drop(lease);
+    assert!(
+        !store.custody_released(&record)?,
+        "a free lock does not clear a retained writer fence"
+    );
+    record.state = AttemptState::Running;
+    assert!(!store.custody_released(&record)?);
+    Ok(())
+}
+
 fn hold_child_fixture(
     store: &RunStore,
     directory: Directory,

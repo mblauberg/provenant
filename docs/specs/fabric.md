@@ -313,10 +313,22 @@ A graph document has `schema_version: 1`, `graph_id` and `nodes`. A node has an
 `id`, a `prompt`, optional `depends_on`, an `access` of `read_only` or
 `worktree_write` (a writer names its registered worktree) and exactly one of
 `route` or the ordered `routes`. A route holds an `adapter`, one of `model` or
-`alias`, and an optional `effort`. Limits are 8 routes per node, 64 nodes, 256
+`alias`, and optional `effort` and `account`. `account` selects a registered
+provider account, with the same meaning as `dispatch --account`; each fallback
+route can select a different account. Limits are 8 routes per node, 64 nodes, 256
 edges, 64 KiB per prompt and 256 KiB of prompt in total. `run` and `resume` take
 a project-local document path, and `status` and `cancel` take the graph `id`.
 Each graph attempt is bounded by `limits.graph_timeout_ms`.
+
+`run` starts ready nodes and returns. After a run settles, its existing
+supervisor advances pending graphs in the same project, after releasing
+attempt custody and writer locks. Dependants start without a chair tick or a
+separate daemon. The journal retains the document and original working
+directory, so advancement does not depend on the submitting process or on
+later edits to the document file. These host-only inputs are omitted from
+`status` replies. A later settlement also recovers a graph whose advancing
+process exited. If no further run settles, `resume` is the manual recovery
+path; it validates the supplied document against the checkpoint.
 
 - The owner writes a starting checkpoint before it calls run, under a stable
   key for graph, node and route index. A pending or unknown observation reuses

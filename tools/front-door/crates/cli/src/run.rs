@@ -728,6 +728,17 @@ pub fn submit(
     submission: Submission,
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    submit_with_host(session, edge, submission, call, None)
+}
+
+/// Reuse the host's pinned launch inputs after its guardian has settled.
+pub fn submit_with_host(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     // Reuse the originally resolved boundary before consulting Git. Retrying
     // the same operation must work even after its caller-supplied ref vanishes.
@@ -885,6 +896,8 @@ pub fn submit(
     let record = session.store.create(&prepared, call)?;
     let started = if parent_attempt.is_some() {
         Vec::new()
+    } else if let Some(host) = host {
+        launch_on_host(session, record.run_id, edge, call, Some(host), None)?
     } else {
         launch(session, record.run_id, edge, call)?
     };
@@ -1277,20 +1290,20 @@ pub fn launch(
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host(session, run, edge, call, None)
+    launch_on_host(session, run, edge, call, None, None)
 }
-/// `child` carries a lane's child launch: the inherited host context and the
-/// request `validate_child` returned, which is the only copy launched from.
-/// The session's store then carries the parent attempt's sealed requester.
+/// A child carries the request `validate_child` returned, which is the only
+/// copy launched from. The store carries its parent's sealed requester.
 fn launch_on_host(
     session: &Session,
     run: RunId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
-    child: Option<(&run::HostLaunchContext, &run::CanonicalRequest)>,
+    host: Option<&run::HostLaunchContext>,
+    validated: Option<&run::CanonicalRequest>,
 ) -> Result<Vec<run::Started>, Fail> {
-    let host = match child {
-        Some((host, _)) => host.clone(),
+    let host = match host {
+        Some(host) => host.clone(),
         None => run::HostLaunchContext {
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
@@ -1310,7 +1323,6 @@ fn launch_on_host(
             fixture_state_write: false,
         },
     };
-    let validated = child.map(|(_, request)| request);
     let read;
     let request = match validated {
         Some(request) => request,

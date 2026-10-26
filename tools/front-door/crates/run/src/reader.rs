@@ -350,6 +350,33 @@ impl RunStore {
         self.held_owner(&run, Some(&record))?;
         Ok(record)
     }
+    /// A terminal row may precede the guardian releasing writer custody.
+    pub fn custody_released(&self, record: &AttemptRecord) -> Result<bool> {
+        use provenant_supervisor::fs::{FsError, LockMode};
+        if record.project_id != self.context.project_id {
+            return Err(RunError::UnsafePath);
+        }
+        if !matches!(record.state, AttemptState::Terminal { .. }) {
+            return Ok(false);
+        }
+        let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let _custody = match directory
+            .try_lock_existing(std::ffi::OsStr::new("custody.lock"), LockMode::Exclusive)
+        {
+            Ok(lock) => Some(lock),
+            Err(FsError::LockTimeout { .. }) => return Ok(false),
+            Err(error) if error.is_not_found() && record.provider_launched == Some(false) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let fences = self.writer_fence_listing()?;
+        if !fences.issues.is_empty() {
+            return Err(RunError::Validation("writer reservation is unreadable"));
+        }
+        Ok(!fences
+            .reservations
+            .iter()
+            .any(|fence| fence.scope == Self::scope(record)))
+    }
     fn record_with_run(
         &self,
         id: AttemptId,

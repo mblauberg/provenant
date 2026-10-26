@@ -19,6 +19,14 @@ peers on different versions are not supported.
 
 ## Breaking changes
 
+- Fabric graph routes now accept optional `account` in `route` and every
+  `routes` entry. Graph checkpoint envelopes under
+  `fabric/graphs/<project>/graph-<id>.json` now require `execution.document`
+  and `execution.directory`; their digest covers those host-only inputs.
+  Existing checkpoints cannot be read or resumed by the new release. Finish
+  active graphs with the previous release and archive their checkpoints
+  before upgrading (#1712, #1713).
+
 - Installer cut-over support is removed: the `--legacy-checkout` install flag,
   the `LEGACY_CHECKOUT` error code, pre-1.0 cleanup and Git launcher ownership
   are removed. `check install` no longer reports the finding rules
@@ -29,6 +37,10 @@ peers on different versions are not supported.
   receipts omit the key (#1571).
 
 ## Behaviour changes
+
+- Run settlement advances pending Fabric graphs in the same project after
+  releasing custody. Dependants start automatically; `graph resume` remains
+  manual recovery after a crash when no later run settles (#1712).
 
 - `provenant output` on a terminal attempt that has no requested part now
   reports `NOT_FOUND` (exit 2). It used to report `NONTERMINAL` (exit 1)

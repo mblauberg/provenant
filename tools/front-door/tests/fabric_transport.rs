@@ -627,7 +627,7 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     std::fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(
-            &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one"},{"adapter":"fixture","model":"two"}]}]}),
+            &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one","account":"work"},{"adapter":"fixture","model":"two","account":"pro"}]}]}),
         )?,
     )?;
     let run = rig.command(&[
@@ -652,11 +652,48 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     // the graph moves on to the next route rather than claiming a task failure.
     let attempts = node["attempts"].as_array().ok_or("attempts")?;
     assert_eq!(attempts.len(), 2);
-    for attempt in attempts {
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let context = provenant_run::ExecutionContext {
+        state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+        project_id: identity["data"]["project"]
+            .as_str()
+            .ok_or("project")?
+            .parse()?,
+        actor_id: identity["data"]["inbox"]["actor"]
+            .as_str()
+            .ok_or("actor")?
+            .parse()?,
+        read_prompts: false,
+    };
+    use provenant_core::Clock;
+    let clock = provenant_supervisor::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    for (attempt, account) in attempts.iter().zip(["work", "pro"]) {
         assert_eq!(attempt["state"], "terminal");
         assert_eq!(attempt["launched"], false);
         assert_eq!(attempt["outcome"], "adapter_unavailable");
         assert!(attempt["attempt_ref"].as_str().is_some());
+        let (_, id) = attempt["attempt_ref"]
+            .as_str()
+            .ok_or("reference")?
+            .split_once('/')
+            .ok_or("reference")?;
+        let record = store.record(id.parse()?, &call)?;
+        assert_eq!(
+            store.request(record.run_id, &call)?.tasks[0]
+                .account
+                .as_deref(),
+            Some(account)
+        );
     }
     // Every harness reads the same persisted checkpoint.
     let frames = mcp(

@@ -28,6 +28,65 @@ dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
+## Local graphs
+
+Use a graph for a writer followed by a review. Create and register the writer's
+worktree first with `provenant worktree create`, then save a project-local
+document such as `graph.json`:
+
+```json
+{
+  "schema_version": 1,
+  "graph_id": "write-review",
+  "nodes": [
+    {
+      "id": "write",
+      "prompt": "Implement the approved change and commit it.",
+      "access": "worktree_write",
+      "worktree": ".worktrees/feature",
+      "route": {"adapter": "codex", "model": "codex/gpt-6.1-sol"}
+    },
+    {
+      "id": "review",
+      "prompt": "Review the change in .worktrees/feature.",
+      "access": "read_only",
+      "depends_on": ["write"],
+      "route": {
+        "adapter": "claude",
+        "model": "claude/claude-sonnet-5-5",
+        "effort": "medium",
+        "account": "pro"
+      }
+    }
+  ]
+}
+```
+
+Register `pro` with `provenant accounts register` before running the graph.
+Both `route` and each entry in `routes` accept `account`.
+
+```sh
+provenant fabric graph run --document graph.json
+provenant fabric graph status write-review
+```
+
+The run command returns after starting ready nodes. Settlement automatically
+starts dependants and updates the checkpoint to complete. `status` only reads
+the checkpoint. Cancellation fences new starts; it remains in effect until
+an explicit resume:
+
+```sh
+provenant fabric graph cancel write-review
+provenant fabric graph resume --document graph.json
+```
+
+After a supervisor crash, the next settlement in the project advances pending
+graphs. Use `resume` when nothing else will settle. Keep the original document
+for that recovery command; changing its plan produces a conflict. Failed
+writers retain their checkout for inspection. See the
+[graph spec](../specs/fabric.md#bounded-graphs-and-route-fallback) for fallback
+rules and limits.
+
 ## Configure hosts
 
 Install the Rust `provenant` binary on each host and make it available to

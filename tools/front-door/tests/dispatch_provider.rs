@@ -175,9 +175,8 @@ fn codex_dispatch_observes_rollout() -> Result {
     }
     Ok(())
 }
-fn claude_dispatch_refreshes_registered_account() -> Result {
+fn claude_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
-    let cleanup = rig.process_cleanup();
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
     rig.copy_executable(&std::env::current_exe()?, &bin.join("claude"))?;
@@ -217,6 +216,13 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
         listed,
         fs::read_to_string(rig.state.join("config.toml"))?
     );
+    Ok(rig)
+}
+
+fn claude_dispatch_refreshes_registered_account() -> Result {
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let account = rig.home.join(".claude-pro");
     let manifest = rig.root.join("manifest.json");
     fs::write(
         &manifest,
@@ -287,6 +293,149 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
         }
     }
     rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    if let Err(error) = provenant_confinement::permissions::system_backend(
+        &provenant_confinement::permissions::BackendContext {
+            safe_fs: &provenant_supervisor::fs::LocalFs,
+            executor: &executor,
+            cancel: &cancel,
+            #[cfg(target_os = "macos")]
+            env: &[],
+        },
+    ) {
+        if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some() {
+            return Err(error.into());
+        }
+        writeln!(io::stderr(), "graph fixture skipped: {error}")?;
+        return Ok(());
+    }
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let git = std::env::var_os("PROVENANT_GIT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
+    let commit = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Initial",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&commit), 0);
+    let created = rig.command(&[
+        "worktree",
+        "create",
+        "graph-writer",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&created),
+        0,
+        "{}",
+        String::from_utf8_lossy(&created.stdout.bytes)
+    );
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
+        ".rustup/toolchains",
+        ".codex",
+        ".claude/hooks",
+        ".kiro/settings",
+        ".gemini/config",
+        ".cursor/extensions",
+        ".npm",
+    ] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let route = json!({"adapter":"claude","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"});
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({"schema_version":1,"graph_id":"settlement","nodes":[
+            {"id":"write","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/graph-writer","route":route},
+            {"id":"review","prompt":"reply OK","access":"read_only","depends_on":["write"],"route":route}
+        ]}))?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&started),
+        0,
+        "{}",
+        String::from_utf8_lossy(&started.stdout.bytes)
+    );
+    // Status only observes. No resume or other mutating command drives the graph.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let status = rig.command(&["fabric", "graph", "status", "settlement", "--json"])?;
+        assert_eq!(
+            code(&status),
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&status.stdout.bytes),
+            String::from_utf8_lossy(&status.stderr.bytes)
+        );
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        if status["data"]["status"] == "complete" {
+            let nodes = status["data"]["checkpoint"]["nodes"]
+                .as_array()
+                .ok_or("nodes")?;
+            assert_eq!(nodes.len(), 2);
+            for node in nodes {
+                assert_eq!(
+                    node["state"],
+                    "succeeded",
+                    "{status}; lanes={}",
+                    String::from_utf8_lossy(
+                        &rig.command(&["lanes", "--all", "--json"])?.stdout.bytes
+                    )
+                );
+                assert_eq!(node["attempts"].as_array().ok_or("attempts")?.len(), 1);
+            }
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "graph did not advance: {status}"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    }
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lanes = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
+    assert_eq!(lanes.len(), 2);
+    for lane in lanes {
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        assert_eq!(lane["account"], "pro", "{lane}");
+    }
     cleanup.disarm();
     Ok(())
 }
@@ -614,6 +763,7 @@ fn main() -> ExitCode {
             &[
                 "codex_dispatch_observes_rollout",
                 "claude_dispatch_refreshes_registered_account",
+                "graph_settlement_advances_writer_and_account_routed_review",
                 "opencode_free_pool_cools_second_model",
                 "agy_individual_quota_cools_model_until_reset",
             ],
@@ -622,6 +772,9 @@ fn main() -> ExitCode {
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()
+                    }
+                    "graph_settlement_advances_writer_and_account_routed_review" => {
+                        graph_settlement_advances_writer_and_account_routed_review()
                     }
                     "agy_individual_quota_cools_model_until_reset" => {
                         agy_individual_quota_cools_model_until_reset()
