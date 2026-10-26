@@ -82,8 +82,9 @@ provenant fabric graph resume --document graph.json
 
 After a supervisor crash, the next settlement in the project advances pending
 graphs. Use `resume` when nothing else will settle. Keep the original document
-for that recovery command; changing its plan produces a conflict. Failed
-writers retain their checkout for inspection. See the
+for that recovery command; changing its plan produces a conflict. If a graph
+stays pending, `graph status` shows `advance_error` when an automatic advance
+failed. Failed writers retain their checkout for inspection. See the
 [graph spec](../specs/fabric.md#bounded-graphs-and-route-fallback) for fallback
 rules and limits.
 

@@ -48,11 +48,23 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     assert!(!store.custody_released(&record)?);
     drop(custody);
     assert!(store.custody_released(&record)?);
-    let writer = store
+    let worktrees = store
         .writer_registry
         .join("worktrees")
-        .join(record.project_id.to_string())
-        .join("retained");
+        .join(record.project_id.to_string());
+    let broken = worktrees.join("broken");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&broken)?;
+    std::fs::write(broken.join("reservation.json"), "{")?;
+    assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
+    assert!(
+        store.custody_released(&record)?,
+        "another worktree's unreadable reservation is not this attempt's"
+    );
+    std::fs::remove_dir_all(&broken)?;
+    let writer = worktrees.join("retained");
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

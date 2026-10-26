@@ -2144,6 +2144,7 @@ pub(crate) fn advance_settled_graphs(
             if context.identity.project != settled.project_id {
                 return Err(EdgeError::Invalid.into());
             }
+            // The settled attempt's launch inputs serve the graph, whatever that attempt was.
             let mut host = host.clone();
             host.cwd = execution.directory.clone();
             let factory = Factory {
@@ -2176,8 +2177,23 @@ pub(crate) fn advance_settled_graphs(
             advance(&execution.document, &mut owner, &mut journal)?;
             Ok(())
         })();
+        // The guardian's output is discarded, so `graph status` shows a failure.
+        let recorded = FileJournal::set_advance_error(
+            &roots.state,
+            settled.project_id,
+            &id,
+            result
+                .as_ref()
+                .err()
+                .map(|error| error.to_string())
+                .as_deref(),
+            &LocalFs,
+        );
         if let Err(error) = result {
             first_error.get_or_insert(error);
+        }
+        if let Err(error) = recorded {
+            first_error.get_or_insert(error.into());
         }
     }
     first_error.map_or(Ok(()), Err)
@@ -2368,7 +2384,15 @@ impl Factory {
                 }
             })?
             .ok_or(FacadeError::NotFound)?;
-            return Ok(graph_snapshot(checkpoint));
+            let mut run = graph_snapshot(checkpoint);
+            run.advance_error = FileJournal::read_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                &provenant_supervisor::fs::LocalFs,
+            )
+            .map_err(|_| FacadeError::Io)?;
+            return Ok(run);
         }
         let mut journal = FileJournal::open(
             &self.context.roots.state,
@@ -2380,7 +2404,7 @@ impl Factory {
             &self.clock,
         )
         .map_err(|_| FacadeError::Io)?;
-        if let Some(document) = document {
+        if let Some(document) = &document {
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
                     directory: self.cwd.clone(),
@@ -2393,18 +2417,28 @@ impl Factory {
                 cancel,
             };
             let run = if resume {
-                provenant_fabric_runtime::graph::resume(&document, &mut owner, &mut journal)
+                provenant_fabric_runtime::graph::resume(document, &mut owner, &mut journal)
             } else {
-                provenant_fabric_runtime::graph::advance(&document, &mut owner, &mut journal)
+                provenant_fabric_runtime::graph::advance(document, &mut owner, &mut journal)
             };
-            return run.map_err(|error| match error {
+            let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
                 provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
                     FacadeError::InvalidInput
                 }
                 provenant_fabric_runtime::graph::GraphError::PlanChanged => FacadeError::Conflict,
                 _ => FacadeError::StateCorrupt,
-            });
+            })?;
+            // A manual advance that succeeded supersedes an earlier failure.
+            FileJournal::set_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                None,
+                &provenant_supervisor::fs::LocalFs,
+            )
+            .map_err(|_| FacadeError::Io)?;
+            return Ok(run);
         }
         let mut checkpoint = journal
             .load(id)
@@ -2456,7 +2490,11 @@ fn graph_snapshot(
     } else {
         GraphStatus::Complete
     };
-    GraphRun { status, checkpoint }
+    GraphRun {
+        status,
+        checkpoint,
+        advance_error: None,
+    }
 }
 
 impl Factory {

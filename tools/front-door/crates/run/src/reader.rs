@@ -369,9 +369,8 @@ impl RunStore {
             Err(error) => return Err(error.into()),
         };
         let fences = self.writer_fence_listing()?;
-        if !fences.issues.is_empty() {
-            return Err(RunError::Validation("writer reservation is unreadable"));
-        }
+        // An unreadable reservation names no scope, so it cannot be this
+        // attempt's; it stays fenced and blocks only a writer that needs it.
         Ok(!fences
             .reservations
             .iter()

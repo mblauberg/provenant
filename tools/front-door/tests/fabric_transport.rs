@@ -721,6 +721,73 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
 }
 
 #[test]
+fn graph_status_shows_a_failed_advance_until_a_later_advance_succeeds() -> Result {
+    let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    std::fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"stuck","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"one"}}]}),
+        )?,
+    )?;
+    let run = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&run),
+        0,
+        "{}",
+        String::from_utf8_lossy(&run.stderr.bytes)
+    );
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = identity["data"]["project"].as_str().ok_or("project")?;
+    // The guardian writes this beside the checkpoint when its advance fails.
+    let marker = rig
+        .state
+        .join("fabric/graphs")
+        .join(project)
+        .join("graph-stuck.advance-error");
+    std::fs::write(&marker, "journal lock timed out")?;
+    let status = rig.command(&["fabric", "graph", "status", "stuck", "--json"])?;
+    assert_eq!(code(&status), 0);
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert_eq!(status["data"]["advance_error"], "journal lock timed out");
+    let human = rig.command(&["fabric", "graph", "status", "stuck"])?;
+    assert!(
+        String::from_utf8_lossy(&human.stdout.bytes).contains("journal lock timed out"),
+        "{}",
+        String::from_utf8_lossy(&human.stdout.bytes)
+    );
+    // A successful manual advance supersedes the recorded failure.
+    let resume = rig.command(&[
+        "fabric",
+        "graph",
+        "resume",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&resume),
+        0,
+        "{}",
+        String::from_utf8_lossy(&resume.stderr.bytes)
+    );
+    assert!(!marker.exists());
+    let status = rig.command(&["fabric", "graph", "status", "stuck", "--json"])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert!(status["data"].get("advance_error").is_none(), "{status}");
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result {
     use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal};
