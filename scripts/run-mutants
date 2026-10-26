@@ -41,7 +41,7 @@ for f in $(cd "$ws" && grep -rlw --include='*.rs' unsafe crates src 2>/dev/null)
 done
 
 cd "$ws"
-common="--in-place --workspace --in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --timeout 120 --cargo-arg=--locked"
+common="--in-place --workspace --in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --timeout 120 --annotations none --cargo-arg=--locked"
 # shellcheck disable=SC2086
 total=$(cargo mutants $common "$@" --list | grep -c . || true)
 if [ "$total" -eq 0 ]; then
