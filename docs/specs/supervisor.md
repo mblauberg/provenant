@@ -247,6 +247,11 @@ home or tmp grants.
   and other modes keep their existing grants. Hard links remain denied and
   short Unix socket paths still require host tests. Private check homes use
   `std::env::temp_dir()`, honouring the lane's `TMPDIR`.
+- **Pseudo-terminals.** Only a profile that declares `allow_pseudo_tty`, today
+  Agy's, whose `run_command` tool needs a PTY, may open `/dev/ptmx` and the
+  `/dev/ttysN` terminals that its own sandbox allocates (the
+  `com.apple.sandbox.pty` extension). Other terminals and the rest of `/dev`
+  stay denied.
 - **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
   `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
   grants.

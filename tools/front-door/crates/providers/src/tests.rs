@@ -981,6 +981,8 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             .adapter
             .prepare(fixture_input(&route, &confined, &prompt, repo, token));
         let spec = result?;
+        // Only Agy runs its commands on a pseudo-terminal.
+        assert_eq!(spec.profile.spec.allow_pseudo_tty, id == "agy");
         // Agy keeps its prompt on argv and has no lane runtime; its own test pins its launch.
         if matches!(id, "agy" | "cursor" | "opencode") {
             continue;
