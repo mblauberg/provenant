@@ -42,8 +42,8 @@ cross-tracker routes, not a second current-work owner.
 ### Change history
 
 - Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
-- There is no changelog file; see
-  [living ADRs](skills/engineering-docs/SKILL.md#living-adrs)
+- Living docs are edited in place, not appended to; see
+  [engineering-docs](skills/engineering-docs/SKILL.md#binding-rules)
 - Release notes: each change adds a fragment under
   [`docs/release-notes/next.d/`](docs/release-notes/next.d/). To release, run
   `scripts/collate-release-notes vX.Y.Z`, which writes

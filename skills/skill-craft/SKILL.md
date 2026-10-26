@@ -57,8 +57,7 @@ Both branches follow this without restating it in two voices:
   target excluded from both expected routes) that share its vocabulary but
   belong elsewhere. Routing-text changes re-run the held-out set.
 - **Behaviour changes:** run the fixtures with and without the skill and record
-  decisions, differences, model/effort and omissions as reviewer evidence
-  ([ADR 0014](../../docs/adr/0014-comparative-skill-evals-on-suspicion.md)).
+  decisions, differences, model/effort and omissions as reviewer evidence.
   Scores are advisory; only inventory checks may fail CI.
 - **Contract-test boundary:** a contract test protects a machine-enforced
   invariant, never the prose that describes it. If the invariant has no

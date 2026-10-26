@@ -36,6 +36,12 @@ Use these only with setup-repo write authority; advisory mode proposes paths.
 - **Link or generate, do not restate.** Each domain keeps its natural owner;
   link code, schemas, tests and other docs. Regenerate derived reference, never
   hand-edit it. Specs retain intent, prohibitions and invariants.
+- **Edit in place, do not append history.** A living doc states the current
+  truth: rewrite or delete superseded text in the same change. Never add
+  dated `Update:`, `Changed on`, "as of" or progress entries to a spec,
+  runbook, README or ADR; git log and the PR hold the narrative. A diff that
+  only adds lines to a living doc needs a reason. Changelogs and release notes
+  are the exception, since recording change is their job.
 - Specs and runbooks carry `Owner:` and `Anchor:` lines; see
   [placement](references/placement.md).
 - Verify cited decision IDs and repair indexes and inbound links together.
