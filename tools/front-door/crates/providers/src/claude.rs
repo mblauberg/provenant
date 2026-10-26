@@ -83,9 +83,11 @@ impl OauthToken {
                 .access
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control())
-            || oauth.expires_at_ms <= now_ms
         {
-            return Err(ProviderError::UnsupportedPolicy);
+            return Err(ProviderError::Malformed);
+        }
+        if oauth.expires_at_ms <= now_ms {
+            return Err(ProviderError::CredentialExpired);
         }
         Ok(Self {
             access: oauth.access,
@@ -164,15 +166,29 @@ impl CredentialAuthority {
 }
 fn credential_source(login: &Login<'_>) -> Result<CredentialSource, ProviderError> {
     let path = login.config_dir.join(".credentials.json");
-    let directory = provenant_os::fs::Directory::open_anchor(login.config_dir)
-        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    let directory =
+        provenant_os::fs::Directory::open_anchor(login.config_dir).map_err(|error| {
+            if error.is_not_found() {
+                ProviderError::CredentialNotFound
+            } else {
+                ProviderError::CredentialReadFailed("cannot open credential directory".into())
+            }
+        })?;
     match directory.metadata_at(OsStr::new(".credentials.json"), false) {
         Ok(meta) if meta.kind == provenant_os::fs::FileKind::Regular && meta.links == 1 => {
             return Ok(CredentialSource::File { path });
         }
-        Ok(_) => return Err(ProviderError::CredentialUnavailable),
+        Ok(_) => {
+            return Err(ProviderError::CredentialReadFailed(
+                "credential file is not a single regular file".into(),
+            ));
+        }
         Err(error) if error.is_not_found() => {}
-        Err(_) => return Err(ProviderError::CredentialUnavailable),
+        Err(_) => {
+            return Err(ProviderError::CredentialReadFailed(
+                "cannot inspect credential file".into(),
+            ));
+        }
     }
     if !cfg!(target_os = "macos") {
         return Ok(CredentialSource::File { path });
@@ -194,6 +210,13 @@ fn keychain_source(login: &Login<'_>) -> CredentialSource {
     }
 }
 
+fn parse_stored_token(bytes: &[u8], now_ms: u64) -> Result<OauthToken, ProviderError> {
+    OauthToken::parse(bytes, now_ms).map_err(|error| match error {
+        ProviderError::CredentialExpired => error,
+        _ => ProviderError::CredentialReadFailed("stored credential JSON is invalid".into()),
+    })
+}
+
 /// Reads one identity's login token outside the sandbox. When it expires
 /// within the refresh window, runs the CLI once at zero cost to refresh it,
 /// then reads again and accepts a token with at least a minute left. The
@@ -208,11 +231,7 @@ pub fn refresh_if_expiring(
     deadline_ms: u64,
     authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
-    let source = if authority.is_some() {
-        credential_source(login)?
-    } else {
-        keychain_source(login)
-    };
+    let source = credential_source(login)?;
     if let Some(authority) = authority {
         authority.check(&source, now_ms())?;
     }
@@ -235,6 +254,7 @@ pub fn refresh_if_expiring(
         env.push(("CLAUDE_CONFIG_DIR".into(), login.config_dir.into()));
     }
     let read = || -> Result<OauthToken, ProviderError> {
+        let timeout = budget(Duration::from_secs(10))?;
         if authority.is_some() && credential_source(login)? != source {
             return Err(ProviderError::CredentialUnavailable);
         }
@@ -245,12 +265,19 @@ pub fn refresh_if_expiring(
             let directory = provenant_os::fs::Directory::open_anchor(
                 path.parent().ok_or(ProviderError::CredentialUnavailable)?,
             )
-            .map_err(|_| ProviderError::CredentialUnavailable)?;
+            .map_err(|_| {
+                ProviderError::CredentialReadFailed("cannot open credential directory".into())
+            })?;
             let bytes = directory
                 .read_bounded(OsStr::new(".credentials.json"), 65536)
-                .map_err(|_| ProviderError::CredentialUnavailable)?;
-            return OauthToken::parse(&bytes, now_ms())
-                .map_err(|_| ProviderError::CredentialUnavailable);
+                .map_err(|error| {
+                    if error.is_not_found() {
+                        ProviderError::CredentialNotFound
+                    } else {
+                        ProviderError::CredentialReadFailed("cannot read credential file".into())
+                    }
+                })?;
+            return parse_stored_token(&bytes, now_ms());
         }
         let argv: Vec<OsString> = [
             "/usr/bin/security".as_ref(),
@@ -263,22 +290,39 @@ pub fn refresh_if_expiring(
         ]
         .map(OsString::from)
         .to_vec();
-        let mut options = ExecOptions::new(
-            &argv,
-            Path::new(PROBE_CWD),
-            budget(Duration::from_secs(10))?,
-        );
+        let mut options = ExecOptions::new(&argv, Path::new(PROBE_CWD), timeout);
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
         options.stderr = StreamPolicy::Discard;
-        let out = executor
-            .execute(options)
-            .map_err(|_| ProviderError::CredentialUnavailable)?;
-        if out.termination != Termination::Exit(0) || out.stdout.truncated {
-            return Err(ProviderError::CredentialUnavailable);
+        let out = executor.execute(options).map_err(|_| {
+            ProviderError::CredentialReadFailed("cannot execute keychain read".into())
+        })?;
+        if out.timed_out {
+            return Err(ProviderError::CredentialReadFailed(
+                "keychain read timed out".into(),
+            ));
         }
-        OauthToken::parse(&out.stdout.bytes, now_ms())
-            .map_err(|_| ProviderError::CredentialUnavailable)
+        if out.stdout.truncated
+            || out.stdout.read_failed
+            || out.drain_truncated
+            || out.cancelled
+            || out.overflow_stopped
+        {
+            return Err(ProviderError::CredentialReadFailed(
+                "keychain read was incomplete".into(),
+            ));
+        }
+        match out.termination {
+            Termination::Exit(0) => parse_stored_token(&out.stdout.bytes, now_ms()),
+            // security's errSecItemNotFound exit status.
+            Termination::Exit(44) => Err(ProviderError::CredentialNotFound),
+            Termination::Exit(code) => Err(ProviderError::CredentialReadFailed(format!(
+                "security exited with code {code}"
+            ))),
+            Termination::Signal(signal) => Err(ProviderError::CredentialReadFailed(format!(
+                "security terminated by signal {signal}"
+            ))),
+        }
     };
     match read() {
         Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
