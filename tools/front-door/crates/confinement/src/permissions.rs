@@ -47,8 +47,9 @@ const MAX_NETWORK_GRANTS: usize = 128;
 const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
 const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
+/// The retained provider state copy shares this depth limit.
 #[cfg(target_os = "macos")]
-const MAX_WRITABLE_TREE_DEPTH: usize = 128;
+const MAX_WRITABLE_TREE_DEPTH: usize = 32;
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "macos")]
