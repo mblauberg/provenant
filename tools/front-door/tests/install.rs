@@ -121,14 +121,19 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
     // Staged smoke executables must live under a lane's executable build root.
     let executable = std::env::current_exe()?;
     let fixture_root = executable.parent().ok_or("test executable parent")?;
-    for bin_setting in ["flag-external", "flag-home", "config-home"] {
+    for (bin_setting, state_in_home) in [
+        ("flag-external", true),
+        ("flag-home", true),
+        ("config-home", true),
+        ("config-home", false),
+    ] {
         let mut rig = TestRig::in_directory(fixture_root)?;
-        rig.state = rig.home.join(".local/share/provenant/v1");
+        if state_in_home {
+            rig.state = rig.home.join(".local/share/provenant/v1");
+        }
         rig.env.retain(|(key, _)| {
-            !matches!(
-                key.to_str(),
-                Some("PROVENANT_STATE_DIR" | "CODEX_HOME" | "CLAUDE_CONFIG_DIR")
-            )
+            !matches!(key.to_str(), Some("CODEX_HOME" | "CLAUDE_CONFIG_DIR"))
+                && !(state_in_home && key == "PROVENANT_STATE_DIR")
         });
         let bin_dir = match bin_setting {
             "flag-external" => rig.root.join("global-bin"),
@@ -192,10 +197,14 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
             .join(".local/share/provenant/v1/releases")
             .join(receipt.source_digest.to_string())
             .join("bin/provenant");
-        fs::create_dir_all(old_release_binary.parent().ok_or("release parent")?)?;
-        fs::write(&old_release_binary, b"old release canary\n")?;
+        if state_in_home {
+            fs::create_dir_all(old_release_binary.parent().ok_or("release parent")?)?;
+            fs::write(&old_release_binary, b"old release canary\n")?;
+        }
         rig.home = moved_home.clone();
-        rig.state = moved_home.join(".local/share/provenant/v1");
+        if state_in_home {
+            rig.state = moved_home.join(".local/share/provenant/v1");
+        }
         // Doctor receives unresolved HOME and does not load install config.
         let alias = rig.root.join("home-alias");
         symlink(&moved_home, &alias)?;
@@ -220,16 +229,28 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
         );
         fs::write(&old_mcp, mcp_bytes)?;
         // Uninstall has no --bin-dir flag; the config path still names old HOME.
-        let removed = rig.execute(binary, &["uninstall", "--harness", "codex", "--json"], None)?;
+        let uninstall_args = if state_in_home {
+            vec!["uninstall", "--harness", "codex", "--json"]
+        } else {
+            vec!["uninstall", "--harness", "codex"]
+        };
+        let removed = rig.execute(binary, &uninstall_args, None)?;
         assert_eq!(code(&removed), 0, "{bin_setting}: {removed:?}");
-        let removed: serde_json::Value = serde_json::from_slice(&removed.stdout.bytes)?;
-        assert!(
-            removed["data"]["outcome"]["findings"]
-                .as_array()
-                .ok_or("findings")?
-                .iter()
-                .any(|finding| finding["rule"] == "relocated_stale_entry")
-        );
+        if state_in_home {
+            let removed: serde_json::Value = serde_json::from_slice(&removed.stdout.bytes)?;
+            assert!(
+                removed["data"]["outcome"]["findings"]
+                    .as_array()
+                    .ok_or("findings")?
+                    .iter()
+                    .any(|finding| finding["rule"] == "relocated_stale_entry")
+            );
+        } else {
+            assert!(
+                String::from_utf8_lossy(&removed.stdout.bytes)
+                    .contains("Home moved; old paths left untouched")
+            );
+        }
         for (path, value) in &canaries {
             match value {
                 Canary::Link(target) => assert_eq!(fs::read_link(path)?, *target),
@@ -239,7 +260,9 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
                 }
             }
         }
-        assert_eq!(fs::read(old_release_binary)?, b"old release canary\n");
+        if state_in_home {
+            assert_eq!(fs::read(old_release_binary)?, b"old release canary\n");
+        }
     }
     Ok(())
 }

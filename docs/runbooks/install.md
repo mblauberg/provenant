@@ -137,7 +137,8 @@ If your home directory or state root has moved since install, uninstall reports
 one `relocated_stale_entry` per entry it will not touch, plus `state_root_moved`
 if the state root moved, then forgets the removed targets. This also applies
 with a custom `PROVENANT_STATE_DIR` or state outside the home. It never acts on
-the old paths. To finish,
+the old paths. Human output also says `Home moved; old paths left untouched`
+when the state root stayed in place. To finish,
 run `launchctl bootout gui/$UID/dev.provenant.peer`, move
 `~/Library/LaunchAgents/dev.provenant.peer.plist` aside, and delete links under
 `~/.local/bin` and the harness skills directories, plus harness instruction

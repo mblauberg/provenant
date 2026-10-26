@@ -240,7 +240,9 @@ recorded default bin directory, the moved default state root, recorded harness
 paths compared with defaults, then the legacy home. The first candidate that
 neither contains nor sits within the current home identifies the old home,
 independently of the current bin setting or state layout. Legacy staleness
-depends only on its recorded home. Stale entries produce `relocated_stale_entry`
+depends only on its recorded home. Detection is heuristic: an unchanged external
+harness home with a default suffix, such as `/data/profile/.codex`, can resemble
+an old home. Stale entries produce `relocated_stale_entry`
 findings without inspecting or changing their paths; a moved state root also
 produces `state_root_moved`. These findings remain visible when no target is
 selected. Uninstall forgets selected stale ownership and retains unselected
