@@ -151,6 +151,74 @@ fn read_only_data_version_detects_a_new_queued_attempt() -> TestResult {
 }
 
 #[test]
+fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: temp.path().join("lane"),
+    });
+    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        remote: "origin".into(),
+        branch: "published/lane".into(),
+        open_pr: false,
+    });
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let id = input.attempts[0].attempt_id;
+    let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
+    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
+        ".github/workflows/ci.yml",
+    )?)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    artifacts::seal(
+        &attempt,
+        "writer-terminal.json",
+        &db::bytes(&writer::WriterTerminal {
+            schema_version: 1,
+            head,
+            protected_paths: vec![path.clone()],
+        })?,
+        RECORD_LIMIT,
+    )?;
+    let mut publication = publication();
+    publication.outcome = Outcome::ReviewRequired;
+    publication.reason = Some("protected changes require review".into());
+    let mut incomplete = publication.clone();
+    incomplete.complete = false;
+    assert!(matches!(
+        store.publish_terminal(id, 1, &incomplete, &exit(), &call),
+        Err(RunError::Validation(_))
+    ));
+    let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
+    assert_eq!(record.head, Some(head));
+    assert_eq!(record.protected_paths, vec![path]);
+    assert!(record.delivery.is_none());
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            ..
+        }
+    ));
+    assert_eq!(store.record(id, &call)?, record);
+    assert_eq!(
+        serde_json::to_value(&record)?["state"]["outcome"],
+        "review_required"
+    );
+    assert_eq!(
+        store.attempt(id, &call)?.terminal_state,
+        provenant_records::AttemptOutcome::ReviewRequired
+    );
+    Ok(())
+}
+
+#[test]
 fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

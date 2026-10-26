@@ -10,6 +10,7 @@ use crate::{FileDigest, PathWire};
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
     Succeeded,
+    ReviewRequired,
     Failed,
     Rejected,
     Cancelled,

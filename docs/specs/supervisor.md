@@ -308,8 +308,15 @@ content-free error.
 and archives protected disk, index and HEAD patches, blobs and digests before
 restoring anything. Only attributable ordinary `.agents/` edits are restored
 automatically. Policy or control-file changes, concurrent edits or
-unaccountable history need review: evidence is kept, a terminal failure is
-published, and unrelated work and history are untouched. A tracked symlink at a
+unaccountable history need review: evidence is kept and a completed writer
+publishes `review_required` with its candidate head and protected paths.
+Provider failures and invalid terminal Git state remain failures. Committed
+changes are compared with the merge base of the candidate and the locally
+observed default branch of the delivery remote (`origin` without automatic
+delivery). If that remote has no default-branch ref, the primary checkout's
+HEAD is the target. Terminal checks do not fetch. Clean protected changes
+merged from that target do not require review; staged and disk edits still do.
+Unrelated work and history are untouched. A tracked symlink at a
 protected path (mode 120000, such as `CLAUDE.md -> AGENTS.md`) is evidence whose
 bytes are the link target, read with `readlink` and checked against the
 committed blob, never followed. Protected-tip verification returns a pinned SHA,

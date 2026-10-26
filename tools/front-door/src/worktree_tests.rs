@@ -44,6 +44,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
+            "writer_protected_changes_wait_for_review_and_ignore_upstream",
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "create_list_and_remove_a_managed_worktree",
@@ -77,6 +78,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "second_writer_is_refused_while_first_holds_the_worktree" => {
                     second_writer_is_refused_while_first_holds_the_worktree()
+                }
+                "writer_protected_changes_wait_for_review_and_ignore_upstream" => {
+                    writer_protected_changes_wait_for_review_and_ignore_upstream()
                 }
                 "writer_terminal_refuses_sequencer_state" => {
                     writer_terminal_refuses_sequencer_state()
@@ -333,6 +337,113 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     ));
     wait_for_writer_release(&store)?;
     cleanup.disarm();
+    Ok(())
+}
+
+fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    for own_change in [true, false] {
+        let rig = repository()?;
+        ok(
+            &rig,
+            &["worktree", "create", "writer", "--base", "HEAD", "--json"],
+        )?;
+        let path = rig.project.join(".worktrees/writer");
+        let path_text = path.to_str().ok_or("fixture worktree encoding")?;
+        let (roots, context) = writer_context(&rig)?;
+        let cleanup = writer_process_cleanup(&context);
+        let store = open_writer_store(&context)?;
+        let clock = provenant_supervisor::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = writer_call(&clock, &cancel)?;
+        let writer =
+            provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+        let prepared = writer_run(writer, "protected-review", 101, "hold for protected commit")?;
+        let attempt = prepared.attempts[0].attempt_id;
+        let record = store.create(&prepared, &call)?;
+        let release = path.join(".writer-fixture-release");
+        let _release_on_drop = ReleaseOnDrop(release.clone());
+        let provider = WriterProvider {
+            state: context.state_root.as_path().to_owned(),
+            home: fs::canonicalize(&rig.home)?,
+            project: context.project_id,
+            mode: "hold",
+        };
+        let holder = holder_context(&rig, &roots, &context);
+        let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+        assert!(
+            matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt)
+        );
+        wait_for_path(
+            &path.join(".writer-fixture-ready"),
+            Duration::from_secs(8),
+            "writer hold",
+        )?;
+        // Upstream advances after launch while local main stays at the base.
+        git(&rig, &["checkout", "-qb", "upstream"])?;
+        fs::write(
+            rig.project.join(".github/workflows/check.yml"),
+            b"upstream workflow",
+        )?;
+        fs::write(rig.project.join(".github/new.yml"), b"upstream addition")?;
+        fs::remove_file(rig.project.join("nested/AGENTS.md"))?;
+        git(&rig, &["add", "-A"])?;
+        git(&rig, &["commit", "-qm", "Upstream protected changes"])?;
+        git(&rig, &["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+        git(
+            &rig,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )?;
+        git(&rig, &["checkout", "-q", "main"])?;
+        fs::write(path.join("source.txt"), b"writer source")?;
+        git(&rig, &["-C", path_text, "add", "source.txt"])?;
+        git(&rig, &["-C", path_text, "commit", "-qm", "Writer source"])?;
+        git(
+            &rig,
+            &["-C", path_text, "merge", "--no-edit", "origin/main"],
+        )?;
+        if own_change {
+            fs::write(path.join(".github/workflows/check.yml"), b"writer workflow")?;
+            git(
+                &rig,
+                &["-C", path_text, "add", ".github/workflows/check.yml"],
+            )?;
+            git(
+                &rig,
+                &["-C", path_text, "commit", "-qm", "Writer protected change"],
+            )?;
+        }
+        let head = git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?;
+        fs::write(&release, b"release")?;
+        let terminal = await_terminal(&store, attempt, &call)?;
+        let value = serde_json::to_value(&terminal)?;
+        assert_eq!(
+            value["state"]["outcome"],
+            if own_change {
+                "review_required"
+            } else {
+                "succeeded"
+            }
+        );
+        if own_change {
+            assert_eq!(value["head"], head);
+            assert_eq!(
+                value["protected_paths"],
+                serde_json::json!([
+                    {"encoding": "utf8", "path": ".github/workflows/check.yml"}
+                ])
+            );
+            assert!(terminal.delivery.is_none());
+        }
+        wait_for_writer_release(&store)?;
+        cleanup.disarm();
+    }
     Ok(())
 }
 
