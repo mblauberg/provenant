@@ -8,7 +8,9 @@ use provenant_core::{ProjectId, WorkScope};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
-use provenant_supervisor::fs::{Directory, FileKind, FsError, PublishMode, entropy_128};
+use provenant_supervisor::fs::{
+    Directory, FileKind, FsError, PayloadTree, PublishMode, entropy_128,
+};
 use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::path::{Path, PathBuf};
 
@@ -540,20 +542,27 @@ fn continuation_for(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     match find_session_state(&prior_state, session) {
-        Some(retained) => copy_state(&retained, private_state)?,
+        Ok(Some(retained)) => copy_state(&retained, private_state)?,
         // These adapters retain sessions in their existing user data stores.
-        None if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
-        None => return Err("the prior attempt's retained provider state is missing".into()),
+        Ok(None) if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
+        Ok(None) => return Err("the prior attempt's retained provider state is missing".into()),
+        // An unfinished search proves nothing missing, whatever the adapter.
+        Err(SearchExhausted) => {
+            return Err(format!(
+                "the prior attempt's retained provider state exceeds {} entries",
+                RETAINED_STATE.entries
+            ));
+        }
     }
     Ok(continuation)
 }
 
 /// Bounds on retained provider state, shared by its search and its copy. A
-/// leftover process from the prior attempt may still grow the tree. Lane state
-/// nests plugin caches 14 directories deep, and the launch census refuses a
-/// private tree past 100,000 entries anyway. The byte budget is many times a
-/// long session's state while bounding what a sparse or still-growing file can
-/// make the host write.
+/// leftover process from the prior attempt may still grow the tree. The depth
+/// and entry limits match the launch census of writable trees, which would
+/// refuse a larger copy anyway, and leave room past the depth of Codex plugin
+/// caches. The byte budget is many times a long session's state while bounding
+/// what a sparse or still-growing file can make the host write.
 #[derive(Clone, Copy)]
 struct StateLimits {
     depth: u32,
@@ -583,8 +592,9 @@ fn listed(
     Ok(Some(names))
 }
 
-/// A real directory on `device`, opened without following a link. A mount
-/// point stats as the mounted root, so it is never opened.
+/// A real directory on `device`, opened without following a link. Only the
+/// stat before the open checks the device: a mount point stats as the mounted
+/// root, so it is not opened unless it is swapped in after that stat.
 fn open_local_directory(
     parent: &Directory,
     name: &std::ffi::OsStr,
@@ -601,40 +611,70 @@ fn open_local_directory(
 /// named for `session`, searched within `RETAINED_STATE`. The prior lane
 /// wrote this tree, so the path must already be canonical and every directory
 /// is opened from its parent's handle, never through a link or a mount.
-fn find_session_state(provider_state: &Path, session: &str) -> Option<PathBuf> {
-    fn holds(dir: &Directory, session: &str, depth: u32, device: u64, budget: &mut u32) -> bool {
-        let Ok(Some(names)) = listed(dir, budget) else {
-            return false;
+fn find_session_state(
+    provider_state: &Path,
+    session: &str,
+) -> Result<Option<PathBuf>, SearchExhausted> {
+    find_session_state_within(provider_state, session, RETAINED_STATE)
+}
+
+/// The session search spent its entry budget before it finished.
+#[derive(Debug, PartialEq)]
+struct SearchExhausted;
+
+fn find_session_state_within(
+    provider_state: &Path,
+    session: &str,
+    limits: StateLimits,
+) -> Result<Option<PathBuf>, SearchExhausted> {
+    fn holds(
+        dir: &Directory,
+        session: &str,
+        depth: u32,
+        device: u64,
+        budget: &mut u32,
+    ) -> Result<bool, SearchExhausted> {
+        let names = match listed(dir, budget) {
+            Ok(Some(names)) => names,
+            Ok(None) => return Err(SearchExhausted),
+            Err(_) => return Ok(false),
         };
-        names.iter().any(|name| {
-            name.to_string_lossy().contains(session)
-                || depth > 0
-                    && open_local_directory(dir, name, device)
-                        .is_some_and(|child| holds(&child, session, depth - 1, device, budget))
-        })
+        for name in names {
+            if name.to_string_lossy().contains(session) {
+                return Ok(true);
+            }
+            if depth > 0
+                && let Some(child) = open_local_directory(dir, &name, device)
+                && holds(&child, session, depth - 1, device, budget)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
-    if provenant_supervisor::fs::canonicalize(provider_state).ok()? != provider_state {
-        return None;
+    let opened = provenant_supervisor::fs::canonicalize(provider_state)
+        .ok()
+        .filter(|canonical| canonical == provider_state)
+        .and_then(|_| Directory::open_anchor(provider_state).ok())
+        .and_then(|root| Some((root.metadata().ok()?.device, root)));
+    let Some((device, root)) = opened else {
+        return Ok(None);
+    };
+    let mut budget = limits.entries;
+    let names = match listed(&root, &mut budget) {
+        Ok(Some(names)) => names,
+        Ok(None) => return Err(SearchExhausted),
+        Err(_) => return Ok(None),
+    };
+    for name in names {
+        if name.to_string_lossy().starts_with("candidate-")
+            && let Some(candidate) = open_local_directory(&root, &name, device)
+            && holds(&candidate, session, limits.depth, device, &mut budget)?
+        {
+            return Ok(Some(provider_state.join(name)));
+        }
     }
-    let root = Directory::open_anchor(provider_state).ok()?;
-    let device = root.metadata().ok()?.device;
-    let mut budget = RETAINED_STATE.entries;
-    listed(&root, &mut budget)
-        .ok()??
-        .into_iter()
-        .find(|name| {
-            name.to_string_lossy().starts_with("candidate-")
-                && open_local_directory(&root, name, device).is_some_and(|candidate| {
-                    holds(
-                        &candidate,
-                        session,
-                        RETAINED_STATE.depth,
-                        device,
-                        &mut budget,
-                    )
-                })
-        })
-        .map(|name| provider_state.join(name))
+    Ok(None)
 }
 
 /// Copy regular files and directories within `RETAINED_STATE`. Symlinks and
@@ -658,19 +698,37 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
         return Err("retained provider state is not a directory".into());
     }
     let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
-    std::fs::create_dir_all(to).map_err(|error| failed(&error))?;
-    let target = Directory::open_anchor(to).map_err(|error| failed(&error))?;
+    let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
+        return Err(failed(&"the destination has no parent directory"));
+    };
+    std::fs::create_dir_all(parent).map_err(|error| failed(&error))?;
+    let parent = Directory::open_anchor(parent).map_err(|error| failed(&error))?;
+    // Free space caps the budget, so state the filesystem cannot hold is
+    // refused before it fills the disk.
+    let bytes = limits
+        .bytes
+        .min(parent.available_bytes().map_err(|error| failed(&error))?);
     let mut budget = Budget {
         entries: limits.entries,
-        bytes: limits.bytes,
+        bytes,
         device: source.metadata().map_err(|error| failed(&error))?.device,
     };
-    copy_tree(&source, &target, limits.depth, &mut budget).map_err(|refusal| match refusal {
+    // The copy fills a fresh private sibling and is renamed into place, onto
+    // the empty destination, only once whole. Any refusal removes it.
+    let staging = provenant_supervisor::fs::temporary_name().map_err(|error| failed(&error))?;
+    parent
+        .mkdir(&staging, 0o700)
+        .map_err(|error| failed(&error))?;
+    let copied = parent
+        .open_directory(&staging)
+        .map_err(CopyRefusal::from)
+        .and_then(|target| copy_tree(&source, &target, limits.depth, &mut budget))
+        .and_then(|()| Ok(parent.replace(&staging, &parent, name)?));
+    let copied = copied.map_err(|refusal| match refusal {
         CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
-        CopyRefusal::TooLarge => format!(
-            "retained provider state exceeds its {} byte copy budget",
-            limits.bytes
-        ),
+        CopyRefusal::TooLarge => {
+            format!("retained provider state exceeds its {bytes} byte copy budget")
+        }
         CopyRefusal::TooMany => {
             format!("retained provider state exceeds {} entries", limits.entries)
         }
@@ -680,7 +738,32 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
         ),
         CopyRefusal::CrossDevice => "retained provider state crosses a filesystem boundary".into(),
         CopyRefusal::Fs(error) => failed(&error),
-    })
+    });
+    if let Err(refusal) = &copied
+        && let Err(error) = remove_staged(&parent, &staging)
+    {
+        return Err(format!("{refusal}; removing its staged copy: {error}"));
+    }
+    copied
+}
+
+/// Remove a refused copy's staging tree. The host made it fresh and private,
+/// so it may dispose of lock-named entries the copy wrote there.
+fn remove_staged(parent: &Directory, name: &std::ffi::OsStr) -> Result<(), FsError> {
+    fn remove_contents(tree: &PayloadTree) -> Result<(), FsError> {
+        for entry in tree.entries()?.collect::<Result<Vec<_>, _>>()? {
+            if tree.metadata_at(&entry)?.kind == FileKind::Directory {
+                remove_contents(&tree.child(&entry)?)?;
+                tree.rmdir(&entry)?;
+            } else {
+                tree.unlink(&entry)?;
+            }
+        }
+        Ok(())
+    }
+    let staged = parent.metadata_at(name, false)?;
+    remove_contents(&PayloadTree::claim(parent, name, &staged)?)?;
+    parent.rmdir(name)
 }
 
 /// What the rest of a copy may still spend, and the source's filesystem.
@@ -787,8 +870,8 @@ fn copy_tree(
                 if opened.links > 1 {
                     return Err(CopyRefusal::HardLink);
                 }
-                // The destination is the new attempt's fresh, empty candidate
-                // directory, so an existing entry there is refused, not replaced.
+                // The destination is the copy's fresh staging directory, so an
+                // existing entry there is refused, not replaced.
                 let mut copy = to.create_new(&name)?;
                 // Size is never trusted: read one byte past the budget, so a
                 // sparse or still-growing file is refused, not copied unbounded.
@@ -802,8 +885,6 @@ fn copy_tree(
                     source,
                 })?;
                 if copied > budget.bytes {
-                    drop(copy);
-                    let _ = to.unlink(&name);
                     return Err(CopyRefusal::TooLarge);
                 }
                 budget.bytes -= copied;
@@ -1855,16 +1936,16 @@ mod tests {
         std::fs::create_dir_all(base.join("outside/fixture-session"))?;
         std::fs::create_dir_all(&state)?;
         std::os::unix::fs::symlink(base.join("outside"), state.join("candidate-0"))?;
-        assert_eq!(find_session_state(&state, "fixture-session"), None);
+        assert_eq!(find_session_state(&state, "fixture-session"), Ok(None));
         std::fs::create_dir_all(state.join("candidate-1/fixture-session"))?;
         assert_eq!(
             find_session_state(&state, "fixture-session"),
-            Some(state.join("candidate-1"))
+            Ok(Some(state.join("candidate-1")))
         );
         std::os::unix::fs::symlink(&state, base.join("alias"))?;
         assert_eq!(
             find_session_state(&base.join("alias"), "fixture-session"),
-            None
+            Ok(None)
         );
         assert!(copy_state(&state.join("candidate-0"), &base.join("copy")).is_err());
         std::fs::write(state.join("candidate-1/fixture-session/own"), "lane")?;
@@ -2120,6 +2201,73 @@ mod tests {
         assert_eq!(
             copy_state_within(&wide, &base.join("wide-copy"), limits),
             Err("retained provider state exceeds 4 entries".into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_leaves_nothing_when_refused() -> Result<(), Box<dyn std::error::Error>> {
+        const LIMIT: u64 = 1 << 20;
+        let limits = StateLimits {
+            bytes: LIMIT,
+            ..RETAINED_STATE
+        };
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(source.join("sessions.lock"))?;
+        std::fs::write(source.join("sessions.lock/rollout.jsonl"), "turn")?;
+        std::fs::write(source.join("keep"), "lane")?;
+        // A lock-named partial, which ordinary removal refuses.
+        std::fs::File::create(source.join("Cargo.lock"))?.set_len(64 * LIMIT)?;
+        // Like a launch, the destination is an empty candidate directory.
+        let state = base.join("provider-state");
+        let copied = state.join("candidate-0");
+        std::fs::create_dir_all(&copied)?;
+        assert_eq!(
+            copy_state_within(&source, &copied, limits),
+            Err(format!(
+                "retained provider state exceeds its {LIMIT} byte copy budget"
+            ))
+        );
+        let names = |path: &Path| -> std::io::Result<Vec<_>> {
+            std::fs::read_dir(path)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect()
+        };
+        assert_eq!(names(&state)?, ["candidate-0"], "no staging survives");
+        assert!(names(&copied)?.is_empty(), "no partial output survives");
+        std::fs::remove_file(source.join("Cargo.lock"))?;
+        copy_state_within(&source, &copied, limits)?;
+        assert_eq!(names(&state)?, ["candidate-0"]);
+        assert_eq!(
+            std::fs::read_to_string(copied.join("sessions.lock/rollout.jsonl"))?,
+            "turn"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_search_reports_its_spent_entry_budget() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = StateLimits {
+            entries: 4,
+            ..RETAINED_STATE
+        };
+        let temp = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(temp.path())?;
+        std::fs::create_dir_all(state.join("candidate-0/sessions"))?;
+        for name in ["1", "2", "3"] {
+            std::fs::write(state.join("candidate-0/sessions").join(name), "lane")?;
+        }
+        // An unfinished search is not a missing session.
+        assert_eq!(
+            find_session_state_within(&state, "fixture-session", limits),
+            Err(SearchExhausted)
+        );
+        std::fs::remove_file(state.join("candidate-0/sessions/3"))?;
+        assert_eq!(
+            find_session_state_within(&state, "fixture-session", limits),
+            Ok(None)
         );
         Ok(())
     }
