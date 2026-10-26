@@ -122,11 +122,12 @@ fn render(
 }
 
 fn collect(globals: &Globals) -> Result<DiskReport, Box<dyn std::error::Error>> {
-    let assets = roots::product_root()?;
-    let home = roots::home()?;
-    let project = roots::selected_project(globals.project.as_deref(), true)?;
-    let roots = roots::roots(globals, &assets, &project)?;
-    collect_resolved(&roots, &home, &project)
+    let resolved = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Required,
+    )?;
+    collect_resolved(&resolved.roots, &resolved.home, &resolved.project)
 }
 
 fn collect_resolved(

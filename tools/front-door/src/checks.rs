@@ -158,13 +158,19 @@ impl Inspection {
     }
 }
 fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
-    let assets = roots::product_root()?;
-    let project = roots::selected_project(
-        globals.project.as_deref(),
-        matches!(check, Inspectable::Harness(_) | Inspectable::Release { .. }),
-    )?;
-    let roots = roots::roots(globals, &assets, &project)?;
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or(roots::RootError::Home)?);
+    let workspace = if matches!(check, Inspectable::Harness(_) | Inspectable::Release { .. }) {
+        roots::Workspace::Checkout
+    } else {
+        roots::Workspace::Project
+    };
+    let roots::Resolved {
+        assets,
+        home,
+        project,
+        roots,
+        claude_config,
+        codex_home,
+    } = roots::resolve(globals, workspace, roots::Product::Required)?;
     let selector = (
         env!("PROVENANT_SOURCE_DIGEST"),
         assets.as_os_str().as_encoded_bytes(),
@@ -265,10 +271,8 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &home,
                 &harnesses,
                 &LocalFs,
-                std::env::var_os("CLAUDE_CONFIG_DIR")
-                    .as_deref()
-                    .map(Path::new),
-                std::env::var_os("CODEX_HOME").as_deref().map(Path::new),
+                claude_config.as_deref(),
+                codex_home.as_deref(),
             )?;
             targets.resolve_destinations(&LocalFs)?;
             let skill_roots: Vec<_> = targets

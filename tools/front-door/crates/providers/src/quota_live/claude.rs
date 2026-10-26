@@ -73,7 +73,7 @@ fn optional_probe<T>(result: Result<T, ProbeFailure>) -> Result<Option<T>, Probe
 
 fn refresh(
     executor: &dyn Executor,
-    login: &provenant_providers::claude::Login<'_>,
+    login: &crate::claude::Login<'_>,
     now_ms: &dyn Fn() -> u64,
     deadline_ms: u64,
 ) -> Result<(), ProbeFailure> {
@@ -104,13 +104,7 @@ fn refresh(
         executor,
         directory_failed: AtomicBool::new(false),
     };
-    let _ = provenant_providers::claude::refresh_if_expiring(
-        &watched,
-        login,
-        now_ms,
-        deadline_ms,
-        None,
-    );
+    let _ = crate::claude::refresh_if_expiring(&watched, login, now_ms, deadline_ms, None);
     if watched.directory_failed.load(Ordering::Relaxed) {
         Err(ProbeFailure::ProbeDirectory)
     } else {
@@ -169,7 +163,7 @@ impl LiveQuota {
             let mut service = "Claude Code-credentials".to_owned();
             if dir != self.home.join(".claude") {
                 service.push('-');
-                service.push_str(&crate::hosts::keychain_suffix(dir.as_os_str().as_bytes()));
+                service.push_str(&crate::claude::keychain_suffix(dir.as_os_str().as_bytes()));
             }
             let out = self.command(
                 "/usr/bin/security",
@@ -294,10 +288,9 @@ impl LiveQuota {
             {
                 // Each command gets a fresh private cwd under the stable host
                 // state root, so a killed run's leftovers are swept next time.
-                let executor =
-                    provenant_providers::host::HostProbeExecutor::new(&system, &self.state)
-                        .map_err(|_| ProbeFailure::ProbeDirectory)?;
-                let login = provenant_providers::claude::Login {
+                let executor = crate::host::HostProbeExecutor::new(&system, &self.state)
+                    .map_err(|_| ProbeFailure::ProbeDirectory)?;
+                let login = crate::claude::Login {
                     executable: &executable,
                     home: &self.home,
                     user: user.as_os_str(),
@@ -349,7 +342,7 @@ mod tests {
                 }
             }
         }
-        let login = provenant_providers::claude::Login {
+        let login = crate::claude::Login {
             executable: Path::new("/bin/claude"),
             home: Path::new("/home/test"),
             user: OsStr::new("test"),

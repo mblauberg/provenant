@@ -135,8 +135,12 @@ fn guard(globals: &Globals, deadline: Instant) -> u8 {
 /// the rules only refuse patterns and the remedy is always available.
 fn guard_config(globals: &Globals, cwd: &Path) -> provenant_confinement::guard::GuardConfig {
     let read = || -> Result<_, Error> {
-        let assets = crate::roots::product_root()?;
-        let roots = crate::roots::roots(globals, &assets, cwd)?;
+        let roots = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::At(cwd),
+            crate::roots::Product::Required,
+        )?
+        .roots;
         let domains = provenant_config::read_with_domains(
             &roots,
             &LocalFs,
@@ -205,7 +209,6 @@ fn checkpoint(
     cwd: &Path,
     input: &[u8],
 ) -> Result<provenant_workflow::session::HookContext, Error> {
-    let assets = crate::roots::product_root()?;
     let project = std::fs::canonicalize(cwd)?;
     if let Some(selected) = &globals.project
         && std::fs::canonicalize(selected)? != project
@@ -215,7 +218,12 @@ fn checkpoint(
     if !project.is_dir() {
         return Err("hook cwd unavailable".into());
     }
-    let roots = crate::roots::roots(globals, &assets, &project)?;
+    let roots = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::At(&project),
+        crate::roots::Product::Required,
+    )?
+    .roots;
     with_git(|runtime, executor, budget, cancel| {
         let location = runtime
             .project_location(executor, &project, budget, cancel)?

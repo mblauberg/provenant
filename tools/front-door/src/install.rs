@@ -1,12 +1,13 @@
 //! Process-edge wiring for installation. State operations stay in config;
 //! every child is supervised with a bounded wait and isolated environment.
 use crate::release_smoke::SystemSmoke;
+use crate::roots::{self, Product, Resolved, Workspace};
 use provenant_cli as cli;
 use provenant_config::{
     Action, InstallContext, InstallError, InstallFinding, InstallOutcome, InstallReporter,
     ManualInclude, Targets,
 };
-use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
+use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{CommandError, CommandResult, Harness, Outcome};
 use provenant_supervisor::{
     clock::SystemClock,
@@ -32,24 +33,29 @@ struct InstallCounts {
 
 #[derive(Debug)]
 enum EdgeError {
-    Root(super::roots::RootError),
+    Root(roots::RootError),
     Install(InstallError),
     Home,
-    Peer(super::peer_agent::AgentError),
+    Peer(provenant_fabric_runtime::peer_agent::AgentError),
 }
 
 fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
     let state = targets.roots.state.as_path();
-    if super::peer_agent::eligible(state, &targets.home) {
+    if provenant_fabric_runtime::peer_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
         let previous = provenant_config::installed_binary(targets, &LocalFs)
             .map_err(EdgeError::Install)?
             .unwrap_or_else(|| program.clone());
         targets.peer_agent = Some(
-            super::peer_agent::install_plist(&program, &targets.roots).map_err(EdgeError::Peer)?,
+            provenant_fabric_runtime::peer_agent::install_plist(
+                &program,
+                &targets.roots,
+                provenant_confinement::worktrees::state_dir_name,
+            )
+            .map_err(EdgeError::Peer)?,
         );
         targets.peer_agent_previous =
-            super::peer_agent::previous_plist(&previous, state, &targets.home)
+            provenant_fabric_runtime::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;
         let config =
             provenant_config::read_with_domains(&targets.roots, &LocalFs, &cli::domains::SECTIONS)
@@ -63,37 +69,17 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
     Ok(())
 }
 
-struct Environment {
-    home: PathBuf,
-    roots: Roots,
-    assets: PathBuf,
-    claude: Option<PathBuf>,
-    codex: Option<PathBuf>,
-}
-
-fn environment(globals: &cli::Globals) -> Result<Environment, EdgeError> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(EdgeError::Home)?;
-    let assets = super::roots::product_root().map_err(EdgeError::Root)?;
-    let project = super::roots::selected_project(globals.project.as_deref(), false)
-        .map_err(EdgeError::Root)?;
-    let roots = super::roots::roots(globals, &assets, &project).map_err(EdgeError::Root)?;
-    let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
-    Ok(Environment {
-        home,
-        roots,
-        assets,
-        claude,
-        codex,
+fn environment(globals: &cli::Globals) -> Result<Resolved, EdgeError> {
+    roots::resolve(globals, Workspace::Project, Product::Required).map_err(|error| match error {
+        roots::RootError::Home => EdgeError::Home,
+        error => EdgeError::Root(error),
     })
 }
 
 fn selected_targets(
     globals: &cli::Globals,
     harnesses: &[Harness],
-) -> Result<(Environment, Targets), EdgeError> {
+) -> Result<(Resolved, Targets), EdgeError> {
     let environment = environment(globals)?;
     let fs = LocalFs;
     let mut targets = cli::install::configured_targets(
@@ -101,8 +87,8 @@ fn selected_targets(
         &environment.home,
         harnesses,
         &fs,
-        environment.claude.as_deref(),
-        environment.codex.as_deref(),
+        environment.claude_config.as_deref(),
+        environment.codex_home.as_deref(),
     )
     .map_err(EdgeError::Install)?;
     if !environment
@@ -124,8 +110,8 @@ fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targ
         &environment.home,
         harnesses,
         &LocalFs,
-        environment.claude.as_deref(),
-        environment.codex.as_deref(),
+        environment.claude_config.as_deref(),
+        environment.codex_home.as_deref(),
     )
     .map_err(EdgeError::Install)?;
     targets
@@ -153,7 +139,7 @@ impl PreviewReporter {
             let expected = if action.selector == "gc-agent" {
                 super::gc_agent::plist(&home)
             } else {
-                super::peer_agent::plist(&home)
+                provenant_fabric_runtime::peer_agent::plist(&home)
             };
             if action.before.is_some() && action.path.to_path_buf().ok().as_ref() != Some(&expected)
             {
@@ -170,7 +156,7 @@ impl InstallReporter for PreviewReporter {
             if action.selector == "gc-agent" {
                 super::gc_agent::stop(home).map_err(io::Error::other)
             } else {
-                super::peer_agent::stop(home).map_err(io::Error::other)
+                provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other)
             }
         })
     }
@@ -191,7 +177,7 @@ struct InstallData {
     completed: Vec<Action>,
     remaining: Vec<Action>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    peer_agent: Option<super::peer_agent::Installed>,
+    peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gc_agent: Option<super::gc_agent::Installed>,
 }
@@ -321,7 +307,7 @@ fn context<'a>(
 fn output_install(
     command: &str,
     result: Result<InstallOutcome, InstallError>,
-    peer_agent: Option<super::peer_agent::Installed>,
+    peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     gc_agent: Option<super::gc_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
@@ -543,7 +529,7 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
     );
     // The release is installed first; the agent then serves the new binary.
     let peer_agent = match &result {
-        Ok(outcome) if !outcome.dry_run => Some(super::peer_agent::install(
+        Ok(outcome) if !outcome.dry_run => Some(provenant_fabric_runtime::peer_agent::install(
             &state,
             &home,
             outcome
@@ -612,7 +598,7 @@ mod tests {
         std::os::unix::fs::symlink(&home, &alias)?;
         let reporter = PreviewReporter { home: Some(alias) };
         let mut action = Action {
-            path: AbsolutePath::new(&crate::peer_agent::plist(&home))?,
+            path: AbsolutePath::new(&provenant_fabric_runtime::peer_agent::plist(&home))?,
             disposition: Disposition::Remove,
             selector: "peer-agent".into(),
             before: None,

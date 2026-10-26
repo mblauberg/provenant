@@ -1,5 +1,6 @@
 //! Fabric process composition: MCP, fixed peer ingress and host observations.
 use provenant_cli::fabric::Context;
+use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_mcp::{
     stdio,
@@ -55,6 +56,7 @@ struct Factory {
     cwd: std::path::PathBuf,
     assets: PathBuf,
     host_launch: Option<provenant_run::HostLaunchContext>,
+    workers: &'static dyn WorkerObserver,
 }
 impl Factory {
     fn coordination(&self) -> Result<CoordinationService<'_>, CoordinationError> {
@@ -82,13 +84,20 @@ fn fair_probe_micros(remaining_micros: u64, probes_remaining: usize) -> Option<u
 }
 impl stdio::Factory for Factory {
     fn maintain_usage(&self) {
-        crate::usage::maintain_tools(&self.context.roots);
+        provenant_telemetry::usage::maintain_tools(&self.context.roots);
     }
     fn record_usage(&self, tool: &str, outcome: &str, duration_ms: u64) {
         let project_id = self
             .project_attribution
             .then_some(self.context.identity.project);
-        crate::usage::record_tool(&self.context.roots, tool, outcome, duration_ms, project_id);
+        provenant_telemetry::usage::record_tool(
+            &self.context.roots,
+            &self.clock,
+            tool,
+            outcome,
+            duration_ms,
+            project_id,
+        );
     }
     type Facade<'a> = BoundFacade<'a>;
     fn input_limits(&self) -> provenant_records::Limits {
@@ -373,13 +382,14 @@ impl stdio::Output for Stdout {
     }
 }
 
-pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::Globals) -> u8 {
+pub fn mcp(
+    client: Option<provenant_records::Harness>,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let assets = crate::roots::product_root()?;
-        let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
-        let roots = crate::roots::roots(globals, &assets, &cwd)?;
-        let home = crate::roots::home()?;
-        let mut context = Context::open(roots, &home, &cwd)?;
+        let mut factory = factory(globals, workers)?;
+        let context = &mut factory.context;
         if let Some(client) = client {
             context.config.client_label = serde_json::to_value(client)?
                 .as_str()
@@ -395,17 +405,6 @@ pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::
                 )?;
             }
         }
-        let factory = Factory {
-            project_attribution: crate::usage::attribution_enabled(&context.roots),
-            context,
-            clock: SystemClock::new(),
-            backoff: ThreadWait,
-            executor: SystemExecutor::new(4)?,
-            home,
-            cwd,
-            assets,
-            host_launch: None,
-        };
         stdio::serve(&mut Stdin::new(), &mut Stdout, factory)?;
         Ok(())
     })();
@@ -421,27 +420,32 @@ pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::
     }
 }
 
-fn factory(globals: &provenant_cli::Globals) -> Result<Factory, Box<dyn std::error::Error>> {
-    let assets = crate::roots::product_root()?;
-    let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
-    let roots = crate::roots::roots(globals, &assets, &cwd)?;
-    let home = crate::roots::home()?;
-    let context = Context::open(roots, &home, &cwd)?;
+fn factory(
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Factory, Box<dyn std::error::Error>> {
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Project,
+        crate::roots::Product::Required,
+    )?;
+    let context = Context::open(resolved.roots, &resolved.home, &resolved.project)?;
     Ok(Factory {
         project_attribution: crate::usage::attribution_enabled(&context.roots),
         context,
         clock: SystemClock::new(),
         backoff: ThreadWait,
         executor: SystemExecutor::new(4)?,
-        home,
-        cwd,
-        assets,
+        home: resolved.home,
+        cwd: resolved.project,
+        assets: resolved.assets,
         host_launch: None,
+        workers,
     })
 }
-pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
+pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObserver) -> u8 {
     let result = (|| -> Result<Vec<HostHealth>, Box<dyn std::error::Error>> {
-        let factory = factory(globals)?;
+        let factory = factory(globals, workers)?;
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         Ok(BoundFacade { factory: &factory }.hosts(
             HostsInput::List {
@@ -477,7 +481,11 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
 }
 // Peer frames use bounded real-time stdin and stdout transport deadlines.
 #[allow(clippy::disallowed_methods)]
-pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
+pub fn peer(
+    globals: &provenant_cli::Globals,
+    in_process: bool,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         // A request names its own agent, so a lane could act as any actor.
         if provenant_cli::fabric::in_lane() {
@@ -496,31 +504,36 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
             )?;
             return Ok(());
         }
-        let home = crate::roots::home()?;
+        let host = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Home,
+            crate::roots::Product::Required,
+        )?;
+        let home = host.home;
         if !in_process {
-            let assets = crate::roots::product_root()?;
-            let state = crate::roots::roots(globals, &assets, &home)?.state;
+            let state = host.roots.state;
             // Only an unreachable agent falls back; a sent request is never repeated.
-            let reply = match crate::peer_agent::forward(state.as_path(), &bytes)? {
-                crate::peer_agent::Forward::Replied(reply) => Some(reply),
-                // Refused unread at the agent's cap: nothing ran, so say busy.
-                crate::peer_agent::Forward::Busy => {
-                    let request = decode_request(&bytes)?;
-                    let mut busy = serde_json::to_vec(&PeerResponse {
-                        version: 1,
-                        protocol: PROTOCOL,
-                        host: request.target_host,
-                        project: request.project.key,
-                        result: PeerResult::Error {
-                            code: "busy".into(),
-                            operation_id: None,
-                        },
-                    })?;
-                    busy.push(b'\n');
-                    Some(busy)
-                }
-                crate::peer_agent::Forward::Unreachable => None,
-            };
+            let reply =
+                match provenant_fabric_runtime::peer_agent::forward(state.as_path(), &bytes)? {
+                    provenant_fabric_runtime::peer_agent::Forward::Replied(reply) => Some(reply),
+                    // Refused unread at the agent's cap: nothing ran, so say busy.
+                    provenant_fabric_runtime::peer_agent::Forward::Busy => {
+                        let request = decode_request(&bytes)?;
+                        let mut busy = serde_json::to_vec(&PeerResponse {
+                            version: 1,
+                            protocol: PROTOCOL,
+                            host: request.target_host,
+                            project: request.project.key,
+                            result: PeerResult::Error {
+                                code: "busy".into(),
+                                operation_id: None,
+                            },
+                        })?;
+                        busy.push(b'\n');
+                        Some(busy)
+                    }
+                    provenant_fabric_runtime::peer_agent::Forward::Unreachable => None,
+                };
             if let Some(reply) = reply {
                 provenant_supervisor::sys::hook_io::write_stdout(
                     &reply,
@@ -539,9 +552,13 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
         } else {
             common
         };
-        let assets = crate::roots::product_root()?;
-        let roots = crate::roots::roots(globals, &assets, &cwd)?;
-        let mut context = Context::open(roots, &home, &cwd)?;
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::At(&cwd),
+            crate::roots::Product::Required,
+        )?;
+        let assets = resolved.assets;
+        let mut context = Context::open(resolved.roots, &home, &cwd)?;
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
@@ -549,7 +566,10 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let seconds = if let PeerAction::SessionHandoff { budget_seconds, .. } = &request.action {
-            crate::handoff::peer_seconds(*budget_seconds, context.config.limits.peer_seconds)
+            provenant_fabric_runtime::handoff::peer_seconds(
+                *budget_seconds,
+                context.config.limits.peer_seconds,
+            )
         } else {
             30
         };
@@ -567,6 +587,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
             cwd: cwd.clone(),
             assets,
             host_launch: None,
+            workers,
         };
         let context = &peer_factory.context;
         let mut owner = BinaryRunOwner {
@@ -618,13 +639,15 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 PeerResult::SessionHandoff(crate::handoff::receive(
                     &crate::handoff::Target {
                         context,
+                        home: &home,
                         cwd: &cwd,
+                        workers,
                         source: request.source_host,
                         clock: &clock,
                         budget,
                     },
                     input,
-                    &crate::handoff::Terminal,
+                    &provenant_fabric_runtime::handoff::Terminal,
                 ))
             }
             PeerAction::Health => PeerResult::Health(provenant_fabric_runtime::hosts::PeerHealth {
@@ -882,7 +905,11 @@ fn landing_local(
         Ok(git.push_landing(&store, &guard, &fence, &cwd, operation_id, &request, cancel)?)
     }
 }
-pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::Globals) -> u8 {
+pub fn landing(
+    input: provenant_cli::fabric::Landing,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
     use provenant_cli::fabric::Landing;
     let (fence, operation, reconcile) = match input {
         Landing::Push { fence, operation } => (fence, operation, false),
@@ -898,7 +925,7 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
     let result =
         (|| -> Result<provenant_fabric_store::PushOperation, Box<dyn std::error::Error>> {
             let proof = fence.proof()?;
-            let factory = factory(globals)?;
+            let factory = factory(globals, workers)?;
             let ctx = &factory.context;
             if ctx.in_lane {
                 return Err(CoordinationError::LaneMutation.into());
@@ -1633,8 +1660,10 @@ impl BinaryRunOwner<'_> {
         };
         let info = crate::worktrees::with_context(
             &self.factory.context.roots,
+            &self.factory.home,
             project,
             half(),
+            self.factory.workers,
             |context, cancel| {
                 let existing = worktrees::list(context, cancel)?
                     .into_iter()
@@ -2156,6 +2185,7 @@ struct BoundGraphOwner<'a> {
 
 pub(crate) fn advance_settled_graphs(
     holder: &provenant_cli::run::HostHolder<'_>,
+    workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(settled) = holder.settled()? else {
         return Ok(());
@@ -2165,10 +2195,11 @@ pub(crate) fn advance_settled_graphs(
     let Some(host) = &settled.launch else {
         return Ok(());
     };
-    let mut inputs =
-        provenant_core::RootInputs::new(settled.roots.home.clone(), settled.roots.checkout.clone());
-    inputs.state_dir = Some(host.configuration_root.clone());
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = crate::roots::child(
+        &settled.roots.home,
+        &settled.roots.checkout,
+        host.configuration_root.clone(),
+    )?;
     let mut first_error = None;
     for id in FileJournal::graph_ids(&roots.state, settled.project_id, &LocalFs)? {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -2194,6 +2225,7 @@ pub(crate) fn advance_settled_graphs(
                 cwd: execution.directory,
                 assets: settled.roots.checkout.clone(),
                 host_launch: Some(host),
+                workers,
             };
             let cancel = CancelToken::new();
             let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
@@ -2596,7 +2628,11 @@ fn graph_operation(
     provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
         .map_err(|_| FacadeError::InvalidInput)
 }
-pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globals) -> u8 {
+pub fn graph(
+    input: provenant_cli::fabric::Graph,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
     use provenant_cli::fabric::Graph;
     let (command, input) = match input {
         Graph::Run { document } => ("fabric graph run", GraphInput::Run { document }),
@@ -2605,7 +2641,7 @@ pub fn graph(input: provenant_cli::fabric::Graph, globals: &provenant_cli::Globa
         Graph::Resume { document } => ("fabric graph resume", GraphInput::Resume { document }),
     };
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let factory = factory(globals)?;
+        let factory = factory(globals, workers)?;
         if factory.context.in_lane && !matches!(input, GraphInput::Status { .. }) {
             return Err(CoordinationError::LaneMutation.into());
         }
@@ -2749,9 +2785,10 @@ pub fn events(
     page: provenant_cli::fabric::SequencePage,
     wait: Option<u64>,
     globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
 ) -> u8 {
     let result = (|| -> Result<(EventsResult, bool), Box<dyn std::error::Error>> {
-        let factory = factory(globals)?;
+        let factory = factory(globals, workers)?;
         if page.limit > factory.context.config.limits.page_rows {
             return Err(FacadeError::InvalidInput.into());
         }

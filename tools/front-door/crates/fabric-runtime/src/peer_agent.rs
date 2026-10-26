@@ -6,8 +6,8 @@
 //! credential reads and the lanes it launches all run in the login session.
 //! The SSH entrypoint forwards when the agent accepts a connection and handles
 //! the request itself otherwise.
+use crate::hosts::MAX_FRAME;
 use provenant_core::Roots;
-use provenant_fabric_runtime::hosts::MAX_FRAME;
 use provenant_supervisor::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::LocalFs,
@@ -186,7 +186,8 @@ fn forward_reply(stream: &mut UnixStream, log: &Path) -> Result<Forward, AgentEr
     Ok(Forward::Replied(reply))
 }
 
-fn log(message: &str) {
+/// One line on stderr, which the LaunchAgent sends to its log.
+pub fn log(message: &str) {
     let _ = io::stderr()
         .lock()
         .write_all(format!("provenant: fabric peer-agent: {message}\n").as_bytes());
@@ -339,13 +340,18 @@ fn listen(state: &Path) -> Result<UnixListener, AgentError> {
     Ok(listener)
 }
 
-fn serve_state(state: &Path) -> Result<(), AgentError> {
-    serve_listener(listen(state)?, state)
+/// The LaunchAgent's long-running entrypoint, `fabric peer-agent`: relay each
+/// request on the `state` root's socket to a fresh `program` child in `home`.
+pub fn serve(program: &Path, state: &Path, home: &Path) -> Result<(), AgentError> {
+    serve_listener(listen(state)?, program, state, home)
 }
 
-fn serve_listener(listener: UnixListener, state: &Path) -> Result<(), AgentError> {
-    let program = std::env::current_exe()?;
-    let cwd = crate::roots::home().map_err(|error| io::Error::other(error.to_string()))?;
+fn serve_listener(
+    listener: UnixListener,
+    program: &Path,
+    state: &Path,
+    cwd: &Path,
+) -> Result<(), AgentError> {
     let active = Arc::new(AtomicUsize::new(0));
     let refusing = Arc::new(AtomicUsize::new(0));
     let mut failures = 0;
@@ -360,9 +366,9 @@ fn serve_listener(listener: UnixListener, state: &Path) -> Result<(), AgentError
             continue;
         }
         let (program, state, cwd, active) = (
-            program.clone(),
+            program.to_path_buf(),
             state.to_path_buf(),
-            cwd.clone(),
+            cwd.to_path_buf(),
             Arc::clone(&active),
         );
         std::thread::spawn(move || {
@@ -374,33 +380,11 @@ fn serve_listener(listener: UnixListener, state: &Path) -> Result<(), AgentError
     }
 }
 
-/// The LaunchAgent's long-running entrypoint, `fabric peer-agent`.
-pub fn serve(globals: &provenant_cli::Globals) -> u8 {
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        if provenant_cli::fabric::in_lane() {
-            return Err(
-                provenant_fabric_runtime::coordination::CoordinationError::LaneMutation.into(),
-            );
-        }
-        let home = crate::roots::home()?;
-        let assets = crate::roots::product_root()?;
-        let state = crate::roots::roots(globals, &assets, &home)?.state;
-        Ok(serve_state(state.as_path())?)
-    })();
-    match result {
-        Ok(()) => 0,
-        Err(error) => {
-            log(&error.to_string());
-            3
-        }
-    }
-}
-
-pub(super) fn utf8(path: &Path) -> Result<&str, AgentError> {
+pub fn utf8(path: &Path) -> Result<&str, AgentError> {
     path.to_str().ok_or_else(|| AgentError::Path(path.into()))
 }
 
-pub(super) fn xml(text: &str) -> String {
+pub fn xml(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -452,7 +436,7 @@ pub fn plist(home: &Path) -> PathBuf {
         .join(format!("{LABEL}.plist"))
 }
 
-pub(super) fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError> {
+pub fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError> {
     let mut argv: Vec<OsString> = vec!["/bin/launchctl".into()];
     argv.extend(args.iter().map(|arg| arg.to_os_string()));
     let env: [(OsString, OsString); 2] = [
@@ -600,11 +584,17 @@ struct Projects {
     common_dirs: Vec<PathBuf>,
     /// The `<state>/worktrees/<project>` registry directories.
     registries: Vec<PathBuf>,
+    /// The worktree owner's registry entry name for a canonical worktree.
+    registry_name: RegistryName,
 }
+
+/// Names a worktree's registry entry. The worktree owner, which this crate
+/// cannot see, supplies it.
+pub type RegistryName = fn(&Path) -> OsString;
 
 impl Projects {
     #[allow(clippy::print_stderr)]
-    fn registered(roots: &Roots) -> Self {
+    fn registered(roots: &Roots, registry_name: RegistryName) -> Self {
         let common_dirs = match provenant_config::registered_projects(roots, &LocalFs) {
             Ok(bindings) => bindings
                 .iter()
@@ -626,13 +616,14 @@ impl Projects {
         Self {
             common_dirs,
             registries,
+            registry_name,
         }
     }
 
     /// Whether the worktree at `top`, with Git common directory `common` when
     /// it resolves, is a registered project or a Provenant worktree of one.
     fn own(&self, top: &Path, common: Option<&Path>) -> bool {
-        let name = provenant_confinement::worktrees::state_dir_name(top);
+        let name = (self.registry_name)(top);
         self.common_dirs.iter().any(|dir| {
             common == Some(dir.as_path())
                 || *dir == top.join(".git")
@@ -729,11 +720,16 @@ fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
     executables
 }
 
-pub fn install_plist(program: &Path, roots: &Roots) -> Result<Vec<u8>, AgentError> {
+pub fn install_plist(
+    program: &Path,
+    roots: &Roots,
+    registry_name: RegistryName,
+) -> Result<Vec<u8>, AgentError> {
     let state = roots.state.as_path();
     let search = std::env::var_os("PATH").unwrap_or_default();
-    let mut executables = provider_executables(&search, &Projects::registered(roots));
-    executables.extend(crate::roots::git_binary());
+    let projects = Projects::registered(roots, registry_name);
+    let mut executables = provider_executables(&search, &projects);
+    executables.extend(provenant_supervisor::git::git_executable());
     let bin = program
         .parent()
         .ok_or_else(|| AgentError::Path(program.into()))?;
@@ -835,6 +831,11 @@ pub fn status(state: &Path, home: &Path) -> Status {
 mod tests {
     // Agent tests use real time to bound local socket simulations.
     #![allow(clippy::disallowed_methods)]
+
+    /// A stand-in for the worktree owner's registry entry name.
+    fn name(path: &std::path::Path) -> std::ffi::OsString {
+        path.to_string_lossy().replace('/', "_").into()
+    }
 
     #[test]
     fn read_bounded_drains_a_closed_peer() {
@@ -950,6 +951,7 @@ mod tests {
         let projects = Projects {
             common_dirs: Vec::new(),
             registries: Vec::new(),
+            registry_name: name,
         };
         let tools = provider_executables(&search, &projects);
         assert_eq!(tools, vec![bin.join("claude")]);
@@ -961,7 +963,6 @@ mod tests {
     }
 
     /// A canonical temporary base, with private state roots inside it.
-    #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn project_roots() -> (tempfile::TempDir, std::path::PathBuf, provenant_core::Roots) {
         use super::*;
         let temp = tempfile::tempdir().unwrap();
@@ -976,7 +977,6 @@ mod tests {
         (temp, base, roots)
     }
 
-    #[allow(dead_code)]
     fn bind(roots: &provenant_core::Roots, root: &std::path::Path) {
         use super::*;
         fs::create_dir_all(root.join(".git")).unwrap();
@@ -984,7 +984,6 @@ mod tests {
         provenant_config::bind_project(roots, location, &LocalFs).unwrap();
     }
 
-    #[allow(dead_code)]
     fn provider(path: &std::path::Path) {
         use super::*;
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1007,7 +1006,7 @@ mod tests {
         ] {
             provider(&path);
         }
-        let projects = Projects::registered(&roots);
+        let projects = Projects::registered(&roots, name);
         assert_eq!(
             project_worktree(&project.join("bin"), &projects),
             Some(project.clone())
@@ -1035,7 +1034,7 @@ mod tests {
         fs::create_dir_all(nvm.join(".git")).unwrap();
         fs::create_dir_all(home.join(".git")).unwrap();
         provider(&bin.join("codex"));
-        let projects = Projects::registered(&roots);
+        let projects = Projects::registered(&roots, name);
         assert_eq!(project_worktree(&bin, &projects), None);
         let search = std::env::join_paths([&bin]).unwrap();
         assert_eq!(
@@ -1045,6 +1044,7 @@ mod tests {
         let unreadable = Projects {
             common_dirs: Vec::new(),
             registries: Vec::new(),
+            registry_name: name,
         };
         assert_eq!(
             provider_executables(&search, &unreadable),
@@ -1069,7 +1069,7 @@ mod tests {
         )
         .unwrap();
         provider(&worktree.join("bin/claude"));
-        let projects = Projects::registered(&roots);
+        let projects = Projects::registered(&roots, name);
         assert_eq!(common_dir(&worktree), Some(project.join(".git")));
         assert_eq!(
             project_worktree(&worktree.join("bin"), &projects),
@@ -1083,11 +1083,8 @@ mod tests {
         let elsewhere = base.join("elsewhere");
         assert!(!projects.own(&elsewhere, None));
         let registry = roots.state.as_path().join("worktrees/project");
-        fs::create_dir_all(
-            registry.join(provenant_confinement::worktrees::state_dir_name(&elsewhere)),
-        )
-        .unwrap();
-        assert!(Projects::registered(&roots).own(&elsewhere, None));
+        fs::create_dir_all(registry.join(name(&elsewhere))).unwrap();
+        assert!(Projects::registered(&roots, name).own(&elsewhere, None));
     }
 
     #[test]
@@ -1254,7 +1251,12 @@ mod tests {
         let listener = listen(&state).unwrap();
         let server_state = state.clone();
         std::thread::spawn(move || {
-            let _ = serve_listener(listener, &server_state);
+            let _ = serve_listener(
+                listener,
+                Path::new("/usr/bin/false"),
+                &server_state,
+                &server_state,
+            );
         });
         let socket = directory(&state).join(SOCKET);
         // Hold the cap with connections that never finish their request. The

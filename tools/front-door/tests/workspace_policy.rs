@@ -37,7 +37,7 @@ const LAYERS: &[(&str, &[&str])] = &[
         ],
     ),
     ("quota", &["records", "config"]),
-    ("telemetry", &["core", "records"]),
+    ("telemetry", &["core", "records", "supervisor"]),
     (
         "routing",
         &["core", "records", "config", "quota", "providers"],
@@ -88,6 +88,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "confinement",
             "providers",
             "quota",
+            "telemetry",
             "run",
             "fabric-store",
             "fabric-runtime",

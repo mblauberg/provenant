@@ -125,17 +125,107 @@ fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
 /// Validate caller-selected roots before composing any leaf. This creates no
 /// state and does not require a product installation for an unavailable owner.
 pub fn validate_globals(globals: &provenant_cli::Globals) -> Result<(), RootError> {
-    let project = if globals.project.is_some() {
-        Some(selected_project(globals.project.as_deref(), false)?)
-    } else {
-        None
-    };
     if globals.state_dir.is_some() {
-        let project = project.unwrap_or(std::env::current_dir()?);
-        let assets = product_root().unwrap_or_else(|_| project.clone());
-        roots(globals, &assets, &project)?;
+        resolve(globals, Workspace::Project, Product::Optional)?;
+    } else if globals.project.is_some() {
+        selected_project(globals.project.as_deref(), false)?;
     }
     Ok(())
+}
+
+/// Where a command's workspace comes from.
+#[derive(Clone, Copy)]
+pub enum Workspace<'a> {
+    /// The selected or working directory, without a Git probe.
+    Directory,
+    /// As `Directory`, except that a selected project must be a checkout.
+    Project,
+    /// The Git checkout holding the selected or working directory.
+    Checkout,
+    /// The home directory, for host-wide commands.
+    Home,
+    /// A canonical directory the command has already chosen.
+    At(&'a Path),
+}
+
+/// Whether a command needs the installed product root. An optional product
+/// root falls back to the workspace, which it then protects instead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Product {
+    Required,
+    Optional,
+}
+
+/// One command's roots. Production reads `HOME`, the state root and harness
+/// config roots from the environment only in [`resolve`].
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub assets: PathBuf,
+    pub home: PathBuf,
+    pub project: PathBuf,
+    pub roots: Roots,
+    /// `CLAUDE_CONFIG_DIR`, as the environment names it.
+    pub claude_config: Option<PathBuf>,
+    /// `CODEX_HOME`, as the environment names it.
+    pub codex_home: Option<PathBuf>,
+}
+
+/// The one root resolver: the product root, the workspace, the canonical
+/// home, the state root and the harness config roots, in that order.
+pub fn resolve(
+    globals: &provenant_cli::Globals,
+    workspace: Workspace<'_>,
+    product: Product,
+) -> Result<Resolved, RootError> {
+    let installed = match product {
+        Product::Required => Some(product_root()?),
+        Product::Optional => None,
+    };
+    let (project, home) = match workspace {
+        Workspace::Home => {
+            let home = home()?;
+            (home.clone(), home)
+        }
+        Workspace::Directory => {
+            let project = match &globals.project {
+                Some(project) => fs::canonicalize(project).map_err(|_| RootError::Checkout)?,
+                None => fs::canonicalize(std::env::current_dir()?)?,
+            };
+            (project, home()?)
+        }
+        Workspace::Project => (
+            selected_project(globals.project.as_deref(), false)?,
+            home()?,
+        ),
+        Workspace::Checkout => (selected_project(globals.project.as_deref(), true)?, home()?),
+        Workspace::At(path) => (path.to_owned(), home()?),
+    };
+    let assets = match installed {
+        Some(assets) => assets,
+        None => product_root().unwrap_or_else(|_| project.clone()),
+    };
+    let mut inputs = RootInputs::new(home.clone(), assets.clone());
+    inputs.state_dir = globals.state_dir.clone();
+    inputs.environment_state_dir =
+        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
+    inputs.workspaces.push(project.clone());
+    let roots = inputs.resolve(&Resolver)?;
+    Ok(Resolved {
+        assets,
+        home,
+        project,
+        roots,
+        claude_config: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+        codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+    })
+}
+
+/// Bind a child store's `state_dir` with its resolved parent's `home` and
+/// `assets`. No environment is read.
+pub fn child(home: &Path, assets: &Path, state_dir: PathBuf) -> Result<Roots, RootError> {
+    let mut inputs = RootInputs::new(home.to_owned(), assets.to_owned());
+    inputs.state_dir = Some(state_dir);
+    Ok(inputs.resolve(&Resolver)?)
 }
 struct Resolver;
 impl PathResolver for Resolver {
@@ -168,21 +258,8 @@ impl PathResolver for Resolver {
         }
     }
 }
-pub fn roots(
-    globals: &provenant_cli::Globals,
-    assets: &Path,
-    project: &Path,
-) -> Result<Roots, RootError> {
-    let home = home()?;
-    let mut inputs = RootInputs::new(home, assets.into());
-    inputs.state_dir = globals.state_dir.clone();
-    inputs.environment_state_dir = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from);
-    inputs.workspaces.push(project.into());
-    Ok(inputs.resolve(&Resolver)?)
-}
-
 /// Canonical home used by root selection and home-relative Fabric identity.
-pub fn home() -> Result<PathBuf, RootError> {
+fn home() -> Result<PathBuf, RootError> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or(RootError::Home)?);
     if !home.is_absolute() {
         return Err(RootError::Home);
