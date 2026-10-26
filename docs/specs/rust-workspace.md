@@ -27,9 +27,9 @@ same PR. The binary `provenant` is the only executable.
 Direct dependencies come only from the `DIRECT` list in
 `tests/workspace_policy.rs` (ADR 0028 decision 3), declared once in
 `[workspace.dependencies]`; `tempfile` is dev-only. A new crate, feature or
-material transitive addition needs a recorded reason and an update to this rule. So far:
+material transitive addition needs a recorded reason and an update to this rule. So far,
 `rusqlite` also serves run's store, keeping admission atomic in one
-database, and `toml_edit` enables `serde` for typed config. There is no
+database. `toml_edit` enables `serde` for typed config. There is no
 async runtime and no daemon.
 - Why: a small, audited supply chain with bounded, synchronous code.
 - Test: `tests/workspace_policy.rs::every_member_obeys_the_direct_dependency_policy`;
@@ -53,8 +53,8 @@ path, never secret values. Publication and recovery never rely on `Drop`.
 First-party `unsafe` lives only in `os::sys` and supervisor's private
 `process_os`, behind safe wrappers; every other crate forbids it. Only
 supervisor may use OS `sys::{fs, child, raw_exec, reaper}`, `handoff_file`
-and `from_handoff`, and `std::process::Command::new` is disallowed outside
-those boundaries. Each block documents its invariants and gets a second
+and `from_handoff`. `std::process::Command::new` is disallowed outside
+those boundaries. Each `unsafe` block documents its invariants and needs a second
 reviewer.
 - Why: process custody is the safety core; one audited boundary is
   reviewable.
@@ -66,7 +66,7 @@ reviewer.
 ## Numbers, digests and diagnostics
 
 Integers are `i64` or `u64`, never `f64`, and the `serde_json` feature `arbitrary_precision` stays
-off. Digest bytes come from the canonical encoder, never `HashMap` order.
+off. Digest bytes come from the canonical encoder, never `HashMap` iteration order.
 Diagnostics go to bounded, redacted stderr, never MCP stdout or result
 bytes, and never carry prompt or credential contents.
 - Why: float or map-order digests change identity, and protocol streams must
@@ -89,9 +89,9 @@ Tests use explicit clocks and handshakes, never sleeps.
 
 Build the simplest design that is correct for the main path and the failures
 that matter: data loss, credential exposure, killing a healthy provider,
-writing outside the selected roots and silent wrong answers. Other edge cases
-get a typed refusal or a PR note, and reviews block only on those classes or
-a broken main path. Never mute `ci-status`.
+writing outside the selected roots and silent wrong answers. Reviews block only on those
+failures or a broken main path; other edge cases get a typed refusal or a PR
+note. Never mute the `ci-status` check.
 - Why: guardrails for unobserved risks cost more than they save.
 - Test: none (review gate)
 - Owner: code review

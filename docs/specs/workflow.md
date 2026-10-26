@@ -6,9 +6,9 @@ Anchor: `crates/workflow/src/coverage.rs`, `crates/workflow/src/store/tests.rs`,
 `crates/workflow/src/session.rs`, `tests/workflow.rs`
 
 Workflow is a small synchronous policy library: a pure review coverage check,
-a minimal delivery receipt, bounded session checkpoints and a data-driven
-writing matcher, with no SQLite, process runner or MCP tool. For pull request
-work the pull request carries the evidence. This spec grants no merge,
+a minimal delivery receipt, bounded session checkpoints and a writing
+matcher that runs on JSON rules, with no SQLite, process runner or MCP tool. Pull requests carry their own
+evidence. This spec grants no merge,
 install or release authority. Paths are relative to `tools/front-door/`.
 
 ## Review coverage
@@ -19,7 +19,7 @@ A review passes only for a retained matching verdict and output on the exact
 subject, with adequate tier and an independent reviewer. Authors and decision
 makers, including the chair, never count, and repeats add nothing.
 `approve_with_nits` passes only when every remaining finding is advisory.
-Counted reviewers meet the highest author tier, and family separation is
+Counted reviewers must be at least the highest author tier, and family separation is
 measured against all authors.
 - Why: self-review or a stale subject proves nothing.
 - Test: `crates/workflow/src/coverage.rs::authors_decision_makers_repeats_and_low_tiers_do_not_count`;
@@ -63,8 +63,8 @@ The reviewer identity is the dispatched attempt's own execution identity,
 never the submitting chair, and the family comes from the catalogue entry for
 the observed model (unknown if absent). A PR review's attempt head must equal
 the subject head; a read-only lane's head is the HEAD the host read at
-dispatch, never lane output. `LegBlocker` and `user_approval` are
-chair-supplied references the CLI records but does not verify.
+dispatch, never lane output. The CLI records, but does not verify, the
+chair-supplied `LegBlocker` and `user_approval` references.
 - Why: a reviewer's output must not assert its own identity.
 - Test: `crates/workflow/src/bind.rs::failed_headless_wrong_head_and_foreign_delivery_attempts_are_refused`;
   `crates/cli/src/workflow.rs::family_comes_from_the_catalogue_and_is_unknown_otherwise`
@@ -86,10 +86,10 @@ Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.
 ### Revisioned atomic saves
 
 A save replaces the whole receipt at an expected revision under a stable
-lock inode, never unlinked: recheck, validate, write and sync a temporary,
-rename, sync the directory. Two saves at one revision give one winner, a
+lock inode, never unlinked: recheck, validate, write and sync a temporary file,
+rename it, sync the directory. Two saves at one revision give one winner, a
 crash leaves a complete file, and a corrupt receipt fails closed. No lock is
-held across probes, provider waits or GitHub reads.
+held during probes, provider waits or GitHub reads.
 - Why: concurrent chairs must not lose or interleave decisions.
 - Test: `crates/workflow/src/store/concurrency.rs::concurrent_process_writers_on_one_revision_have_one_winner`;
   `crates/workflow/src/store/tests.rs::atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors`
@@ -112,8 +112,8 @@ session key, saved atomically with its bytes preserved. Session IDs are 1 to
 
 `pre-compact` and `compact` exit 0 on missing or invalid state with a
 diagnostic naming a cause kind, never a path. SessionStart emits only the
-event's own key's checkpoint or a missing or stale status, never the latest
-file, withholds stale content and caps output at 8 KiB.
+checkpoint for its own key, or a missing or stale status. It never emits the
+latest file, withholds stale content and caps output at 8 KiB.
 - Why: a hook must never block the user or inject another session.
 - Test: `crates/workflow/src/session.rs::malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback`;
   `::native_host_fixtures_select_only_their_key_and_emit_native_json`
@@ -123,8 +123,10 @@ file, withholds stale content and caps output at 8 KiB.
 
 `workflow session handoff` sends a generated prompt, never the transcript,
 to a fresh Claude session on a peer in one `session_handoff` action. Source
-worktrees must be clean and pushed unless `--wip` or `--allow-dirty`. The
-target must opt in, check the account against its own registrations and recreate branches through its own worktree owner. The owner lease moves
+worktrees must be clean and pushed unless `--wip` (which commits and pushes tracked changes first) or
+`--allow-dirty`. The target must opt in, check the account against its own
+registrations and recreate branches through its own worktree owner. The owner
+lease moves
 only after the peer accepts, and a repeated operation never launches again.
 - Why: a handoff must not lose work, launch twice or use an unregistered
   account.
@@ -148,7 +150,7 @@ Dispatch and batch receipts own the actual route, provider, model and attempt
 facts; delivery may reference them. Fabric MCP may start dispatch but owns no
 lifecycle acceptance. Assurance labels infer no coverage, and route
 comparison is task-local and opt-in, with no learned router, leaderboard or
-automatic promotion. An issue or receipt records scope or evidence and is
+automatic promotion. An issue or receipt records scope or evidence. It is
 not approval: release, promotion, activation, sharing, provider login, live
 installation, push and destructive action stay gated by current user
 authority.

@@ -20,10 +20,10 @@ Paths are relative to `tools/front-door/`.
 
 ### Projects never merge by guess
 
-`ProjectId` is host-local, from the `HostId` and canonical Git common
+`ProjectId` is host-local, derived from the `HostId` and canonical Git common
 directory, so linked worktrees share it. The cross-host `ProjectKey` is
-home-relative and verified at each peer; outside home, remote placement is
-refused. No scan or URL heuristic joins projects. Labels address inboxes and
+relative to the user's home directory and verified at each peer; outside it,
+remote placement is refused. No scan or URL heuristic joins projects. Labels address inboxes and
 never prove a model family.
 - Why: two checkouts must never share coordination state by accident.
 - Test: `tests/fabric.rs::linked_worktrees_share_projects_and_ignore_git_redirects`;
@@ -32,7 +32,7 @@ never prove a model family.
 
 ### Lane store isolation
 
-Lanes are refused coordination mutations at the tool surface
+Fabric refuses coordination mutations from lanes at the tool surface
 ([nested lanes](routing.md#lane-identity-and-refusals)), and `fabric peer`
 and `peer-agent` refuse to start under the lane environment. Lanes still
 have direct write access to `fabric.sqlite3`, because opening the store
@@ -46,10 +46,10 @@ lane-store-isolation follow-up.
 ### Private, versioned database
 
 The store is one SQLite database (WAL, foreign keys, `synchronous=FULL`)
-under a 0700 root with 0600 files. Symlinked components are refused, and the
-database and companions must be private, single-link and owned by the
+under a root with mode 0700 and files with mode 0600. Fabric refuses symlinked
+components, and the database and its companion files must be private, single-link and owned by the
 user. A future or unversioned schema is refused before any mutation. Limits
-are ceilings config may lower, never raise.
+are ceilings that config may lower, never raise.
 - Why: a shared or swapped database would let another user forge fences.
 - Test: `crates/fabric-store/src/tests.rs::state_symlinks_and_non_private_components_are_refused`;
   `tests/fabric.rs::domain_config_accepts_typed_peers_and_only_lower_limits`
@@ -71,10 +71,10 @@ repeating the mutation.
 
 Generation counters survive release and expiry, and claims use the home
 host's clock, never a caller's. Task `finish` needs the live fence. Path
-claims compare canonical prefixes and are advisory, never authority to write
-a worktree. Mail cursors advance monotonically and only for the caller. Run
-events are pulled lazily and deduplicated with the cursor in the same
-transaction; an unreachable peer is `Unknown` and partial results never
+claims compare canonical prefixes and are advisory and never authorise writing
+to a worktree. Mail cursors advance monotonically and only for the caller. Run
+events are pulled lazily and deduplicated in the same transaction that
+advances the cursor; an unreachable peer is `Unknown` and partial results never
 claim complete coverage.
 - Why: a stale holder must never act, and a reader must never skip events.
 - Test: `crates/fabric-store/src/tests.rs::task_fences_survive_expiry_and_release_and_cannot_be_bypassed`;
@@ -92,7 +92,7 @@ the [CLI reference](../reference/cli.md).
 Each tool takes a tagged `op` enum that rejects unknown fields, with no
 coercion or synonym repair. Compact `tools/list` schemas accept every valid
 strict probe, and runtime validation still rejects empty, NUL and oversized
-text before side effects with the field path. MCP submission rejects
+text with the field path, before side effects. MCP submission rejects
 `new_worktree`, and `resume` cannot change route, account or authority.
 - Why: a lenient parser turns a model's typo into a different request.
 - Test: `crates/fabric-mcp/src/schema_tests.rs::generated_schema_values_match_strict_serde_for_every_operation_and_field`;
@@ -103,8 +103,8 @@ text before side effects with the field path. MCP submission rejects
 
 Output is UTF-8 when valid, otherwise padded base64; neither is lossy, and
 a page never splits a character. Oversized observations fail with `result_too_large`, but committed mutation receipts keep the transport
-ceiling. `fetch` copies only run-exported regular files, refuses links and
-traversal, and verifies a manifest digest before atomic publication.
+ceiling. `fetch` copies only run-exported regular files, refuses symlinks and
+path traversal, and verifies a manifest digest before atomic publication.
 - Why: agents must read every byte, never lose a receipt and never import a
   peer's link.
 - Test: `crates/fabric-mcp/src/tools_tests.rs::result_limit_preserves_mutation_receipts_and_rejects_oversized_observations`;
@@ -115,7 +115,7 @@ traversal, and verifies a manifest digest before atomic publication.
 
 The server is a bounded, tools-only stdio JSON-RPC transport with
 protocol-only stdout, serving the 2025-11-25 and 2026-07-28 eras without a
-switch mid-connection. Four workers share a queue of 32 and saturation is a
+switch mid-connection. Four workers share a queue of 32, and a full queue returns a
 typed busy error. Cancellation suppresses the late reply and never cancels a
 launched run; on EOF accepted work drains for at most 55 s.
 - Why: a disconnected or cancelling client must never kill lanes.
@@ -126,7 +126,7 @@ launched run; on EOF accepted work drains for at most 55 s.
 ### One error meaning at both edges
 
 The CLI and MCP render one typed category per run error, and peer replies
-keep their code over the wire. Uncertain mutations carry their
+keep their error code over the wire. Uncertain mutations carry their
 `operation_id`.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;
@@ -136,14 +136,15 @@ keep their code over the wire. Uncertain mutations carry their
 ## Bounded graphs and route fallback
 
 A graph is bounded (8 routes per node, 64 nodes, 256 edges, 64 KiB per
-prompt, 256 KiB in total), each attempt by `limits.graph_timeout_seconds`.
+prompt, 256 KiB in total), with each attempt bounded by
+`limits.graph_timeout_seconds`.
 
 ### Checkpoint before launch
 
 The owner writes a checkpoint under a stable graph, node and route key
 before calling run, so replay returns the existing attempt. A checkpoint
 missing launch evidence or the submitting actor is refused, and digests
-detect tampering. Cancel persists the admission fence before cancelling.
+detect tampering. Cancelling a graph persists the admission fence first.
 - Why: a restart must never launch a node twice.
 - Test: `crates/fabric-runtime/src/graph.rs::checkpoint_attempts_require_launch_evidence_and_actor`;
   `::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`
@@ -152,8 +153,8 @@ detect tampering. Cancel persists the admission fence before cancelling.
 ### Fallback only for unavailability
 
 Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
-consumes the next route. Task failure, input requirements and uncertain
-launches never fall back; after launch only read-only nodes may. A failed
+moves a node to the next route. Task failure, input requirements and uncertain
+launches never fall back; after launch only read-only nodes may fall back. A failed
 writer keeps its worktree, and graph writers never deliver.
 - Why: retrying a writer elsewhere would duplicate edits.
 - Test: `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`;
@@ -162,8 +163,8 @@ writer keeps its worktree, and graph writers never deliver.
 
 ### Settlement advances graphs
 
-After a run settles, its supervisor advances pending graphs from the
-journal's retained document, after releasing custody and writer locks. A
+After a run settles and its supervisor releases custody and writer locks,
+the supervisor advances pending graphs from the journal's retained document. A
 failed advance is recorded as `advance_error` until the next success;
 `resume` is the manual path.
 - Why: dependants progress without a daemon.
@@ -179,9 +180,9 @@ Landing runs on the home host under a per-ref OS lock, binding a generation
 and token to the expected and candidate OIDs. The operation is marked
 `pushing` first, and expiry cannot admit a successor while it is
 unresolved. The push proves a fast-forward and uses
-`--force-with-lease=<ref>:<expected>`. Origin URLs with credentials or
-options are refused. On a lost reply the remote OID is reconciled; absent
-proof stays unknown and keeps the fence.
+`--force-with-lease=<ref>:<expected>`. Landing refuses origin URLs with credentials or
+options. After a lost reply it reconciles the remote OID; without proof, the
+outcome stays unknown and keeps the fence.
 - Why: two landers must never overwrite each other's push.
 - Test: `crates/fabric-runtime/src/landing_tests.rs::lost_push_reply_keeps_successor_fenced_until_remote_reconciliation`;
   `::local_url_rewrite_is_refused_before_it_can_push_to_another_repository`
@@ -191,7 +192,7 @@ proof stays unknown and keeps the fence.
 
 The landing fence token comes from `PROVENANT_LANDING_TOKEN`, never an
 argument, and no token reaches an error renderer. `landing wait` never
-acquires.
+acquires the fence.
 - Why: argv is visible to every process on the host.
 - Test: `tests/fabric.rs::landing_fence_reads_secret_from_environment_without_a_token_argument`;
   `::malformed_fence_tokens_never_reach_either_error_renderer`
@@ -204,7 +205,7 @@ its own lanes when others sleep.
 
 ### Owners are authoritative
 
-Each host is authoritative for the records it created and is written only
+Each host is authoritative for the records it created and accepts writes only
 through its own ingress. Only the owner reports liveness, so an unreachable
 peer is `Unknown`, never dead. Each project has one home host for mail,
 tasks, events, claims and landing, with no outbox or election; an
@@ -221,8 +222,8 @@ matching several hosts is refused.
 Peers use system SSH with no listener or credential of Provenant's own. The
 remote command is the fixed `provenant fabric peer`, which takes one framed
 request, never a command string. Ingress refuses another `protocol` before
-decoding, an unknown source, its own host ID as source and a `trace.host`
-other than the sender. There is no version negotiation.
+decoding, and refuses an unknown source, its own host ID as source or a
+`trace.host` other than the sender. There is no version negotiation.
 - Why: the peer key is restricted to one command; nothing else may run.
 - Test: `tests/fabric_transport.rs::peer_ingress_refuses_protocol_before_decoding_or_running_mutations`;
   `::peer_ingress_refuses_a_trace_naming_another_host_than_the_sender`
@@ -231,16 +232,16 @@ other than the sender. There is no version negotiation.
 ### Remote mutations are never resent
 
 A remote mutation is prepared durably, marked sent and recorded committed or
-unknown. An uncertain one asks only for the home's receipt; it never
-repeats or falls back locally, and a sent but unanswered launch is
+unknown. If its outcome is uncertain, Fabric asks only for the home host's receipt and
+never repeats it or falls back locally, and a sent but unanswered launch is
 `launch_unknown`. A peer error naming another operation, or a reply naming
-the wrong attempt, is `state_corrupt`. Absolute paths under home travel
-home-relative; others are refused. Cancelling a peer call stops the SSH
+the wrong attempt, is `state_corrupt`. Absolute paths under the user's home directory travel relative to it; others
+are refused. Cancelling a peer call stops the SSH
 child, never the remote run.
 - Why: an SSH timeout after execution looks like a failure.
 - Test: `crates/fabric-runtime/src/hosts.rs::fixed_peer_transport_preserves_mutation_uncertainty_without_retry`;
   `crates/fabric-runtime/src/home.rs::remote_coordination_read_rejects_forged_operation_errors`.
-  Refusing absolute paths outside home and the cancel scope have no direct
+  Refusing absolute paths outside the home directory and the cancel scope have no direct
   test (gaps).
 - Owner: `crates/fabric-runtime/src/hosts.rs`
 

@@ -16,10 +16,11 @@ reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 ## Operation IDs
 
 An operation ID is 1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting
-alphanumeric. Run scopes it by caller and project and binds it to the
-operation kind and a digest of prompt, route, authority and execution
-controls, not reader waits. The same ID and digest returns the recorded
-outcome without repeating effects; the same ID with a different digest is `operation_conflict`, exit 2.
+alphanumeric. Run scopes it by caller and project, and binds it to the
+operation kind and a digest of the prompt, route, authority and execution
+controls. Reader waits are excluded from the digest. The same ID and digest
+return the recorded outcome without repeating effects. The same ID with a
+different digest fails with `operation_conflict` (exit 2).
 - Why: lost replies and concurrent duplicates, including resume, must never
   launch twice.
 - Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;
@@ -43,7 +44,7 @@ memory and disk floors, startup spacing and a deadline.
 Terminal attempts are immutable; a retry or continued turn is a new attempt
 linked by `retry_of`, and the latest is the highest attempt number, never
 the latest timestamp. Read-only fallback needs explicit opt-in and a typed
-transient failure. A writer is never replayed automatically, and two writers
+transient failure. A writer (an attempt that may edit files) is never replayed automatically, and two writers
 never share a worktree.
 - Why: evidence must not be rewritten, and replaying a writer clobbers edits.
 - Test: `crates/run/src/dispatch_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
@@ -53,8 +54,8 @@ never share a worktree.
 ## Publication order
 
 1. One transaction reserves the operation, digest, IDs and tickets.
-2. The scheduler samples resources outside it, takes writer custody and
-   hands supervisor the plan. A lost acknowledgement records
+2. The scheduler samples resources outside the transaction, takes writer custody and
+   passes the plan to supervisor. A lost acknowledgement records
    `launch_unknown`, keeps capacity and the reservation, and is never
    replayed.
 3. Result and exit evidence are sealed first; then one commit writes the
@@ -89,7 +90,7 @@ transcript except Codex's post-exit identity projection.
 A host failure to read the stored prompt, or to stage or read back a context
 file, ends the attempt `rejected` before launch with its cause. `--base`
 context is captured on the host with fsmonitor, external diff, textconv,
-mailmap and fetching off, 10 s per read and 1 MiB per file; a timeout keeps
+mailmap and fetching disabled, limited to 10 s per read and 1 MiB per file; a timeout keeps
 partial output and is recorded. Reviewers must report inputs they could not
 read and truncated captures.
 - Why: repository config is hostile input, and a lane must not run on input
@@ -101,7 +102,7 @@ read and truncated captures.
 ## Launch prompts
 
 Launch prompts are bounded to 1 MiB. Argv adapters take up to 64 KiB; a
-larger top-level prompt is sealed as `prompt.md` behind a pointer, while
+larger top-level prompt is sealed as `prompt.md` and replaced by a pointer to it, while
 nested argv attempts refuse it because the parent lane can write their
 directory. Prompt digests cover the full text in `prompt.txt`.
 - Why: a spill file a lane can rewrite would change its child's task.
@@ -112,7 +113,8 @@ directory. Prompt digests cover the full text in `prompt.txt`.
 ## Read-only write exceptions
 
 `projects/<ProjectId>/read-only.json` may grant read-only runs write
-exceptions: existing directories relative to the verified repository root.
+exceptions for existing directories, given relative to the verified repository
+root.
 Absolute paths, traversal, symlinks and Git or provider configuration are
 refused, and the attempt records every granted path.
 - Why: only the user widens a read-only lane.
@@ -127,9 +129,9 @@ an uncertain launch. A start with no summary, held lock or recorded provider
 start settles as rejected; a held lock stays unobservable. Terminal `tmp/`
 removal runs only when no worktree reservation remains: reconcile checks
 reservations before taking the attempt's writer lock, and an unreadable
-reservation blocks removal. Deletion is no-follow and identity-checked, and
-symlinks are unlinked, never followed. Only below a terminal, unreserved
-`tmp/` are lock names disposable; owner locks such as `writer.lock`,
+reservation blocks removal. Deletion never follows links, checks identity first and
+unlinks symlinks themselves. Lock files may be removed only below a terminal,
+unreserved `tmp/`; owner locks such as `writer.lock`,
 `publication.lock` and the run store lock keep their inodes.
 - Why: unlinking an owner lock lets two owners lock different inodes, and
   deleting under a reservation destroys a writer's work.
@@ -142,8 +144,8 @@ symlinks are unlinked, never followed. Only below a terminal, unreserved
 ## Store
 
 The run store is SQLite with write-ahead logging (WAL), foreign keys and `synchronous=FULL`.
-Unknown or newer versions fail closed without modification, unsafe
-companions are refused, and caps (1 MiB record or prompt, 64 MiB stream,
+The store refuses unknown or newer versions without modifying them and
+refuses unsafe companion files beside the database, and caps (1 MiB record or prompt, 64 MiB stream,
 4 MiB result) make an oversized result a typed failure, never a truncation.
 - Why: a corrupt or foreign store must never be repaired into evidence.
 - Test: `crates/run/src/tests.rs::opens_refuse_unsafe_database_companions`;
@@ -155,7 +157,7 @@ companions are refused, and caps (1 MiB record or prompt, 64 MiB stream,
 `output` offsets count original bytes and reads are lossless; prompt reads
 need dispatch-equivalent authority. A terminal attempt with no requested
 output is `NOT_FOUND`. `wait any` returns on the next unseen terminal or
-`input_required` lane, and `wait all` when all are terminal or any needs
+`input_required` lane, and `wait all` returns when all are terminal or any needs
 input. The set is fixed at entry and excludes the caller and its ancestors.
 - Why: attention must never wait behind a running sibling.
 - Test: `crates/run/src/tests.rs::create_publish_and_read_exact_bounded_facts`;

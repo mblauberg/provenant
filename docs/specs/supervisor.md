@@ -19,7 +19,7 @@ relative to `tools/front-door/`.
 
 Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation, wall deadline, protocol rejection, supervisor signal or post-terminal
 cleanup. Silence, CPU inactivity, capture failure, ENOSPC and failed
-publication cannot construct a reason, and there is no startup deadline. A
+publication cannot produce a stop reason, and there is no startup deadline. A
 natural exit observed in a tick wins over a late cancel or deadline.
 - Why: a bookkeeping fault or slow start must never kill a healthy provider.
 - Test: `crates/supervisor/src/machine.rs::silence_capture_and_observation_failures_are_not_stop_reasons`;
@@ -28,12 +28,12 @@ natural exit observed in a tick wins over a late cancel or deadline.
 
 ### Signals need proven identity and scope
 
-Child observation is registered before spawn, exit is observed with
-`WNOWAIT`, and the handle is reaped last, so the PID stays reserved through
+Supervisor registers child observation before spawn, observes exit with
+`WNOWAIT` and reaps the handle last, so the PID stays reserved through
 cleanup. Only the unreaped provider, its group while the leader is unreaped,
 and proven attempt-sandbox escapees may be signalled. Reused identities,
 members that left the group, shared hosts and sibling groups are never signalled.
-Census and CWD observations never grant signal authority.
+Census and working-directory (CWD) observations never grant signal authority.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
   `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`
@@ -41,7 +41,7 @@ Census and CWD observations never grant signal authority.
 
 ### Nested owners are spared unless disproven
 
-A registered nested owner is spared only with matching native identity,
+A registered nested owner is spared from signals only with matching native identity,
 observed ancestry and proof of its held custody; an unlocked descriptor,
 environment token or process name is not proof. When macOS cannot prove an
 owner's custody, that owner and its descendants stay protected.
@@ -54,9 +54,10 @@ owner's custody, that owner and its descendants stay protected.
 
 Each confined launch may look up one Mach name unique to its attempt. After
 exit, a live process outside the provider that the sandbox reports as
-allowed that name is an escapee: it is re-identified, then sent TERM and
-KILL. If the nested child store is unreadable or holds a nested run, nothing
-is signalled and the escapee stays unresolved.
+permitted to look up that name is an escapee: supervisor re-identifies it,
+then sends SIGTERM and SIGKILL. If the nested child store is unreadable or
+holds a nested run, supervisor signals nothing and the escapee stays
+unresolved.
 - Why: a detached descendant keeps the sandbox but leaves the group.
 - Test: `crates/supervisor/tests/custody.rs::detached_descendant_in_the_attempt_sandbox_is_found_and_ended`;
   `::escapee_is_ended_only_when_the_host_reports_no_nested_runs`
@@ -65,8 +66,8 @@ is signalled and the escapee stays unresolved.
 ### Guardian holds custody past its owner
 
 The attempt guardian runs in its own session and receives the plan and a
-duplicated writer lease over a bounded private channel, acknowledged before
-the parent disconnects. Secrets travel in memory and pipes, never argv or
+duplicated writer lease over a bounded private channel and acknowledges them
+before the parent disconnects. Secrets travel in memory and pipes, never argv or
 disk. The guardian keeps the provider, attempt lock and lease after the run
 owner or MCP host dies. Provider exec needs both leases and the durable
 reservation and closes every custody descriptor. A missing acknowledgement
@@ -79,10 +80,10 @@ is an unknown launch, never permission to launch again.
 
 ### Quiescence before release
 
-A writer stays fenced until the provider is reaped, two complete census
-snapshots at least 20 ms apart show no other session or group member and no
-tracked survivor, and a fresh non-blocking lock on the original lease inode
-succeeds. Failed, racing or incomplete reads keep the fence.
+A writer stays fenced until three things hold: the provider is reaped; two
+complete census snapshots at least 20 ms apart show no other session or group
+member and no tracked survivor; and a fresh non-blocking lock on the original
+lease inode succeeds. Failed, racing or incomplete reads keep the fence.
 - Why: a leftover descendant could still write the worktree.
 - Test: `crates/supervisor/src/guardian/tests.rs::darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes`;
   `crates/supervisor/src/custody_tests.rs::an_unrecorded_escape_cannot_be_cleared_by_an_empty_census`
@@ -91,12 +92,12 @@ succeeds. Failed, racing or incomplete reads keep the fence.
 ### Unresolved exits and orphans
 
 An unresolved exit keeps the guardian cleaning; once quiescence is proven it
-replaces `process-exit.json` once, the only replace of that file. With the
+replaces `process-exit.json` once, the only replacement of that file. With the
 guardian gone, recovery takes the writer lock without waiting and signals
-only a PID whose boot, PID and start time match the record, or that macOS
+only a PID whose boot ID, PID and start time match the record, or that macOS
 places in the attempt sandbox; anything else is named, never signalled.
 Uncertainty never clears a fence; only a recorded decision with matching
-authority may, and it permits no signal.
+authority may do so, and that decision permits no signal.
 - Why: recovery must not kill a reused PID or free a busy worktree.
 - Test: `crates/supervisor/src/custody/orphans.rs::an_unprovable_pid_is_never_signalled_and_is_named`;
   `crates/supervisor/src/custody_tests.rs::reconcile_requires_matching_authority_and_records_before_release`
@@ -113,10 +114,10 @@ escalate to the user; no environment guess or uncertain signal compensates.
 
 ### Durable exit publication
 
-The exit record is published no-replace after the files it references are
+The exit record is published without replacing an existing record after the files it references are
 durable. A failed publication keeps custody and retries; a visible link with
-a failed directory sync is `durability_unconfirmed`, never absent. A 64 KiB
-reserve is released on ENOSPC for one retry, with no provider signal.
+a failed directory sync is `durability_unconfirmed`, never absent. On ENOSPC,
+supervisor releases a 64 KiB reserve for one retry, with no provider signal.
 - Why: a lost or overwritten exit record loses the only proof of outcome.
 - Test: `crates/supervisor/tests/publication.rs::exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot`;
   `crates/supervisor/tests/custody.rs::publication_failure_retains_the_lease_and_retries_without_overwrite`
@@ -128,8 +129,8 @@ The writer reservation is published under the writer lock before spawn and
 cleared only after quiescence, quarantine and run's terminal commit, or an
 authorised reconcile decision; a missing or malformed reservation refuses
 acquisition. `SettlementCommit`, needed for scratch deletion and fence
-clearing, is minted only after the attempt inode, custody lock and both
-digests in `release.json` check out.
+clearing, is issued only after the attempt inode, custody lock and both
+digests in `release.json` are verified.
 - Why: a writer must never be freed on a partial or forged settlement.
 - Test: `crates/supervisor/src/custody_tests.rs::missing_or_malformed_reservation_does_not_reopen_a_writer`;
   `::settlement_checks_exact_attempt_and_both_digests_before_scratch`
@@ -137,11 +138,11 @@ digests in `release.json` check out.
 
 ### Cancel requests from lanes
 
-A stop from a held scope replaces an undecodable, foreign or
-earlier-generation `cancel.json`, or a symlink, FIFO or oversize entry, without
+A stop request from a held scope replaces an undecodable, foreign or
+earlier-generation `cancel.json`, or a symlink, FIFO or oversized entry, without
 following it; a reattached handle never replaces a later generation's
 request. Because the lane can write its attempt directory, it can pre-empt
-or undo the host's stop; this residual is accepted.
+or undo the host's stop request; this residual risk is accepted.
 - Why: stale or forged requests must not cancel a later attempt.
 - Test: `crates/supervisor/tests/custody.rs::held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation`
 - Owner: `crates/supervisor/src/custody.rs`
@@ -149,8 +150,8 @@ or undo the host's stop; this residual is accepted.
 ### Stable locks and atomic writes
 
 Lock leaves are regular, single-link, owner-controlled files whose inodes are
-never unlinked while a duplicate lives. Acquisition polls `flock(LOCK_NB)`
-to one monotonic deadline and never revokes or steals a lease. Lock order is
+never unlinked while a duplicate descriptor is open. Acquisition polls `flock(LOCK_NB)`
+to one monotonic deadline and never revokes or steals a lease. Locks are taken in this order:
 run custody, repository metadata, writer reservation, attempt publication,
 children journal. Authoritative writes use held directory handles, 0600
 temporaries in 0700 directories, file sync, atomic rename or no-replace and

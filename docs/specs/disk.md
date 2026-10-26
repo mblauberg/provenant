@@ -15,11 +15,11 @@ Paths below are relative to `tools/front-door/`.
 
 The report creates no state directories, databases, identities, lock files
 or overflow artefacts, and never deletes, repairs, settles or checkpoints.
-SQLite may create or update only the `-shm` and `-wal` companions of an
-existing run store while reading it; a non-empty rollback journal or
-unavailable index falls back to a filesystem-only inventory with an error and
-unknown terminal status. Output over 1 MiB returns `RESULT_TOO_LARGE`
-without publishing an artefact.
+SQLite may create or update only the `-shm` and `-wal` companion files of an
+existing run store while reading it. If the run store has a non-empty rollback journal or an
+unavailable index, the report falls back to a filesystem-only inventory with an
+error and unknown terminal status. A report over 1 MiB returns
+`RESULT_TOO_LARGE` without publishing an artefact.
 - Why: inspecting disk use must be safe while lanes run.
 - Test: `src/disk.rs::disk_report_inventories_worktrees_and_unindexed_state_without_writes`;
   `crates/run/src/disk.rs::disk_reader_refuses_rollback_journal_without_modification`
@@ -27,10 +27,10 @@ without publishing an artefact.
 
 ## Bounded walks that never follow links
 
-The walk never follows symlinks or crosses a held anchor's device. Each
-measured path has a budget of 1,000,000 entries and ten seconds, and depth is
-capped at 256; reaching a limit records one error and keeps partial bytes.
-Hard-linked files count once across the report; when roots overlap, allocation belongs to the first observation.
+The walk never follows symlinks or crosses a held anchor's device boundary. Each
+measured path has a budget of 1,000,000 entries and 10 seconds, and depth is
+capped at 256; reaching a limit records one error and keeps the bytes measured so far.
+Hard-linked files count once across the report; when roots overlap, allocation is attributed to the first observation.
 - Why: a link or a huge tree must not send the report outside its roots or
   hang it.
 - Test: `crates/os/src/disk.rs::measurement_never_follows_links_and_separates_tagged_cache`;
@@ -50,7 +50,7 @@ observations, not an atomic snapshot.
 
 ## Classes grant no authority
 
-Lane classification reuses GC's owner parsing and reason policy. Missing or
+Lane classification reuses garbage collection (GC) owner parsing and reason policy. Missing or
 ambiguous writer evidence stays unknown and protects its cache; measurement
 errors classify a cache as `refused`; v1 markers never become idle.
 `reclaim: "gc"` and owner or writer facts are hints only, and GC revalidates

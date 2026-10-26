@@ -25,8 +25,8 @@ duplicate or conflicting options fail with exit 2, and paths stay raw bytes.
 
 ### Targets and manifests never guess
 
-`TARGET` is `RUN[/TASK[/ATTEMPT]]`, and an ambiguous name fails with the
-candidates, never the newest. A manifest is strict
+`TARGET` is `RUN[/TASK[/ATTEMPT]]`, and an ambiguous name fails and lists the
+candidates rather than picking the newest. A manifest must be exactly
 `{schema_version:1,tasks:[…]}` with the tagged `route` object shared with
 Fabric; flat route fields are rejected, and a manifest conflicts with the
 per-task route, access and timeout flags.
@@ -40,12 +40,12 @@ per-task route, access and timeout flags.
 
 ### One bounded envelope, never truncated
 
-With `--json` every command emits one envelope with area fields inside
-`data`. Results are capped at 1 MiB: the renderer size-checks before
-writing, and an oversize result fails `RESULT_TOO_LARGE` (exit 3) with a
-pointer to a published file or paged read. It never truncates or reruns a
+With `--json` every command emits one envelope with area-specific fields inside
+`data`. Results are capped at 1 MiB: the renderer checks size before
+writing, and an oversized result fails with `RESULT_TOO_LARGE` (exit 3) with a
+pointer to a published file or paged read. The renderer never truncates a result or reruns a
 mutation. Paged lists bind a cursor to the input digest and keep findings at
-exit 1 on every page. Human output escapes terminal controls, including in
+exit 1 on every page. Human-readable output escapes terminal control sequences, including in
 peer text.
 - Why: a result must be whole or absent, and a lane must not forge terminal
   output.
@@ -68,9 +68,9 @@ exits 124, and neither expiry nor cancelling a wait stops the work.
 
 ### Merge guard
 
-`pr merge NUMBER --head SHA` merges only that full object ID. `pr watch` and
-`pr merge` need at least one passing check with the rest passing or
-skipped, refuse a head change during verification and fail closed on
+`pr merge NUMBER --head SHA` merges only the commit with that full object ID. `pr watch` and
+`pr merge` need at least one passing check (the rest passing or
+skipped), refuse a head change during verification and fail closed on
 incomplete evidence.
 - Why: a merge must land exactly the head that CI verified.
 - Test: `tests/pr.rs::pr_merge_refuses_head_changes_before_and_after_checks`;
@@ -80,7 +80,7 @@ incomplete evidence.
 ### Chair switch quoting
 
 `chair switch` single-quotes each handoff argument and writes apostrophes
-and backslashes as double-quoted characters, so sh, bash, zsh and fish read
+and backslashes as double-quoted characters, so `sh`, `bash`, `zsh` and `fish` read
 them literally.
 - Why: a path or session ID must never become shell syntax.
 - Test: `src/chair.rs::chair_quote_encodes_apostrophes_and_backslashes`;
@@ -92,7 +92,7 @@ them literally.
 One static `HookSpec` table drives hook dispatch, fixtures and the
 installer; hook stdout carries only the protocol response and no hook
 launches a provider. The pre-tool-use guard reads at most 1 MiB in one
-second; oversize, malformed, unreadable or timed-out input denies, and if the
+second; oversized, malformed, unreadable or timed-out input is denied, and if the
 denial cannot be written it exits 2. It never echoes or persists input.
 - Why: a guard that allows on error is no guard.
 - Test: `tests/hooks.rs::unreadable_and_stalled_input_cannot_allow_bash`;
@@ -101,7 +101,7 @@ denial cannot be written it exits 2. It never echoes or persists input.
 
 ### Bash guard policy
 
-The guard refuses pattern and group process control (a literal
+The guard refuses pattern-based and group process control (a literal
 `kill [-SIGNAL] PID` above 1 is allowed), then applies the configured rule
 IDs to every simple command. Unreadable or invalid config keeps the default
 rules on. The guard is advisory: confinement and custody stay authoritative.
@@ -115,7 +115,7 @@ rules on. The guard is advisory: confinement and custody stay authoritative.
 
 `hook git pre-push` refuses default-branch deletion, non-fast-forward
 updates, pushes from linked worktrees to the default branch and conflict
-markers. It refuses on any inspection failure, disables inherited redirects
+markers. It also refuses when any inspection fails, disables inherited redirects
 and never fetches.
 - Why: the last local guard before shared history changes.
 - Test: `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
@@ -123,8 +123,8 @@ and never fetches.
 
 ### Checks report, never repair
 
-`check` returns findings with exit 1, malformed input exit 2 and unreadable
-evidence exit 3. `check release` reads Git with redirects, replacements,
+`check` exits 1 on findings, 2 on malformed input and 3 on unreadable
+evidence. `check release` reads Git with redirects, replacements,
 fsmonitor, textconv and lazy fetch off, and a missing object never yields a
 clean result. No check fetches or rewrites.
 - Why: a release scan that passes on missing evidence would publish secrets.
@@ -134,6 +134,6 @@ clean result. No check fetches or rewrites.
 
 ## Not provided
 
-- Root `run`, `batch`, `reap` or `fabric dispatch`: the run verbs cover them.
+- Top-level `run`, `batch`, `reap` or `fabric dispatch`: the run verbs cover them.
 - `worktree remove --force` or remote branch deletion.
 - `commit-msg`, Codex or OpenCode hooks: no recorded protocol.

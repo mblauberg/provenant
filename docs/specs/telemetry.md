@@ -4,10 +4,11 @@ Owner: `crates/telemetry` (reducer, prices, trace, usage log)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
 `tests/usage.rs`
 
-Telemetry reduces run's terminal attempt records with the bundled price table
-into per-route outcomes, usage and API-equivalent cost, and exports a trace.
+Telemetry summarises run's terminal attempt records into per-route outcomes,
+usage and API-equivalent cost (the cost of the same tokens at published API
+prices) using the bundled price table, and exports a trace.
 There is no ledger, store or collector. Grammar is in the generated [CLI
-reference](../reference/cli.md); quota belongs to [routing](routing.md).
+reference](../reference/cli.md); quota is specified in [routing](routing.md).
 Paths are relative to `tools/front-door/`.
 
 ## A report cannot touch a lane
@@ -23,12 +24,13 @@ is an error.
 
 ## Bounded, honest totals
 
-Reduction is bounded to 100,000 attempts, 10,000 groups and 1 MiB of keys,
-checked before insertion; a bound returns `TooLarge`, never partial totals.
+The reducer accepts at most 100,000 attempts, 10,000 groups and 1 MiB of keys.
+It checks each limit before inserting and returns `TooLarge`, never partial
+totals.
 Sums add known values and count the rest as missing; `cost.complete` is null
 when any cost is unknown, with the known lower bound reported. An unpriced
-subscription is not free, and the latest task outcome is the
-highest-numbered attempt.
+subscription is not free. The latest task outcome is the highest-numbered
+attempt.
 - Why: a partial or zero-filled total reads as a real one.
 - Test: `crates/telemetry/src/tests.rs::attempt_and_group_limits_are_enforced_before_insertion`;
   `::missing_usage_and_prices_preserve_known_lower_bounds`
@@ -36,10 +38,10 @@ highest-numbered attempt.
 
 ## Exact money and prices
 
-Telemetry never re-subtracts provider-normalised counts. Cost accumulates in
-checked integers, divides by 10^6 once and rounds half-up once; floating
-point is never used. Prices are keyed by exact provider and model; an omitted
-rate is unknown, zero needs a verified zero, and there is no runtime fetch,
+Telemetry never subtracts again from counts the provider has already
+normalised. Cost accumulates in checked integers, is divided by 10^6 once and
+rounded half-up once, and floating point is never used. Prices are keyed by exact provider and model; an omitted
+rate is unknown. A zero rate must be verified. There is no runtime fetch,
 regex or alias. Cost is an estimate, not a bill.
 - Why: rounding drift or a guessed price corrupts route comparison.
 - Test: `crates/telemetry/src/tests.rs::rounding_occurs_once_across_categories_attempts_and_groups`;
@@ -48,8 +50,9 @@ regex or alias. Cost is an estimate, not a bill.
 
 ## Trace export
 
-`telemetry trace` writes Chrome Trace Event JSON, one process per host and
-one thread per attempt, with flow arrows to `Trace.parent` across hosts. An
+`telemetry trace` writes Chrome Trace Event JSON, with one process per host and
+one thread per attempt, and flow arrows from a child to its `Trace.parent`
+across hosts. An
 unreadable peer is listed with its error and the rest of the export is still written.
 - Why: one peer outage must not hide the local picture.
 - Test: `crates/telemetry/src/tests.rs::trace_groups_hosts_and_links_a_child_to_its_parent_across_them`;
@@ -59,10 +62,10 @@ unreadable peer is listed with its error and the rest of the export is still wri
 ## Demand counters are lossy and private
 
 `usage.jsonl` records are appended best-effort under an existing root, never
-creating one. They carry the verb or tool, time, duration and outcome, never
-argument, prompt or result text. Each line is one bounded `O_APPEND` write;
-only rotation takes a non-blocking lock, and I/O errors drop the event.
-Project attribution is opt-in and records only the `ProjectId` hash.
+creating one. They carry the command or tool name, time, duration and outcome, never
+argument, prompt or result text. Each line is one bounded `O_APPEND` write.
+Only rotation takes a non-blocking lock, and an I/O error discards the event.
+Recording the project is opt-in and stores only the `ProjectId` hash.
 - Why: counting demand must not leak work content or slow a command.
 - Test: `tests/usage.rs::cli_and_mcp_usage_records_exclude_arguments_prompts_and_results`;
   `crates/telemetry/src/usage/tests.rs::recording_on_a_missing_root_creates_nothing`
@@ -70,8 +73,8 @@ Project attribution is opt-in and records only the `ProjectId` hash.
 
 ## Quota display stays honest
 
-A failed refresh keeps the last snapshot, marked stale, and the menu bar
-never reads staleness as zero usage. An unregistered icon account falls back
+A failed refresh keeps the last snapshot, marked stale. The menu bar
+never shows a stale value as zero usage. An unregistered icon account falls back
 to `most_constrained` with a warning and leaves config unchanged.
 - Why: stale data must not look like free headroom.
 - Test: `tests/quota.rs::failed_auth_refresh_shows_last_known_usage_age_and_stale_marker`;
