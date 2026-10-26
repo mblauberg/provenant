@@ -64,7 +64,7 @@ jobs:
               summary.write(body)
           PY
           comment_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/1752/comments" \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- provenant-docs-drift -->"))) | .id' | head -n1)"
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- provenant-docs-drift -->"))) | .id' | sed -n 1p)"
           if [ -n "$comment_id" ]; then
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
               --input "$RUNNER_TEMP/doc-truth-comment.json" > /dev/null
