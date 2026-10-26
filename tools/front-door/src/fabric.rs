@@ -2937,6 +2937,30 @@ mod peer_tests {
         Ok(())
     }
     #[test]
+    fn events_within_trims_whole_events_and_counts_separators() {
+        // Serialised sizes are 4, 12 and 3 bytes; the array adds brackets and commas.
+        let events = ["aa", "bbbbbbbbbb", "c"];
+        for (max_bytes, kept) in [
+            (65536, 3),
+            // Two events are 2 + 4 + 1 + 12 = 19 bytes; the comma counts.
+            (19, 2),
+            (18, 1),
+            // One event is 2 + 4 bytes.
+            (6, 1),
+            (5, 0),
+            (0, 0),
+        ] {
+            assert_eq!(
+                super::events_within(&events, max_bytes).unwrap(),
+                kept,
+                "{max_bytes}"
+            );
+        }
+        // A large event stops the page even when a later small one would fit.
+        assert_eq!(super::events_within(&events, 10).unwrap(), 1);
+        assert_eq!(super::events_within::<&str>(&[], 2).unwrap(), 0);
+    }
+    #[test]
     fn host_probe_budget_is_shared_fairly() {
         assert_eq!(super::fair_probe_micros(10_000_000, 4), Some(2_500_000));
         assert_eq!(super::fair_probe_micros(55_000_000, 100), Some(550_000));

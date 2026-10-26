@@ -246,6 +246,10 @@ pub(crate) fn verify_lineage(
 }
 
 pub trait Adapter: Sync {
+    /// A recognised failure diagnostic, without untrusted stderr prose.
+    fn failure_diagnostic(&self, _stderr: &[u8]) -> Option<String> {
+        None
+    }
     fn id(&self) -> &'static str;
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;

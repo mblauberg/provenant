@@ -156,6 +156,49 @@ fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_denied_command_preserves_failed_response() -> Result<(), ProviderError> {
+    // Synthetic stdout paired with the issue's recorded stderr diagnostic.
+    let raw = serde_json::json!({"event":"result","result":{
+        "conversation_id":"", "status":"ERROR", "response":"I could only verify part of the claim.",
+        "error":"command permission denied", "usage":{"input_tokens":0,"output_tokens":0}
+    }})
+    .to_string();
+    let (mut events, outcome) = replay(
+        &agy::Agy,
+        &raw,
+        ExitObservation {
+            code: Some(1),
+            ..EXIT
+        },
+    )?;
+    events.extend(outcome.final_events().iter().cloned());
+    assert_eq!(outcome.status(), OutcomeStatus::Failed);
+    assert!(events.contains(&ProviderEvent::Text(
+        "I could only verify part of the claim.".into()
+    )));
+    assert_eq!(
+        agy::Agy.failure_diagnostic(include_bytes!(
+            "../../../tests/fixtures/providers/agy/command-denied.stderr"
+        )),
+        Some(r#"agy denied the "command" permission in headless mode"#.into())
+    );
+    for unrelated in [
+        "a tool required the command permission",
+        "jetski: unrelated failure",
+        "jetski: no output produced \u{2014} a tool required the \"command\nforged\" permission that headless mode cannot prompt for, so it was auto-denied.",
+        "jetski: no output produced \u{2014} a tool required the \"\" permission that headless mode cannot prompt for, so it was auto-denied.",
+    ] {
+        assert_eq!(agy::Agy.failure_diagnostic(unrelated.as_bytes()), None);
+    }
+    assert_eq!(
+        codex::Codex.failure_diagnostic(include_bytes!(
+            "../../../tests/fixtures/providers/agy/command-denied.stderr"
+        )),
+        None
+    );
+    Ok(())
+}
+#[test]
 fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
     let exit = ExitObservation {
         code: Some(1),

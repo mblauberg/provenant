@@ -36,3 +36,7 @@ so its streams cannot establish v2 acceptance. OpenCode `step_finish` with
 
 Recovered retry, nested tool/subagent identity and quota windows remain gaps;
 tests cover them with inputs labelled synthetic.
+
+`agy/command-denied.stderr` is the verbatim denial diagnostic reported in
+issue #1776 from three read-only lanes on 2026-10-26. It records only stderr;
+tests combine it with explicitly synthetic stdout frames or empty stdout.
