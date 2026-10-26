@@ -199,13 +199,13 @@ re-apply instruction. Harness changes are printed before they are applied
 covers shipped workspace source (each member's `src/`, `assets/` and `build.rs`),
 manifests, the lockfile, the toolchain, Cargo configuration, the release packager
 (`examples/package-release.rs`) and the bundled assets.
-Cargo watches only existing input paths; the lockfile covers member additions.
-An optional input created later, such as a member's `build.rs` or `assets/`, is
-picked up on the next watched change.
-Names are sorted workspace-relative POSIX paths, framed by
-lengths, under the prefix `provenant-source-v1`. Duplicate, missing, symlinked or
-escaping inputs are rejected, and there is no digest environment override.
-Release builds trim source paths so checkout paths do not affect binary bytes.
+Cargo watches existing input paths and the checkout's Git index, including in
+linked worktrees. Newly created optional inputs, such as a member's `build.rs`
+or `assets/`, are picked up once tracked because the index changes. Names are
+sorted workspace-relative POSIX paths, framed by lengths, under the prefix
+`provenant-source-v1`. Duplicate, missing, symlinked or escaping inputs are
+rejected, and there is no digest environment override. Release builds trim
+source paths so checkout paths do not affect binary bytes.
 
 Packaging emits a typed `release.json` beside `bin/provenant` with the source
 digest, target triple, toolchain and a bounded file inventory with digests.

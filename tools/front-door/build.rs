@@ -87,7 +87,11 @@ struct TrackedFiles {
 impl TrackedFiles {
     // Build-time Git metadata discovery, before the runtime supervisor exists.
     #[allow(clippy::disallowed_methods)]
-    fn load(workspace: &Path, repository: &Path) -> BuildResult<Self> {
+    fn load(
+        workspace: &Path,
+        repository: &Path,
+        watched: &mut BTreeSet<PathBuf>,
+    ) -> BuildResult<Self> {
         let top_level = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(workspace)
@@ -103,6 +107,19 @@ impl TrackedFiles {
         if top_level != repository {
             return Err(invalid("source workspace is outside its expected git checkout").into());
         }
+
+        let index = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+            .current_dir(workspace)
+            .output()?;
+        if !index.status.success() {
+            return Err(invalid("cannot resolve source inventory git index").into());
+        }
+        let index = index
+            .stdout
+            .strip_suffix(b"\n")
+            .ok_or_else(|| invalid("git did not return an index path"))?;
+        watch(watched, PathBuf::from(std::str::from_utf8(index)?))?;
 
         let output = Command::new("git")
             .args(["ls-files", "--full-name", "-z", "--", ":/"])
@@ -161,9 +178,8 @@ fn main() -> BuildResult<()> {
         .and_then(Path::parent)
         .ok_or_else(|| invalid("workspace is not nested below the repository root"))?;
     let repository = fs::canonicalize(repository)?;
-    let tracked = TrackedFiles::load(&workspace, &repository)?;
-
     let mut watched = BTreeSet::new();
+    let tracked = TrackedFiles::load(&workspace, &repository, &mut watched)?;
     let mut inputs = Inputs::default();
 
     let workspace_manifest = workspace.join("Cargo.toml");
@@ -192,7 +208,7 @@ fn main() -> BuildResult<()> {
         &mut inputs,
     )?;
 
-    // Cargo.lock covers member additions without recursively watching crates/.
+    // The Git index covers newly tracked members without watching crates/.
     let members = discover_members(&workspace, &workspace_document, &tracked)?;
     for member in &members {
         collect_member_inputs(&workspace, member, &mut watched, &tracked, &mut inputs)?;
@@ -800,7 +816,7 @@ fn join_logical(directory: &str, child: &str) -> String {
 }
 
 fn watch(paths: &mut BTreeSet<PathBuf>, path: PathBuf) -> BuildResult<()> {
-    if optional_metadata(&path)?.is_none() {
+    if fs::symlink_metadata(&path).is_err() {
         return Ok(());
     }
     path.to_str()
@@ -884,7 +900,80 @@ mod tests {
         let workspace = repository.join("tools/front-door");
         fs::create_dir_all(&workspace)?;
 
-        assert!(TrackedFiles::load(&workspace, &repository).is_err());
+        assert!(TrackedFiles::load(&workspace, &repository, &mut BTreeSet::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn linked_worktree_watches_its_own_git_index() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        run_git(&repository, &["init", "--quiet"])?;
+        run_git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        )?;
+        run_git(
+            &repository,
+            &["worktree", "add", "--quiet", "--detach", "linked"],
+        )?;
+        let linked = repository.join("linked");
+        let workspace = linked.join("tools/front-door");
+        fs::create_dir_all(&workspace)?;
+        let mut watched = BTreeSet::new();
+        TrackedFiles::load(&workspace, &linked, &mut watched)?;
+        assert!(watched.contains(&repository.join(".git/worktrees/linked/index")));
+        assert!(!watched.contains(&repository.join(".git/index")));
+        Ok(())
+    }
+
+    #[test]
+    fn untracked_optional_symlink_is_watched_but_not_hashed() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        let workspace = repository.join("tools/front-door");
+        fs::create_dir_all(&workspace)?;
+        fs::write(workspace.join("config-target"), b"// local config\n")?;
+        let config = workspace.join("rustfmt.toml");
+        std::os::unix::fs::symlink("config-target", &config)?;
+        run_git(&repository, &["init", "--quiet"])?;
+        let mut watched = BTreeSet::new();
+        let tracked = TrackedFiles::load(&workspace, &repository, &mut watched)?;
+        let mut inputs = Inputs::default();
+        super::add_workspace_configuration(
+            &workspace,
+            &repository,
+            &mut watched,
+            &tracked,
+            &mut inputs,
+        )?;
+        assert!(watched.contains(&config));
+        assert!(inputs.files.is_empty());
+
+        run_git(&repository, &["add", "tools/front-door/rustfmt.toml"])?;
+        let tracked = TrackedFiles::load(&workspace, &repository, &mut watched)?;
+        assert!(
+            super::add_workspace_configuration(
+                &workspace,
+                &repository,
+                &mut watched,
+                &tracked,
+                &mut inputs,
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -941,10 +1030,10 @@ mod tests {
         repository: &Path,
         member: &Path,
     ) -> BuildResult<SourceDigest> {
-        let tracked = TrackedFiles::load(workspace, repository)?;
+        let mut watched = BTreeSet::new();
+        let tracked = TrackedFiles::load(workspace, repository, &mut watched)?;
         let mut inputs = Inputs::default();
         let document = parse_toml(&fs::read(workspace.join("Cargo.toml"))?, "fixture manifest")?;
-        let mut watched = BTreeSet::new();
         for member in discover_members(workspace, &document, &tracked)? {
             collect_member_inputs(workspace, &member, &mut watched, &tracked, &mut inputs)?;
         }
@@ -952,6 +1041,12 @@ mod tests {
             watched.iter().all(|path| path.exists()),
             "missing watch: {watched:?}"
         );
+        assert!(watched.contains(&member.join("src")));
+        assert!(watched.contains(&repository.join(".git/index")));
+        for optional in ["assets", "build.rs"] {
+            let path = member.join(optional);
+            assert_eq!(watched.contains(&path), path.exists(), "{optional}");
+        }
         let tests = member.join("tests");
         assert!(
             watched
@@ -971,7 +1066,7 @@ mod tests {
         repository: &Path,
         assets: &Path,
     ) -> BuildResult<SourceDigest> {
-        let tracked = TrackedFiles::load(workspace, repository)?;
+        let tracked = TrackedFiles::load(workspace, repository, &mut BTreeSet::new())?;
         let mut inputs = Inputs::default();
         collect_external_tree(assets, "assets", &mut inputs, true, &tracked)?;
         let borrowed: Vec<SourceInput<'_>> = inputs
