@@ -1842,9 +1842,22 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         ));
     }
     if command.trace {
+        let grants = json!({
+            "read_only_writable": record.read_only_writable,
+            "write_grants": record.write_grants,
+            "git_grants_digest": record.git_grants_digest,
+        });
+        let grant_lines = grants_lines(&record);
         let trace = trace_chain(&session.store, record, &call)?;
-        let human = trace.iter().map(trace_line).collect();
-        return Ok((json!({ "attempt_id": id, "trace": trace }), human));
+        let human = trace
+            .iter()
+            .map(trace_line)
+            .chain([grant_lines])
+            .collect::<String>();
+        return Ok((
+            json!({ "attempt_id": id, "trace": trace, "grants": grants }),
+            human,
+        ));
     }
     let part = match command.part {
         Part::Result => run::ArtifactPart::Result,
@@ -1944,6 +1957,39 @@ fn trace_chain(
         }
     }
     Ok(chain)
+}
+/// The grants the launch applied, one line each. Older attempts show none.
+fn grants_lines(record: &run::AttemptRecord) -> String {
+    let mut text = String::new();
+    for grant in &record.write_grants {
+        let path = grant
+            .path
+            .to_path_buf()
+            .map_or_else(|_| "-".to_owned(), |p| p.display().to_string());
+        let [source, scope] = [
+            serde_json::to_value(grant.source),
+            serde_json::to_value(grant.scope),
+        ]
+        .map(|v| {
+            v.ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        });
+        text.push_str(&format!(
+            "grant write source={source} scope={scope} path={}\n",
+            plain_text(&path, usize::MAX)
+        ));
+    }
+    for path in &record.read_only_writable {
+        text.push_str(&format!(
+            "grant read_only_writable path={}\n",
+            plain_text(path, usize::MAX)
+        ));
+    }
+    if let Some(digest) = record.git_grants_digest {
+        text.push_str(&format!("grant git digest={digest}\n"));
+    }
+    text
 }
 fn trace_line(trace: &provenant_records::Trace) -> String {
     fn field(name: &str, value: Option<impl std::fmt::Display>) -> String {
@@ -2125,7 +2171,7 @@ fn reconcile_summary(state: &run::Reconciled) -> String {
             plain_text(reason, usize::MAX)
         ),
         run::Reconciled::Uncertain { reason } => {
-            format!("uncertain: {}", plain_text(reason, usize::MAX))
+            format!("uncertain: {}", plain_text(&reason.to_string(), usize::MAX))
         }
         _ => state_tag(state),
     }
@@ -2400,7 +2446,7 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let (_, store) = open_read_only(edge, &call)?;
-    let facts = store
+    let mut facts = store
         .map(|store| {
             store
                 .attempts(
@@ -2414,7 +2460,18 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         })
         .transpose()?
         .unwrap_or_default();
-    let trace = provenant_telemetry::trace(&facts, since);
+    let mut hosts = provenant_telemetry::Hosts::default();
+    let mut peers = Vec::new();
+    if command.peers
+        && let Some(found) = remote::peer_facts(edge, command.run)?
+    {
+        facts.extend(found.facts);
+        hosts.local = Some(found.local);
+        hosts.names = found.names;
+        hosts.names.insert(found.local, "this host".to_owned());
+        peers = found.hosts;
+    }
+    let trace = provenant_telemetry::trace(&facts, &hosts, since);
     let events = trace["traceEvents"].as_array().map_or(0, Vec::len);
     let bytes = serde_json::to_vec(&trace)
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
@@ -2426,9 +2483,19 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         )
     })?;
     let out = command.out.display().to_string();
+    let mut human = format!("{events} events written to {out}; open in ui.perfetto.dev\n");
+    for row in &peers {
+        if let Some(error) = row["error"].as_str() {
+            human.push_str(&format!(
+                "peer {} not read: {}\n",
+                row["host"].as_str().unwrap_or("?"),
+                plain_text(error, usize::MAX)
+            ));
+        }
+    }
     Ok((
-        json!({ "out": out, "events": events }),
-        format!("{events} events written to {out}; open in ui.perfetto.dev\n"),
+        json!({ "out": out, "events": events, "peers": peers }),
+        human,
     ))
 }
 
@@ -2829,6 +2896,41 @@ mod tests {
         let line = trace_line(&chain[2]);
         assert_eq!(line.lines().count(), 1);
         assert!(line.contains("host=- ") && line.contains(&format!("attempt={missing} ")));
+        Ok(())
+    }
+
+    #[test]
+    fn grants_lines_list_each_applied_grant_and_stay_empty_for_older_attempts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let store = trace_store(&temp, &call)?;
+        let prepared = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+        store.create(&prepared, &call)?;
+        let mut record = store.record(prepared.attempts[0].attempt_id, &call)?;
+        assert_eq!(grants_lines(&record), "");
+        record.write_grants = vec![run::WriteGrantRecord {
+            source: run::WriteSource::WriteRoot,
+            path: provenant_records::AbsolutePath::new(std::path::Path::new("/work/shared"))?,
+            scope: run::PathScope::Subtree,
+        }];
+        record.read_only_writable = vec!["docs".into()];
+        record.git_grants_digest = Some(provenant_core::Digest::from_bytes([6; 32]));
+        let lines = grants_lines(&record);
+        let mut lines = lines.lines();
+        assert_eq!(
+            lines.next(),
+            Some("grant write source=write_root scope=subtree path=/work/shared")
+        );
+        assert_eq!(lines.next(), Some("grant read_only_writable path=docs"));
+        assert!(
+            lines
+                .next()
+                .is_some_and(|l| l.starts_with("grant git digest="))
+        );
+        assert_eq!(lines.next(), None);
         Ok(())
     }
 

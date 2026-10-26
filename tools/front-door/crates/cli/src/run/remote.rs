@@ -821,6 +821,77 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
     out
 }
 
+/// What a trace export learned from peers. A peer that cannot be read is
+/// listed with its error, never fatal: the rest of the export still stands.
+pub(super) struct PeerFacts {
+    pub(super) local: HostId,
+    pub(super) names: BTreeMap<HostId, String>,
+    pub(super) facts: Vec<provenant_records::AttemptFact>,
+    pub(super) hosts: Vec<Value>,
+}
+
+/// The terminal attempts of every configured peer, however the run got there,
+/// read as `lanes --host` reads them: the peer's newest lanes over the peer
+/// channel. `None` when this is not a federated project or no peer is
+/// configured.
+pub(super) fn peer_facts(edge: &Edge<'_>, run: Option<RunId>) -> Result<Option<PeerFacts>, Fail> {
+    let peer = Peer::open(edge)?;
+    // Another project's lanes are not this export's to read.
+    if peer.project().is_err() || peer.context.config.peers.is_empty() {
+        return Ok(None);
+    }
+    let names: BTreeMap<HostId, String> = peer
+        .context
+        .config
+        .peers
+        .iter()
+        .map(|(name, p)| (p.host, name.clone()))
+        .collect();
+    let (facts, hosts) = collect(&names, run, |host, action| peer.call(host, action));
+    Ok(Some(PeerFacts {
+        local: peer.context.identity.host,
+        names,
+        facts,
+        hosts,
+    }))
+}
+
+/// The most lanes one peer returns; the peer rejects a larger page.
+const PEER_LANES: u16 = 100;
+
+/// Ask each host for its lanes and keep the terminal ones of `run`, or of any
+/// run. A host that fails is listed with its error and the rest still count.
+fn collect(
+    names: &BTreeMap<HostId, String>,
+    run: Option<RunId>,
+    mut call: impl FnMut(HostId, PeerAction) -> Result<PeerResult, Fail>,
+) -> (Vec<provenant_records::AttemptFact>, Vec<Value>) {
+    let (mut facts, mut hosts) = (Vec::new(), Vec::new());
+    for (host, name) in names {
+        let mut row = json!({ "host": host, "name": name, "attempts": 0 });
+        let action = PeerAction::Lanes {
+            all: true,
+            limit: PEER_LANES,
+        };
+        match call(*host, action) {
+            Ok(PeerResult::RunStatuses(records)) if records.len() <= usize::from(PEER_LANES) => {
+                let before = facts.len();
+                facts.extend(
+                    records
+                        .into_iter()
+                        .filter(|r| run.is_none_or(|run| r.run_id == run))
+                        .filter_map(|r| run::fact(r).ok()),
+                );
+                row["attempts"] = json!(facts.len() - before);
+            }
+            Ok(_) => row["error"] = json!(corrupt().message),
+            Err(fail) => row["error"] = json!(fail.message),
+        }
+        hosts.push(row);
+    }
+    (facts, hosts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,5 +1132,41 @@ mod tests {
         );
         assert_eq!(out.err().map(|f| f.code), Some("STATE_CORRUPT"));
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn peer_export_asks_every_configured_peer_for_its_lanes() {
+        let names = BTreeMap::from([
+            (HostId::from_bytes([1; 16]), "alpha".to_owned()),
+            (HostId::from_bytes([2; 16]), "beta".to_owned()),
+            (HostId::from_bytes([3; 16]), "gamma".to_owned()),
+        ]);
+        let mut asked = Vec::new();
+        let (facts, hosts) = collect(&names, None, |host, action| {
+            let PeerAction::Lanes { all, limit } = action else {
+                panic!("expected a lanes request");
+            };
+            asked.push((host, all, limit));
+            match names[&host].as_str() {
+                "alpha" => Ok(PeerResult::RunStatuses(Vec::new())),
+                "beta" => Err(unavailable("beta: ssh timed out")),
+                _ => Ok(PeerResult::Error {
+                    code: "REFUSED".into(),
+                    operation_id: None,
+                }),
+            }
+        });
+        let expected: Vec<_> = names.keys().map(|h| (*h, true, PEER_LANES)).collect();
+        assert_eq!(asked, expected);
+        assert!(facts.is_empty());
+        assert_eq!(hosts[0]["name"], "alpha");
+        assert_eq!(hosts[0]["attempts"], 0);
+        assert!(hosts[0].get("error").is_none());
+        assert!(
+            hosts[1]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("beta"))
+        );
+        assert_eq!(hosts[2]["error"], corrupt().message);
     }
 }

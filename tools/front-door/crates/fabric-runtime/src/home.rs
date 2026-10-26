@@ -380,15 +380,13 @@ impl<'a> CoordinationService<'a> {
                 .find(|p| p.host == *host)
                 .cloned()
                 .ok_or(PeerError::Unavailable)?;
-            let request = PeerRequest {
-                version: 1,
-                protocol: PROTOCOL,
-                target_host: *host,
-                source_host: identity.host,
-                agent: identity.inbox.agent.clone(),
-                project: ProjectLocator::new(identity, home)?,
-                action: PeerAction::Health,
-            };
+            let request = PeerRequest::new(
+                *host,
+                identity.host,
+                identity.inbox.agent.clone(),
+                ProjectLocator::new(identity, home)?,
+                PeerAction::Health,
+            );
             let executable = discover_ssh_executable(config.ssh_executable.as_deref())?;
             let transport = SshTransport {
                 executor,
@@ -599,6 +597,7 @@ mod tests {
                 protocol: PROTOCOL,
                 target_host: self.remote_host,
                 source_host: self.local_host,
+                trace: Default::default(),
                 agent: "chair".into(),
                 project: ProjectLocator {
                     key: self.project_key.clone(),

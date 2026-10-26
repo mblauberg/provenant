@@ -209,15 +209,13 @@ impl Context {
             })?;
         let project = ProjectLocator::new(&self.identity, &self.home)
             .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused))?;
-        let request = PeerRequest {
-            version: 1,
-            protocol: provenant_fabric_runtime::hosts::PROTOCOL,
-            target_host: host,
-            source_host: self.identity.host,
-            agent: self.identity.inbox.agent.clone(),
+        let request = PeerRequest::new(
+            host,
+            self.identity.host,
+            self.identity.inbox.agent.clone(),
             project,
             action,
-        };
+        );
         let executable =
             discover_ssh_executable(self.config.ssh_executable.as_deref()).map_err(|_| {
                 PeerFailure::new(FacadeError::HomeUnavailable, "no usable ssh executable")

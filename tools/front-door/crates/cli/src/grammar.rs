@@ -507,6 +507,9 @@ pub struct Trace {
     /// Restrict the trace to one run.
     #[arg(long)]
     pub run: Option<RunId>,
+    /// Also read the attempts of runs placed on peers, one SSH status read per peer
+    #[arg(long)]
+    pub peers: bool,
 }
 #[derive(Debug, Args)]
 pub struct Stats {

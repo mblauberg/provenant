@@ -3465,7 +3465,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         } else {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]
-                if *attempt == id && reason.contains("chair recovery required"))
+                if *attempt == id && reason.to_string().contains("chair recovery required"))
             );
             assert_eq!(store.writer_fences()?.len(), 1);
             assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
@@ -3531,8 +3531,8 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
     assert!(
         matches!(store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
-        [(attempt, Reconciled::Uncertain { reason })]
-        if *attempt == id && reason.contains("writer reservation retained"))
+        [(attempt, Reconciled::Uncertain { reason: UncertainReason::WriterReservationRetained { .. } })]
+        if *attempt == id)
     );
     assert_eq!(std::fs::read_to_string(candidate.join("x.lock"))?, "keep");
     // Reconcile can withdraw the prepared reservation after its lock is released.

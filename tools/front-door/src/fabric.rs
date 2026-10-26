@@ -253,15 +253,13 @@ impl F3Facade for BoundFacade<'_> {
             if let (Some(project), Some(executable), Some(cap)) =
                 (locator.clone(), executable.clone(), cap)
             {
-                let request = PeerRequest {
-                    version: 1,
-                    protocol: PROTOCOL,
-                    target_host: host,
-                    source_host: ctx.identity.host,
-                    agent: ctx.identity.inbox.agent.clone(),
+                let request = PeerRequest::new(
+                    host,
+                    ctx.identity.host,
+                    ctx.identity.inbox.agent.clone(),
                     project,
-                    action: PeerAction::Health,
-                };
+                    PeerAction::Health,
+                );
                 let transport = SshTransport {
                     executor: &self.factory.executor,
                     clock: &self.factory.clock,
@@ -921,19 +919,17 @@ pub fn landing(input: provenant_cli::fabric::Landing, globals: &provenant_cli::G
                 let executable = provenant_fabric_runtime::hosts::discover_ssh_executable(
                     ctx.config.ssh_executable.as_deref(),
                 )?;
-                let request = PeerRequest {
-                    version: 1,
-                    protocol: PROTOCOL,
-                    target_host: *host,
-                    source_host: ctx.identity.host,
-                    agent: ctx.identity.inbox.agent.clone(),
-                    project: ProjectLocator::new(&ctx.identity, &factory.home)?,
-                    action: PeerAction::LandingPush {
+                let request = PeerRequest::new(
+                    *host,
+                    ctx.identity.host,
+                    ctx.identity.inbox.agent.clone(),
+                    ProjectLocator::new(&ctx.identity, &factory.home)?,
+                    PeerAction::LandingPush {
                         proof,
                         operation_id: operation.operation_id,
                         reconcile,
                     },
-                };
+                );
                 let transport = SshTransport {
                     executor: &factory.executor,
                     clock: &factory.clock,

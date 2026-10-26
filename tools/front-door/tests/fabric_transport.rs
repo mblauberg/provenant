@@ -520,6 +520,39 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
 }
 
 #[test]
+fn peer_ingress_refuses_a_trace_naming_another_host_than_the_sender() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = &identity["data"]["host"];
+    let source = next_host(host.as_str().ok_or("host")?.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
+    let key = &identity["data"]["federation"]["key"];
+    let mut request = json!({
+        "version": 1, "protocol": 2, "target_host": host, "source_host": source, "agent": "worker",
+        "project": {"key": key, "common_dir": "repo/.git"},
+        "trace": {"host": host},
+        "action": {"action": "health"},
+    });
+    let args: Vec<OsString> = vec![
+        "--state-dir".into(),
+        rig.state.clone().into(),
+        "fabric".into(),
+        "peer".into(),
+    ];
+    let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let refused = rig.execute_os(binary, &args, Some(&serde_json::to_vec(&request)?))?;
+    assert_ne!(code(&refused), 0);
+    assert!(refused.stdout.bytes.is_empty());
+    // The same request traced to its sender is served.
+    request["trace"] = json!({"host": source});
+    let served = rig.execute_os(binary, &args, Some(&serde_json::to_vec(&request)?))?;
+    assert_eq!(code(&served), 0, "{:?}", served.stderr.bytes);
+    let reply: Value = serde_json::from_slice(&served.stdout.bytes)?;
+    assert_eq!(reply["result"]["result"], "health", "{reply}");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let mut rig = TestRig::new()?;
     let moved = rig.home.join("repo");

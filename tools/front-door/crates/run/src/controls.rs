@@ -56,11 +56,67 @@ pub enum Reconciled {
     /// that left the process group); custody stays fenced until they exit.
     Escaped { pids: Vec<i64> },
     /// Custody cannot be proven either way; it stays fenced.
-    Uncertain { reason: String },
+    Uncertain { reason: UncertainReason },
+}
+/// Why custody could not be proven. The text of an underlying error rides
+/// along as `error`; the kind is what a caller matches on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UncertainReason {
+    /// Reconciling the attempt failed before it could be settled.
+    ReconcileFailed { error: String },
+    /// Custody could not be reattached, acquired or observed.
+    CustodyUnavailable { error: String },
+    /// A running attempt has no launch summary.
+    NoLaunchSummary,
+    /// The launch custody is neither held nor provably absent.
+    CustodyNotProvablyAbsent,
+    /// A process exit exists although no launch was recorded.
+    ExitWithoutLaunchSummary,
+    /// The guardian is neither alive nor finished as far as can be seen.
+    GuardianNotObservable,
+    /// A launch was handed to a writer whose custody is unconfirmed.
+    WriterCustodyUnconfirmed { reservation: std::path::PathBuf },
+    /// A writer reservation outlived the attempt's terminal commit.
+    WriterReservationRetained { reservation: std::path::PathBuf },
+}
+impl std::fmt::Display for UncertainReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReconcileFailed { error } | Self::CustodyUnavailable { error } => {
+                f.write_str(error)
+            }
+            Self::NoLaunchSummary => f.write_str("running attempt has no launch summary"),
+            Self::CustodyNotProvablyAbsent => f.write_str("launch custody is not provably absent"),
+            Self::ExitWithoutLaunchSummary => f.write_str("exit exists without a launch summary"),
+            Self::GuardianNotObservable => f.write_str("guardian is not observable"),
+            Self::WriterCustodyUnconfirmed { reservation } => write!(
+                f,
+                "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
+                reservation.display()
+            ),
+            Self::WriterReservationRetained { reservation } => write!(
+                f,
+                "writer reservation retained after terminal commit: {}; chair recovery required",
+                reservation.display()
+            ),
+        }
+    }
 }
 
 /// How long recovery waits after each of TERM and KILL for an orphan to go.
 const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Reconciled {
+    fn uncertain(reason: UncertainReason) -> Self {
+        Self::Uncertain { reason }
+    }
+    fn custody_unavailable(error: &dyn std::fmt::Display) -> Self {
+        Self::uncertain(UncertainReason::CustodyUnavailable {
+            error: error.to_string(),
+        })
+    }
+}
 
 impl RunStore {
     /// Writer exclusion for an attempt, taken without waiting: failure means a
@@ -257,13 +313,17 @@ impl RunStore {
                     // A busy or unreadable custody lock leaves it untouched.
                     let settled =
                         self.settle_unlaunched(id, &record, call)
-                            .unwrap_or_else(|error| Reconciled::Uncertain {
-                                reason: error.to_string(),
+                            .unwrap_or_else(|error| {
+                                Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                                    error: error.to_string(),
+                                })
                             });
                     return Ok(match settled {
                         Reconciled::Withdrawn => CancelReceipt::Cancelled,
                         Reconciled::Finished => CancelReceipt::AlreadyTerminal,
-                        Reconciled::Uncertain { reason } => CancelReceipt::Unobservable { reason },
+                        Reconciled::Uncertain { reason } => CancelReceipt::Unobservable {
+                            reason: reason.to_string(),
+                        },
                         other => CancelReceipt::Unobservable {
                             reason: format!("{other:?}"),
                         },
@@ -422,9 +482,9 @@ impl RunStore {
             let state = self
                 .reconcile_attempt(id, providers, call)
                 .unwrap_or_else(|error| {
-                    Some(Reconciled::Uncertain {
-                        reason: error.to_string(),
-                    })
+                    Some(Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                        error: error.to_string(),
+                    }))
                 });
             if let Some(state) = state {
                 found.push((id, state));
@@ -455,12 +515,9 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Reconciled> {
         let scope = Self::scope(record);
-        let uncertain = |error: &dyn std::fmt::Display| Reconciled::Uncertain {
-            reason: error.to_string(),
-        };
         let dir = || self.attempt_dir(record.run_id, id, false);
         if record.state != AttemptState::Starting {
-            return Ok(uncertain(&"running attempt has no launch summary"));
+            return Ok(Reconciled::uncertain(UncertainReason::NoLaunchSummary));
         }
         if let Some(fence) = self
             .writer_fences()?
@@ -482,10 +539,11 @@ impl RunStore {
                 )?;
                 return Ok(Reconciled::Withdrawn);
             }
-            return Ok(uncertain(&format!(
-                "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
-                fence.reservation.display()
-            )));
+            return Ok(Reconciled::uncertain(
+                UncertainReason::WriterCustodyUnconfirmed {
+                    reservation: fence.reservation.clone(),
+                },
+            ));
         }
         // The submitter died before reserving: the held lease proves no
         // handoff began and keeps a late reservation out.
@@ -498,13 +556,17 @@ impl RunStore {
                 let recovery =
                     match custody::acquire_recovery(dir()?, call.budget, call.cancel, call.clock) {
                         Ok(recovery) => recovery,
-                        Err(error) => return Ok(uncertain(&error)),
+                        Err(error) => return Ok(Reconciled::custody_unavailable(&error)),
                     };
                 if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent {
-                    return Ok(uncertain(&"launch custody is not provably absent"));
+                    return Ok(Reconciled::uncertain(
+                        UncertainReason::CustodyNotProvablyAbsent,
+                    ));
                 }
                 if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
-                    return Ok(uncertain(&"exit exists without a launch summary"));
+                    return Ok(Reconciled::uncertain(
+                        UncertainReason::ExitWithoutLaunchSummary,
+                    ));
                 }
                 Held::Reserved(Box::new(recovery))
             }
@@ -563,12 +625,11 @@ impl RunStore {
                 return Ok(Some(Reconciled::Withdrawn));
             }
             Some(fence) => {
-                return Ok(Some(Reconciled::Uncertain {
-                    reason: format!(
-                        "writer reservation retained after terminal commit: {}; chair recovery required",
-                        fence.reservation.display()
-                    ),
-                }));
+                return Ok(Some(Reconciled::uncertain(
+                    UncertainReason::WriterReservationRetained {
+                        reservation: fence.reservation.clone(),
+                    },
+                )));
             }
             None => {}
         }
@@ -659,9 +720,6 @@ impl RunStore {
         if record.state == AttemptState::Queued {
             return Ok(Reconciled::Queued);
         }
-        let uncertain = |error: &dyn std::fmt::Display| Reconciled::Uncertain {
-            reason: error.to_string(),
-        };
         let dir = || self.attempt_dir(record.run_id, id, false);
         match custody::reattach(dir()?, scope) {
             Ok(handle) => {
@@ -698,7 +756,7 @@ impl RunStore {
                                 pids: report.survivors.iter().map(|s| s.pid).collect(),
                             }),
                             Err(CustodyError::Fenced) => Ok(still_named()),
-                            Err(error) => Ok(uncertain(&error)),
+                            Err(error) => Ok(Reconciled::custody_unavailable(&error)),
                         }
                     }
                     Ok(Observation::Exited(exit)) => {
@@ -709,8 +767,10 @@ impl RunStore {
                         Ok(Reconciled::Finished)
                     }
                     Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
-                    Ok(Observation::Unknown) => Ok(uncertain(&"guardian is not observable")),
-                    Err(error) => Ok(uncertain(&error)),
+                    Ok(Observation::Unknown) => Ok(Reconciled::uncertain(
+                        UncertainReason::GuardianNotObservable,
+                    )),
+                    Err(error) => Ok(Reconciled::custody_unavailable(&error)),
                 }
             }
             // No launch summary: the handoff never confirmed. Only a
@@ -718,7 +778,7 @@ impl RunStore {
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
                 self.settle_unlaunched(id, record, call)
             }
-            Err(error) => Ok(uncertain(&error)),
+            Err(error) => Ok(Reconciled::custody_unavailable(&error)),
         }
     }
 }
@@ -727,4 +787,42 @@ impl RunStore {
 enum Held {
     Unreserved(custody::Unreserved),
     Reserved(Box<custody::Recovery>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uncertain_reasons_serialise_by_kind_and_keep_their_text() {
+        let reservation = std::path::PathBuf::from("/state/custody/reservation.json");
+        let found = Reconciled::uncertain(UncertainReason::WriterCustodyUnconfirmed {
+            reservation: reservation.clone(),
+        });
+        let value = serde_json::to_value(&found).unwrap();
+        assert_eq!(value["state"], "uncertain");
+        assert_eq!(value["reason"]["kind"], "writer_custody_unconfirmed");
+        assert_eq!(
+            value["reason"]["reservation"],
+            "/state/custody/reservation.json"
+        );
+        let Reconciled::Uncertain { reason } = found else {
+            unreachable!()
+        };
+        assert!(reason.to_string().contains("chair recovery required"));
+        let unit = serde_json::to_value(UncertainReason::GuardianNotObservable).unwrap();
+        assert_eq!(
+            unit,
+            serde_json::json!({ "kind": "guardian_not_observable" })
+        );
+        let custody = Reconciled::custody_unavailable(&"lock is held");
+        assert_eq!(
+            custody,
+            Reconciled::Uncertain {
+                reason: UncertainReason::CustodyUnavailable {
+                    error: "lock is held".into()
+                }
+            }
+        );
+    }
 }

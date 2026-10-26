@@ -5,7 +5,7 @@ use crate::{
 };
 use provenant_confinement::valid_read_only_writable;
 use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
-use provenant_records::{AttemptFact, OutputRef, ReviewerFact, ReviewerProvenance};
+use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
@@ -98,51 +98,55 @@ fn reviewer_fact(
         model: observed.and_then(|r| r.model.clone()),
     })
 }
+/// The published fact for a terminal record. A record read from a peer takes the
+/// same path as one read here.
+pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
+    let AttemptState::Terminal {
+        outcome,
+        exit_code,
+        finished_at,
+        reason,
+    } = r.state
+    else {
+        return Err(RunError::Nonterminal);
+    };
+    let output = r
+        .result
+        .ok_or(RunError::Validation("terminal result missing"))?;
+    Ok(AttemptFact {
+        attempt_id: r.attempt_id,
+        task_id: r.task_id,
+        attempt_number: r.attempt_number,
+        operation_id: r.operation_id,
+        project_id: r.project_id,
+        terminal_state: outcome.into(),
+        exit_code,
+        queued_at: r.queued_at,
+        started_at: r.started_at,
+        provider_ms: r.provider_ms,
+        finished_at,
+        resolved_route: r.resolved_route.map(Into::into),
+        usage: r.usage.into(),
+        reviewer: reviewer_fact(r.attempt_id, r.verified_owner, r.observed_route.as_ref()),
+        delivery_id: r.delivery_id,
+        subject: r.subject,
+        head: r.head,
+        output_refs: vec![OutputRef {
+            path: output.path,
+            digest: output.digest,
+        }],
+        requested_route: Some(r.requested_route.projection()),
+        applied_route: r.applied_route.map(Into::into),
+        observed_route: r.observed_route.map(Into::into),
+        verified_owner: r.verified_owner,
+        lineage: r.retry_of.into_iter().collect(),
+        reason,
+        trace: r.trace,
+    })
+}
 impl AttemptReader for RunStore {
     fn attempt(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptFact> {
-        let r = self.record(id, call)?;
-        let AttemptState::Terminal {
-            outcome,
-            exit_code,
-            finished_at,
-            reason,
-        } = r.state
-        else {
-            return Err(RunError::Nonterminal);
-        };
-        let output = r
-            .result
-            .ok_or(RunError::Validation("terminal result missing"))?;
-        Ok(AttemptFact {
-            attempt_id: r.attempt_id,
-            task_id: r.task_id,
-            attempt_number: r.attempt_number,
-            operation_id: r.operation_id,
-            project_id: r.project_id,
-            terminal_state: outcome.into(),
-            exit_code,
-            queued_at: r.queued_at,
-            started_at: r.started_at,
-            provider_ms: r.provider_ms,
-            finished_at,
-            resolved_route: r.resolved_route.map(Into::into),
-            usage: r.usage.into(),
-            reviewer: reviewer_fact(r.attempt_id, r.verified_owner, r.observed_route.as_ref()),
-            delivery_id: r.delivery_id,
-            subject: r.subject,
-            head: r.head,
-            output_refs: vec![OutputRef {
-                path: output.path,
-                digest: output.digest,
-            }],
-            requested_route: Some(r.requested_route.projection()),
-            applied_route: r.applied_route.map(Into::into),
-            observed_route: r.observed_route.map(Into::into),
-            verified_owner: r.verified_owner,
-            lineage: r.retry_of.into_iter().collect(),
-            reason,
-            trace: r.trace,
-        })
+        fact(self.record(id, call)?)
     }
     fn attempts<'a>(
         &'a self,
@@ -361,9 +365,10 @@ impl RunStore {
             return Ok(false);
         }
         let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
-        let _custody = match directory
-            .try_lock_existing(std::ffi::OsStr::new("custody.lock"), LockMode::Exclusive)
-        {
+        let _custody = match directory.try_lock_existing(
+            std::ffi::OsStr::new(AttemptFile::CustodyLock.name()),
+            LockMode::Exclusive,
+        ) {
             Ok(lock) => Some(lock),
             Err(FsError::LockTimeout { .. }) => return Ok(false),
             Err(error) if error.is_not_found() && record.provider_launched == Some(false) => None,
@@ -415,7 +420,7 @@ impl RunStore {
             validate_attempt(&record)?;
             let checkpoint = match self.attempt_dir(record.run_id, id, false) {
                 Ok(directory) => {
-                    crate::artifacts::read_sealed(&directory, "process.json", RECORD_LIMIT)?
+                    crate::artifacts::read_sealed(&directory, AttemptFile::Process.name(), RECORD_LIMIT)?
                 }
                 Err(RunError::Filesystem(error)) if error.is_not_found() => None,
                 Err(error) => return Err(error),
@@ -475,8 +480,9 @@ impl RunStore {
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
                 let dir = self.attempt_dir(record.run_id, id, false)?;
-                let bytes = crate::artifacts::read_sealed(&dir, "stderr.log", CAPTURE_LIMIT)?
-                    .ok_or(missing_output)?;
+                let bytes =
+                    crate::artifacts::read_sealed(&dir, AttemptFile::Stderr.name(), CAPTURE_LIMIT)?
+                        .ok_or(missing_output)?;
                 let digest = provenant_records::CanonicalV1::file_digest(&bytes);
                 (bytes, true, digest)
             }
@@ -751,7 +757,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     if r.schema_version != 1 || r.attempt_number == 0 || r.revision == 0 {
         return Err(RunError::Validation("attempt version/ordinal"));
     }
-    if r.prompt.path != artifact_path(r.attempt_id, "prompt.txt")?
+    if r.prompt.path != artifact_path(r.attempt_id, AttemptFile::Prompt.name())?
         || r.prompt.bytes > RECORD_LIMIT
         || !r.prompt.complete
     {
@@ -761,7 +767,8 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
         return Err(RunError::Validation("context basis points"));
     }
     if let Some(result) = &r.result
-        && (result.path != artifact_path(r.attempt_id, "result.md")? || result.bytes > RESULT_LIMIT)
+        && (result.path != artifact_path(r.attempt_id, AttemptFile::Result.name())?
+            || result.bytes > RESULT_LIMIT)
     {
         return Err(RunError::Validation("result artifact"));
     }
@@ -779,7 +786,8 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
         // Only a refusal or cancellation before spawn lacks exit evidence.
         match &r.exit_evidence {
             Some(evidence)
-                if evidence.path != artifact_path(r.attempt_id, "process-exit.json")?
+                if evidence.path
+                    != artifact_path(r.attempt_id, AttemptFile::ProcessExit.name())?
                     || evidence.bytes > RECORD_LIMIT
                     || !evidence.complete =>
             {
