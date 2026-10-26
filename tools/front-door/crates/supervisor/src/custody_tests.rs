@@ -408,6 +408,137 @@ impl ProcessObserver for EmptyNativeWorld {
         crate::census::Census::from_observations([], [], [], true, false, 1)
     }
 }
+
+struct RebootWorld {
+    boot: Option<&'static str>,
+}
+impl ProcessObserver for RebootWorld {
+    fn boot_identity(&self) -> std::result::Result<String, crate::census::CensusError> {
+        self.boot
+            .map(str::to_owned)
+            .ok_or(crate::census::CensusError::Unsupported)
+    }
+    fn observe(&self, _: i64) -> ProcessObservation {
+        ProcessObservation::Unknown(crate::census::ObservationIssue::PermissionDenied)
+    }
+    fn census(
+        &self,
+        _: usize,
+    ) -> std::result::Result<crate::census::Census, crate::census::CensusError> {
+        Err(crate::census::CensusError::Unsupported)
+    }
+}
+
+#[test]
+fn reboot_recovery_requires_native_proof() -> TestResult {
+    const BOOT: &str = "darwin:00000000-0000-0000-0000-000000000000";
+    const NEW_BOOT: &str = "darwin:11111111-1111-1111-1111-111111111111";
+    for (boot, expected) in [(Some(NEW_BOOT), true), (Some(BOOT), false), (None, false)] {
+        let root = tempfile::tempdir()?;
+        let attempt = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(attempt.path())?;
+        let recovery = spawned_reboot_recovery(root.path(), &attempt, BOOT, 10, 20)?;
+        let world = RebootWorld { boot };
+        let proof = recovery.after_reboot_with(&attempt, scope(), &world)?;
+        assert_eq!(proof.is_some(), expected, "boot={boot:?}");
+        if let Some(proof) = proof {
+            assert_eq!(proof.scope(), scope());
+            proof.release()?;
+            assert!(!root.path().join("reservation.json").exists());
+        } else {
+            assert!(root.path().join("reservation.json").exists());
+        }
+    }
+    Ok(())
+}
+
+fn spawned_reboot_recovery(
+    root: &std::path::Path,
+    attempt: &Directory,
+    boot: &str,
+    guardian_start: u64,
+    provider_start: u64,
+) -> Result<Recovery> {
+    let mut writer = acquire(root)?;
+    let metadata = attempt.metadata()?;
+    let identity = |pid, native_start| ProcessIdentity {
+        boot: boot.into(),
+        pid,
+        native_start,
+        group_id: pid,
+        session_id: 100,
+    };
+    writer.reservation.boot = boot.into();
+    writer.reservation.launch_state = LaunchState::Spawned;
+    writer.reservation.guardian = Some(identity(100, guardian_start));
+    writer.reservation.provider = Some(identity(101, provider_start));
+    writer.reservation.attempt_device = Some(metadata.device);
+    writer.reservation.attempt_inode = Some(metadata.inode);
+    Publication::require_durable(write_record(
+        &writer.directory,
+        "reservation.json",
+        &writer.reservation,
+        PublishMode::Replace,
+    )?)?;
+    writer.into_recovery()
+}
+
+#[test]
+fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> TestResult {
+    enum Refusal {
+        Scope,
+        Attempt,
+        Custody,
+    }
+    for refusal in [Refusal::Scope, Refusal::Attempt, Refusal::Custody] {
+        let root = tempfile::tempdir()?;
+        let original = tempfile::tempdir()?;
+        let original = Directory::open_anchor(original.path())?;
+        let replacement = tempfile::tempdir()?;
+        let replacement = Directory::open_anchor(replacement.path())?;
+        let recovery = spawned_reboot_recovery(
+            root.path(),
+            &original,
+            "darwin:00000000-0000-0000-0000-000000000000",
+            10,
+            20,
+        )?;
+        let before = std::fs::read(root.path().join("reservation.json"))?;
+        let mut target = scope();
+        let mut attempt = &original;
+        let _custody = match refusal {
+            Refusal::Scope => {
+                target.generation += 1;
+                None
+            }
+            Refusal::Attempt => {
+                attempt = &replacement;
+                None
+            }
+            Refusal::Custody => {
+                Some(original.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?)
+            }
+        };
+        let world = RebootWorld {
+            boot: Some("darwin:11111111-1111-1111-1111-111111111111"),
+        };
+        let result = recovery.after_reboot_with(attempt, target, &world);
+        match refusal {
+            Refusal::Scope | Refusal::Attempt => {
+                assert!(matches!(result, Err(CustodyError::InvalidRecord)));
+            }
+            Refusal::Custody => {
+                assert!(matches!(
+                    result,
+                    Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+                ));
+            }
+        }
+        assert_eq!(std::fs::read(root.path().join("reservation.json"))?, before);
+    }
+    Ok(())
+}
+
 #[test]
 fn an_unrecorded_escape_cannot_be_cleared_by_an_empty_census() -> TestResult {
     let root = tempfile::tempdir()?;

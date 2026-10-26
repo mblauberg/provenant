@@ -65,6 +65,15 @@ public proc APIs do not prove a particular open file description holds `flock`;
 nested custody therefore remains unknown and prevents descendant delivery there.
 A future native proof needs an explicit reviewed mechanism, not a guessed flag.
 
+Reboot recovery holds writer and attempt exclusion and verifies the original
+attempt inode and scope. A changed native boot identity proves the old process
+tree is dead, including unrecorded descendants. Matching or unavailable boot
+identity retains the fence. Calendar timestamps alone do not authorise release.
+This narrow capability lets Run commit `lost` and then clear the reservation
+without a synthetic exit, quarantine or scratch cleanup. Existing attempt
+artefacts and worktree contents remain available for recovery. Missing boot
+evidence keeps the reservation fenced.
+
 The `WaitBudget`/`Clock`, streams, executor, filesystem and reaper
 APIs are reused. The crate does not depend on Run, providers or confinement.
 

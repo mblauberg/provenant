@@ -1181,6 +1181,23 @@ pub struct Recovery {
     // Only the guardian can mint this after its durable exit and cleanup.
     pub(crate) guardian_quiescent: bool,
 }
+
+/// Both exclusions and native evidence that a reboot ended this attempt's
+/// entire process tree. Run commits Lost before releasing this capability.
+pub struct RebootRecovery {
+    recovery: Recovery,
+    _custody: LockGuard,
+}
+impl RebootRecovery {
+    pub fn scope(&self) -> Scope {
+        self.recovery.scope()
+    }
+    /// The trusted Run owner calls this only after its canonical terminal
+    /// transaction. No attempt artefacts or worktree contents are removed.
+    pub fn release(self) -> Result<()> {
+        clear_reservation(&self.recovery.directory, self.scope())
+    }
+}
 pub fn acquire_recovery(
     directory: Directory,
     budget: WaitBudget,
@@ -1313,6 +1330,35 @@ impl Recovery {
     pub fn observe(&self) -> RecoveryState {
         self.observe_with(&SystemProcessObserver)
     }
+    pub fn after_reboot(self, attempt: &Directory, scope: Scope) -> Result<Option<RebootRecovery>> {
+        self.after_reboot_with(attempt, scope, &SystemProcessObserver)
+    }
+    pub(crate) fn after_reboot_with(
+        self,
+        attempt: &Directory,
+        scope: Scope,
+        observer: &dyn ProcessObserver,
+    ) -> Result<Option<RebootRecovery>> {
+        self.reservation.validate()?;
+        if self.reservation.attempt_device.is_none() {
+            return Ok(None);
+        }
+        let metadata = attempt.metadata()?;
+        if self.scope() != scope
+            || self.reservation.attempt_device != Some(metadata.device)
+            || self.reservation.attempt_inode != Some(metadata.inode)
+        {
+            return Err(CustodyError::InvalidRecord);
+        }
+        if !previous_boot(&self.reservation, observer) {
+            return Ok(None);
+        }
+        let custody = attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+        Ok(Some(RebootRecovery {
+            recovery: self,
+            _custody: custody,
+        }))
+    }
     pub(crate) fn observe_with(&self, observer: &dyn ProcessObserver) -> RecoveryState {
         if self.guardian_quiescent {
             return RecoveryState::Absent;
@@ -1364,11 +1410,11 @@ fn classify_reservation(
     {
         return RecoveryState::Absent;
     }
-    let Ok(boot) = observer.boot_identity() else {
-        return RecoveryState::Unknown;
-    };
-    if boot != reservation.boot {
+    if previous_boot(reservation, observer) {
         return RecoveryState::Absent;
+    }
+    if observer.boot_identity().is_err() {
+        return RecoveryState::Unknown;
     }
     let Some(guardian) = &reservation.guardian else {
         return RecoveryState::Unknown;
@@ -1386,6 +1432,12 @@ fn classify_reservation(
         ProcessObservation::Unknown(_) => RecoveryState::Unknown,
         _ => crate::guardian::session_absence(reservation),
     }
+}
+
+fn previous_boot(reservation: &Reservation, observer: &dyn ProcessObserver) -> bool {
+    observer
+        .boot_identity()
+        .is_ok_and(|boot| boot != reservation.boot)
 }
 
 /// A storage-verified release receipt. It cannot be made from a scope alone.
