@@ -589,9 +589,9 @@ fn sanitised_path(bin: &Path, executables: &[PathBuf]) -> Result<OsString, Agent
 /// The projects the agent works in: registered Git-backed bindings and the
 /// Provenant worktree registry. Non-Git bindings never match a worktree.
 struct Projects {
-    /// Canonical Git common directories, or `None` when the bindings cannot
-    /// be read and every Git worktree counts as a project.
-    common_dirs: Option<Vec<PathBuf>>,
+    /// Canonical Git common directories, empty when the bindings cannot be
+    /// read.
+    common_dirs: Vec<PathBuf>,
     /// The `<state>/worktrees/<project>` registry directories.
     registries: Vec<PathBuf>,
 }
@@ -600,17 +600,15 @@ impl Projects {
     #[allow(clippy::print_stderr)]
     fn registered(roots: &Roots) -> Self {
         let common_dirs = match provenant_config::registered_projects(roots, &LocalFs) {
-            Ok(bindings) => Some(
-                bindings
-                    .iter()
-                    .map(|binding| binding.common_dir().to_path_buf())
-                    .collect(),
-            ),
+            Ok(bindings) => bindings
+                .iter()
+                .map(|binding| binding.common_dir().to_path_buf())
+                .collect(),
             Err(error) => {
                 eprintln!(
-                    "note: peer agent PATH skips every Git worktree: project bindings are unreadable: {error}"
+                    "note: peer agent PATH skips only Provenant worktrees: project bindings are unreadable: {error}"
                 );
-                None
+                Vec::new()
             }
         };
         let registries = fs::read_dir(roots.state.as_path().join("worktrees"))
@@ -628,11 +626,8 @@ impl Projects {
     /// Whether the worktree at `top`, with Git common directory `common` when
     /// it resolves, is a registered project or a Provenant worktree of one.
     fn own(&self, top: &Path, common: Option<&Path>) -> bool {
-        let Some(common_dirs) = &self.common_dirs else {
-            return true;
-        };
         let name = provenant_confinement::worktrees::state_dir_name(top);
-        common_dirs.iter().any(|dir| {
+        self.common_dirs.iter().any(|dir| {
             common == Some(dir.as_path())
                 || *dir == top.join(".git")
                 || (dir.file_name() == Some(OsStr::new(".git"))
@@ -940,7 +935,7 @@ mod tests {
             bin.display()
         ));
         let projects = Projects {
-            common_dirs: Some(Vec::new()),
+            common_dirs: Vec::new(),
             registries: Vec::new(),
         };
         let tools = provider_executables(&search, &projects);
@@ -1035,10 +1030,13 @@ mod tests {
             vec![bin.join("codex")]
         );
         let unreadable = Projects {
-            common_dirs: None,
+            common_dirs: Vec::new(),
             registries: Vec::new(),
         };
-        assert!(provider_executables(&search, &unreadable).is_empty());
+        assert_eq!(
+            provider_executables(&search, &unreadable),
+            vec![bin.join("codex")]
+        );
     }
 
     #[test]

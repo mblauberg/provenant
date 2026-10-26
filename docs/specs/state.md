@@ -265,9 +265,10 @@ enclosing worktree is found by an ancestor `.git` file or directory and
 resolved, through `gitdir:` and `commondir`, to its common directory. It is
 a project's when its top level or common directory matches a Git-backed
 binding (`<root>/.git`), when it lies under such a project's `.worktrees/`,
-or when the worktree registry lists it. Unreadable bindings make every Git
-worktree count. Other clones, such as `~/.nvm`, `/opt/homebrew` or a `$HOME`
-kept in Git, stay eligible, and non-Git bindings never match. Uninstall of
+or when the worktree registry lists it. Unreadable bindings are noted and
+leave only the registry to match. Other clones, such as `~/.nvm`,
+`/opt/homebrew` or a `$HOME` kept in Git, stay eligible, and non-Git bindings
+never match. Uninstall of
 the last recorded target boots out the service before removing an exact
 receipt match. A modified plist and its service are kept and reported;
 failed bootout leaves the plist owned for retry.
