@@ -115,6 +115,32 @@
         "primary_skill": "diagnose",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176102",
+      "relation": "negative",
+      "prompt": "The PR review identified the confirmed defect; implement the approved patch through verification and acceptance.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176103",
+      "relation": "negative",
+      "prompt": "Review the rendered checkout for keyboard navigation and contrast.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      }
     }
   ]
 }

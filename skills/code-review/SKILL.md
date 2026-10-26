@@ -13,7 +13,8 @@ resulting system, not the changed lines alone.
 ## Review
 
 1. Read project instructions and preserve the requested scope and output
-   contract.
+   contract. Briefs carry the target and rubric, never the hypothesis or
+   verdict; see [review outcome](references/finding-contract.md#review-outcome).
 2. Establish the change intent from the spec, issue, tests, commit message, or
    user request. Mark unclear intent instead of inventing it.
 3. Trace the affected dependency cone: full touched files, live callers/
@@ -42,7 +43,7 @@ resulting system, not the changed lines alone.
    trajectory: relevant deterministic checks ran and their results are
    available. Never infer coverage from a green summary alone.
 9. Report only high-confidence, actionable findings. Return `clean` when no
-   genuine defect exists.
+   genuine defect exists and required review coverage is complete.
 
 Load [review-lenses.md](references/review-lenses.md) for the detailed inspection
 questions, [multi-agent-review.md](references/multi-agent-review.md) for lens

@@ -43,6 +43,7 @@ Use the `HARNESS.md` risk tier as the mode, not a separate switch:
    cross-family cover is needed; the router does not fill or diversify a
    council. Juniors return claims with evidence (path:line, screenshot, source),
    not verdicts.
+   Review briefs follow the [review outcome](../../code-review/references/finding-contract.md#review-outcome) rule.
 3. **Seniors.** Each senior works separately over a wider scope (several parts
    or the whole) and receives the subject plus the junior claims for that scope.
    It confirms, rejects or merges each claim and adds its own view.

@@ -168,6 +168,32 @@
         "primary_skill": "implement",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176116",
+      "relation": "negative",
+      "prompt": "Before implementation, decide the unresolved migration requirements and acceptance criteria.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176117",
+      "relation": "negative",
+      "prompt": "Review the completed implementation read-only; report defects without applying fixes.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
     }
   ]
 }
