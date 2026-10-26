@@ -105,7 +105,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
   request.json                 # immutable canonical submission and prompt digests
   attempts/<AttemptId>/
     prompt.txt                 # run-owned immutable prompt
-    prompt.md                  # full launch prompt, only when spilling needs a copy
+    prompt.md                  # full launch prompt, only for top-level argv spills
     result.md                  # run-owned sealed result, including failure
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
     provider-state/            # retained provider history; no credentials
@@ -117,15 +117,18 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
 The supervisor file names inside an attempt directory are the run and
 supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
 
-Launch prompts up to 64 KiB keep their existing provider transport unchanged. When
-the full launch prompt, including the durable-output preamble, exceeds that
-argv limit, dispatch sends a short instruction to read a run-owned file first
-and treat its contents as the full task. It reuses `prompt.txt` if the bytes
-match; otherwise it seals the full launch text as `prompt.md`. Every adapter
-receives an exact read grant for that file and any provider-specific tool
-permission needed to read it. The submission and attempt prompt digests still
-cover the full submitted text in `prompt.txt`, never the pointer. Both files
-remain retained with the attempt.
+Launch prompts, including the durable-output preamble, are bounded to 1 MiB
+for every adapter. Claude, Codex and OpenCode receive the full launch text on
+stdin, without a spill file. Cursor and Agy receive prompts up to 64 KiB on
+argv unchanged. For larger top-level prompts, dispatch seals the full launch
+text as `prompt.md` and sends a short instruction to read that file first and
+treat its contents as the full task. The OS read grant covers that exact file;
+provider tool permissions may cover its containing directory. Nested Cursor
+and Agy attempts refuse launch prompts over 64 KiB before launch: route the
+child to a stdin adapter or shorten the prompt. Their attempt directories are
+writable by the parent lane, so a spill there could be rewritten before use.
+The submission and attempt prompt digests still cover the full submitted text
+in `prompt.txt`, never the pointer. Both files remain retained with the attempt.
 
 Structured events live in SQLite, and provider parsing uses the live stream, not
 a second copy. Writer and read-only lanes stage provider temporary files in

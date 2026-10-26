@@ -46,6 +46,13 @@ fn prepare_with(
     locate: impl Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
 ) -> Result<run::PreparedLaunch, String> {
+    check_launch_prompt(prompt_text, paths, None)?;
+    if task.fallback.is_empty()
+        && let run::RequestedRoute::Model { model, .. } = &task.route
+        && let Some((adapter, _)) = model.split_once('/')
+    {
+        check_launch_prompt(prompt_text, paths, Some(adapter))?;
+    }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
     let fixture_token: Option<&provenant_providers::claude::OauthToken> = {
@@ -76,7 +83,6 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
-    let prompt = launch_prompt(prompt_text, paths)?;
     let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -188,7 +194,7 @@ fn prepare_with(
                 scratch: &paths.scratch,
                 private_state: &paths.provider_state,
                 assets,
-                prompt_file: prompt.file(),
+                prompt_file: None,
             },
             writer.as_ref(),
             &task.access,
@@ -266,6 +272,13 @@ fn prepare_with(
             reasons.push(skip(&label, SkipKind::Unavailable, error));
             continue;
         }
+        let prompt = match launch_prompt(prompt_text, paths, state_root, adapter.id()) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                reasons.push(skip(&label, SkipKind::Refused, error));
+                continue;
+            }
+        };
         let entry = entries
             .iter()
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
@@ -1047,17 +1060,53 @@ fn credential_authority(
     Ok(authority)
 }
 
-fn launch_prompt(text: &str, paths: &run::LaunchPaths) -> Result<Prompt, String> {
+fn check_launch_prompt(
+    text: &str,
+    paths: &run::LaunchPaths,
+    adapter: Option<&str>,
+) -> Result<(), String> {
+    if text.len() as u64 > super::PROMPT_LIMIT {
+        return Err(
+            "invalid input: launch prompt including the preamble exceeds 1 MiB; shorten the prompt"
+                .into(),
+        );
+    }
+    if paths.lane_depth > 1
+        && matches!(adapter, Some("cursor" | "agy"))
+        && Prompt::new(text.to_owned()).check_argv().is_err()
+    {
+        return Err("invalid input: nested argv launch prompt including the preamble exceeds 64 KiB; route the child to a stdin adapter (claude, codex or opencode), or shorten the prompt".into());
+    }
+    Ok(())
+}
+
+fn launch_prompt(
+    text: &str,
+    paths: &run::LaunchPaths,
+    state_root: &Path,
+    adapter: &str,
+) -> Result<Prompt, String> {
+    check_launch_prompt(text, paths, Some(adapter))?;
     let prompt = Prompt::new(text.to_owned());
-    if prompt.check_argv().is_ok() {
+    if !matches!(adapter, "cursor" | "agy") || prompt.check_argv().is_ok() {
         return Ok(prompt);
     }
     let attempt = paths
         .provider_state
         .parent()
         .ok_or("attempt directory missing")?;
-    let directory = Directory::open_anchor(attempt).map_err(|error| error.to_string())?;
-    // The stored prompt may lack the launch's durable-output preamble.
+    let relative = attempt
+        .strip_prefix(state_root)
+        .map_err(|_| "attempt directory is outside run state")?;
+    let mut directory = Directory::open_anchor(state_root).map_err(|error| error.to_string())?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("attempt directory is not normalised".into());
+        };
+        directory = directory
+            .open_verified_directory(name)
+            .map_err(|error| error.to_string())?;
+    }
     let matches = |name: &str| -> Result<bool, String> {
         match directory.read_bounded(name.as_ref(), text.len() as u64) {
             Ok(bytes) => Ok(bytes == text.as_bytes()),
@@ -1066,27 +1115,20 @@ fn launch_prompt(text: &str, paths: &run::LaunchPaths) -> Result<Prompt, String>
             Err(error) => Err(error.to_string()),
         }
     };
-    let name = if matches("prompt.txt")? {
-        "prompt.txt"
-    } else {
-        let name = "prompt.md";
-        match directory.atomic_write(
-            name.as_ref(),
-            ".prompt-",
-            text.as_bytes(),
-            PublishMode::NoReplace,
-        ) {
-            Ok(provenant_supervisor::fs::Publication::Durable) => {}
-            Ok(provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed {
-                sync_error,
-            }) => {
-                return Err(sync_error.to_string());
-            }
-            Err(error) if error.is_exists() && matches(name)? => {}
-            Err(error) => return Err(error.to_string()),
+    let name = "prompt.md";
+    match directory.atomic_write(
+        name.as_ref(),
+        ".prompt-",
+        text.as_bytes(),
+        PublishMode::NoReplace,
+    ) {
+        Ok(provenant_supervisor::fs::Publication::Durable) => {}
+        Ok(provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { sync_error }) => {
+            return Err(sync_error.to_string());
         }
-        name
-    };
+        Err(error) if error.is_exists() && matches(name)? => {}
+        Err(error) => return Err(error.to_string()),
+    }
     let prompt = Prompt::from_file(attempt.join(name));
     prompt.check_argv().map_err(|error| error.to_string())?;
     Ok(prompt)
@@ -1477,12 +1519,8 @@ pub fn prepare_fixture(
 mod tests {
     use super::*;
 
-    #[test]
-    fn launch_prompt_preserves_small_text_and_reuses_the_full_prompt_file()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let attempt = canonical(temp.path())?;
-        let paths = run::LaunchPaths {
+    fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::Error>> {
+        Ok(run::LaunchPaths {
             attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
             operation_id: provenant_core::OperationId::parse("spill-prompt")?,
             task_index: 0,
@@ -1492,27 +1530,167 @@ mod tests {
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
-        };
-        for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
-            let prompt = launch_prompt(&text, &paths)?;
-            assert_eq!(prompt.text(), text);
-            assert!(prompt.file().is_none());
-            assert!(!attempt.join("prompt.md").exists());
-        }
-        let text = "é".repeat(75_000);
-        std::fs::write(attempt.join("prompt.txt"), &text)?;
-        let prompt = launch_prompt(&text, &paths)?;
-        assert_eq!(prompt.file(), Some(attempt.join("prompt.txt").as_path()));
-        assert!(prompt.text().len() < 1024);
-        assert!(!attempt.join("prompt.md").exists());
+        })
+    }
 
-        let full = format!("Durable output instructions\n\n{text}");
-        for _ in 0..2 {
-            let prompt = launch_prompt(&full, &paths)?;
-            assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
-            assert!(prompt.text().len() < 1024);
-            assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, full);
-            assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, text);
+    #[test]
+    fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = canonical(temp.path())?;
+        let paths = prompt_paths(&attempt)?;
+        for entry in REGISTRY {
+            let adapter = entry.adapter.id();
+            for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
+                let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+                assert_eq!(prompt.text(), text);
+                assert!(prompt.file().is_none());
+            }
+            let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
+            let error = launch_prompt(&text, &paths, &attempt, adapter)
+                .err()
+                .ok_or("oversized launch accepted")?;
+            assert!(error.contains("1 MiB"), "{adapter}: {error}");
+        }
+        assert!(!attempt.join("prompt.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_keeps_oversized_stdin_prompts_in_memory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = canonical(temp.path())?;
+        let mut paths = prompt_paths(&attempt)?;
+        let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+        for depth in [1, 2] {
+            paths.lane_depth = depth;
+            for adapter in ["claude", "codex", "opencode"] {
+                for text in [&text, &"a".repeat(1024 * 1024)] {
+                    let prompt = launch_prompt(text, &paths, &attempt, adapter)?;
+                    assert_eq!(prompt.text(), text);
+                    assert!(prompt.file().is_none());
+                }
+            }
+        }
+        assert!(!attempt.join("prompt.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        for adapter in ["cursor", "agy"] {
+            let temp = tempfile::tempdir()?;
+            let attempt = canonical(temp.path())?;
+            let mut paths = prompt_paths(&attempt)?;
+            let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+            paths.lane_depth = 2;
+            let error = launch_prompt(&text, &paths, &attempt, adapter)
+                .err()
+                .ok_or("nested argv spill accepted")?;
+            for expected in ["invalid input", "64 KiB", "stdin adapter", "shorten"] {
+                assert!(error.contains(expected), "{error}");
+            }
+            assert!(!attempt.join("prompt.md").exists());
+
+            paths.lane_depth = 1;
+            for _ in 0..2 {
+                let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+                assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
+                assert!(prompt.text().len() < 1024);
+                assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, text);
+                assert_eq!(
+                    std::fs::metadata(attempt.join("prompt.md"))?
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            std::fs::write(attempt.join("prompt.md"), "conflicting prompt")?;
+            assert!(launch_prompt(&text, &paths, &attempt, adapter).is_err());
+            assert_eq!(
+                std::fs::read_to_string(attempt.join("prompt.md"))?,
+                "conflicting prompt"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let state = canonical(temp.path())?;
+        std::fs::create_dir_all(state.join("actual/attempt"))?;
+        std::os::unix::fs::symlink(state.join("actual"), state.join("runs"))?;
+        let paths = prompt_paths(&state.join("runs/attempt"))?;
+        assert!(launch_prompt(&"a".repeat(65_537), &paths, &state, "cursor").is_err());
+        assert!(!state.join("actual/attempt/prompt.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn launch_prompt_refuses_invalid_input_before_account_resolution()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = canonical(temp.path())?;
+        let paths = prompt_paths(&attempt)?;
+        let full = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+        // Refuse invalid input before consulting accounts or executables.
+        for entry in REGISTRY {
+            let adapter = entry.adapter.id();
+            let requested = run::TaskRequest {
+                task_id: provenant_core::TaskId::from_bytes([3; 16]),
+                profile: Default::default(),
+                prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
+                route: run::RequestedRoute::Model {
+                    provider: adapter.into(),
+                    model: format!("{adapter}/fixture-model"),
+                    effort: None,
+                },
+                account: None,
+                fallback: vec![],
+                authority_digest: provenant_core::Digest::from_bytes([4; 32]),
+                writer: None,
+                deliver: None,
+                provider_timeout_seconds: 20,
+                delivery_id: None,
+                access: Default::default(),
+            };
+            let oversized = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
+            let error = prepare_with(
+                &Registry::default(),
+                &requested,
+                &oversized,
+                &paths,
+                None,
+                |_| unreachable!("invalid prompt must not probe executables"),
+                None,
+            )
+            .err()
+            .ok_or("oversized launch accepted")?;
+            assert!(error.contains("1 MiB"), "{adapter}: {error}");
+            if matches!(adapter, "cursor" | "agy") {
+                let mut nested = prompt_paths(&attempt)?;
+                nested.lane_depth = 2;
+                let error = prepare_with(
+                    &Registry::default(),
+                    &requested,
+                    &full,
+                    &nested,
+                    None,
+                    |_| unreachable!("nested argv spill must not probe executables"),
+                    None,
+                )
+                .err()
+                .ok_or("nested argv launch accepted")?;
+                assert!(error.contains("invalid input"), "{error}");
+                assert!(error.contains("64 KiB"), "{error}");
+                assert!(!attempt.join("prompt.md").exists());
+            }
         }
         Ok(())
     }

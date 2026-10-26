@@ -503,9 +503,6 @@ fn prepare(
         // The following MCP flags terminate --add-dir's variadic paths.
         add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
     }
-    if let Some(parent) = input.prompt.file().and_then(std::path::Path::parent) {
-        add_git_dirs(&mut argv, [parent], input.cwd);
-    }
 
     let config_dir = input.account.map_or_else(
         || input.home.join(".claude"),
@@ -521,11 +518,7 @@ fn prepare(
     } else {
         "mcp__fabric__*"
     };
-    let allowed_tools = match input.prompt.file() {
-        Some(file) if !shell => format!("{allowed_tools},Read(/{})", file.display()),
-        _ => allowed_tools.to_owned(),
-    };
-    let mut setup = input.provenant.claude(scratch, &mut argv, &allowed_tools)?;
+    let mut setup = input.provenant.claude(scratch, &mut argv, allowed_tools)?;
 
     let path = if shell {
         format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())

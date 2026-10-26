@@ -764,15 +764,17 @@ pub(super) fn fixture_input<'a>(
 }
 
 #[test]
-fn spilled_prompts_reach_each_adapter_with_file_read_permissions() -> Result<(), ProviderError> {
+fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<(), ProviderError> {
     let file = Path::new("/fixture/attempt/prompt.md");
     let prompt = Prompt::from_file(file.to_owned());
-    let token = fixture_token();
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        for entry in REGISTRY {
+        for entry in REGISTRY
+            .iter()
+            .filter(|entry| matches!(entry.adapter.id(), "cursor" | "agy"))
+        {
             let id = entry.adapter.id();
             let authentication = match id {
-                "codex" | "cursor" => Some("login"),
+                "cursor" => Some("login"),
                 "agy" => Some("keychain"),
                 _ => None,
             };
@@ -784,44 +786,14 @@ fn spilled_prompts_reach_each_adapter_with_file_read_permissions() -> Result<(),
                 &plan,
                 &prompt,
                 Path::new("/fixture/repo"),
-                (id == "claude").then_some(&token),
+                None,
             ))?;
-            if matches!(id, "cursor" | "agy") {
-                assert_eq!(spec.argv.last(), Some(&OsString::from(prompt.text())));
-            } else {
-                assert_eq!(spec.stdin, Stdin::Bytes(prompt.text().as_bytes().to_vec()));
-            }
-            if matches!(id, "claude" | "agy") {
+            assert_eq!(spec.argv.last(), Some(&OsString::from(prompt.text())));
+            if id == "agy" {
                 assert!(
                     spec.argv
                         .windows(2)
                         .any(|pair| { pair[0] == "--add-dir" && pair[1] == "/fixture/attempt" })
-                );
-            }
-            if id == "claude" && access == Access::ReadOnly {
-                assert!(spec.argv.windows(2).any(|pair| {
-                    pair[0] == "--allowedTools"
-                        && pair[1]
-                            .to_string_lossy()
-                            .contains("Read(//fixture/attempt/prompt.md)")
-                        && pair[1].to_string_lossy().contains("mcp__fabric__*")
-                }));
-            }
-            if id == "opencode" {
-                let config = spec
-                    .env
-                    .iter()
-                    .find(|(name, _)| name == "OPENCODE_CONFIG_CONTENT")
-                    .expect("inline permissions");
-                let config: serde_json::Value =
-                    serde_json::from_str(&config.1.to_string_lossy()).expect("JSON permissions");
-                assert_eq!(
-                    config["permission"]["read"]["/fixture/attempt/prompt.md"],
-                    "allow"
-                );
-                assert_eq!(
-                    config["permission"]["external_directory"]["/fixture/attempt/*"],
-                    "allow"
                 );
             }
             if id == "agy" && access == Access::ReadOnly {
@@ -832,6 +804,36 @@ fn spilled_prompts_reach_each_adapter_with_file_read_permissions() -> Result<(),
                         .any(|arg| arg == "--dangerously-skip-permissions")
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderError> {
+    let prompt = Prompt::new(format!(
+        "Durable output instructions\n\n{}",
+        "é".repeat(75_000)
+    ));
+    let token = fixture_token();
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for entry in REGISTRY
+            .iter()
+            .filter(|entry| matches!(entry.adapter.id(), "claude" | "codex" | "opencode"))
+        {
+            let id = entry.adapter.id();
+            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let mut route = route(id, "fixture-model");
+            route.account_key = None;
+            let spec = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            ))?;
+            assert_eq!(spec.stdin, Stdin::Bytes(prompt.text().as_bytes().to_vec()));
+            assert!(!spec.argv.iter().any(|arg| arg == "--add-dir"));
         }
     }
     Ok(())
