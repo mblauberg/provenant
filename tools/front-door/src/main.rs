@@ -570,6 +570,9 @@ fn main() -> ExitCode {
     };
     let verb = verb.to_owned();
     let usage_roots = usage::selected_roots(globals);
+    let usage_project = usage_roots
+        .as_ref()
+        .and_then(|roots| usage::project_id(roots, globals));
     let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv),
         ParseOutcome::Invalid { error, globals } => fail(
@@ -632,6 +635,7 @@ fn main() -> ExitCode {
             &verb,
             status,
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            usage_project,
         );
     }
     ExitCode::from(status)

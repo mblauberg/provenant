@@ -1,6 +1,12 @@
 {
   "schema_version": 1,
   "knobs": {
+    "usage.project_attribution": {
+      "type": "bool", "default": false, "status": "wired",
+      "reader": "tools/front-door/src/usage.rs",
+      "effect": "Include the existing project identifier in local usage events.",
+      "trade_off": "Off keeps project identity out of usage logs; on makes project-level usage visible to anyone who can read them."
+    },
     "fabric.accept_handoff": {
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/handoff.rs",
