@@ -31,9 +31,11 @@ companions of an existing store while reading its live index.
    GC; existing project owners stay legacy and never become idle. Foreign,
    legacy, refused and unmarked caches require owner investigation.
    An `attempt_tmp` entry with `leak: true` belongs to an indexed
-   terminal attempt. Scratch, provider state, quarantine and logs are retained
-   output, so their presence alone is not a leak. Retained output and other run
-   metadata and child stores are rolled up into one row per class. Each
+   terminal attempt. `provider_state` measures resumable provider state
+   separately; [GC](gc.md) applies its terminal retention policy. Scratch,
+   archived provider history, quarantine and logs remain retained output.
+   Retained output, other run metadata and child stores are rolled up into one
+   row per class. Each
    aggregate's `count` records the number of inventory rows it represents.
    Temporary directories, caches and worktrees keep their individual paths.
 
@@ -48,10 +50,10 @@ companions of an existing store while reading its live index.
 
 Every `target` directory is sized, including nested attempt targets and
 `parts.target` in lane caches. Build artefacts are never parsed. Each measured
-path has a budget of 1,000,000 entries and ten seconds, checked between filesystem
-operations; depth is capped at 256. Reaching a limit reports an error and the
-bytes observed so far. Files that disappear during the walk are skipped without
-an error. A worktree's
+path has a budget of 1,000,000 entries and ten seconds, checked between
+filesystem operations; depth is capped at 256. Reaching a limit reports an
+error and the bytes observed so far. Files that disappear during the walk are
+skipped without an error. A worktree's
 `merged` fact describes containment in the main checkout's observed HEAD and
 grants no removal authority. The main worktree omits this field.
 

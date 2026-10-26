@@ -190,6 +190,8 @@ pub fn collect(
                     .push(branch.short_name().to_owned());
             } else if !terminal || !no_live_lanes {
                 retain(&mut report.worktrees, &branch, RetainReason::UnknownWriter);
+            } else {
+                retain(&mut report.worktrees, &branch, RetainReason::Dirty);
             }
             continue;
         }
@@ -364,7 +366,7 @@ fn walk_output(
         return Err(FsError::EntryLimit { limit: 64 });
     }
     for name in entry_names(directory, 100_000)? {
-        if name == ".git" || name == ".worktrees" {
+        if name == ".git" || name == WORKTREE_ROOT {
             continue;
         }
         let path = relative.join(&name);

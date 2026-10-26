@@ -15,6 +15,7 @@ mod install;
 mod overflow;
 mod peer_agent;
 mod pr;
+mod provider_retention;
 mod quota_live;
 mod release_smoke;
 mod roots;
@@ -294,7 +295,16 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
                 ..Default::default()
             };
             match provenant_supervisor::supervise(&descriptors, hooks) {
-                Ok(()) => 0,
+                Ok(()) => match fabric::advance_settled_graphs(&holder) {
+                    Ok(()) => 0,
+                    Err(error) => fail(
+                        "internal supervise",
+                        Outcome::Error,
+                        "GRAPH_ADVANCE",
+                        &error.to_string(),
+                        globals,
+                    ),
+                },
                 Err(error) => fail(
                     "internal supervise",
                     Outcome::Error,

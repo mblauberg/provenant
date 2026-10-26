@@ -20,6 +20,8 @@ pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_dom
 mod presets;
 mod project_binding;
 mod release;
+mod retention;
+pub use retention::RetentionSettings;
 mod splice;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -157,6 +159,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub domains: D,
     pub install: InstallSettings,
     pub gc: GcSettings,
+    pub retention: RetentionSettings,
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,
     pub origins: BTreeMap<String, Origin>,

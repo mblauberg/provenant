@@ -3,6 +3,7 @@
 //! Compiled only with the `snapshot` feature, on any platform. It renders what
 //! `compile_sbpl` would for a plan and profile, without anchoring or reading
 //! the filesystem, and gathers grants through the same `extend_read_grants`.
+//! On macOS it also compiles against held anchors without the sandbox probe.
 
 use super::*;
 
@@ -41,4 +42,16 @@ pub fn render(
         home,
     )?;
     String::from_utf8(bytes).map_err(|_| PermissionError::NonUtf8Path)
+}
+
+/// What the probed backend's `compile` returns for `plan` and `profile`
+/// against held anchors. Tests cannot rely on the probe, which a process that
+/// is already sandboxed cannot run.
+#[cfg(target_os = "macos")]
+pub fn compile(
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    anchors: &Anchors<'_>,
+) -> Result<ConfinedLaunch, PermissionError> {
+    compile_sbpl(plan, profile, anchors)
 }
