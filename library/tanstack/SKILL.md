@@ -1,6 +1,6 @@
 ---
-name: tanstack-query
-description: "Use for TanStack Query v5, Router loaders, Table v9 and react-virtual: keys, queryOptions, staleTime, mutations, useTable, virtualised rows. Not for local UI state, render speed (react-performance) or backend caches."
+name: tanstack
+description: "Use for TanStack Query v5, Router, Table v9 and react-virtual: keys, queryOptions, staleTime, mutations, loaders, search params, useTable, virtualised rows. Not for local UI state, render speed (react-performance) or backend caches."
 ---
 
 # TanStack Query v5, Router, Table and Virtual

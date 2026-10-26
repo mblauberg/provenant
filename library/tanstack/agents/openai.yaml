@@ -1,0 +1,4 @@
+interface:
+  display_name: TanStack
+  short_description: TanStack Query v5, Router, Table v9 and Virtual.
+  default_prompt: Use $tanstack for this TanStack Query, Router, Table or Virtual task.

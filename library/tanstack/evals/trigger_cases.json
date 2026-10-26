@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "target_skill": "tanstack-query",
+  "target_skill": "tanstack",
   "cases": [
     {
       "id": "q253",
@@ -10,7 +10,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -22,7 +22,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -34,7 +34,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -84,7 +84,7 @@
       "expected": {
         "primary_skill": "implement",
         "companion_skills": [
-          "tanstack-query",
+          "tanstack",
           "tdd"
         ]
       }
@@ -99,7 +99,7 @@
       "expected": {
         "primary_skill": "code-review",
         "companion_skills": [
-          "tanstack-query"
+          "tanstack"
         ]
       }
     },
@@ -113,7 +113,7 @@
       "expected": {
         "primary_skill": "react-performance",
         "companion_skills": [
-          "tanstack-query"
+          "tanstack"
         ]
       }
     },
@@ -125,7 +125,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -137,7 +137,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -149,7 +149,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },

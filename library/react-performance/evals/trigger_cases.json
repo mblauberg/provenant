@@ -58,7 +58,7 @@
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },

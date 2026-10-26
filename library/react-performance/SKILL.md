@@ -1,6 +1,6 @@
 ---
 name: react-performance
-description: "Use for slow React 19 UIs: render profiling, input lag, React Compiler memoisation and lint errors, transitions, bundle size. Not for Query caching (tanstack-query) or visual design (ui-ux-design)."
+description: "Use for slow React 19 UIs: render profiling, input lag, React Compiler memoisation and lint errors, transitions, bundle size. Not for Query caching (tanstack) or visual design (ui-ux-design)."
 ---
 
 # React performance
@@ -53,7 +53,7 @@ docs.
 ## Fixes, roughly by payoff
 
 1. **Waits.** Start independent requests together. Prefetch at route or intent
-   boundaries (loaders: see `tanstack-query`). Break parent-then-child fetch
+   boundaries (loaders: see `tanstack`). Break parent-then-child fetch
    chains.
 2. **Bytes.** Split routes with `lazy()`, load rare heavy libraries with
    dynamic `import()`, and avoid barrel imports the bundler cannot prune.
