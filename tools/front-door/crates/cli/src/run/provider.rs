@@ -153,12 +153,11 @@ fn prepare_with(
         }
     }
     // These adapters use the CLI's existing local login and configuration.
-    let mut local: Vec<_> = ADAPTER_SPECS
+    for adapter in ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.local_discovery_order.is_some() && eligible(spec.name))
-        .collect();
-    local.sort_by_key(|spec| spec.local_discovery_order);
-    for adapter in local.into_iter().map(|spec| spec.name) {
+        .filter(|spec| spec.local_login && eligible(spec.name))
+        .map(|spec| spec.name)
+    {
         if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),

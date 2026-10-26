@@ -194,6 +194,10 @@ fn canonical_v1_sorts_keys_uses_required_escapes_and_separates_digest_domains() 
         serde_json::to_string(&AttemptOutcome::InputRequired).expect("outcome wire form"),
         "\"input_required\""
     );
+    assert_eq!(
+        serde_json::to_string(&AttemptOutcome::Uncommitted).expect("outcome wire form"),
+        "\"uncommitted\""
+    );
 }
 
 #[test]

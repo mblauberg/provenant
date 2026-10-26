@@ -1148,7 +1148,7 @@ mod tests {
             MonoTime::from_micros(0)
         }
         fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-            Ok(())
+            unreachable!("fixed-time test clock never waits")
         }
     }
 

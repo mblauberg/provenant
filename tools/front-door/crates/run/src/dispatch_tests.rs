@@ -3,7 +3,7 @@
 use super::tests::{call, clock, context, exit, input, route};
 use super::*;
 use provenant_confinement::permissions::{PathGrant, PathScope};
-use provenant_core::{AttemptId, CancelToken, RunId, TaskId, WallTime};
+use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, WallTime};
 use provenant_os::exec::Termination;
 use provenant_os::fs::Directory;
 use provenant_os::sys::resources::MemorySample;
@@ -2330,9 +2330,10 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     )?;
     assert!(store.claim(id, now, &call)?.is_none(), "20 s host spacing");
 
-    let attempt = store.attempt_dir(spaced.run_id, id, false)?;
+    // A one-second window from the queued time, 100 microseconds, so the
+    // starved wait pauses on the virtual clock until the deadline.
     store.set_admission_policy(AdmissionPolicy {
-        admission_seconds: 0,
+        admission_seconds: 1,
         ..AdmissionPolicy::default()
     });
     let mut expired = input();
@@ -2341,6 +2342,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
     store.create(&expired, &call)?;
     let id = expired.attempts[0].attempt_id;
+    let attempt = store.attempt_dir(expired.run_id, id, false)?;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -2354,6 +2356,9 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         store.admit(id, &attempt, &starved, &clock, &cancel),
         Err(RunError::Refused)
     ));
+    // The clock moved only by the waits, and stopped at the deadline.
+    assert_eq!(clock.wall_now()?, WallTime::from_micros(1_000_100)?);
+    assert_eq!(clock.mono_now(), MonoTime::from_micros(1_000_000));
     Ok(())
 }
 

@@ -275,7 +275,7 @@ impl RunStore {
                 let attempt = AttemptRecord {
                     profile: task.profile.clone(),
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
-                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, delivery: None, verified_owner: Some(context.actor_id), session: None,
+                    delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                     trace: provenant_records::Trace {
@@ -361,8 +361,10 @@ impl RunStore {
                 "exit/cleanup evidence is unresolved or out of scope",
             ));
         }
-        if publication.outcome == Outcome::Succeeded
-            && (outcome_exit != Some(0) || exit.never_spawned)
+        if matches!(
+            publication.outcome,
+            Outcome::Succeeded | Outcome::ReviewRequired
+        ) && (outcome_exit != Some(0) || exit.never_spawned)
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }
@@ -511,14 +513,16 @@ impl RunStore {
                 limit: RESULT_LIMIT,
             });
         }
-        if publication.outcome == Outcome::Succeeded
-            && (!publication.complete
-                || publication.result.is_empty()
-                || !super::reader::verified_route(
-                    publication.resolved_route.as_ref(),
-                    publication.applied_route.as_ref(),
-                    publication.observed_route.as_ref(),
-                ))
+        if matches!(
+            publication.outcome,
+            Outcome::Succeeded | Outcome::ReviewRequired
+        ) && (!publication.complete
+            || publication.result.is_empty()
+            || !super::reader::verified_route(
+                publication.resolved_route.as_ref(),
+                publication.applied_route.as_ref(),
+                publication.observed_route.as_ref(),
+            ))
         {
             return Err(RunError::Validation(
                 "success lacks complete result or verified provider identity",
@@ -549,8 +553,13 @@ impl RunStore {
         };
         next.publication_error = None;
         next.exit_evidence = durable_exit;
+        let attempt = self.attempt_dir(old.run_id, id, false)?;
+        if let Some(raw) = read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)? {
+            let writer: crate::writer::WriterTerminal = decode(&raw)?;
+            next.head = Some(writer.head);
+            next.protected_paths = writer.protected_paths;
+        }
         if publication.outcome == Outcome::Succeeded {
-            let attempt = self.attempt_dir(old.run_id, id, false)?;
             // Recovery reports uncertainty from the sealed start marker without
             // repeating an external effect or inferring success from prose.
             let raw = match read_sealed(&attempt, "delivery.json", RECORD_LIMIT)? {

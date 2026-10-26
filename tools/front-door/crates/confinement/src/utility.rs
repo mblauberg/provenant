@@ -170,6 +170,10 @@ pub enum GitRead {
         head: GitOid,
         paths: Vec<RepoPath>,
     },
+    ChangedPaths {
+        base: GitOid,
+        head: GitOid,
+    },
     DiffIndex {
         paths: Vec<RepoPath>,
     },
@@ -721,6 +725,17 @@ fn git_args(
             "--verify".into(),
             "--end-of-options".into(),
             format!("{}^{{commit}}", revision.as_str()).into(),
+        ],
+        GitRead::ChangedPaths { base, head } => vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--no-renames".into(),
+            "--name-only".into(),
+            "-z".into(),
+            base.to_string().into(),
+            head.to_string().into(),
+            "--".into(),
         ],
         GitRead::Diff { base, head, paths } => {
             let mut args = vec![

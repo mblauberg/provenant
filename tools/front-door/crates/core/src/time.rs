@@ -206,15 +206,19 @@ impl TestClock {
         }
     }
     pub fn advance(&mut self, duration: DurationMicros) -> Result<(), TimeError> {
-        // Both sums are checked before either field changes.
         let mut times = self
             .times
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let wall = times.0.checked_add(duration)?;
-        let mono = times.1.checked_add(duration)?;
-        *times = (wall, mono);
+        *times = Self::shifted(*times, duration)?;
         Ok(())
+    }
+    /// Both sums are checked before either field changes.
+    fn shifted(
+        (wall, mono): (WallTime, MonoTime),
+        duration: DurationMicros,
+    ) -> Result<(WallTime, MonoTime), TimeError> {
+        Ok((wall.checked_add(duration)?, mono.checked_add(duration)?))
     }
 }
 impl Clock for TestClock {
@@ -237,14 +241,8 @@ impl Clock for TestClock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if deadline > times.1 {
-            let duration = deadline
-                .as_micros()
-                .checked_sub(times.1.as_micros())
-                .map(DurationMicros::from_micros)
-                .ok_or(TimeError::Overflow)?;
-            let wall = times.0.checked_add(duration)?;
-            let mono = times.1.checked_add(duration)?;
-            *times = (wall, mono);
+            let duration = DurationMicros::from_micros(deadline.as_micros() - times.1.as_micros());
+            *times = Self::shifted(*times, duration)?;
         }
         Ok(())
     }

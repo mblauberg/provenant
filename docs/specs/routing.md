@@ -369,6 +369,14 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   and listing. Child storage is writable by the submitting lane, so it is not
   independent evidence against that lane: the host's view refuses a run or
   attempt it launched once its record names another owner.
+- A child may name a different adapter or account from its parent, in its own
+  `route` and `account`. That crossing is intended: a lane may hand work to
+  another provider family, such as a cross-family reviewer or a cheap utility
+  model, and the host does not bind a child to its parent's route. The child
+  gets the authentication grant of the adapter it names (Codex `login`, Cursor
+  `login` or Agy `keychain`), so a lane can reach any registered adapter's
+  login through a child's result. The host's checks above limit the child's
+  network and folder reach. They do not limit which credential it is given.
 - The guardian stops its worker on observed provider exit. Parent cancellation,
   deadline or supervisor signal cancels only this worker's children; normal
   parent completion leaves launched children's custody intact. The host first

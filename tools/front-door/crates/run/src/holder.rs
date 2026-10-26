@@ -366,6 +366,7 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing from request"))?;
+        let mut review_required = false;
         if let Some(writer) = &task.writer {
             let check = crate::prepare_writer(writer, &self.writer_registry, record.project_id)
                 .and_then(|writer| {
@@ -373,6 +374,9 @@ impl RunStore {
                         self.context.state_root.as_path(),
                         attempt,
                         recovery.ok_or(RunError::Validation("writer terminal custody missing"))?,
+                        task.deliver
+                            .as_ref()
+                            .map_or("origin", |deliver| deliver.remote.as_str()),
                     )
                 });
             match check {
@@ -414,13 +418,42 @@ impl RunStore {
                         RECORD_LIMIT,
                     )?;
                 }
+                Ok(false) if decoded.outcome == Outcome::Succeeded => {
+                    // Edits with no commit are not a success, and nothing is delivered.
+                    let left =
+                        crate::prepare_writer(writer, &self.writer_registry, record.project_id)
+                            .and_then(|launch| {
+                                launch.uncommitted(
+                                    self.context.state_root.as_path(),
+                                    recovery.ok_or(RunError::Validation(
+                                        "writer terminal custody missing",
+                                    ))?,
+                                )
+                            });
+                    let note = match left {
+                        Ok(None) => None,
+                        Ok(Some(reason)) => {
+                            decoded.outcome = Outcome::Uncommitted;
+                            Some(reason)
+                        }
+                        Err(error) => {
+                            decoded.outcome = Outcome::Failed;
+                            Some(format!(
+                                "writer terminal check failed for {}: {error}",
+                                writer.worktree.display()
+                            ))
+                        }
+                    };
+                    if let Some(note) = note {
+                        decoded.reason = Some(match decoded.reason.take() {
+                            Some(reason) => format!("{reason}; {note}"),
+                            None => note,
+                        });
+                    }
+                }
                 Ok(false) => {}
                 Ok(true) => {
-                    decoded.outcome = Outcome::Failed;
-                    decoded.reason = Some(format!(
-                        "writer terminal check failed for {}: protected changes require review",
-                        writer.worktree.display()
-                    ));
+                    review_required = true;
                 }
                 Err(error) => {
                     // Incomplete quarantine is retryable, never a terminal
@@ -470,7 +503,7 @@ impl RunStore {
             decoded.result.truncate(end);
             decoded.complete = false;
         }
-        if decoded.outcome == Outcome::Succeeded {
+        if matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
             let refusal = if exit.termination != Some(Termination::Exit(0)) {
                 Some("provider exited unsuccessfully")
             } else if !decoded.complete || decoded.result.is_empty() {
@@ -494,6 +527,10 @@ impl RunStore {
                     _ => reason.into(),
                 });
             }
+        }
+        if decoded.outcome == Outcome::Succeeded && review_required {
+            decoded.outcome = Outcome::ReviewRequired;
+            decoded.reason = Some("protected changes require review".into());
         }
         // Recovered/result-only publication never starts external delivery.
         // A succeeded outcome already proves the provider's terminal event in
