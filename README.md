@@ -43,7 +43,7 @@ worktree, no lane started on an exhausted account, and a record of every run.
 flowchart TB
     subgraph H["Your harness sessions"]
         direction LR
-        CC["Claude Code"] ~~~ CX["Codex"] ~~~ OT["Cursor · Agy · OpenCode"]
+        CC["Claude Code"] ~~~ CX["Codex"] ~~~ H3["Cursor · Agy · OpenCode"]
     end
     subgraph P["Provenant"]
         direction LR
