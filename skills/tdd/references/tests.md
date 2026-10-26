@@ -1,38 +1,38 @@
-# Good and Bad Tests
+# Good and bad tests
 
-## Good Tests
+## Good tests
 
 **Integration-style**: Test through real interfaces, not mocks of internal parts.
 
-```typescript
-// GOOD: Tests observable behavior
-test("user can checkout with valid cart", async () => {
-  const cart = createCart();
-  cart.add(product);
-  const result = await checkout(cart, paymentMethod);
-  expect(result.status).toBe("confirmed");
-});
+```rust
+#[test]
+fn checkout_confirms_a_valid_cart() {
+    let cart = Cart::with_item(Product::priced_in_cents(1200));
+    let receipt = checkout(cart, &mut FakePaymentGateway::approved()).unwrap();
+    assert_eq!(receipt.status, Status::Confirmed);
+    assert_eq!(receipt.total_cents, 1200); // The spec requires the item's price.
+}
 ```
 
 Characteristics:
 
-- Tests behavior users/callers care about
+- Tests behaviour users/callers care about
 - Uses public API only
 - Survives internal refactors
 - Describes WHAT, not HOW
 - One behaviour per test, with as many assertions as that behaviour needs
 
-## Bad Tests
+## Bad tests
 
 **Implementation-detail tests**: Coupled to internal structure.
 
-```typescript
-// BAD: Tests implementation details
-test("checkout calls paymentService.process", async () => {
-  const mockPayment = jest.mock(paymentService);
-  await checkout(cart, payment);
-  expect(mockPayment.process).toHaveBeenCalledWith(cart.total);
-});
+```rust
+#[test]
+fn checkout_calls_the_internal_price_calculator_once() {
+    let pricing = PricingSpy::default();
+    checkout_with_pricing(&pricing, valid_cart()).unwrap();
+    assert_eq!(pricing.calls(), 1); // Internal call count is not the contract.
+}
 ```
 
 Red flags:
@@ -40,7 +40,7 @@ Red flags:
 - Mocking internal collaborators
 - Testing private methods
 - Asserting on call counts/order
-- Test breaks when refactoring without behavior change
+- Test breaks when refactoring without behaviour change
 - Test name describes HOW not WHAT
 - Verifying through external means instead of interface
 - Reads a `.md` file and asserts a sentence, a phrase or a phrase count
@@ -50,25 +50,48 @@ Red flags:
 - Pins a class name, inline style, DOM path or element index
 - Pins a count, order or list that is not itself a contract, or a list that
   must mirror another list
-- Reads a source file (`.ts`, `.css`, `.html`) as text and matches it
+- Reads a source file (`.rs`, `.css`, `.html`) as text and matches it
 - Pins exact error or log wording instead of an error class or code
 - Repeats a case an existing test already covers
 
-```typescript
-// BAD: Bypasses interface to verify
-test("createUser saves to database", async () => {
-  await createUser({ name: "Alice" });
-  const row = await db.query("SELECT * FROM users WHERE name = ?", ["Alice"]);
-  expect(row).toBeDefined();
-});
+```rust
+// BAD: Bypasses the interface and pins the storage schema.
+let user = users.create("Alice").unwrap();
+let row = db.query("SELECT name FROM users WHERE id = ?", user.id).unwrap();
+assert_eq!(row.name, "Alice");
 
-// GOOD: Verifies through interface
-test("createUser makes user retrievable", async () => {
-  const user = await createUser({ name: "Alice" });
-  const retrieved = await getUser(user.id);
-  expect(retrieved.name).toBe("Alice");
-});
+// GOOD: Verifies through the interface, using an isolated test store.
+let user = users.create("Alice").unwrap();
+let retrieved = users.get(user.id).unwrap();
+assert_eq!(retrieved.name, "Alice");
 ```
+
+## Independent oracles and weakening
+
+Expected values come from the spec, never from running the code under test.
+Do not copy today's output into an expected value or compute the expectation
+with the same production helper. If the spec is unsettled, stop and report it.
+If a failing test contradicts the spec, stop and report the conflict with
+evidence; do not edit the test to make it pass.
+
+Gaming includes replacing a specific error with `is_err()`, an exact count with
+an at-least check, deleting or skipping a failing assertion, or special-casing
+a test input in production. These hide defects rather than fix them.
+
+```rust
+// Spec: a denied checkout returns PermissionDenied and creates no order.
+let error = checkout_as(&denied_user, valid_cart()).unwrap_err();
+assert!(matches!(error, CheckoutError::PermissionDenied));
+assert_eq!(orders.count(), 0);
+
+// BAD: A storage failure and an extra order would both escape these checks.
+assert!(checkout_as(&denied_user, valid_cart()).is_err());
+assert!(orders.count() <= 1);
+```
+
+Rejection tests assert the specific error variant or code. An unrelated failure
+must fail the test too. For an exact count in the contract, keep exact equality;
+an at-least check would miss duplicates.
 
 ## What a test may pin
 

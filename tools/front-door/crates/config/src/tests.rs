@@ -39,9 +39,18 @@ fn provider_state_retention_defaults_overrides_and_validation() {
         14
     );
     test_support::assert_leaf_origins(&config);
-    for value in ["0", "3651", "-1", "'seven'"] {
+    for (value, rule) in [
+        ("0", "provider_state_days_range"),
+        ("3651", "provider_state_days_range"),
+        ("-1", "type"),
+        ("'seven'", "type"),
+    ] {
         let text = format!("schema_version=1\n[retention]\nprovider_state_days={value}");
-        assert!(load(&roots(), Some(text.as_bytes())).is_err());
+        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Schema { rule: actual, .. } if *actual == rule),
+            "provider_state_days={value}: expected Schema({rule}), got {error:?}"
+        );
     }
 }
 
@@ -68,19 +77,29 @@ fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
     );
     assert_eq!(configured.gc.projects["example"].keep, ["web/target"]);
     test_support::assert_leaf_origins(&configured);
-    for field in [
-        "idle_days=0",
-        "idle_days=3651",
-        "schedule='yes'",
-        "free_floor='bad'",
-        "alert_below='bad'",
-        "projects.p.regenerable=['../target']",
-        "projects.p.regenerable=['.git']",
-        "projects.p.keep=['/absolute']",
-        "unknown=true",
+    for (field, rule) in [
+        ("idle_days=0", "idle_days_range"),
+        ("idle_days=3651", "idle_days_range"),
+        ("schedule='yes'", "type"),
+        ("free_floor='bad'", "invalid_cache_size"),
+        ("alert_below='bad'", "invalid_cache_size"),
+        (
+            "projects.p.regenerable=['../target']",
+            "regenerable_directory_name",
+        ),
+        (
+            "projects.p.regenerable=['.git']",
+            "regenerable_directory_name",
+        ),
+        ("projects.p.keep=['/absolute']", "gc_keep_relative_path"),
+        ("unknown=true", "type"),
     ] {
         let text = format!("schema_version=1\n[gc]\n{field}");
-        assert!(load(&roots(), Some(text.as_bytes())).is_err(), "{field}");
+        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Schema { rule: actual, .. } if *actual == rule),
+            "{field}: expected Schema({rule}), got {error:?}"
+        );
     }
 }
 

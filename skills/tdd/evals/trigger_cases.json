@@ -137,6 +137,32 @@
           "implement"
         ]
       }
+    },
+    {
+      "id": "q175701",
+      "relation": "negative",
+      "prompt": "Review this Rust test diff read-only: it replaces a specific ConfigError::Schema assertion with is_err(). Report whether the change weakens coverage; do not implement anything.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q175702",
+      "relation": "negative",
+      "prompt": "Investigate why this rejection test now returns StorageUnavailable instead of PermissionDenied. Find the root cause and report it; do not edit tests or production code.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
     }
   ]
 }

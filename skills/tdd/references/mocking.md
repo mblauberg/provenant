@@ -25,35 +25,36 @@ At system boundaries, design interfaces that are easy to mock:
 
 Pass external dependencies in rather than creating them internally:
 
-```typescript
+```rust
 // Easy to mock
-function processPayment(order, paymentClient) {
-  return paymentClient.charge(order.total);
+fn process_payment(order: &Order, client: &impl PaymentClient) -> Result<Charge, PaymentError> {
+    client.charge(order.total_cents)
 }
 
 // Hard to mock
-function processPayment(order) {
-  const client = new StripeClient(process.env.STRIPE_KEY);
-  return client.charge(order.total);
+fn process_payment_from_env(order: &Order) -> Result<Charge, PaymentError> {
+    let client = StripeClient::from_env()?;
+    client.charge(order.total_cents)
 }
 ```
 
 **2. Prefer SDK-style interfaces over generic fetchers**
 
-Create specific functions for each external operation instead of one generic function with conditional logic:
+Create specific functions for each external operation instead of one generic
+function with conditional logic:
 
-```typescript
+```rust
 // GOOD: Each function is independently mockable
-const api = {
-  getUser: (id) => fetch(`/users/${id}`),
-  getOrders: (userId) => fetch(`/users/${userId}/orders`),
-  createOrder: (data) => fetch('/orders', { method: 'POST', body: data }),
-};
+trait ShopApi {
+    fn get_user(&self, id: UserId) -> Result<User, ApiError>;
+    fn get_orders(&self, user: UserId) -> Result<Vec<Order>, ApiError>;
+    fn create_order(&self, order: NewOrder) -> Result<Order, ApiError>;
+}
 
 // BAD: Mocking requires conditional logic inside the mock
-const api = {
-  fetch: (endpoint, options) => fetch(endpoint, options),
-};
+trait GenericApi {
+    fn request(&self, endpoint: &str, body: &[u8]) -> Result<Vec<u8>, ApiError>;
+}
 ```
 
 The SDK approach means:
