@@ -1,10 +1,12 @@
 # ADR 0007: Defer universal retention classes and typed deletion
 
-**Status:** Accepted 2026-07-13; amended 2026-07-15 and 2026-10-26
+**Status:** Accepted 2026-07-13; amended 2026-07-15 and 2026-10-26;
+provider-state retention deferral superseded by [ADR
+0031](0031-retain-provider-history-and-expire-resume-state.md)
 
 ## Context
 
-Durable run retention remains report/archive-only. Universal retention
+Provider-state retention is now governed by ADR 0031. Universal retention
 classes and typed deletion would add state fields and lifecycle machinery
 before a concrete requirement for those abstractions exists.
 
@@ -16,7 +18,8 @@ state.
 
 Defer universal retention classes and typed deletion until a concrete deletion
 requirement establishes the necessary protections, evidence and refusal
-behaviour. Durable run artefacts remain retained until then.
+behaviour. ADR 0031 supplies that requirement for provider state; other durable
+run artefacts remain retained.
 
 Attempt-private `tmp/` is disposable. Writer `TMPDIR` lives in `tmp/candidate-N`.
 Terminal commit attempts to remove `tmp/`; `reconcile` retries removal for
@@ -34,12 +37,14 @@ reconcile retry inside the attempt's `tmp/`, including rustc incremental
 `*.lock` files, cache GC (#1591) inside a verified detached cache tree, and
 declared regenerable output GC (#1687) detached beneath a private staging
 directory while holding the worktree writer lock.
+ADR 0031 adds verified detached provider-state payloads.
 `PayloadTree::claim` in `supervisor::fs` is the only entry point (#1597). It
 refuses a root whose identity differs from the holder's observation, or that
 is not owned by the effective user or grants group or other access. Reconcile
 widens narrower owner bits, such as 0500, before removal. Ordinary directory
-handles have no payload removal. Settlement keeps ordinary lock-name
-protection while reservations may remain.
+handles have no payload removal. Temporary settlement cleanup keeps ordinary
+lock-name protection while reservations may remain; proven regenerable
+provider caches are detached and disposed of separately after terminal commit.
 Stable owner locks outside `tmp/` remain protected: unlinking a lock and
 recreating its name could split writer exclusion across different inodes.
 
@@ -49,8 +54,9 @@ default. User configuration can disable it or change the idle threshold and
 optional free-space floor. Collection is scoped to lane build caches, uses
 verified detachment and preserves live writers, reservations and unobservable
 owners. A free-space floor collects eligible caches oldest-first by last write
-after the orphaned, tombstoned and idle pass. This approval does not extend to
-durable run artefacts or general state deletion.
+after the orphaned, tombstoned and idle pass. ADR 0031 separately approves
+provider-state retention. General state deletion remains outside these
+approvals.
 
 Merged worktree collection (#1683) is also approved: GC fetches the upstream
 default branch, proves branch ancestry against that fetched tip and removes

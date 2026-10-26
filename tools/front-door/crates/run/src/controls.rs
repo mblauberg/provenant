@@ -173,6 +173,8 @@ impl RunStore {
         }
         errors
     }
+    // Cancellation coordinates with a real guardian handoff under a hard cap.
+    #[allow(clippy::disallowed_methods)]
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         // Half the budget for waiting on the handoff; the rest for the store.
         let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
@@ -284,6 +286,12 @@ impl RunStore {
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
         }
+        let replay = self.operation(&input.operation_id, call)?.is_some();
+        let _retention = if replay {
+            None
+        } else {
+            Some(self.retain_provider_state(input.prior, call)?)
+        };
         let request = self.request(prior.run_id, call)?;
         let task = request
             .tasks
@@ -327,7 +335,6 @@ impl RunStore {
         };
         // A replay, prepared or accepted, is answered by `create`, which
         // compares the request digest and adopts a prepared operation's IDs.
-        let replay = self.operation(&input.operation_id, call)?.is_some();
         if !replay {
             let generation: i64 = call.retry(|| {
                 Ok(self.db.query_row(

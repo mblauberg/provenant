@@ -60,6 +60,8 @@ fn read(path: &Path) -> Result<Vec<u8>, ProbeFailure> {
 fn value(path: &Path) -> Result<Value, ProbeFailure> {
     serde_json::from_slice(&read(path)?).map_err(|_| ProbeFailure::Malformed)
 }
+// Provider quota snapshots need the current UTC wall time.
+#[allow(clippy::disallowed_methods)]
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -278,7 +280,8 @@ impl QuotaEffects for LiveQuota {
             .ok_or(ProbeFailure::Auth)?;
         let deadline = plan.input.deadline_unix_seconds;
         let check_identity = || {
-            if matches!(account.scope.adapter.as_str(), "codex" | "cursor")
+            if provenant_records::AdapterSpec::get(&account.scope.adapter)
+                .is_some_and(|spec| spec.quota_identity_check)
                 && signin_key(&account.scope.adapter, &account.identity_dir)
                     .as_deref()
                     .unwrap_or("unknown")

@@ -1,5 +1,5 @@
 //! Production CLI dispatch against a fake Codex executable, never live credentials.
-use super::worktree_tests::support::{Result, TestRig, code};
+use super::worktree_tests::support::{Result, TestRig, code, eventually};
 use super::worktree_tests::{git, ok, repository, writer_backend_available, writer_context};
 use std::{
     fs,
@@ -159,12 +159,10 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         if configured {
             assert_eq!(fs::read(locks.join("compose-lock"))?, b"lock");
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while attempt.join("reservation.json").exists() {
-            if std::time::Instant::now() >= deadline {
-                return Err("reader reservation did not settle".into());
-            }
-            std::thread::yield_now();
+        if !eventually(std::time::Duration::from_secs(5), || {
+            !attempt.join("reservation.json").exists()
+        }) {
+            return Err("reader reservation did not settle".into());
         }
         cleanup.disarm();
     }

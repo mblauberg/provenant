@@ -507,6 +507,7 @@ pub(crate) fn wait_pause(duration: std::time::Duration) {
 }
 
 /// All production clocks use this process-wide monotonic coordinate.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn monotonic_now() -> provenant_core::MonoTime {
     static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let elapsed = ORIGIN

@@ -183,6 +183,8 @@ fn write_before(output: &mut impl Output, value: &Value, deadline: Instant) -> R
     bytes.push(b'\n');
     output.write_frame(&bytes, deadline).map_err(Error::Output)
 }
+// I/O deadlines use the operating system's real monotonic coordinate.
+#[allow(clippy::disallowed_methods)]
 fn write(output: &mut impl Output, value: &Value, timeouts: Timeouts) -> Result<(), Error> {
     write_before(output, value, Instant::now() + timeouts.write)
 }
@@ -241,6 +243,8 @@ impl Drop for CompletionGuard {
     }
 }
 
+// Input poll deadlines are real transport boundaries.
+#[allow(clippy::disallowed_methods)]
 fn read_input(
     input: &mut impl Input,
     events: &SyncSender<Event>,
@@ -441,6 +445,8 @@ fn serve_with_timeouts(
     })
 }
 
+// The transport loop bounds shutdown and output using real elapsed time.
+#[allow(clippy::disallowed_methods)]
 fn serve_loop(
     events: &Receiver<Event>,
     jobs: &SyncSender<Job>,
@@ -582,6 +588,8 @@ fn record_completion(factory: &impl Factory, completion: &Completion) {
     );
 }
 
+// Worker shutdown must remain bounded even when no further input arrives.
+#[allow(clippy::disallowed_methods)]
 fn shutdown_workers(
     events: &Receiver<Event>,
     output: &mut impl Output,

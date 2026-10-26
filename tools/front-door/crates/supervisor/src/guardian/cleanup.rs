@@ -2,6 +2,8 @@
 use super::*;
 
 impl Driver<'_> {
+    // Cleanup phases use bounded real-time windows around OS process events.
+    #[allow(clippy::disallowed_methods)]
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
         self.reservation.omitted_descendants = self.tracked.len().saturating_sub(128) as u64;
@@ -108,6 +110,8 @@ impl Driver<'_> {
     /// provider's group while its unreaped leader still reserves the PGID.
     /// Returns once no live member remains or the bounded budget is spent;
     /// settlement is judged by the caller.
+    // Process group escalation follows real elapsed time.
+    #[allow(clippy::disallowed_methods)]
     fn terminate_group(
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,
@@ -383,6 +387,8 @@ impl Driver<'_> {
         }
     }
 
+    // Process cleanup uses a real-time cap independent of provider progress.
+    #[allow(clippy::disallowed_methods)]
     pub(super) fn cleanup(
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,

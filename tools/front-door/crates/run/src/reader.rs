@@ -141,6 +141,7 @@ impl AttemptReader for RunStore {
             verified_owner: r.verified_owner,
             lineage: r.retry_of.into_iter().collect(),
             reason,
+            trace: r.trace,
         })
     }
     fn attempts<'a>(
@@ -349,6 +350,56 @@ impl RunStore {
         let (run, record) = self.record_with_run(id, call)?;
         self.held_owner(&run, Some(&record))?;
         Ok(record)
+    }
+    /// A terminal row may precede the guardian releasing writer custody.
+    pub fn custody_released(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
+        use provenant_supervisor::fs::{FsError, LockMode};
+        if record.project_id != self.context.project_id {
+            return Err(RunError::UnsafePath);
+        }
+        if !matches!(record.state, AttemptState::Terminal { .. }) {
+            return Ok(false);
+        }
+        let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let _custody = match directory
+            .try_lock_existing(std::ffi::OsStr::new("custody.lock"), LockMode::Exclusive)
+        {
+            Ok(lock) => Some(lock),
+            Err(FsError::LockTimeout { .. }) => return Ok(false),
+            Err(error) if error.is_not_found() && record.provider_launched == Some(false) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let fences = self.writer_fence_listing()?;
+        if fences
+            .reservations
+            .iter()
+            .any(|fence| fence.scope == Self::scope(record))
+        {
+            return Ok(false);
+        }
+        if fences.issues.is_empty() {
+            return Ok(true);
+        }
+        // An unreadable reservation names no scope. It holds this attempt's
+        // custody only in this writer's directory; other entries block only
+        // a writer that needs them.
+        let request = self.request(record.run_id, call)?;
+        let Some(writer) = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref())
+        else {
+            return Ok(true);
+        };
+        let name = provenant_confinement::worktrees::state_dir_name(&writer.worktree);
+        Ok(!fences.issues.iter().any(|issue| {
+            issue
+                .reservation
+                .parent()
+                .and_then(|parent| parent.file_name())
+                == Some(&name)
+        }))
     }
     fn record_with_run(
         &self,

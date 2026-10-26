@@ -41,6 +41,7 @@ pub(crate) enum Error {
     CacheGc(
         Box<provenant_confinement::permissions::CacheGcError>,
         Vec<PathBuf>,
+        Box<provenant_run::ProviderStateGc>,
         Vec<worktrees::WorktreeGcReport>,
         Vec<String>,
     ),
@@ -209,6 +210,7 @@ struct GcData {
     #[serde(flatten)]
     report: provenant_confinement::permissions::CacheGcReport,
     idle_days: u64,
+    provider_state: provenant_run::ProviderStateGc,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -221,20 +223,38 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
     match gc(&command, globals) {
         Ok(data) => {
             let human = gc_data_summary(&data);
-            emit(
-                &CommandResult::new("gc", Outcome::Ok, data),
-                globals,
-                &human,
-                command.dry_run,
-            )
+            let failed = !data.provider_state.errors.is_empty();
+            let mut result = CommandResult::new(
+                "gc",
+                if failed { Outcome::Error } else { Outcome::Ok },
+                data,
+            );
+            if failed {
+                result.error = Some(provenant_records::CommandError {
+                    code: "GC".into(),
+                    message:
+                        "provider-state retention incomplete; inspect data.provider_state.errors"
+                            .into(),
+                    cause: None,
+                    repair: None,
+                });
+            }
+            emit(&result, globals, &human, command.dry_run)
         }
-        Err(Error::CacheGc(error, unobserved_projects, worktree_cleanup, alerts)) => {
+        Err(Error::CacheGc(
+            error,
+            unobserved_projects,
+            provider_state,
+            worktree_cleanup,
+            alerts,
+        )) => {
             let error = *error;
             let failure = error.to_string();
             let data = GcData {
                 report: error.report,
                 idle_days: command.idle_days,
                 unobserved_projects,
+                provider_state: *provider_state,
                 worktree_cleanup,
                 alerts,
             };
@@ -254,6 +274,12 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
 
 fn gc_data_summary(data: &GcData) -> String {
     let mut human = gc_summary(&data.report);
+    human.push_str(&format!(
+        "{} provider-state removal(s), {} kept, {} error(s)\n",
+        data.provider_state.removed.len(),
+        data.provider_state.kept.len(),
+        data.provider_state.errors.len()
+    ));
     for project in &data.worktree_cleanup {
         if let Some(error) = &project.upstream_error {
             human.push_str(&format!("{error}; merged worktrees kept\n"));
@@ -378,6 +404,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                     ..Default::default()
                 },
                 idle_days: command.idle_days,
+                provider_state: Default::default(),
                 unobserved_projects,
                 ..Default::default()
             });
@@ -487,6 +514,13 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             Err(_) => unobserved_projects.push(project.path.clone()),
         }
     }
+    let provider_state = crate::provider_retention::collect(
+        &roots,
+        &home,
+        &assets,
+        config.retention.provider_state_days,
+        command.dry_run,
+    );
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
         .wall_now()
@@ -521,6 +555,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             return Err(Error::CacheGc(
                 Box::new(error),
                 unobserved_projects,
+                Box::new(provider_state),
                 worktree_cleanup,
                 alerts,
             ));
@@ -529,6 +564,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
     Ok(GcData {
         report,
         idle_days: command.idle_days,
+        provider_state,
         unobserved_projects,
         worktree_cleanup,
         alerts,

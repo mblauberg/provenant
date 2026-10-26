@@ -53,6 +53,8 @@ struct Factory {
     executor: SystemExecutor,
     home: std::path::PathBuf,
     cwd: std::path::PathBuf,
+    assets: PathBuf,
+    host_launch: Option<provenant_run::HostLaunchContext>,
 }
 impl Factory {
     fn coordination(&self) -> Result<CoordinationService<'_>, CoordinationError> {
@@ -338,6 +340,8 @@ impl Stdin {
     }
 }
 impl stdio::Input for Stdin {
+    // The stdin bridge waits against the transport's real-time deadline.
+    #[allow(clippy::disallowed_methods)]
     fn read(&mut self, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
         if self.eof {
             return Ok(0);
@@ -399,6 +403,8 @@ pub fn mcp(client: Option<provenant_records::Harness>, globals: &provenant_cli::
             executor: SystemExecutor::new(4)?,
             home,
             cwd,
+            assets,
+            host_launch: None,
         };
         stdio::serve(&mut Stdin::new(), &mut Stdout, factory)?;
         Ok(())
@@ -429,6 +435,8 @@ fn factory(globals: &provenant_cli::Globals) -> Result<Factory, Box<dyn std::err
         executor: SystemExecutor::new(4)?,
         home,
         cwd,
+        assets,
+        host_launch: None,
     })
 }
 pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
@@ -467,6 +475,8 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
         ),
     }
 }
+// Peer frames use bounded real-time stdin and stdout transport deadlines.
+#[allow(clippy::disallowed_methods)]
 pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         // A request names its own agent, so a lane could act as any actor.
@@ -555,6 +565,8 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
             executor: SystemExecutor::new(4)?,
             home: home.clone(),
             cwd: cwd.clone(),
+            assets,
+            host_launch: None,
         };
         let context = &peer_factory.context;
         let mut owner = BinaryRunOwner {
@@ -1188,6 +1200,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         "CANCELLED" => FacadeError::Cancelled,
         "QUEUE_FULL" | "CONTENTION" => FacadeError::Busy,
         "UNSUPPORTED" => FacadeError::ConfinementRefused,
+        "PROVIDER_STATE_EXPIRED" => FacadeError::ProviderStateExpired,
         "OWNER_UNAVAILABLE" => FacadeError::OwnerUnavailable,
         _ => FacadeError::Io,
     }
@@ -1221,7 +1234,7 @@ impl BinaryRunOwner<'_> {
             state_root: provenant_cli::run::execution_state(
                 &ctx.roots,
                 &self.factory.home,
-                &crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?,
+                &self.factory.assets,
             )
             .map_err(fail_error)?,
             project_id: ctx.identity.project,
@@ -1229,7 +1242,8 @@ impl BinaryRunOwner<'_> {
             read_prompts: false,
         };
         let store = provenant_run::RunStore::open(&context, &self.call(budget, cancel))
-            .map_err(run_error)?;
+            .map_err(run_error)?
+            .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
     fn store(
@@ -1251,11 +1265,10 @@ impl BinaryRunOwner<'_> {
         map: fn(provenant_cli::run::Fail) -> FacadeError,
         action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> Result<T, provenant_cli::run::Fail>,
     ) -> Result<T, FacadeError> {
-        let assets = crate::roots::product_root().map_err(|_| FacadeError::OwnerUnavailable)?;
         action(&provenant_cli::run::Edge {
             roots: &self.factory.context.roots,
             home: &self.factory.home,
-            assets: &assets,
+            assets: &self.factory.assets,
             cwd: &self.factory.cwd,
         })
         .map_err(map)
@@ -1566,7 +1579,7 @@ impl BinaryRunOwner<'_> {
         let session = self.session(budget, cancel)?;
         let call = self.call(budget, cancel);
         let (run, started) = self.with_edge(|edge| {
-            provenant_cli::run::submit(
+            provenant_cli::run::submit_with_host(
                 &session,
                 edge,
                 Submission {
@@ -1576,6 +1589,7 @@ impl BinaryRunOwner<'_> {
                     knobs,
                 },
                 &call,
+                self.factory.host_launch.as_ref(),
             )
         })?;
         let mut receipt = self.receipt(&session, operation_id, &run, &started, &call)?;
@@ -2139,6 +2153,89 @@ struct BoundGraphOwner<'a> {
     budget: WaitBudget,
     cancel: &'a CancelToken,
 }
+
+pub(crate) fn advance_settled_graphs(
+    holder: &provenant_cli::run::HostHolder<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(settled) = holder.settled()? else {
+        return Ok(());
+    };
+    use provenant_fabric_runtime::graph::{FileJournal, advance};
+    use provenant_supervisor::fs::LocalFs;
+    let Some(host) = &settled.launch else {
+        return Ok(());
+    };
+    let mut inputs =
+        provenant_core::RootInputs::new(settled.roots.home.clone(), settled.roots.checkout.clone());
+    inputs.state_dir = Some(host.configuration_root.clone());
+    let roots = inputs.resolve(&LocalFs)?;
+    let mut first_error = None;
+    for id in FileJournal::graph_ids(&roots.state, settled.project_id, &LocalFs)? {
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let Some(execution) =
+                FileJournal::pending_execution(&roots.state, settled.project_id, &id, &LocalFs)?
+            else {
+                return Ok(());
+            };
+            let context = Context::open(roots.clone(), &settled.roots.home, &execution.directory)?;
+            if context.identity.project != settled.project_id {
+                return Err(EdgeError::Invalid.into());
+            }
+            // The settled attempt's launch inputs serve the graph, whatever that attempt was.
+            let mut host = host.clone();
+            host.cwd = execution.directory.clone();
+            let factory = Factory {
+                project_attribution: crate::usage::attribution_enabled(&context.roots),
+                context,
+                clock: SystemClock::new(),
+                backoff: ThreadWait,
+                executor: SystemExecutor::new(4)?,
+                home: settled.roots.home.clone(),
+                cwd: execution.directory,
+                assets: settled.roots.checkout.clone(),
+                host_launch: Some(host),
+            };
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+            let mut journal = FileJournal::open(
+                &roots.state,
+                settled.project_id,
+                &id,
+                &LocalFs,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            let mut owner = BoundGraphOwner {
+                factory: &factory,
+                budget,
+                cancel: &cancel,
+            };
+            advance(&execution.document, &mut owner, &mut journal)?;
+            Ok(())
+        })();
+        // The guardian's output is discarded, so `graph status` shows a failure.
+        let recorded = FileJournal::set_advance_error(
+            &roots.state,
+            settled.project_id,
+            &id,
+            result
+                .as_ref()
+                .err()
+                .map(|error| error.to_string())
+                .as_deref(),
+            &LocalFs,
+        );
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) = recorded {
+            first_error.get_or_insert(error.into());
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
     fn actor(&self) -> String {
@@ -2174,7 +2271,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 operation_id,
                 tasks: vec![SubmittedTask {
                     base: None,
-                    account: None,
+                    account: route.account.clone(),
                     access,
                     worktree: worktree.map(str::to_owned),
                     prompt: prompt.into(),
@@ -2218,6 +2315,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {
+                let store = owner.store(self.budget, self.cancel)?;
+                let call = owner.call(self.budget, self.cancel);
+                match store.custody_released(&attempt, &call) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Ok(AttemptObservation::Pending {
+                            attempt_ref: reference,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(AttemptObservation::Unknown {
+                            attempt_ref: reference,
+                        });
+                    }
+                }
                 let launched = attempt.provider_launched.unwrap_or(true);
                 Ok(AttemptObservation::Terminal {
                     launched,
@@ -2310,7 +2422,15 @@ impl Factory {
                 }
             })?
             .ok_or(FacadeError::NotFound)?;
-            return Ok(graph_snapshot(checkpoint));
+            let mut run = graph_snapshot(checkpoint);
+            run.advance_error = FileJournal::read_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                &provenant_supervisor::fs::LocalFs,
+            )
+            .map_err(|_| FacadeError::Io)?;
+            return Ok(run);
         }
         let mut journal = FileJournal::open(
             &self.context.roots.state,
@@ -2322,25 +2442,41 @@ impl Factory {
             &self.clock,
         )
         .map_err(|_| FacadeError::Io)?;
-        if let Some(document) = document {
+        if let Some(document) = &document {
+            journal
+                .bind(provenant_fabric_runtime::graph::GraphExecution {
+                    directory: self.cwd.clone(),
+                    document: document.clone(),
+                })
+                .map_err(|_| FacadeError::Conflict)?;
             let mut owner = BoundGraphOwner {
                 factory: self,
                 budget,
                 cancel,
             };
             let run = if resume {
-                provenant_fabric_runtime::graph::resume(&document, &mut owner, &mut journal)
+                provenant_fabric_runtime::graph::resume(document, &mut owner, &mut journal)
             } else {
-                provenant_fabric_runtime::graph::advance(&document, &mut owner, &mut journal)
+                provenant_fabric_runtime::graph::advance(document, &mut owner, &mut journal)
             };
-            return run.map_err(|error| match error {
+            let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
                 provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
                     FacadeError::InvalidInput
                 }
                 provenant_fabric_runtime::graph::GraphError::PlanChanged => FacadeError::Conflict,
                 _ => FacadeError::StateCorrupt,
-            });
+            })?;
+            // A manual advance that succeeded supersedes an earlier failure.
+            FileJournal::set_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                None,
+                &provenant_supervisor::fs::LocalFs,
+            )
+            .map_err(|_| FacadeError::Io)?;
+            return Ok(run);
         }
         let mut checkpoint = journal
             .load(id)
@@ -2392,7 +2528,11 @@ fn graph_snapshot(
     } else {
         GraphStatus::Complete
     };
-    GraphRun { status, checkpoint }
+    GraphRun {
+        status,
+        checkpoint,
+        advance_error: None,
+    }
 }
 
 impl Factory {
@@ -2759,6 +2899,22 @@ mod peer_tests {
             super::resume_fail_error(fail("NOT_FOUND")),
             super::FacadeError::NotFound
         ));
+    }
+
+    #[test]
+    fn expired_provider_state_keeps_its_facade_code() {
+        assert!(matches!(
+            super::resume_fail_error(fail("PROVIDER_STATE_EXPIRED")),
+            super::FacadeError::ProviderStateExpired
+        ));
+        assert!(matches!(
+            super::fail_error(fail("PROVIDER_STATE_EXPIRED")),
+            super::FacadeError::ProviderStateExpired
+        ));
+        assert_eq!(
+            super::FacadeError::from_code("provider_state_expired", None).code(),
+            "provider_state_expired"
+        );
     }
 
     #[test]

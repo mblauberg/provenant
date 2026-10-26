@@ -1,4 +1,6 @@
 #![allow(clippy::panic, clippy::unwrap_used)]
+// Unit tests use real time to bound concurrent transport simulations.
+#![allow(clippy::disallowed_methods)]
 
 use super::*;
 use crate::tools::*;

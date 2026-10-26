@@ -86,6 +86,8 @@ fn private(directory: &Path) -> bool {
 }
 
 /// Read to EOF within `timeout`, bounding each blocking read by the time left.
+// Peer socket reads use bounded real-time deadlines.
+#[allow(clippy::disallowed_methods)]
 fn read_bounded(stream: &mut UnixStream, timeout: Duration) -> Result<Vec<u8>, AgentError> {
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
@@ -291,6 +293,8 @@ fn drain_buffered(stream: &mut UnixStream) {
 /// Count consecutive `accept` failures: pause and carry on, then give up once
 /// the run is long enough that the cause (such as descriptor exhaustion) is
 /// not passing. A success resets the run.
+// Listener retry and startup settling are bounded real-time operations.
+#[allow(clippy::disallowed_methods)]
 fn accepted<T>(
     result: io::Result<T>,
     failures: &mut u32,
@@ -469,6 +473,8 @@ pub(super) fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), 
 }
 
 /// Start the receipt-owned plist after managed publication has succeeded.
+// LaunchAgent bootstrap retries are bounded real-time OS operations.
+#[allow(clippy::disallowed_methods)]
 fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -693,7 +699,11 @@ fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
     // shell entry into an absolute agent search directory by canonicalising it.
     // A project-local directory (direnv's `PATH_add`) would lend the agent
     // everything it holds, so it is skipped and the search continues.
-    for name in ["claude", "codex"] {
+    for name in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.peer_bootstrap)
+        .map(|spec| spec.binary)
+    {
         if let Some(program) = std::env::split_paths(search)
             .filter(|dir| dir.is_absolute())
             .filter(|dir| {
@@ -823,6 +833,9 @@ pub fn status(state: &Path, home: &Path) -> Status {
 
 #[cfg(test)]
 mod tests {
+    // Agent tests use real time to bound local socket simulations.
+    #![allow(clippy::disallowed_methods)]
+
     #[test]
     fn read_bounded_drains_a_closed_peer() {
         use super::*;

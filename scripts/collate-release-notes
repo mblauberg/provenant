@@ -5,7 +5,8 @@
 #   collate-release-notes vX.Y.Z    write docs/release-notes/vX.Y.Z.md and
 #                                   delete the fragments, keeping _intro.md
 # Each fragment is <topic>.md whose first line is one of the section headings
-# below, followed by its bullets. Links in fragments are relative to next.d/;
+# below, followed by its bullets, with no later ## heading.
+# Links in fragments are relative to next.d/;
 # the collated file sits one directory up, so ../../ becomes ../.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
@@ -32,6 +33,10 @@ check() {
     first=$(sed -n 1p "$f")
     if ! printf '%s\n' "$sections" | grep -qxF -- "$first"; then
       echo "collate-release-notes: $f: first line must be one of: $(printf '%s' "$sections" | paste -sd, -)" >&2
+      status=1
+    fi
+    if awk 'NR > 1 && /^## / { found = 1 } END { exit !found }' "$f"; then
+      echo "collate-release-notes: $f: section headings are only allowed on line 1" >&2
       status=1
     fi
   done

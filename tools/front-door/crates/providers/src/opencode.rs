@@ -170,6 +170,12 @@ fn prepare(
                 discovery_reads: input
                     .cwd
                     .ancestors()
+                    // Root-level probes would require a forbidden `/` anchor,
+                    // and probes at the home would list `~/.claude` and
+                    // `~/.codex`. Stop below both.
+                    .take_while(|parent| {
+                        parent.parent().is_some() && !input.home.starts_with(parent)
+                    })
                     .flat_map(|parent| {
                         [".agents", ".claude", ".codex"].map(|name| exact(parent.join(name)))
                     })
@@ -321,12 +327,17 @@ mod tests {
         )
         .unwrap();
         for parent in input.cwd.ancestors() {
+            // `/fixture` holds the fixture home, so the walk stops below it.
+            let probed = parent == input.cwd;
             for name in [".agents", ".claude", ".codex"] {
-                assert!(
+                assert_eq!(
                     spec.profile
                         .spec
                         .discovery_reads
-                        .contains(&exact(parent.join(name)))
+                        .contains(&exact(parent.join(name))),
+                    probed,
+                    "{}",
+                    parent.display()
                 );
             }
         }
@@ -337,6 +348,124 @@ mod tests {
                 .iter()
                 .all(|g| g.scope == provenant_confinement::permissions::PathScope::Exact)
         );
+    }
+
+    /// A literal on the home's `.claude` or `.codex` would list their entries.
+    #[test]
+    fn seatbelt_profile_for_a_project_under_home_lists_no_home_probes() {
+        let home = std::path::Path::new("/fixture/home");
+        let plan = crate::tests::read_only_plan("/fixture/home", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let cwd = home.join("repo/crate");
+        let input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
+        assert_eq!(input.home, home);
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            home,
+        )
+        .unwrap();
+        let literal = |parent: &std::path::Path, name| {
+            format!("(literal \"{}\")", parent.join(name).display())
+        };
+        for name in [".agents", ".claude", ".codex"] {
+            for parent in [&cwd, &home.join("repo")] {
+                assert!(profile.contains(&literal(parent, name)), "{name}");
+            }
+            for parent in [home, std::path::Path::new("/fixture")] {
+                let literal = literal(parent, name);
+                assert!(!profile.contains(&literal), "{literal}");
+            }
+        }
+    }
+
+    // Anchors are real host paths; on Linux `/bin` links to `/usr/bin`, and
+    // only the macOS backend confines OpenCode.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn homebrew_launch_plan_anchors_with_default_xdg_homes() {
+        use provenant_confinement::permissions::snapshot::compile;
+        use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
+        use provenant_supervisor::fs::LocalFs;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let prefix = root.join("opt/homebrew");
+        let package = prefix.join("Cellar/opencode-v2/2.0.32");
+        let bin = prefix.join("bin");
+        fs::create_dir_all(package.join("bin")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(package.join("bin/opencode"), "fixture").unwrap();
+        let link = bin.join("opencode");
+        std::os::unix::fs::symlink("../Cellar/opencode-v2/2.0.32/bin/opencode", &link).unwrap();
+        // Dispatch resolves the CLI before passing it to the provider.
+        let executable = link.canonicalize().unwrap();
+        // The project sits under the home, as lane worktrees do.
+        let home = root.clone();
+        fs::create_dir_all(home.join(".config/opencode")).unwrap();
+        fs::create_dir(root.join("repo")).unwrap();
+        // Compilation refuses private directories other users can reach.
+        for name in ["scratch", "state"] {
+            fs::create_dir(root.join(name)).unwrap();
+            fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let cwd = root.join("repo");
+        let input = PrepareInput {
+            executable: &executable,
+            home: &home,
+            ..crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None)
+        };
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let spec = prepare(
+                &input,
+                access,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap(),
+            )
+            .unwrap();
+            for step in &spec.setup {
+                let SetupStep::CreateDir(path) = step else {
+                    panic!("unexpected setup step: {step:?}");
+                };
+                fs::create_dir_all(path).unwrap();
+            }
+            assert!(spec.profile.spec.runtime_reads.contains(&subtree(&package)));
+            let directories = required_anchors(plan.permissions(), &spec.profile, None)
+                .into_iter()
+                .map(|path| {
+                    AnchoredDirectory::open_canonical(&LocalFs, &path).unwrap_or_else(|error| {
+                        panic!("{access:?} anchor {} refused: {error}", path.display())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let anchors = Anchors {
+                home: &home,
+                directories: &directories,
+                safe_fs: &LocalFs,
+                worktree: None,
+            };
+            let launch = compile(plan.permissions(), &spec.profile, &anchors)
+                .unwrap_or_else(|error| panic!("{access:?} profile refused: {error}"));
+            let profile = String::from_utf8(launch.profile).unwrap();
+            assert!(profile.contains(&format!("(literal \"{}\")", cwd.join(".claude").display())));
+            for name in [".agents", ".claude", ".codex"] {
+                let literal = format!("(literal \"{}\")", home.join(name).display());
+                assert!(!profile.contains(&literal), "{access:?} grants {literal}");
+            }
+        }
     }
 
     #[test]

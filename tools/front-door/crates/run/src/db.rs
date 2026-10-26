@@ -77,6 +77,8 @@ pub struct RunStore {
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     pub(crate) sealed_requester: Option<ActorId>,
+    /// This host's ID, stamped on new attempts when the edge supplies it.
+    pub(crate) host: Option<provenant_core::HostId>,
     /// Scopes and bounded custody handles this host view handed to a guardian.
     pub(crate) launched: std::cell::RefCell<Vec<Held>>,
     /// Host-only launch claims survive deletion or rewriting of lane rows.
@@ -147,6 +149,12 @@ impl RunStore {
     /// from the scope and directory it held at hand-off, never from the record.
     pub fn with_sealed_requester(mut self, requester: ActorId) -> Self {
         self.sealed_requester = Some(requester);
+        self
+    }
+    /// Stamp new attempts and their events with this host. Supplied by the host
+    /// composition edge; absent, the host stays unknown in the trace.
+    pub fn with_host(mut self, host: provenant_core::HostId) -> Self {
+        self.host = Some(host);
         self
     }
     /// The trusted host config root owns worktree registrations and the host
@@ -225,6 +233,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             sealed_requester: None,
+            host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),
             _owner: PhantomData,
@@ -243,6 +252,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             sealed_requester: None,
+            host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),
             _owner: PhantomData,

@@ -244,3 +244,36 @@ fn no_reported_windows_remain_unknown() {
     assert!(snapshot.windows.is_empty());
     assert_eq!(snapshot.status, QuotaStatus::Unknown);
 }
+
+#[test]
+fn quota_effects_follow_specs_and_require_successful_commands() {
+    for spec in provenant_records::ADAPTER_SPECS {
+        let plan = super::plan(spec.name, &scope(spec.name), &input()).unwrap();
+        let expected = match spec.name {
+            "claude" | "cursor" => QuotaEffectKind::HttpGet,
+            "codex" | "agy" => QuotaEffectKind::Command,
+            "opencode" => QuotaEffectKind::LocalLedger,
+            _ => unreachable!(),
+        };
+        assert_eq!(plan.kind, expected);
+        let capture = provenant_quota::ProbeCapture {
+            stdout: br#"{"payload": {}}"#.to_vec(),
+            stderr: vec![],
+            exit_code: None,
+            overflowed: false,
+        };
+        let result = super::decode(&plan, &capture);
+        if expected == QuotaEffectKind::Command {
+            assert!(matches!(
+                result,
+                Err(QuotaError::Invalid("provider quota effect"))
+            ));
+        } else {
+            assert!(result.is_ok(), "{}: {result:?}", spec.name);
+        }
+    }
+    assert!(matches!(
+        super::plan("unknown", &scope("unknown"), &input()),
+        Err(QuotaError::Disabled)
+    ));
+}

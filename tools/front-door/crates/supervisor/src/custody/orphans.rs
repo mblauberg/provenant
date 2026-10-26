@@ -87,6 +87,8 @@ impl Recovery {
         self.end_orphans_with(attempt, &SystemProcessObserver, &SystemProbe, patience)
     }
 
+    // Orphan escalation and reaping use bounded real-time windows.
+    #[allow(clippy::disallowed_methods)]
     pub(crate) fn end_orphans_with(
         &mut self,
         attempt: &Directory,

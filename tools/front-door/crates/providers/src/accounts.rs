@@ -101,10 +101,8 @@ impl DomainConfig for Settings {
     }
 }
 fn valid_entry(entry: &Registration) -> bool {
-    matches!(
-        entry.adapter.as_str(),
-        "claude" | "codex" | "agy" | "cursor" | "opencode"
-    ) && entry.key != "unknown"
+    provenant_records::AdapterSpec::get(&entry.adapter).is_some()
+        && entry.key != "unknown"
         && !entry.key.is_empty()
         && entry.key.len() <= 64
         && entry

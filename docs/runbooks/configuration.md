@@ -58,6 +58,12 @@ before applying an authorised install.
 
 ## Lane cache collection
 
+GC also applies [terminal provider-state retention](gc.md). The separate
+`[retention] provider_state_days = 7` key accepts 1 to 3650 and is reread on
+each sweep without reinstalling. Known credential entries expire after
+24 hours. `gc.schedule = false` disables scheduled provider-state sweeps too;
+settlement cache pruning still runs.
+
 The optional `[gc]` section controls the macOS per-user schedule:
 
 ```toml

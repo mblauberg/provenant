@@ -82,6 +82,8 @@ impl Drop for ProcessCleanupGuard {
     }
 }
 
+// Failure cleanup has a real-time bound so a broken fixture cannot hang the suite.
+#[allow(clippy::disallowed_methods)]
 fn kill_recorded_processes(root: &Path) {
     let mut custodians = std::collections::BTreeSet::new();
     let mut dependents = std::collections::BTreeSet::new();
@@ -199,6 +201,8 @@ pub fn signal_recorded_process(
 }
 
 /// Observe the exit status collected by the guardian's owning reaper.
+// The fixture waits for the real supervisor reaper to publish an exit.
+#[allow(clippy::disallowed_methods)]
 pub fn guardian_exit_status(
     pid: u32,
     timeout: std::time::Duration,
@@ -704,6 +708,8 @@ fn injected_fs_error(operation: &'static str, path: PathBuf, errno: i32) -> crat
     }
 }
 
+// Fixture modes intentionally hold until their supervising test ends them.
+#[allow(clippy::disallowed_methods)]
 pub fn dispatch() -> io::Result<bool> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.get(1).is_none_or(|arg| arg != "--fixture") {

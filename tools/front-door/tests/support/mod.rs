@@ -9,10 +9,26 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Poll `condition` until it succeeds or the real-time deadline expires.
+#[allow(clippy::disallowed_methods)]
+pub fn eventually(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if condition() {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::park_timeout(remaining.min(Duration::from_millis(5)));
+    }
+}
 
 static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 

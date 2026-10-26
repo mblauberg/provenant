@@ -906,6 +906,9 @@ fn matches_glob(pattern: &[Token], text: &[char]) -> bool {
 }
 #[cfg(test)]
 mod tests {
+    // Parsing performance tests measure elapsed wall time.
+    #![allow(clippy::disallowed_methods)]
+
     use super::*;
     #[test]
     fn process_control_never_obtains_authority_from_shell_wrapping() {

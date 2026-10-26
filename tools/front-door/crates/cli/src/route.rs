@@ -168,7 +168,9 @@ pub enum Data {
 /// served by the `opencode-go` provider. Free (Zen) and other configured
 /// providers must not inherit its account-level exhaustion.
 fn snapshot_governs(adapter: &str, model: &ModelId) -> bool {
-    adapter != "opencode" || model.model().starts_with("opencode-go/")
+    provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.quota_model_prefix)
+        .is_none_or(|prefix| model.model().starts_with(prefix))
 }
 fn quota_observations(
     catalogue: &Catalogue,
@@ -403,11 +405,11 @@ fn record_pool_redraw(
 }
 /// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
 fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
-    if adapter == "opencode" && free() {
-        vec!["opencode-free".to_owned()]
-    } else {
-        Vec::new()
-    }
+    provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.free_pool)
+        .filter(|_| free())
+        .map(|pool| vec![pool.to_owned()])
+        .unwrap_or_default()
 }
 
 /// Recheck each selected fallback against the latest persisted refusals.

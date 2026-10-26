@@ -17,13 +17,23 @@ struct Service {
 pub struct HostHolder<'a> {
     inner: &'a dyn Holder,
     service: Mutex<Option<Service>>,
+    settled: Mutex<Option<run::HolderContext>>,
 }
 impl<'a> HostHolder<'a> {
     pub fn new(inner: &'a dyn Holder) -> Self {
         Self {
             inner,
             service: Mutex::new(None),
+            settled: Mutex::new(None),
         }
+    }
+    /// Available after supervise returns, when custody locks have been released.
+    pub fn settled(&self) -> custody::Result<Option<run::HolderContext>> {
+        Ok(self
+            .settled
+            .lock()
+            .map_err(|_| custody::CustodyError::InvalidRecord)?
+            .take())
     }
     fn stop(&self, reason: Option<StopReason>) -> custody::Result<()> {
         let service = self
@@ -143,10 +153,19 @@ impl Holder for HostHolder<'_> {
         recovery: &custody::Recovery,
     ) -> custody::Result<()> {
         self.stop(exit.stop_reason)?;
-        self.inner.terminal(context, attempt, exit, recovery)
+        self.inner.terminal(context, attempt, exit, recovery)?;
+        let context =
+            serde_json::from_slice(context).map_err(|_| custody::CustodyError::InvalidRecord)?;
+        *self
+            .settled
+            .lock()
+            .map_err(|_| custody::CustodyError::InvalidRecord)? = Some(context);
+        Ok(())
     }
 }
 
+// Child launcher polling is a real-time pause between bounded store scans.
+#[allow(clippy::disallowed_methods)]
 fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Result<(), String> {
     let launch = context
         .launch
@@ -256,7 +275,9 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             },
             &reason,
             &call,
-            |id, validated| launch_on_host(&session, id, &edge, &call, Some((launch, validated))),
+            |id, validated| {
+                launch_on_host(&session, id, &edge, &call, Some(launch), Some(validated))
+            },
         )?;
         accepted.extend(scan.accepted);
         if let Some(error) = scan.error {

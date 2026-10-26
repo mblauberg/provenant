@@ -257,6 +257,8 @@ struct SaveRequest {
     decision: DecisionInput,
 }
 
+// Stdin reads have a real transport deadline.
+#[allow(clippy::disallowed_methods)]
 fn read_input(source: &str) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
     if source == "-" {

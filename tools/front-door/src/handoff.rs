@@ -87,6 +87,8 @@ impl<E: std::fmt::Display> From<E> for Refusal {
     }
 }
 
+// Handoff lease records use current UTC wall time at this production edge.
+#[allow(clippy::disallowed_methods)]
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -124,10 +126,11 @@ fn read_owner(dir: &Path) -> Option<Owner> {
 }
 fn write_owner(dir: &Path, owner: &Owner) -> io::Result<()> {
     private_dirs(dir)?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |t| t.as_nanos());
-    let staged = dir.join(format!(".owner.{}.{nanos}.tmp", std::process::id()));
+    let staged = dir.join(format!(
+        ".owner.{}.{}.tmp",
+        std::process::id(),
+        provenant_supervisor::fs::temporary_name()?.to_string_lossy()
+    ));
     let result = write_new(&staged, &serde_json::to_vec_pretty(owner)?, 0o600)
         .and_then(|()| fs::rename(&staged, dir.join("owner.json")));
     if result.is_err() {
@@ -556,6 +559,8 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
+// Operation identity includes the current wall-time sample.
+#[allow(clippy::disallowed_methods)]
 fn execute(args: &Handoff, globals: &Globals) -> Result<(Value, String), Refusal> {
     if provenant_cli::fabric::in_lane() {
         return Err(Refusal::refused(

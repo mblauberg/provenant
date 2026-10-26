@@ -6,6 +6,7 @@ use provenant_confinement::permissions::{
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
+use provenant_records::{ADAPTER_SPECS, AdapterSpec};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use provenant_supervisor::fs::{
@@ -109,10 +110,15 @@ fn prepare_with(
         &crate::domains::SECTIONS,
     )
     .map_err(|e| e.to_string())?;
+    let request = route_request(task)?;
+    let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
+    let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
+        .map_err(|e| e.to_string())?;
+    let eligible = |name: &str| eligible.iter().any(|spec| spec.name == name);
     let settings = config.domains.accounts;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
-    if !entries.iter().any(|e| e.adapter == "codex") {
+    if eligible("codex") && !entries.iter().any(|e| e.adapter == "codex") {
         let directory = registry
             .host
             .and_then(|host| host.codex_home.clone())
@@ -148,7 +154,12 @@ fn prepare_with(
         }
     }
     // These adapters use the CLI's existing local login and configuration.
-    for adapter in ["opencode", "cursor", "agy"] {
+    let mut local: Vec<_> = ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.local_discovery_order.is_some() && eligible(spec.name))
+        .collect();
+    local.sort_by_key(|spec| spec.local_discovery_order);
+    for adapter in local.into_iter().map(|spec| spec.name) {
         if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
@@ -168,7 +179,6 @@ fn prepare_with(
         }
     }
     let timestamp = jiff::Timestamp::now().as_second();
-    let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let probe = Probe {
@@ -178,7 +188,7 @@ fn prepare_with(
         user: &user,
         scratch: &paths.scratch,
     };
-    for entry in &entries {
+    for entry in entries.iter().filter(|entry| eligible(&entry.adapter)) {
         match locate(&entry.adapter).and_then(|executable| {
             observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
         }) {
@@ -192,7 +202,11 @@ fn prepare_with(
     }
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
-    for adapter in REGISTRY.iter().map(|entry| entry.adapter.id()) {
+    for adapter in REGISTRY
+        .iter()
+        .map(|entry| entry.adapter.id())
+        .filter(|adapter| eligible(adapter))
+    {
         // Repository-bound read-only grants are checked per candidate below.
         if confinement_request(
             project_id,
@@ -254,7 +268,7 @@ fn prepare_with(
         .map_err(|e| e.to_string())?
         .to_string();
     let resolved = crate::route::resolve_dispatch(
-        &route_request(task)?,
+        &request,
         roots,
         selected,
         (paths.operation_id.as_str(), paths.task_index),
@@ -284,7 +298,9 @@ fn prepare_with(
             .iter()
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
         let account = match entry
-            .filter(|entry| matches!(entry.adapter.as_str(), "claude" | "codex"))
+            .filter(|entry| {
+                AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.registered_account)
+            })
             .map(|entry| entry.registered())
             .transpose()
         {
@@ -294,7 +310,9 @@ fn prepare_with(
                 continue;
             }
         };
-        if matches!(adapter.id(), "codex" | "claude") && account.is_none() {
+        if AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.registered_account)
+            && account.is_none()
+        {
             reasons.push(skip(
                 &label,
                 SkipKind::Account,
@@ -348,6 +366,16 @@ fn prepare_with(
             None => None,
         };
         let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        Directory::open_anchor(private_state)
+            .and_then(|directory| {
+                directory.atomic_write(
+                    std::ffi::OsStr::new("provider.txt"),
+                    ".provider-",
+                    adapter.id().as_bytes(),
+                    provenant_supervisor::fs::PublishMode::Replace,
+                )
+            })
+            .map_err(|error| error.to_string())?;
         let text = match &git_context {
             Some(context) => {
                 let location = context
@@ -586,8 +614,8 @@ fn continuation_for(
     match find_session_state(&prior_state, session) {
         Ok(Some(retained)) => copy_state(&retained, private_state)?,
         // These adapters retain sessions in their existing user data stores.
-        Ok(None) if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
-        Ok(None) => return Err("the prior attempt's retained provider state is missing".into()),
+        Ok(None) if AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.user_sessions) => {}
+        Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),
         // An unfinished search proves nothing missing, whatever the adapter.
         Err(SearchExhausted) => {
             return Err(format!(
@@ -719,11 +747,11 @@ fn find_session_state_within(
     Ok(None)
 }
 
-/// Copy regular files and directories within `RETAINED_STATE`. Symlinks and
-/// other entries are skipped: setup recreates the links a provider needs. A
-/// leftover process may still change the tree, so every entry is opened from
-/// its parent's handle without following a link, and the opened descriptor is
-/// checked and copied.
+/// Copy regular files and directories within `RETAINED_STATE`. GC tombstones,
+/// top-level Codex caches, symlinks and other entries are skipped: setup
+/// recreates the caches and links a provider needs. A leftover process may
+/// still change the tree, so every entry is opened from its parent's handle
+/// without following a link, and the opened descriptor is checked and copied.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
     copy_state_within(from, to, RETAINED_STATE)
 }
@@ -740,6 +768,9 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
         return Err("retained provider state is not a directory".into());
     }
     let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
+    let skip_codex_caches = source
+        .read_bounded(std::ffi::OsStr::new("provider.txt"), 64)
+        .is_ok_and(|provider| provider == b"codex");
     let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
         return Err(failed(&"the destination has no parent directory"));
     };
@@ -764,7 +795,15 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
     let copied = parent
         .open_directory(&staging)
         .map_err(CopyRefusal::from)
-        .and_then(|target| copy_tree(&source, &target, limits.depth, &mut budget))
+        .and_then(|target| {
+            copy_tree(
+                &source,
+                &target,
+                limits.depth,
+                &mut budget,
+                skip_codex_caches,
+            )
+        })
         .and_then(|()| Ok(parent.replace(&staging, &parent, name)?));
     let copied = copied.map_err(|refusal| match refusal {
         CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
@@ -866,8 +905,20 @@ fn copy_tree(
     to: &Directory,
     depth: u32,
     budget: &mut Budget,
+    skip_codex_caches: bool,
 ) -> Result<(), CopyRefusal> {
     for name in listed(from, &mut budget.entries)?.ok_or(CopyRefusal::TooMany)? {
+        if name
+            .as_encoded_bytes()
+            .starts_with(run::TOMBSTONE.as_bytes())
+            || (skip_codex_caches
+                && matches!(
+                    name.to_str(),
+                    Some("cache" | "plugins" | "skills" | "models_cache.json")
+                ))
+        {
+            continue;
+        }
         let metadata = match from.metadata_at(&name, false) {
             Ok(metadata) => metadata,
             Err(error) if error.is_not_found() => continue,
@@ -895,7 +946,7 @@ fn copy_tree(
                     Err(error) if error.is_exists() => {}
                     Err(error) => return Err(error.into()),
                 }
-                copy_tree(&child, &to.open_directory(&name)?, depth, budget)?;
+                copy_tree(&child, &to.open_directory(&name)?, depth, budget, false)?;
             }
             FileKind::Regular => {
                 let mut file = match from.open_read(&name) {
@@ -1014,20 +1065,21 @@ fn observe_account(
             entry.adapter, entry.label
         ));
     }
-    let (detected, org) = if !matches!(entry.adapter.as_str(), "claude" | "codex") {
-        (entry.key.clone(), None)
-    } else {
-        provenant_providers::accounts::detect_with_org(
-            executor,
-            &entry.adapter,
-            executable,
-            home,
-            user,
-            &directory,
-            executor.root(),
-        )
-        .map_err(|error| detect_failure(entry, &error))?
-    };
+    let (detected, org) =
+        if !AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.registered_account) {
+            (entry.key.clone(), None)
+        } else {
+            provenant_providers::accounts::detect_with_org(
+                executor,
+                &entry.adapter,
+                executable,
+                home,
+                user,
+                &directory,
+                executor.root(),
+            )
+            .map_err(|error| detect_failure(entry, &error))?
+        };
     if detected != entry.key {
         return Err(format!(
             "{} account {} changed identity; re-register it",
@@ -1181,7 +1233,9 @@ fn check_launch_prompt(
         );
     }
     if paths.lane_depth > 1
-        && matches!(adapter, Some("cursor" | "agy"))
+        && adapter
+            .and_then(AdapterSpec::get)
+            .is_some_and(|spec| spec.argv_prompt)
         && Prompt::new(text.to_owned()).check_argv().is_err()
     {
         return Err("invalid input: nested argv launch prompt including the preamble exceeds 64 KiB; route the child to a stdin adapter (claude, codex or opencode), or shorten the prompt".into());
@@ -1197,7 +1251,9 @@ fn launch_prompt(
 ) -> Result<Prompt, String> {
     check_launch_prompt(text, paths, Some(adapter))?;
     let prompt = Prompt::new(text.to_owned());
-    if !matches!(adapter, "cursor" | "agy") || prompt.check_argv().is_ok() {
+    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
+        || prompt.check_argv().is_ok()
+    {
         return Ok(prompt);
     }
     let attempt = paths
@@ -1314,11 +1370,9 @@ fn confinement_request(
                 scope: PathScope::Exact,
             }],
             secret_roots: Vec::new(),
-            selected_authentication: match adapter {
-                "codex" | "cursor" => Some("login".into()),
-                "agy" => Some("keychain".into()),
-                _ => None,
-            },
+            selected_authentication: AdapterSpec::get(adapter)
+                .and_then(|spec| spec.authentication)
+                .map(Into::into),
             include_continuation: false,
             write_roots: write_roots(access, host_writes, writer.is_some()),
             network: access.network(writer.is_some()),
@@ -1414,11 +1468,7 @@ fn read_only_plan(
 }
 
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
-    let name = if name == "cursor" {
-        "cursor-agent"
-    } else {
-        name
-    };
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
     for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
         let candidate = directory.join(name);
@@ -2030,6 +2080,13 @@ mod tests {
             },
             &call,
         )?;
+        std::fs::write(
+            state.join("config.toml"),
+            format!(
+                "schema_version = 1\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
+                home.join(".claude-other").display(),
+            ),
+        )?;
         let full = format!("Durable output instructions\n\n{prompt}");
         let launch = prepare_with(
             &registry,
@@ -2038,11 +2095,8 @@ mod tests {
             &paths,
             None,
             |adapter| {
-                if adapter == "cursor" {
-                    Ok(executable.clone())
-                } else {
-                    Err("unavailable".into())
-                }
+                assert_eq!(adapter, "cursor", "unrelated adapter was probed");
+                Ok(executable.clone())
             },
             None,
         )?;
@@ -2277,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn user_session_stores_resume_without_private_session_files()
+    fn user_sessions_and_pruned_codex_state_remain_resumable()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{AttemptId, Digest, RunId, TaskId};
         use provenant_records::{
@@ -2318,11 +2372,151 @@ mod tests {
             let result = continuation_for(&prior, &route, "fixture", state, state);
             if adapter == "codex" {
                 assert!(result.is_err(), "Codex still requires its retained state");
+                use provenant_core::{
+                    ActorId, CancelToken, MonoTime, RootInputs, TestClock, WaitBudget, WallTime,
+                };
+                use std::os::unix::fs::DirBuilderExt;
+                let temp = tempfile::tempdir()?;
+                let base = temp.path().canonicalize()?;
+                let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+                inputs.state_dir = Some(base.join("state"));
+                let roots = inputs.resolve(&provenant_supervisor::fs::LocalFs)?;
+                let context = run::ExecutionContext {
+                    state_root: roots.state,
+                    project_id: prior.project_id,
+                    actor_id: ActorId::from_bytes([5; 16]),
+                    read_prompts: true,
+                };
+                let clock = TestClock::new(WallTime::from_micros(100)?, MonoTime::from_micros(0));
+                let cancel = CancelToken::new();
+                let call = run::Request {
+                    clock: &clock,
+                    cancel: &cancel,
+                    budget: WaitBudget::cli(MonoTime::from_micros(0), 5)?,
+                };
+                let store = run::RunStore::open(&context, &call)?;
+                let request = run::PreparedRun {
+                    run_id: prior.run_id,
+                    operation_id: prior.operation_id.clone(),
+                    created_at: WallTime::from_micros(100)?,
+                    attempts: vec![run::NewAttempt {
+                        attempt_id: prior.attempt_id,
+                        task_id: prior.task_id,
+                        prompt: String::new(),
+                    }],
+                    request: serde_json::from_value(serde_json::json!({
+                        "schema_version": 1, "concurrency": 1, "parent": null,
+                        "tasks": [{ "task_id": prior.task_id, "prompt_digest": provenant_records::CanonicalV1::file_digest(b""),
+                            "route": prior.requested_route, "fallback": [], "authority_digest": prior.authority_digest,
+                            "provider_timeout_seconds": 20, "delivery_id": null }]
+                    }))?,
+                };
+                store.create(&request, &call)?;
+                let candidate = context.state_root.as_path().join(format!(
+                    "runs/{}/attempts/{}/provider-state/candidate-0",
+                    prior.run_id, prior.attempt_id
+                ));
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(candidate.join("sessions"))?;
+                std::fs::write(candidate.join("provider.txt"), "codex")?;
+                std::fs::write(
+                    candidate.join("sessions/fixture-session.jsonl"),
+                    "transcript",
+                )?;
+                for cache in ["cache", "plugins", "skills"] {
+                    std::fs::DirBuilder::new()
+                        .mode(0o700)
+                        .create(candidate.join(cache))?;
+                    std::fs::write(candidate.join(cache).join("payload"), "cache")?;
+                }
+                std::fs::write(candidate.join("models_cache.json"), "cache")?;
+                store.withdraw(
+                    prior.attempt_id,
+                    run::AttemptState::Queued,
+                    run::Outcome::Cancelled,
+                    "fixture",
+                    WallTime::from_micros(200)?,
+                    &call,
+                )?;
+                for cache in ["cache", "plugins", "skills", "models_cache.json"] {
+                    assert!(!candidate.join(cache).exists());
+                }
+                use std::os::unix::fs::MetadataExt;
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(candidate.join("cache"))?;
+                std::fs::write(candidate.join("cache/payload"), "pending deletion")?;
+                let metadata = std::fs::metadata(candidate.join("cache"))?;
+                let tombstone = format!(
+                    "{}{:016x}{:016x}-cache",
+                    run::TOMBSTONE,
+                    metadata.dev(),
+                    metadata.ino()
+                );
+                std::fs::rename(candidate.join("cache"), candidate.join(&tombstone))?;
+                let nested_tombstone = format!("sessions/{}interrupted", run::TOMBSTONE);
+                std::fs::write(candidate.join(&nested_tombstone), "pending deletion")?;
+
+                let copied = base.join("resumed-state");
+                let continuation = continuation_for(
+                    &prior,
+                    &route,
+                    "fixture",
+                    context.state_root.as_path(),
+                    &copied,
+                )?;
+                assert_eq!(continuation.session(), "fixture-session");
+                assert!(!copied.join(&tombstone).exists());
+                assert!(!copied.join(nested_tombstone).exists());
+                assert!(candidate.join(&tombstone).exists());
+                assert_eq!(
+                    std::fs::read_to_string(copied.join("sessions/fixture-session.jsonl"))?,
+                    "transcript"
+                );
             } else {
                 assert_eq!(result?.session(), "fixture-session");
                 prior.session = None;
                 assert!(continuation_for(&prior, &route, "fixture", state, state).is_err());
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_skips_only_top_level_codex_caches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(source.join("sessions"))?;
+        for name in ["cache", "plugins", "skills"] {
+            std::fs::create_dir(source.join(name))?;
+            std::fs::write(source.join(name).join("installed"), "partial cache")?;
+            std::fs::create_dir(source.join("sessions").join(name))?;
+            std::fs::write(source.join("sessions").join(name).join("keep"), "state")?;
+        }
+        std::fs::write(source.join("models_cache.json"), "cache")?;
+        std::fs::write(source.join("sessions/models_cache.json"), "state")?;
+        std::fs::write(source.join("sessions/rollout.jsonl"), "transcript")?;
+        for provider in [Some("codex"), Some("claude"), None] {
+            if let Some(provider) = provider {
+                std::fs::write(source.join("provider.txt"), provider)?;
+            } else {
+                std::fs::remove_file(source.join("provider.txt"))?;
+            }
+            let copied = base.join(provider.unwrap_or("legacy"));
+            copy_state(&source, &copied)?;
+            for name in ["cache", "plugins", "skills", "models_cache.json"] {
+                assert_eq!(copied.join(name).exists(), provider != Some("codex"));
+                assert!(copied.join("sessions").join(name).exists());
+                assert!(source.join(name).exists());
+            }
+            assert_eq!(
+                std::fs::read_to_string(copied.join("sessions/rollout.jsonl"))?,
+                "transcript"
+            );
         }
         Ok(())
     }
@@ -2693,7 +2887,7 @@ mod tests {
         let opened = std::rc::Rc::new(std::cell::Cell::new(false));
         let seen = std::rc::Rc::clone(&opened);
         BEFORE_OPEN.set(Some(Box::new(move |_| seen.set(true))));
-        let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget);
+        let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget, false);
         BEFORE_OPEN.set(None);
         assert!(matches!(result, Err(CopyRefusal::CrossDevice)));
         assert!(!opened.get(), "a mount point is refused before its open");

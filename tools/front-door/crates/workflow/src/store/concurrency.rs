@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used)]
+// Process integration tests use real time to bound coordination.
+#![allow(clippy::disallowed_methods)]
 
 use super::*;
 use crate::session::{HostSessionId, SessionStore};

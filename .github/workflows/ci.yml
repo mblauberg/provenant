@@ -337,6 +337,8 @@ jobs:
         run: scripts/check-retired-names
       - name: Check release-note fragments
         run: scripts/collate-release-notes --check
+      - name: Test release-note collation
+        run: scripts/test-collate-release-notes
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:

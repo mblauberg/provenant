@@ -276,6 +276,15 @@ impl RunStore {
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
+                    trace: provenant_records::Trace {
+                        host: self.host,
+                        project: Some(run.project_id),
+                        run: Some(run.run_id),
+                        attempt: Some(new.attempt_id),
+                        operation: Some(run.operation_id.clone()),
+                        actor: Some(run.actor_id),
+                        parent: input.request.parent.or(input.request.parent_attempt),
+                    },
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
@@ -328,7 +337,7 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;
-        let _writer = dir.lock(
+        let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
             call.budget,
@@ -357,7 +366,7 @@ impl RunStore {
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }
-        self.commit_terminal(
+        let result = self.commit_terminal(
             old,
             expected_revision,
             publication,
@@ -365,7 +374,12 @@ impl RunStore {
             outcome_exit,
             !exit.never_spawned,
             call,
-        )
+        );
+        drop(writer);
+        if let Ok(record) = &result {
+            self.settle_cleanup(record, call);
+        }
+        result
     }
     /// End an attempt that never reached a provider: refused before spawn or
     /// cancelled while queued. It has no custody to release and no exit.
@@ -385,7 +399,7 @@ impl RunStore {
         }
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;
-        let _writer = dir.lock(
+        let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
             call.budget,
@@ -449,8 +463,30 @@ impl RunStore {
             usage: UsageRecord::default(),
             session: None,
         };
-        self.commit_terminal(old, revision, &publication, None, None, false, call)
-            .map(Some)
+        let result = self
+            .commit_terminal(old, revision, &publication, None, None, false, call)
+            .map(Some);
+        drop(writer);
+        if let Ok(Some(record)) = &result {
+            self.settle_cleanup(record, call);
+        }
+        result
+    }
+    fn settle_cleanup(&self, record: &AttemptRecord, call: &Request<'_>) {
+        // The terminal record retains tmp before cleanup; clear that hint only
+        // after removal succeeds.
+        if let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) {
+            let _ = crate::retention::prune_caches(
+                &attempt_dir,
+                record,
+                false,
+                &mut ProviderStateGc::default(),
+            );
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            if remove_temporary_best_effort(&attempt_dir).is_ok() {
+                let _ = self.set_temporary_retained(record.attempt_id, false, call);
+            }
+        }
     }
     /// Seal result and terminal intent, then commit the attempt, run summary,
     /// operation state, released admission and event together. The caller
@@ -552,12 +588,7 @@ impl RunStore {
         }
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
-                if let Ok(attempt_dir) = self.attempt_dir(old.run_id, id, false) {
-                    self.set_temporary_retained(id, true, call)?;
-                    if remove_temporary_best_effort(&attempt_dir).is_ok() {
-                        let _ = self.set_temporary_retained(id, false, call);
-                    }
-                }
+                // The caller releases publication.lock before settlement cleanup.
                 return Ok(old);
             }
             return Err(RunError::Conflict);
@@ -608,11 +639,6 @@ impl RunStore {
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
-        // Retained is committed with the terminal record, so a crash before
-        // removal leaves discoverable work. Clearing the hint is best effort.
-        if remove_temporary_best_effort(&attempt_dir).is_ok() {
-            let _ = self.set_temporary_retained(id, false, call);
-        }
         #[cfg(test)]
         crate::tests::crash_at("committed");
         Ok(next)
@@ -704,6 +730,7 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
         attempt_id: attempt.attempt_id,
         revision: attempt.revision,
         change: attempt.state.clone(),
+        trace: attempt.trace.clone(),
     };
     db.execute(
         "INSERT INTO events(project,attempt,revision,record) VALUES (?1,?2,?3,?4)",

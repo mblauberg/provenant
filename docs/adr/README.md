@@ -19,7 +19,7 @@ historical evidence; the current Fabric owner is
 | [0004](0004-per-domain-truth-owners.md) | Per-domain truth owners, no god manifest | Accepted |
 | [0005](0005-lifecycle-kernel-extends-delivery.md) | Lifecycle kernel extends the delivery kernel | Accepted (amended 2026-07-15) |
 | [0006](0006-defer-backlog-contract.md) | Defer a canonical backlog contract | Superseded by ADR 0011 |
-| [0007](0007-defer-universal-retention-and-deletion.md) | Defer universal retention classes and typed deletion | Accepted (amended 2026-07-15) |
+| [0007](0007-defer-universal-retention-and-deletion.md) | Defer universal retention classes and typed deletion | Accepted; provider-state deferral superseded by ADR 0031 |
 | [0008](0008-review-pressure-risk-and-oracle-adjusted.md) | Risk/oracle-adjusted certifying review | Accepted; unimplemented follow-up superseded 2026-07-15; amended 2026-07-16; addendum 2026-07-22 |
 | [0009](0009-standalone-semantic-specifications.md) | Standalone semantic specifications | Accepted (amended 2026-07-28 by ADR 0017; 2026-08-31 issue-native amendment noted) |
 | [0010](0010-lifecycle-receipt-authority-distinct-trust-boundary.md) | The lifecycle receipt authority is a trust boundary distinct from provider authority compilation | Accepted; daemon-era implementation historical after ADR 0020; vocabulary boundary retained |
@@ -43,3 +43,4 @@ historical evidence; the current Fabric owner is
 | [0028](0028-rust-port-dependencies.md) | Port the whole project to Rust with a small crate allowlist | Accepted; landing method superseded by ADR 0029 |
 | [0029](0029-rust-rewrite-in-one-pass.md) | Rewrite in Rust in one pass, with no transition period | Accepted |
 | [0030](0030-defer-apfs-seeding-and-vm-backend.md) | Defer APFS clone seeding and a VM sandbox backend | Proposed |
+| [0031](0031-retain-provider-history-and-expire-resume-state.md) | Retain provider history and expire resume state | Accepted |

@@ -88,6 +88,8 @@ impl HolderContext {
     }
     /// Open the store, retrying transient failures for about 30 s so a busy
     /// host does not turn into a refused or stranded attempt.
+    // Transient database retries use real pauses between attempts.
+    #[allow(clippy::disallowed_methods)]
     pub fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
         let mut delay = std::time::Duration::from_millis(100);
         for _ in 0..10 {

@@ -239,7 +239,8 @@ pub fn plan_tick_with_settings(
     let mut drops = Vec::new();
     for record in records {
         // Keep past Google accounts so returning to a sign-in restores its cooldown.
-        if record.account.adapter != "agy"
+        if !provenant_records::AdapterSpec::get(&record.account.adapter)
+            .is_some_and(|spec| spec.retain_quota_accounts)
             && selected(&record.account.adapter)
             && detections.iter().any(|d| {
                 d.adapter == record.account.adapter
@@ -607,7 +608,10 @@ mod transition_tests {
     }
     #[test]
     fn detection_removes_only_authoritatively_absent_accounts_and_batches_probes() {
-        let records = [AccountRecord::empty(account("claude", "old"))];
+        let records = [
+            AccountRecord::empty(account("claude", "old")),
+            AccountRecord::empty(account("agy", "old")),
+        ];
         let tick = QuotaTick {
             adapter: None,
             trigger: Trigger::Manual,

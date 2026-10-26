@@ -316,6 +316,8 @@ impl Peer {
 }
 
 /// Poll `fetch` until the condition holds or `budget` passes.
+// Remote peer polling uses a hard real-time budget.
+#[allow(clippy::disallowed_methods)]
 fn poll_until(
     mut fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
     condition: Condition,
@@ -687,6 +689,9 @@ pub(super) fn output(
     };
     if command.tail.is_some() {
         return Err(unsupported("--tail"));
+    }
+    if command.trace {
+        return Err(unsupported("--trace"));
     }
     let peer = Peer::open_for(edge, [placement])?;
     let input = OutputInput::Read {

@@ -426,6 +426,7 @@ mod tests {
             attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
             revision,
             change: AttemptState::Running,
+            trace: Default::default(),
         }
     }
 

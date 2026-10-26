@@ -199,7 +199,8 @@ pub fn record_refusal(
 
 fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
     window == pool
-        || (adapter == "agy"
+        || (provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|spec| spec.grouped_quota_pools)
             && window
                 .split_once('.')
                 .is_some_and(|(group, _)| group == pool))

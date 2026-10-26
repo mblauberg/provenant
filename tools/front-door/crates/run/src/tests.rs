@@ -443,6 +443,29 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
 }
 
 #[test]
+fn created_attempt_and_event_carry_the_host_and_submitting_parent() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let host = provenant_core::HostId::from_bytes([8; 16]);
+    let store = RunStore::open(&context, &call)?.with_host(host);
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut input = input();
+    input.request.parent_attempt = Some(parent);
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let record = store.record(id, &call)?;
+    assert_eq!(record.trace.host, Some(host));
+    assert_eq!(record.trace.parent, Some(parent));
+    let events = store.events(0, 64, Some(id), &call)?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].trace, record.trace);
+    Ok(())
+}
+
+#[test]
 fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -558,6 +581,19 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let events = store.events(0, 64, None, &call)?;
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].revision, record.revision);
+    // The edge supplied no host, so only that field stays unknown.
+    let trace = provenant_records::Trace {
+        host: None,
+        project: Some(context.project_id),
+        run: Some(run.run_id),
+        attempt: Some(id),
+        operation: Some(input.operation_id.clone()),
+        actor: Some(context.actor_id),
+        parent: None,
+    };
+    assert_eq!(record.trace, trace);
+    assert_eq!(store.attempt(id, &call)?.trace, trace);
+    assert!(events.iter().all(|event| event.trace == trace));
     let mut replacement = publication();
     replacement.result = "different";
     assert!(matches!(

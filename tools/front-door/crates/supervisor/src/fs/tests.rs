@@ -378,6 +378,12 @@ impl Clock for FixedClock {
     fn mono_now(&self) -> provenant_core::MonoTime {
         self.0
     }
+    fn wait_until(
+        &self,
+        _deadline: provenant_core::MonoTime,
+    ) -> std::result::Result<(), provenant_core::TimeError> {
+        Ok(())
+    }
 }
 
 fn one_second_budget() -> WaitBudget {

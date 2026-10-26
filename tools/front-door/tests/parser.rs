@@ -219,6 +219,21 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
     assert_eq!(value["data"]["text"], "hello");
 
+    let trace = rig.command(&["output", &attempt, "--trace", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&trace.stdout.bytes)?;
+    let hops = value["data"]["trace"].as_array().ok_or("trace")?;
+    assert_eq!(hops.len(), 1, "{value}");
+    assert_eq!(hops[0]["run"], lane["run_id"]);
+    assert_eq!(hops[0]["attempt"], lane["attempt_id"]);
+    assert!(hops[0]["parent"].is_null());
+    let human = rig.command(&["output", &attempt, "--trace"])?;
+    let line = String::from_utf8(human.stdout.bytes.clone())?;
+    assert_eq!(line.lines().count(), 1, "{line}");
+    assert!(line.contains(&format!(
+        "attempt={}",
+        lane["attempt_id"].as_str().ok_or("id")?
+    )));
+
     let cancel = rig.command(&["cancel", &attempt, "--operation-id", "stop", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&cancel.stdout.bytes)?;
     assert_eq!(
@@ -527,10 +542,8 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     assert_eq!(code(&human), 0);
     let text = String::from_utf8_lossy(&human.stdout.bytes);
     assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(
-        text.ends_with(" profile=balanced schema_version=1\n"),
-        "{text}"
-    );
+    assert!(text.contains(" profile=balanced "), "{text}");
+    assert!(text.ends_with(" schema_version=1\n"), "{text}");
     assert!(!rig.state.exists());
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(

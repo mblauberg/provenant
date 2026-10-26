@@ -1,3 +1,6 @@
+// Integration fixtures use real time to bound process coordination.
+#![allow(clippy::disallowed_methods)]
+
 #[path = "../tests/support/mod.rs"]
 pub(super) mod support;
 use provenant_core::Clock;
@@ -12,7 +15,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use support::{Result, TestRig, code};
+use support::{Result, TestRig, code, eventually};
 
 // Only the harness=false target compiles these observations. The installed
 // binary has no fixture flag, feature or environment override.
@@ -50,6 +53,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
+            "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
             "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
@@ -96,6 +100,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
+                }
+                "provider_state_gc_sweeps_children_and_refuses_replaced_roots" => {
+                    crate::provider_retention::provider_state_gc_sweeps_children_and_refuses_replaced_roots()
                 }
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()
@@ -1040,17 +1047,23 @@ fn await_terminal(
     attempt: provenant_core::AttemptId,
     call: &provenant_run::Request<'_>,
 ) -> Result<provenant_run::AttemptRecord> {
-    let deadline = Instant::now() + Duration::from_secs(12);
-    loop {
-        let record = store.record(attempt, call)?;
-        if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) {
-            return Ok(record);
+    let mut result = None;
+    if !eventually(Duration::from_secs(12), || {
+        match store.record(attempt, call) {
+            Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
+                result = Some(Ok(record));
+                true
+            }
+            Ok(_) => false,
+            Err(error) => {
+                result = Some(Err(error));
+                true
+            }
         }
-        if Instant::now() >= deadline {
-            return Err("writer attempt did not reach terminal state".into());
-        }
-        thread::yield_now();
+    }) {
+        return Err("writer attempt did not reach terminal state".into());
     }
+    Ok(result.expect("eventually returned on terminal state or error")?)
 }
 
 fn assert_terminal_outcome(
@@ -1065,23 +1078,25 @@ fn assert_terminal_outcome(
 }
 
 pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !store.writer_fences()?.is_empty() {
-        if Instant::now() >= deadline {
-            return Err("writer reservation was not released after terminal publication".into());
+    let mut failure = None;
+    let released = eventually(Duration::from_secs(5), || match store.writer_fences() {
+        Ok(fences) => fences.is_empty(),
+        Err(error) => {
+            failure = Some(error);
+            true
         }
-        thread::yield_now();
+    });
+    if let Some(error) = failure {
+        return Err(error.into());
     }
-    Ok(())
+    released
+        .then_some(())
+        .ok_or_else(|| "writer reservation was not released after terminal publication".into())
 }
 
 fn wait_for_path(path: &Path, timeout: Duration, label: &str) -> Result {
-    let deadline = Instant::now() + timeout;
-    while !path.exists() {
-        if Instant::now() >= deadline {
-            return Err(format!("timed out waiting for {label}: {}", path.display()).into());
-        }
-        thread::yield_now();
+    if !eventually(timeout, || path.exists()) {
+        return Err(format!("timed out waiting for {label}: {}", path.display()).into());
     }
     Ok(())
 }
@@ -1153,12 +1168,8 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
             let ready = worktree.join(".writer-fixture-ready");
             let release = worktree.join(".writer-fixture-release");
             fs::write(&ready, b"ready")?;
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !release.exists() {
-                if Instant::now() >= deadline {
-                    return Err("writer fixture hold timed out".into());
-                }
-                thread::yield_now();
+            if !eventually(Duration::from_secs(10), || release.exists()) {
+                return Err("writer fixture hold timed out".into());
             }
         }
         _ => return Err("unknown writer provider fixture mode".into()),
