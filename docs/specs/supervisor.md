@@ -213,7 +213,11 @@ home or tmp grants.
   write it.
 - **Network.** A level: `provider` (the profile's API endpoints only, the
   read-only default), `local` (adds localhost and the Postgres socket) or
-  `open` (adds any outbound, the writer default).
+  `open` (adds any outbound, the writer default). `open` adds IP peers only.
+  At every level a lane's only Unix-socket peers are the system DNS responder
+  and, from `local`, the Postgres socket. Read-only and writer lanes therefore
+  cannot connect to the peer agent's `<state>/peer-agent/peer.sock`, which
+  relays to unconfined `fabric peer` children; a native probe proves it.
 - **Toolchains.** Lanes use the user's own toolchains in place. `~/.cargo` and
   `~/.rustup` are readable with `RUSTUP_HOME` and `RUSTUP_AUTO_INSTALL=0`.
   No lane may write a store the host later runs unconfined: the Cargo registry
@@ -465,7 +469,7 @@ and every harness config path before it starts children.
 |---|---|
 | `crates/supervisor/src` unit tests and `custody_tests.rs` | State-machine transitions, natural-exit precedence, unknown identities, failed signals, stale generations, integer and size bounds, capture and discard modes, lock budgets and cancellation, both publication modes including post-rename sync failure |
 | `crates/supervisor/tests/custody.rs`, `process.rs`, `publication.rs` | Fast exit before watch, inherited ignored SIGCHLD and masks, prelaunch, live and late cancellation, a silent healthy provider, stdin EOF, a terminal frame after the cap, PID reuse, a TERM-resistant provider, `setsid` grandchildren, nested owners, an unlocked-lock impostor, shared hosts, incomplete census, parent death leaving guardian and lease live, racing recoverers and late publishers, injected ENOSPC and post-link fsync with retained custody and no healthy-provider signal |
-| `crates/confinement/src` tests and `tests/fixtures/external` | Credential, config and protected reads; ref, index and gitfile redirects; hard-link, symlink and root swaps; denied IPC and network; outside writes; secret chunk splits; scratch classification and drift; quarantine failure preserving unrelated work; backend probe and compile refusal; fixed Git and `gh` argv with arbitrary operations refused |
+| `crates/confinement/src` tests and `tests/fixtures/external` | Credential, config and protected reads; ref, index and gitfile redirects; hard-link, symlink and root swaps; denied IPC and network, including the peer agent socket from both lane kinds; outside writes; secret chunk splits; scratch classification and drift; quarantine failure preserving unrelated work; backend probe and compile refusal; fixed Git and `gh` argv with arbitrary operations refused |
 | `tools/front-door/tests/worktree_driver.rs`, `dispatch_provider.rs`, `fake_provider.rs` | The public worktree commands and launch, wait, cancel and recover through the built binary against isolated fake providers and temporary repositories |
 
 Unsafe blocks get a second reviewer. CI runs the Linux workspace tests and the
