@@ -4,13 +4,6 @@ use provenant_records::{Harness, Limits, decode_jsonc};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, io::Cursor, path::Path};
 
-pub(crate) fn command(spec: &HookRegistration, targets: &Targets) -> Result<String, InstallError> {
-    hook_command(
-        spec,
-        &targets.bin_dir.join("provenant"),
-        targets.roots.state.as_path(),
-    )
-}
 fn hook_command(
     spec: &HookRegistration,
     binary: &Path,
@@ -137,7 +130,7 @@ pub(crate) fn set(
     Ok(out)
 }
 /// Replace exact manifest leaves in place, then append only missing registry
-/// registrations. Old `remove` entries are handled by the legacy cleaner.
+/// registrations.
 pub(crate) struct Registration {
     pub bytes: Vec<u8>,
     pub changes: Vec<SelectorChange>,
@@ -178,39 +171,6 @@ pub(crate) fn register(
         });
         if !targets.hooks && !was_owned {
             continue;
-        }
-        if let Some(checkout) = &targets.legacy_checkout {
-            let root: Value = decode_jsonc(Cursor::new(&out), Limits::CONFIG)?;
-            if let Some(groups) = root
-                .get("hooks")
-                .and_then(|h| h.get(spec.event))
-                .and_then(Value::as_array)
-            {
-                for (g, group) in groups.iter().enumerate() {
-                    if group.get("matcher").and_then(Value::as_str) != spec.matcher {
-                        continue;
-                    }
-                    for (h, leaf) in group
-                        .get("hooks")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .enumerate()
-                    {
-                        if crate::legacy::replace_hook_matches(leaf, spec, checkout, &targets.home)?
-                        {
-                            let path =
-                                ["hooks", spec.event, &g.to_string(), "hooks", &h.to_string()];
-                            out = splice::set(&out, &path, Some(&desired))?;
-                            changes.push(SelectorChange {
-                                selector: path.join("."),
-                                before: Some(leaf.clone()),
-                                after: Some(desired.clone()),
-                            });
-                        }
-                    }
-                }
-            }
         }
         if let Some(existing) = get(&out, &sel)? {
             if existing != desired {

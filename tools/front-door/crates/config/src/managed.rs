@@ -59,8 +59,8 @@ pub enum InstallError {
     HarnessSelection,
     #[error("hook registration refused: no fixture-backed HookSpec is available")]
     HooksUnavailable,
-    #[error("legacy cut-over unresolved: {0}")]
-    LegacyUnresolved(&'static str),
+    #[error("invalid installation receipt: {0}; reinstall Provenant")]
+    ReceiptDecode(#[source] provenant_records::DecodeError),
     #[error(transparent)]
     Config(#[from] crate::ConfigError),
     #[error("invalid harness configuration: {0}")]
@@ -135,7 +135,7 @@ pub struct HarnessTarget {
     pub instruction: Option<PathBuf>,
 }
 /// Fixture-backed registration supplied by the CLI composition root.
-/// `None` harness denotes Git, whose launcher is installed in verified hooks.
+/// `None` harness denotes Git, outside the managed harness configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct HookRegistration {
     pub harness: Option<Harness>,
@@ -160,8 +160,6 @@ pub struct Targets {
     /// Exact recognised historical rendering, for migration from pre-receipt agents.
     pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
-    pub legacy_checkout: Option<PathBuf>,
-    pub git_hooks_dir: Option<PathBuf>,
     pub protected_roots: Vec<PathBuf>,
     pub(crate) configured_homes: BTreeSet<Harness>,
     pub(crate) configured_configs: BTreeSet<Harness>,
@@ -217,8 +215,6 @@ impl Targets {
             gc_agent: None,
             peer_agent_previous: None,
             hook_specs: Vec::new(),
-            legacy_checkout: None,
-            git_hooks_dir: None,
             protected_roots: Vec::new(),
             configured_homes: BTreeSet::new(),
             configured_configs: BTreeSet::new(),
@@ -260,7 +256,6 @@ impl Targets {
         if self
             .protected_roots
             .iter()
-            .chain(self.legacy_checkout.iter())
             .any(|root| global.starts_with(root))
         {
             return Err(InstallError::Conflict(global));
@@ -298,15 +293,6 @@ impl Targets {
             if self.roots.state.as_path().starts_with(root) {
                 return Err(InstallError::Conflict(self.roots.state.as_path().into()));
             }
-        }
-        if let Some(path) = &self.legacy_checkout {
-            normal_absolute(path)?;
-            if self.roots.state.as_path().starts_with(path) {
-                return Err(InstallError::Conflict(self.roots.state.as_path().into()));
-            }
-        }
-        if let Some(path) = &self.git_hooks_dir {
-            normal_absolute(path)?;
         }
         normal_absolute(&self.bin_dir)?;
         let mut file_paths = BTreeSet::new();
@@ -347,7 +333,6 @@ impl Targets {
                 || self
                     .protected_roots
                     .iter()
-                    .chain(self.legacy_checkout.iter())
                     .any(|root| path.starts_with(root))
             {
                 return Err(InstallError::Conflict(path.clone()));
@@ -379,7 +364,6 @@ pub struct Snapshots {
     receipt: Option<InstallReceipt>,
     harness: crate::harness::HarnessPlan,
     stale_targets: BTreeSet<TargetId>,
-    stale_legacy: bool,
 }
 #[derive(Debug)]
 pub struct InstallPlan {
@@ -505,14 +489,12 @@ impl Snapshots {
             .as_ref()
             .map(|decoded| decoded.stale_targets.clone())
             .unwrap_or_default();
-        let stale_legacy = receipt.as_ref().is_some_and(|decoded| decoded.stale_legacy);
         let receipt = receipt.map(|decoded| decoded.receipt);
         let selected: BTreeSet<_> = targets.harnesses.iter().map(HarnessTarget::id).collect();
         let mut paths: BTreeSet<_> = desired.keys().cloned().collect();
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
                 if entry.selector == "binary"
-                    || entry.selector == "git-hook:pre-push"
                     || entry.selector == "gc-agent"
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
                         .is_some_and(|owner| selected.contains(&owner))
@@ -527,7 +509,7 @@ impl Snapshots {
             let current = if path == manifest_path {
                 manifest_snapshot.clone()
             } else {
-                crate::harness::snapshot_target(&path, targets, fs)?
+                snapshot_scoped(&path, targets.roots.state.as_path(), fs)?
             };
             if completed && path.starts_with(&installed) && current.is_none() {
                 return Err(InstallError::Tampered(path));
@@ -543,7 +525,6 @@ impl Snapshots {
             receipt,
             harness,
             stale_targets,
-            stale_legacy,
         })
     }
 }
@@ -588,13 +569,6 @@ fn desired(
                 .protected_roots
                 .iter()
                 .any(|root| p.starts_with(root))
-            {
-                return Err(InstallError::Conflict(p));
-            }
-            if targets
-                .legacy_checkout
-                .as_ref()
-                .is_some_and(|legacy| p.starts_with(legacy))
             {
                 return Err(InstallError::Conflict(p));
             }
@@ -764,34 +738,14 @@ fn validate_removal(
     path: &Path,
     targets: &Targets,
     source: Option<&Path>,
-    before: &Option<Snapshot>,
-    owned_git_hook: bool,
 ) -> Result<(), InstallError> {
     normal_absolute(path)?;
-    // The composition edge resolves this directory from the explicit checkout.
-    // Only a manifest-listed link to that checkout receives the exception.
-    let git_hook = match (&targets.legacy_checkout, &targets.git_hooks_dir, before) {
-        (
-            Some(checkout),
-            Some(directory),
-            Some(Snapshot {
-                value: Value::Link(actual),
-                ..
-            }),
-        ) => crate::legacy::git_hook_links(checkout)?.iter().any(|link| {
-            path == directory.join(&link.name) && same_link_target(actual, &link.target)
-        }),
-        _ => false,
-    };
-    let git_hook = git_hook || owned_git_hook;
     if path.starts_with(targets.roots.state.as_path())
         || source.is_some_and(|root| path.starts_with(root) || root.starts_with(path))
-        || (!git_hook
-            && targets
-                .protected_roots
-                .iter()
-                .chain(targets.legacy_checkout.iter())
-                .any(|root| path.starts_with(root)))
+        || targets
+            .protected_roots
+            .iter()
+            .any(|root| path.starts_with(root))
     {
         return Err(InstallError::Conflict(path.into()));
     }
@@ -814,19 +768,6 @@ pub(crate) fn matches_owned(value: &Value, expected: &OwnedValue) -> bool {
     owned(value).is_ok_and(|v| &v == expected)
 }
 
-pub(crate) fn same_link_target(actual: &Path, expected: &Path) -> bool {
-    if actual == expected {
-        return true;
-    }
-    match (
-        provenant_supervisor::fs::canonicalize(actual),
-        provenant_supervisor::fs::canonicalize(expected),
-    ) {
-        (Ok(actual), Ok(expected)) => actual == expected,
-        _ => false,
-    }
-}
-
 pub fn plan_install(
     release: Release,
     targets: Targets,
@@ -835,56 +776,14 @@ pub fn plan_install(
     let mut desired = desired(&release, &targets)?;
     for (path, value) in &snapshots.harness.files {
         normal_absolute(path)?;
-        // The only write inside the explicitly selected legacy checkout is
-        // replacement of its exact compiled pre-push link. The Git directory
-        // was resolved at the process edge, independently of --project.
-        let legacy_git_hook = if let (
-            Some(checkout),
-            Some(directory),
-            Some(Some(Snapshot {
-                value: Value::Link(actual),
-                ..
-            })),
-        ) = (
-            &targets.legacy_checkout,
-            &targets.git_hooks_dir,
-            snapshots.entries.get(path),
-        ) {
-            targets.hooks
-                && snapshots.harness.authorised.contains(path)
-                && crate::legacy::git_hook_links(checkout)?.iter().any(|link| {
-                    link.retained
-                        && path == &directory.join(&link.name)
-                        && same_link_target(actual, &link.target)
-                })
-        } else {
-            false
-        };
-        let git_hook = legacy_git_hook
-            || snapshots.receipt.as_ref().is_some_and(|receipt| {
-                receipt.entries.iter().any(|entry| {
-                    entry.selector == "git-hook:pre-push"
-                        && entry.path.to_path_buf().is_ok_and(|owned| &owned == path)
-                        && snapshots
-                            .entries
-                            .get(path)
-                            .and_then(Option::as_ref)
-                            .is_some_and(|current| matches_owned(&current.value, &entry.expected))
-                })
-            });
         if desired.contains_key(path)
             || path.starts_with(targets.roots.state.as_path())
             || path.starts_with(&release.source)
             || release.source.starts_with(path)
-            || (!git_hook
-                && (targets
-                    .protected_roots
-                    .iter()
-                    .any(|root| path.starts_with(root))
-                    || targets
-                        .legacy_checkout
-                        .as_ref()
-                        .is_some_and(|checkout| path.starts_with(checkout))))
+            || targets
+                .protected_roots
+                .iter()
+                .any(|root| path.starts_with(root))
         {
             return Err(InstallError::Conflict(path.clone()));
         }
@@ -958,12 +857,6 @@ pub fn plan_install(
                 if immutable && complete {
                     return Err(InstallError::Tampered(path.clone()));
                 }
-                let legacy = snapshots.harness.authorised.contains(path)
-                    || (want.selector == "binary"
-                        && targets.legacy_checkout.is_some()
-                        && crate::legacy::legacy_shim(&targets.home)?
-                            .is_some_and(|shim| shim.retained && &shim.path == path)
-                        && matches!(&current.value, Value::File { bytes, .. } if crate::legacy::legacy_shim_matches(bytes)));
                 let legacy_peer = want.selector == "peer-agent"
                     && !snapshots.receipt.as_ref().is_some_and(|receipt| {
                         receipt
@@ -976,7 +869,6 @@ pub fn plan_install(
                 if !immutable
                     && !was_owned
                     && !adopt_binary
-                    && !legacy
                     && !legacy_peer
                     && want.selector != "config"
                 {
@@ -1039,18 +931,11 @@ pub fn plan_install(
             {
                 continue;
             }
-            if (entry.selector == "git-hook:pre-push" && !targets.remove_hooks)
-                || entry.selector == "peer-agent"
-            {
-                if entry.selector == "peer-agent" {
-                    entries.push(entry.clone());
-                }
+            if entry.selector == "peer-agent" {
+                entries.push(entry.clone());
                 continue;
             }
-            if !matches!(
-                entry.selector.as_str(),
-                "binary" | "git-hook:pre-push" | "gc-agent"
-            ) {
+            if !matches!(entry.selector.as_str(), "binary" | "gc-agent") {
                 let Some(owner) = owner else {
                     continue;
                 };
@@ -1087,43 +972,10 @@ pub fn plan_install(
         }
     }
 
-    for path in &snapshots.harness.removals {
-        if actions
-            .iter()
-            .any(|a| a.path.to_path_buf().is_ok_and(|p| &p == path))
-        {
-            continue;
-        }
-        let before = snapshots
-            .entries
-            .get(path)
-            .ok_or_else(|| InstallError::Drift(path.clone()))?;
-        if before.is_some() {
-            actions.push(Action {
-                path: AbsolutePath::new(path)?,
-                disposition: Disposition::Remove,
-                selector: "legacy".into(),
-                before: before.as_ref().and_then(|s| owned(&s.value).ok()),
-                after: None,
-                identity: identity(before),
-                edits: Vec::new(),
-            });
-        }
-    }
     for action in &actions {
         if action.disposition == Disposition::Remove {
             let path = action.path.to_path_buf()?;
-            let before = snapshots
-                .entries
-                .get(&path)
-                .ok_or_else(|| InstallError::Drift(path.clone()))?;
-            validate_removal(
-                &path,
-                &targets,
-                Some(&release.source),
-                before,
-                action.selector == "git-hook:pre-push",
-            )?;
+            validate_removal(&path, &targets, Some(&release.source))?;
         }
     }
     for action in &mut actions {
@@ -1134,22 +986,6 @@ pub fn plan_install(
                 .get(&path)
                 .cloned()
                 .unwrap_or_default();
-        }
-    }
-    if targets.legacy_checkout.is_some() {
-        for entry in &entries {
-            if entry.selector == "git-hook:pre-push" {
-                let path = entry.path.to_path_buf()?;
-                if targets
-                    .git_hooks_dir
-                    .as_ref()
-                    .is_none_or(|dir| path != dir.join("pre-push"))
-                {
-                    // One receipt records one legacy hooks directory. Remove
-                    // or relinquish its launcher before migrating another.
-                    return Err(InstallError::Conflict(path));
-                }
-            }
         }
     }
     let mut resolved_targets = BTreeMap::new();
@@ -1188,46 +1024,6 @@ pub fn plan_install(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let mut legacy = match &targets.legacy_checkout {
-        Some(checkout) => Some(provenant_records::LegacyInstall {
-            checkout: AbsolutePath::new(checkout)?,
-            home: AbsolutePath::new(&targets.home)?,
-            manifest_digest: crate::legacy::manifest_digest(),
-            git_hooks_dir: targets
-                .git_hooks_dir
-                .as_deref()
-                .map(AbsolutePath::new)
-                .transpose()?,
-            relinquished_hooks: Vec::new(),
-        }),
-        None if !snapshots.stale_legacy => {
-            snapshots.receipt.as_ref().and_then(|r| r.legacy.clone())
-        }
-        None => None,
-    };
-    if let Some(legacy) = &mut legacy
-        && let Some(previous) = &snapshots.receipt
-        && previous
-            .legacy
-            .as_ref()
-            .is_some_and(|old| old.git_hooks_dir == legacy.git_hooks_dir)
-    {
-        // Once ownership ends, the edited hook is user state. Stop auditing
-        // that hook only; its neighbours keep their legacy audits.
-        for entry in &previous.entries {
-            if let Some(name) = entry.selector.strip_prefix("git-hook:")
-                && !entries.iter().any(|kept| kept.selector == entry.selector)
-                && !legacy.relinquished_hooks.iter().any(|hook| hook == name)
-            {
-                legacy.relinquished_hooks.push(name.to_owned());
-            }
-        }
-    }
-    if legacy.is_none() {
-        // Outside-home hooks keep their existing actions, but ownership needs
-        // the legacy record that validates their directory.
-        entries.retain(|entry| entry.selector != "git-hook:pre-push");
-    }
     let receipt = InstallReceipt {
         schema_version: 1,
         source_digest: release.manifest.source_digest,
@@ -1239,7 +1035,7 @@ pub fn plan_install(
         harnesses,
         harness_targets: resolved_targets.into_values().collect(),
         entries,
-        legacy,
+        legacy: None,
     };
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
     let bytes = provenant_records::encode(&receipt)?;
@@ -1292,7 +1088,6 @@ pub fn plan_install(
             "release" => 0,
             "binary" => 2,
             "receipt" => 5,
-            "legacy" => 3,
             _ => 4,
         }
     });
@@ -1351,7 +1146,7 @@ pub fn install(
     )?;
     // Validate the complete preview before the first authoritative file write.
     for (path, before) in &plan.before.entries {
-        if &crate::harness::snapshot_target(path, &plan.targets, fs)? != before {
+        if &snapshot_scoped(path, plan.targets.roots.state.as_path(), fs)? != before {
             return Err(InstallError::Drift(path.clone()));
         }
     }
@@ -1823,31 +1618,6 @@ pub fn installed_binary(
         .map(|decoded| Ok(decoded.receipt.bin_dir.to_path_buf()?.join("provenant")))
         .transpose()
 }
-/// Recorded legacy checkout when uninstall of `targets` removes the receipt's
-/// Git pre-push launcher, which needs every recorded target selected. The edge
-/// re-derives the hooks directory for uninstall instead of trusting the
-/// receipt's copy.
-pub fn recorded_hook_checkout(
-    targets: &Targets,
-    fs: &dyn SafeFs,
-) -> Result<Option<PathBuf>, InstallError> {
-    let Some(Decoded { receipt, .. }) = read_receipt_inspected(targets, fs, None)? else {
-        return Ok(None);
-    };
-    let (selected, registered) = uninstall_selection(&receipt, targets)?;
-    if selected != registered
-        || !receipt
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "git-hook:pre-push")
-    {
-        return Ok(None);
-    }
-    receipt
-        .legacy
-        .map(|legacy| Ok(legacy.checkout.to_path_buf()?))
-        .transpose()
-}
 /// The recorded targets uninstall of `targets` selects, and every recorded
 /// target. Shared entries go only when the two match.
 fn uninstall_selection(
@@ -1888,7 +1658,6 @@ struct Decoded {
     receipt: InstallReceipt,
     moved: Option<PathBuf>,
     stale: Vec<OwnedEntry>,
-    stale_legacy: bool,
     stale_targets: BTreeSet<TargetId>,
 }
 impl Decoded {
@@ -1908,16 +1677,10 @@ impl Decoded {
     }
 }
 fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
-    let mut receipt: InstallReceipt = provenant_records::decode_v1(bytes, Limits::CONFIG)?;
+    let mut receipt: InstallReceipt =
+        provenant_records::decode_v1(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
     let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
-    if let Some(legacy) = &receipt.legacy {
-        normal_absolute(&legacy.checkout.to_path_buf()?)?;
-        normal_absolute(&legacy.home.to_path_buf()?)?;
-        if legacy.manifest_digest != crate::legacy::manifest_digest() {
-            return Err(InstallError::Manifest("legacy manifest digest differs"));
-        }
-    }
     let mut harnesses = BTreeSet::new();
     for harness in &receipt.harnesses {
         if !harnesses.insert(*harness) {
@@ -1980,11 +1743,6 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
     let home = provenant_supervisor::fs::canonicalize(&targets.home)
         .unwrap_or_else(|_| targets.home.clone());
     let bin_dir = receipt.bin_dir.to_path_buf()?;
-    let legacy_home = receipt
-        .legacy
-        .as_ref()
-        .map(|legacy| legacy.home.to_path_buf())
-        .transpose()?;
     let before_tail = |path: &Path, tail: &Path| {
         path.ancestors()
             .nth(tail.components().count())
@@ -2018,7 +1776,6 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             old_homes.push(before_tail(&recorded.skills_dir.to_path_buf()?, tail));
         }
     }
-    old_homes.push(legacy_home.clone());
     // A coincidental suffix match within HOME (or above it) is not a rename.
     let separate_home = |old: &Path| {
         !old.starts_with(&home)
@@ -2027,7 +1784,6 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             && !targets.home.starts_with(old)
     };
     let old_home = old_homes.iter().flatten().find(|old| separate_home(old));
-    let stale_legacy = legacy_home.as_deref().is_some_and(separate_home);
     let mut stale_targets = BTreeSet::new();
     for target in &receipt.harness_targets {
         let target_paths = [
@@ -2077,7 +1833,6 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         receipt,
         moved,
         stale,
-        stale_legacy,
         stale_targets,
     })
 }
@@ -2154,17 +1909,6 @@ fn permitted_entry(
                         ..
                     }
                 ));
-        }
-        if entry.selector == "git-hook:pre-push" {
-            return Ok(receipt
-                .legacy
-                .as_ref()
-                .and_then(|legacy| legacy.git_hooks_dir.as_ref())
-                .is_some_and(|dir| {
-                    dir.to_path_buf()
-                        .is_ok_and(|dir| path == dir.join("pre-push"))
-                })
-                && matches!(entry.expected, OwnedValue::File { mode: 0o755, .. }));
         }
         let binary = receipt.bin_dir.to_path_buf()?.join("provenant");
         let expected_target = release_root(state_root, receipt.source_digest).join("bin/provenant");
@@ -2289,7 +2033,7 @@ pub fn inspect_install(
                 | InstallError::Path(_)
                 | InstallError::InvalidConfig(_)
                 | InstallError::ConfigFile(_)
-                | InstallError::LegacyUnresolved(_)
+                | InstallError::ReceiptDecode(_)
                 | InstallError::Config(_)),
             ) => (Vec::new(), Some(error)),
             Err(error) => return Err(error),
@@ -2397,13 +2141,6 @@ fn check_install_inspected(
             });
         }
     }
-    // Legacy audits also inspect recorded home and target paths.
-    if decoded.moved.is_none()
-        && !decoded.stale_legacy
-        && let Some(legacy) = &receipt.legacy
-    {
-        crate::harness::check_legacy(&receipt, legacy, &mut findings, evidence, fs)?;
-    }
     Ok(findings)
 }
 
@@ -2456,7 +2193,6 @@ pub fn uninstall(
         mut receipt,
         moved,
         stale,
-        stale_legacy: _,
         stale_targets: _,
     } = decoded;
     let (selected, registered) = uninstall_selection(&receipt, targets)?;
@@ -2499,10 +2235,8 @@ pub fn uninstall(
     }
     let removed = |entry: &OwnedEntry, owner: &Option<TargetId>| {
         owner.as_ref().is_some_and(|id| selected.contains(id))
-            || (matches!(
-                entry.selector.as_str(),
-                "git-hook:pre-push" | "peer-agent" | "gc-agent"
-            ) && selected == registered)
+            || (matches!(entry.selector.as_str(), "peer-agent" | "gc-agent")
+                && selected == registered)
     };
 
     let mut removals = Vec::new();
@@ -2516,21 +2250,6 @@ pub fn uninstall(
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
-        if entry.selector == "git-hook:pre-push" {
-            // The receipt's hooks directory is user-editable evidence. The edge
-            // re-derives it from the recorded checkout; a gone checkout leaves
-            // the launcher and reports it, and any other directory refuses.
-            let Some(directory) = &targets.git_hooks_dir else {
-                findings.push(InstallFinding {
-                    rule: "legacy_checkout_unavailable".into(),
-                    path: entry.path.clone(),
-                });
-                continue;
-            };
-            if path != directory.join("pre-push") {
-                return Err(InstallError::Conflict(path));
-            }
-        }
         if matches!(entry.expected, OwnedValue::Selector { .. }) {
             let before = snapshot(&path, fs)?;
             if let Some(before) = before {
@@ -2634,12 +2353,8 @@ pub fn uninstall(
         edits: Vec::new(),
     });
 
-    for (path, before) in &removals {
-        let owned_git_hook = actions.iter().any(|action| {
-            action.selector == "git-hook:pre-push"
-                && action.path.to_path_buf().is_ok_and(|owned| &owned == path)
-        });
-        validate_removal(path, targets, None, before, owned_git_hook)?;
+    for (path, _) in &removals {
+        validate_removal(path, targets, None)?;
     }
     reporter.preview(&actions).map_err(InstallError::Preview)?;
     reporter

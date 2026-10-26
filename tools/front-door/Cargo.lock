@@ -543,6 +543,7 @@ version = "1.0.0"
 dependencies = [
  "provenant-core",
  "provenant-records",
+ "provenant-sqlite",
  "provenant-supervisor",
  "rusqlite",
  "serde",
@@ -617,12 +618,22 @@ dependencies = [
  "provenant-confinement",
  "provenant-core",
  "provenant-records",
+ "provenant-sqlite",
  "provenant-supervisor",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "provenant-sqlite"
+version = "1.0.0"
+dependencies = [
+ "provenant-core",
+ "provenant-supervisor",
+ "rusqlite",
 ]
 
 [[package]]

@@ -27,9 +27,6 @@ pub struct Install {
     /// Adopt matching existing files instead of refusing
     #[arg(long)]
     pub adopt_existing: bool,
-    /// Legacy checkout to migrate from
-    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
-    pub legacy_checkout: Option<PathBuf>,
     /// Plan the install without changing anything
     #[arg(long)]
     pub dry_run: bool,
@@ -56,14 +53,12 @@ pub fn configured_targets(
     fs: &dyn SafeFs,
     claude_config_dir: Option<&Path>,
     codex_home: Option<&Path>,
-    git_hooks_dir: Option<PathBuf>,
 ) -> Result<Targets, InstallError> {
     let mut targets = Targets::new(roots, home, harnesses);
     // Validate against every registered domain, so sections other commands
     // write (accounts, routing, quota) never block installation.
     config::apply_install_config_with_domains(&mut targets, fs, &crate::domains::SECTIONS)?;
     targets.apply_environment(claude_config_dir, codex_home)?;
-    targets.git_hooks_dir = git_hooks_dir;
     Ok(targets)
 }
 
@@ -83,15 +78,7 @@ pub fn execute_install(
     targets.adopt_existing = args.adopt_existing;
     targets.hooks = matches!(args.hooks, Some(Switch::On));
     targets.remove_hooks = matches!(args.hooks, Some(Switch::Off));
-    targets.legacy_checkout = args.legacy_checkout.clone();
     targets.validate()?;
-    if targets
-        .legacy_checkout
-        .as_ref()
-        .is_some_and(|root| args.source.starts_with(root))
-    {
-        return Err(InstallError::Conflict(args.source.clone()));
-    }
     let release = Release::read(&args.source, target, context.fs)?;
     config::plan_and_install(&release, &targets, context, reporter, smoke, args.dry_run)
 }

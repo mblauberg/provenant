@@ -1,8 +1,7 @@
-[env]
-# The integration tests copy the binary and execute it. On Linux a parallel
-# test's fork can inherit the copy's write descriptor, and exec then fails with
-# ETXTBSY, so the suite runs serially; it takes well under a second.
-RUST_TEST_THREADS = "1"
+# Tests are run with nextest, which gives each test its own process; the
+# `serial-process` group in .config/nextest.toml orders the ones that share
+# cross-process state. Plain `cargo test` is multi-threaded; test support
+# serialises child spawns with executable copies to avoid Linux ETXTBSY.
 
 [build]
 # This repository setting overrides build.rustc-wrapper in global Cargo config.

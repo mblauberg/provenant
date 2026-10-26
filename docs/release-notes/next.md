@@ -9,17 +9,34 @@ configuration, the release packager (`examples/package-release.rs`) and the
 bundled assets. Edits under a member's `tests/`, `benches/` and other `examples/`
 no longer change it.
 
+## Stability
+
+The v1.0.0 stability promise is withdrawn. Commands, flags, `--json` output,
+`config.toml` keys, the state layout and Fabric MCP tool names and schemas can
+change in any release, with no deprecation period or compatibility shims. Each
+release's notes list its breaking changes. Upgrade every host together, since
+peers on different versions are not supported.
+
 ## Breaking changes
 
 - Every peer request and reply envelope now carries integer `protocol: 2`.
-  Health data also reports it. Calls use one SSH connection and reject any
-  different version, naming both versions; upgrade peers together. Missing
-  reply protocols and released peers' decode refusals identify protocol 1.
-  There is no capability negotiation or support for older peers. Facade errors
-  use distinct `not_terminal` and `operation_conflict` codes locally and on the
-  peer wire, instead of `conflict` (#1631, #1571).
+  The host listing reports the protocol observed in the reply envelope. Calls
+  use one SSH connection and reject any different version, naming both
+  versions; upgrade peers together. Missing reply protocols and released
+  peers' decode refusals identify protocol 1. There is no capability
+  negotiation or support for older peers. Facade errors use distinct
+  `not_terminal` and `operation_conflict` codes locally and on the peer wire,
+  instead of `conflict` (#1631, #1571).
 - The CLI reports an unavailable run owner as `OWNER_UNAVAILABLE`, replacing
   `UNSUPPORTED` so the refusal round-trips without changing its meaning.
+- Installer cut-over support is removed: the `--legacy-checkout` install flag,
+  the `LEGACY_CHECKOUT` error code, pre-1.0 cleanup and Git launcher ownership
+  are removed. `check install` no longer reports the finding rules
+  `legacy_entry`, `legacy_hook_conflict`, `legacy_instruction_variable` or
+  `legacy_checkout_unavailable`. Receipts with a non-null `legacy` object need
+  a reinstall; see [receipt recovery](../runbooks/install.md#receipt-recovery).
+  Current receipts with `"legacy":null` upgrade normally; newly written
+  receipts omit the key (#1571).
 
 ## Behaviour changes
 
