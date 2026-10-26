@@ -4,10 +4,9 @@ use super::tests::{call, clock, context, exit, input, route};
 use super::*;
 use provenant_confinement::permissions::{PathGrant, PathScope};
 use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, WallTime};
+use provenant_os::{exec::Termination, fs::Directory, sys::resources::MemorySample};
 use provenant_records::CanonicalV1;
-use provenant_supervisor::{
-    custody::ExitObservation, exec::Termination, fs::Directory, sys::resources::MemorySample,
-};
+use provenant_supervisor::custody::ExitObservation;
 use std::{
     cell::{Cell, RefCell},
     os::unix::fs::DirBuilderExt,
@@ -43,7 +42,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     );
     let custody = directory.try_lock(
         std::ffi::OsStr::new("custody.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
     )?;
     assert!(!store.custody_released(&record, &call)?);
     drop(custody);
@@ -145,7 +144,7 @@ fn hold_child_fixture(
 ) -> TestResult {
     let custody = directory.try_lock(
         std::ffi::OsStr::new("custody.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
     )?;
     store.hold_child(
         provenant_supervisor::custody::hold(directory, scope, requester),
@@ -1020,7 +1019,7 @@ fn rewrite_child_request(
         std::ffi::OsStr::new("request.json"),
         ".swap-",
         &crate::db::bytes(request)?,
-        provenant_supervisor::fs::PublishMode::Replace,
+        provenant_os::fs::PublishMode::Replace,
     )?;
     let mut record = store.run(run, call)?;
     record.request_digest = request.digest()?;
@@ -1054,7 +1053,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
         std::ffi::OsStr::new("request.json"),
         ".swap-",
         &crate::db::bytes(&swapped)?,
-        provenant_supervisor::fs::PublishMode::Replace,
+        provenant_os::fs::PublishMode::Replace,
     )?;
     let mut run = store.run(record.run_id, &call)?;
     run.request_digest = swapped.digest()?;
@@ -1729,7 +1728,8 @@ fn held_children_reclaim_exited_custody_across_sequential_launches() -> TestResu
 
 #[test]
 fn held_children_retain_busy_missing_and_recreated_custody_locks() -> TestResult {
-    use provenant_supervisor::custody::{PublicationReservation, Scope};
+    use provenant_supervisor::custody::PublicationReservation;
+    use provenant_supervisor::custody::Scope;
     use std::ffi::OsStr;
     for state in ["busy", "missing", "recreated", "symlink", "renamed"] {
         let temp = tempfile::tempdir()?;
@@ -1768,13 +1768,12 @@ fn held_children_retain_busy_missing_and_recreated_custody_locks() -> TestResult
             std::fs::remove_file(path.join("custody.lock"))?;
         }
         if state == "recreated" {
-            let replacement =
-                directory.try_lock(lock, provenant_supervisor::fs::LockMode::Exclusive)?;
+            let replacement = directory.try_lock(lock, provenant_os::fs::LockMode::Exclusive)?;
             assert!(!identity.same_identity(&replacement.metadata()?));
         } else if state == "symlink" {
             directory.try_lock(
                 OsStr::new("other.lock"),
-                provenant_supervisor::fs::LockMode::Exclusive,
+                provenant_os::fs::LockMode::Exclusive,
             )?;
             std::os::unix::fs::symlink("other.lock", path.join("custody.lock"))?;
         } else if state == "renamed" {
@@ -1849,7 +1848,7 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
     }
     let custody = directory.try_lock(
         std::ffi::OsStr::new("custody.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
     )?;
     let mut scope = store.launched.borrow()[0].scope;
     // A replacement is allowed even at the cap. Its predecessor retains
@@ -1947,7 +1946,7 @@ fn deferred_child_launches_once_capacity_frees() -> TestResult {
     // until simulating the guardian's exit, rather than changing any row.
     let custody = directory.try_lock(
         std::ffi::OsStr::new("custody.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
     )?;
     let fake = Fake::default();
     for _ in 0..2 {
@@ -2020,7 +2019,7 @@ fn deferral_stops_the_scan_after_the_first_attempt() -> TestResult {
     }
     let _custody = directory.try_lock(
         std::ffi::OsStr::new("custody.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
     )?;
     let fake = Fake::default();
     let started = store.start_child(
@@ -2840,7 +2839,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     )?;
     // Before the handoff publishes its launch summary there is nothing to
     // stop; cancel retries until its budget ends, then says so.
-    let system = provenant_supervisor::clock::SystemClock::new();
+    let system = provenant_os::clock::SystemClock::new();
     let spent = Request {
         clock: &system,
         budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
@@ -3052,7 +3051,7 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
         &cancel,
         &clock,
     )?);
-    let system = provenant_supervisor::clock::SystemClock::new();
+    let system = provenant_os::clock::SystemClock::new();
     let spent = Request {
         clock: &system,
         budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
@@ -3256,7 +3255,8 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
 
 #[test]
 fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
-    use provenant_supervisor::fs::{FsError, LockMode};
+    use provenant_os::fs::FsError;
+    use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
 
     let temp = tempfile::tempdir()?;
@@ -3285,7 +3285,7 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
     let before = locks
         .iter()
         .map(|(dir, name)| dir.metadata_at(OsStr::new(name), false))
-        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
 
     assert_eq!(
         store.reconcile(run.run_id, &Fake::default(), &call)?,
@@ -3332,7 +3332,7 @@ fn reconcile_reports_temporary_removal_failures_and_continues() -> TestResult {
     std::fs::write(temporary.join("payload"), "retain")?;
     let _held = store.attempt_dir(run.run_id, retained, false)?.try_lock(
         std::ffi::OsStr::new("writer.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
     )?;
     let removable = store.temporary_path(removed, &call)?;
     std::fs::write(removable.join("payload"), "discard")?;

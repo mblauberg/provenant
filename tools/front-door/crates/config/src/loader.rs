@@ -4,7 +4,6 @@ use crate::{
 };
 use provenant_core::Roots;
 use provenant_records::Limits;
-use provenant_supervisor::fs::SafeFs;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, ffi::OsStr, io::Read, ops::Range, path::Path};
 use toml_edit::{Document, DocumentMut, Item, Table, Value};
@@ -68,32 +67,29 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
 
 /// No-follow, read-only boundary. Links, directories and I/O failures are not
 /// absence. Neither a missing root nor a missing file creates any state.
-pub fn read(roots: &Roots, fs: &impl SafeFs) -> Result<ResolvedConfig, ConfigError> {
-    read_with_domains(roots, fs, &NO_DOMAINS)
+pub fn read(roots: &Roots) -> Result<ResolvedConfig, ConfigError> {
+    read_with_domains(roots, &NO_DOMAINS)
 }
 pub fn read_with_domains<T: DeserializeOwned + Serialize>(
     roots: &Roots,
-    fs: &impl SafeFs,
     sections: &DomainSections<T>,
 ) -> Result<ResolvedConfig<T>, ConfigError> {
-    load_with_domains(roots, open(roots, fs)?, sections)
+    load_with_domains(roots, open(roots)?, sections)
 }
 pub fn config_show<T: DeserializeOwned + Serialize>(
     roots: &Roots,
-    fs: &impl SafeFs,
     sections: &DomainSections<T>,
 ) -> Result<ResolvedConfig<T>, ConfigError> {
-    read_with_domains(roots, fs, sections)
+    read_with_domains(roots, sections)
 }
 
 /// Inspect every finding within the existing config bounds. The digest binds
 /// exact file bytes and presence, including edits that preserve every finding.
 pub fn inspect_config<T: DeserializeOwned + Serialize>(
     roots: &Roots,
-    fs: &impl SafeFs,
     sections: &DomainSections<T>,
 ) -> Result<ConfigInspection, ConfigError> {
-    let text = open(roots, fs)?
+    let text = open(roots)?
         .map(|r| bounded_text(r, &roots.state.as_path().join("config.toml")))
         .transpose()?;
     let mut evidence = crate::inspection::InspectionEvidence::default();
@@ -153,12 +149,9 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
         input_digest,
     })
 }
-pub(crate) fn open(
-    roots: &Roots,
-    fs: &impl SafeFs,
-) -> Result<Option<Box<dyn provenant_supervisor::fs::SafeFile>>, ConfigError> {
+pub(crate) fn open(roots: &Roots) -> Result<Option<provenant_os::fs::FileHandle>, ConfigError> {
     let path = roots.state.as_path().join("config.toml");
-    let dir = match fs.open_anchor(roots.state.as_path()) {
+    let dir = match provenant_os::fs::Directory::open_anchor(roots.state.as_path()) {
         Ok(dir) => dir,
         Err(e) if e.is_not_found() => return Ok(None),
         Err(source) => return Err(ConfigError::Read { path, source }),
@@ -884,7 +877,7 @@ pub(crate) fn bounded_text(reader: impl Read, path: &Path) -> Result<String, Con
         .read_to_end(&mut bytes)
         .map_err(|source| ConfigError::Read {
             path: path.into(),
-            source: provenant_supervisor::fs::FsError::Io {
+            source: provenant_os::fs::FsError::Io {
                 operation: "read",
                 path: path.into(),
                 source,

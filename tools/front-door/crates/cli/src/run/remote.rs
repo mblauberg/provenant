@@ -22,11 +22,11 @@ use provenant_fabric_runtime::{
     identity::CrossHostProjectKey,
     runs::RunResult,
 };
-use provenant_run as run;
-use provenant_supervisor::{
+use provenant_os::{
     clock::SystemClock,
-    fs::{Directory, Publication, PublishMode},
+    fs::{Directory, PublishMode},
 };
+use provenant_run as run;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -179,7 +179,7 @@ fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
         }
     }
     let bytes = serde_json::to_vec(placement).map_err(io_fail)?;
-    match directory
+    directory
         .atomic_write(
             OsStr::new(&name),
             ".placement-",
@@ -187,10 +187,8 @@ fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
             PublishMode::Replace,
         )
         .map_err(io_fail)?
-    {
-        Publication::Durable => Ok(()),
-        Publication::VisibleDurabilityUnconfirmed { sync_error } => Err(io_fail(sync_error)),
-    }
+        .require_durable()
+        .map_err(io_fail)
 }
 /// The placement of a run dispatched to a peer from this host, if any.
 pub(super) fn find(roots: &Roots, run: RunId) -> Result<Option<Placement>, Fail> {
@@ -896,7 +894,6 @@ fn collect(
 mod tests {
     use super::*;
     use provenant_core::RootInputs;
-    use provenant_supervisor::fs::LocalFs;
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -986,7 +983,7 @@ mod tests {
         std::fs::create_dir_all(&home)?;
         let mut inputs = RootInputs::new(home, base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&LocalFs)?;
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         Ok((Scratch(base), roots))
     }
     fn placement(operation: &str) -> Result<Placement> {

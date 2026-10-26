@@ -1,19 +1,17 @@
 //! Lane cache collection.
 
+use crate::permissions::{PermissionError, validate_absolute};
+use crate::worktrees::{WorkerState, WriterState};
+use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-
-use provenant_supervisor::fs::{FileKind, FsError, LockGuard, PayloadTree, SafeFs, entry_names};
-use serde::Serialize;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use crate::permissions::{PermissionError, validate_absolute};
-use crate::worktrees::{WorkerState, WriterState};
 
 pub(crate) const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
 pub(crate) const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
@@ -114,7 +112,7 @@ pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<()
         return Ok(());
     };
     prune_worktree_cache(
-        root.as_ref(),
+        &root,
         &cache_root,
         name,
         &CacheGcPolicy::default(),
@@ -147,7 +145,7 @@ pub fn gc_worktree_cargo_caches_with_writer_guard(
     writer_guard: impl FnMut(&Path) -> Result<LockGuard, WorkerState>,
 ) -> Result<CacheGcReport, CacheGcError> {
     gc_caches_with_free_space(home, policy, writer_guard, |path| {
-        provenant_supervisor::fs::Directory::open_anchor(path)
+        provenant_os::fs::Directory::open_anchor(path)
             .map_err(std::io::Error::other)?
             .available_bytes()
     })
@@ -177,13 +175,7 @@ fn gc_caches_with_free_space(
             report.free_bytes_after = report.free_bytes_before;
             report.free_bytes_estimated = policy.dry_run;
         }
-        sweep_cache_root(
-            root.as_ref(),
-            &cache_root,
-            policy,
-            &mut report,
-            &mut writer_guard,
-        )?;
+        sweep_cache_root(&root, &cache_root, policy, &mut report, &mut writer_guard)?;
         if let Some(floor) = policy.free_floor_bytes {
             let mut available = if policy.dry_run {
                 report
@@ -199,11 +191,8 @@ fn gc_caches_with_free_space(
                 let mut pressure = policy.clone();
                 pressure.idle_before_ns = Some(i128::MAX);
                 let mut candidates = Vec::new();
-                for name in provenant_supervisor::fs::entry_names(
-                    root.as_ref(),
-                    MAX_CACHE_DIRECTORY_ENTRIES,
-                )
-                .map_err(cache_fs_error("readdir", Path::new(".")))?
+                for name in provenant_os::fs::entry_names(&root, MAX_CACHE_DIRECTORY_ENTRIES)
+                    .map_err(cache_fs_error("readdir", Path::new(".")))?
                 {
                     let path = cache_root.join(&name);
                     if !name.to_str().is_some_and(is_cache_digest)
@@ -219,7 +208,7 @@ fn gc_caches_with_free_space(
                         .metadata_at(&name, false)
                         .map_err(cache_fs_error("stat", Path::new(&name)))?;
                     if metadata.kind != FileKind::Directory
-                        || metadata.uid != provenant_supervisor::fs::effective_uid()
+                        || metadata.uid != provenant_os::fs::effective_uid()
                         || metadata.mode & 0o7777 != 0o700
                     {
                         continue;
@@ -227,13 +216,13 @@ fn gc_caches_with_free_space(
                     let cache = root
                         .open_verified_directory(&name)
                         .map_err(cache_fs_error("open verified directory", Path::new(&name)))?;
-                    let Some(owner) = read_cache_owner(cache.as_ref(), Path::new(&name))? else {
+                    let Some(owner) = read_cache_owner(&cache, Path::new(&name))? else {
                         continue;
                     };
-                    if cache_gc_reason(cache.as_ref(), Path::new(&name), &owner, &pressure)?
+                    if cache_gc_reason(&cache, Path::new(&name), &owner, &pressure)?
                         == Some(CacheGcReason::Idle)
                     {
-                        let (_, newest) = measure_cache(cache.as_ref(), Path::new(&name), 0)?;
+                        let (_, newest) = measure_cache(&cache, Path::new(&name), 0)?;
                         candidates.push((newest, name));
                     }
                 }
@@ -247,7 +236,7 @@ fn gc_caches_with_free_space(
                     let before = report.bytes_freed;
                     let removed = report.removed.len();
                     prune_worktree_cache(
-                        root.as_ref(),
+                        &root,
                         &cache_root,
                         &name,
                         &pressure,
@@ -282,8 +271,7 @@ fn gc_caches_with_free_space(
 
 fn open_cache_root(
     cache_root: &Path,
-) -> Result<Option<Box<dyn provenant_supervisor::fs::SafeDir>>, PermissionError> {
-    use provenant_supervisor::fs::LocalFs;
+) -> Result<Option<provenant_os::fs::Directory>, PermissionError> {
     use std::io;
 
     match std::fs::symlink_metadata(cache_root) {
@@ -296,14 +284,38 @@ fn open_cache_root(
         }
         Err(error) => return Err(cache_io_error("stat cache root", Path::new("."), error)),
     }
-    let root = LocalFs
-        .open_anchor(cache_root)
+    let root = Directory::open_anchor(cache_root)
         .map_err(cache_fs_error("open cache root", Path::new(".")))?;
     Ok(Some(root))
 }
 
+fn cache_gc_operation<T>(
+    event: &str,
+    relative: &Path,
+    operation: impl FnOnce() -> Result<T, FsError>,
+) -> Result<T, FsError> {
+    #[cfg(test)]
+    return tests::gc_faults::operation(event, relative, operation);
+    #[cfg(not(test))]
+    {
+        let _ = (event, relative);
+        operation()
+    }
+}
+
+fn cache_gc_entries(
+    directory: &Directory,
+    relative: &Path,
+) -> Result<Box<dyn Iterator<Item = Result<OsString, FsError>>>, FsError> {
+    let relative = relative.to_owned();
+    Ok(Box::new(directory.entries()?.map(move |entry| {
+        let name = entry?;
+        cache_gc_operation("readdir", &relative.join(&name), || Ok(name))
+    })))
+}
+
 fn sweep_cache_root(
-    root: &dyn provenant_supervisor::fs::SafeDir,
+    root: &provenant_os::fs::Directory,
     cache_root: &Path,
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
@@ -311,8 +323,7 @@ fn sweep_cache_root(
 ) -> Result<(), PermissionError> {
     let mut failures = Vec::new();
     // Snapshot names so newly detached tombstones are retried on a later run.
-    let entries: Vec<_> = root
-        .entries()
+    let entries: Vec<_> = cache_gc_entries(root, Path::new("."))
         .map_err(cache_fs_error("opendir", Path::new(".")))?
         .take(MAX_CACHE_DIRECTORY_ENTRIES + 1)
         .collect();
@@ -346,7 +357,7 @@ fn sweep_cache_root(
 }
 
 fn prune_worktree_cache(
-    root: &dyn provenant_supervisor::fs::SafeDir,
+    root: &provenant_os::fs::Directory,
     cache_root: &Path,
     name: &OsStr,
     policy: &CacheGcPolicy,
@@ -365,17 +376,19 @@ fn prune_worktree_cache(
     if tombstone.is_none() && !is_cache_digest(digest) {
         return Ok(());
     }
-    let metadata = match root.metadata_at(name, false) {
-        Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
-        Ok(_) => return Ok(()),
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(cache_fs_error("stat", Path::new(name))(error)),
-    };
-    if metadata.uid != provenant_supervisor::fs::effective_uid() || metadata.mode & 0o7777 != 0o700
-    {
+    let metadata =
+        match cache_gc_operation("stat", Path::new(name), || root.metadata_at(name, false)) {
+            Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
+            Ok(_) => return Ok(()),
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(cache_fs_error("stat", Path::new(name))(error)),
+        };
+    if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o7777 != 0o700 {
         return Ok(());
     }
-    let cache = match root.open_verified_directory(name) {
+    let cache = match cache_gc_operation("open verified", Path::new(name), || {
+        root.open_verified_directory(name)
+    }) {
         Ok(cache) => cache,
         Err(error) if error.is_not_found() => return Ok(()),
         Err(error) => {
@@ -391,7 +404,7 @@ fn prune_worktree_cache(
         return Err(PermissionError::AnchorMismatch);
     }
     verify_cache_metadata(&opened)?;
-    let owner = read_cache_owner(cache.as_ref(), Path::new(name))?;
+    let owner = read_cache_owner(&cache, Path::new(name))?;
     let reason = if let Some((device, inode, fingerprint)) = tombstone {
         // Bind retry authority to what GC intended to rename, even if a
         // process stopped before verification or quarantine could complete.
@@ -407,7 +420,9 @@ fn prune_worktree_cache(
         // Tombstone names reserve detached directories for collection, even
         // if another held writer added a file after marker deletion.
         if owner.is_none() {
-            match cache.metadata_at(OsStr::new(CARGO_CACHE_OWNER), false) {
+            match cache_gc_operation("stat", &Path::new(name).join(CARGO_CACHE_OWNER), || {
+                cache.metadata_at(OsStr::new(CARGO_CACHE_OWNER), false)
+            }) {
                 Err(error) if error.is_not_found() => {}
                 Ok(_) => return Ok(()),
                 Err(error) => {
@@ -423,12 +438,9 @@ fn prune_worktree_cache(
         let Some(owner) = owner.as_ref() else {
             return Ok(());
         };
-        let Some(reason) = pressure_reason(cache_gc_reason(
-            cache.as_ref(),
-            Path::new(name),
-            owner,
-            policy,
-        )?) else {
+        let Some(reason) =
+            pressure_reason(cache_gc_reason(&cache, Path::new(name), owner, policy)?)
+        else {
             if let Some(state) = policy.protected_owners.get(&owner.path) {
                 report.kept.push(CacheGcEntry {
                     path: cache_root.join(name),
@@ -451,7 +463,7 @@ fn prune_worktree_cache(
         }
         reason
     };
-    let (bytes, _) = measure_cache(cache.as_ref(), Path::new(name), 0)?;
+    let (bytes, _) = measure_cache(&cache, Path::new(name), 0)?;
     if policy.dry_run {
         if matches!(reason, CacheGcReason::Idle | CacheGcReason::FreeFloor) {
             let owner = owner.as_ref().ok_or(PermissionError::AnchorMismatch)?;
@@ -504,11 +516,11 @@ fn prune_worktree_cache(
             };
             // Measurement may take time. Recheck the marker, owner and last
             // write immediately before detaching the cache from the lane path.
-            if read_cache_owner(cache.as_ref(), Path::new(name))? != owner {
+            if read_cache_owner(&cache, Path::new(name))? != owner {
                 return Ok(());
             }
             let current_reason = pressure_reason(cache_gc_reason(
-                cache.as_ref(),
+                &cache,
                 Path::new(name),
                 original_owner,
                 policy,
@@ -523,8 +535,10 @@ fn prune_worktree_cache(
             if current_reason != Some(reason) {
                 return Ok(());
             }
-            root.rename_noreplace(name, &detached)
-                .map_err(cache_fs_error("rename to tombstone", Path::new(name)))?;
+            cache_gc_operation("before rename", Path::new(name), || {
+                root.rename_noreplace(name, root, &detached)
+            })
+            .map_err(cache_fs_error("rename to tombstone", Path::new(name)))?;
             // The lane path is now free for a writer to create a fresh cache.
             drop(idle_guard);
             detached.as_os_str()
@@ -537,8 +551,10 @@ fn prune_worktree_cache(
                 // deletion. Never replace a freshly created lane path.
                 let rejected =
                     OsString::from(format!(".gc-refused-{}", removal_name.to_string_lossy()));
-                root.rename_noreplace(removal_name, &rejected)
-                    .map_err(cache_fs_error("quarantine", Path::new(removal_name)))?;
+                cache_gc_operation("before rename", Path::new(removal_name), || {
+                    root.rename_noreplace(removal_name, root, &rejected)
+                })
+                .map_err(cache_fs_error("quarantine", Path::new(removal_name)))?;
                 return Err(error);
             }
         };
@@ -549,9 +565,14 @@ fn prune_worktree_cache(
         )?;
         // The top-level marker survives every earlier failure.
         let marker_name = OsStr::new(CARGO_CACHE_OWNER);
-        match detached_cache.metadata_at(marker_name) {
+        match cache_gc_operation("stat", &Path::new(removal_name).join(marker_name), || {
+            detached_cache.metadata_at(marker_name)
+        }) {
             Ok(marker) => {
-                detached_cache.unlink(marker_name).map_err(cache_fs_error(
+                cache_gc_operation("unlink", &Path::new(removal_name).join(marker_name), || {
+                    detached_cache.unlink(marker_name)
+                })
+                .map_err(cache_fs_error(
                     "unlink",
                     &Path::new(removal_name).join(marker_name),
                 ))?;
@@ -567,8 +588,10 @@ fn prune_worktree_cache(
                 )(error));
             }
         }
-        root.rmdir(removal_name)
-            .map_err(cache_fs_error("rmdir", Path::new(removal_name)))?;
+        cache_gc_operation("rmdir", Path::new(removal_name), || {
+            root.rmdir(removal_name)
+        })
+        .map_err(cache_fs_error("rmdir", Path::new(removal_name)))?;
     }
     report.removed.push(CacheGcEntry {
         path: cache_root.join(name),
@@ -579,14 +602,13 @@ fn prune_worktree_cache(
 }
 
 fn verify_detached_cache(
-    root: &dyn provenant_supervisor::fs::SafeDir,
+    root: &provenant_os::fs::Directory,
     name: &OsStr,
-    expected: &provenant_supervisor::fs::Metadata,
+    expected: &provenant_os::fs::Metadata,
     owner: &Option<CacheOwner>,
 ) -> Result<PayloadTree, PermissionError> {
     // The held original descriptor alone cannot identify what was renamed.
-    let after = root
-        .metadata_at(name, false)
+    let after = cache_gc_operation("stat", Path::new(name), || root.metadata_at(name, false))
         .map_err(cache_fs_error("stat", Path::new(name)))?;
     verify_cache_metadata(&after)?;
     if !expected.same_identity(&after) {
@@ -594,7 +616,10 @@ fn verify_detached_cache(
     }
     // Only a verified tombstone may dispose of lock-named cache payload.
     // Verified-open failures keep their operation and path.
-    let cache = PayloadTree::claim(root, name, expected).map_err(|error| match error {
+    let cache = cache_gc_operation("open verified", Path::new(name), || {
+        PayloadTree::claim(root, name, expected)
+    })
+    .map_err(|error| match error {
         FsError::PayloadMismatch { .. } | FsError::NotPrivate { .. } => {
             PermissionError::AnchorMismatch
         }
@@ -653,16 +678,18 @@ pub(crate) fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
 }
 
 pub(crate) fn read_cache_owner(
-    cache: &dyn provenant_supervisor::fs::SafeDir,
+    cache: &provenant_os::fs::Directory,
     relative: &Path,
 ) -> Result<Option<CacheOwner>, PermissionError> {
     let marker_name = OsStr::new(CARGO_CACHE_OWNER);
     let marker_path = relative.join(marker_name);
-    let marker_meta = match cache.metadata_at(marker_name, false) {
+    let marker_meta = match cache_gc_operation("stat", &relative.join(marker_name), || {
+        cache.metadata_at(marker_name, false)
+    }) {
         Ok(metadata)
             if metadata.kind == FileKind::Regular
                 && metadata.links == 1
-                && metadata.uid == provenant_supervisor::fs::effective_uid() =>
+                && metadata.uid == provenant_os::fs::effective_uid() =>
         {
             metadata
         }
@@ -674,7 +701,9 @@ pub(crate) fn read_cache_owner(
         return Ok(None);
     }
     let mut marker = Vec::with_capacity(marker_meta.size as usize);
-    let file = match cache.open_read(marker_name) {
+    let file = match cache_gc_operation("read", &relative.join(marker_name), || {
+        cache.open_read(marker_name)
+    }) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(cache_fs_error("open marker", &marker_path)(error)),
@@ -726,7 +755,7 @@ pub(crate) fn read_cache_owner(
 }
 
 fn cache_gc_reason(
-    cache: &dyn provenant_supervisor::fs::SafeDir,
+    cache: &provenant_os::fs::Directory,
     relative: &Path,
     owner: &CacheOwner,
     policy: &CacheGcPolicy,
@@ -777,7 +806,7 @@ pub(crate) fn cache_gc_reason_with_newest(
 /// Disk bytes and the newest modification time (ns since the epoch) under a
 /// cache, without following symlinks.
 fn measure_cache(
-    directory: &dyn provenant_supervisor::fs::SafeDir,
+    directory: &provenant_os::fs::Directory,
     relative: &Path,
     depth: usize,
 ) -> Result<(u64, i128), PermissionError> {
@@ -789,22 +818,23 @@ fn measure_cache(
         .metadata()
         .map_err(cache_fs_error("fstat", relative))?
         .modified_ns;
-    for entry in directory
-        .entries()
-        .map_err(cache_fs_error("opendir", relative))?
+    for entry in
+        cache_gc_entries(directory, relative).map_err(cache_fs_error("opendir", relative))?
     {
         let name = entry.map_err(cache_fs_error("readdir", relative))?;
         let path = relative.join(&name);
-        let metadata = directory
-            .metadata_at(&name, false)
-            .map_err(cache_fs_error("stat", &path))?;
+        let metadata = cache_gc_operation("stat", &relative.join(&name), || {
+            directory.metadata_at(&name, false)
+        })
+        .map_err(cache_fs_error("stat", &path))?;
         bytes = bytes.saturating_add(metadata.allocated.max(metadata.size));
         newest = newest.max(metadata.modified_ns);
         if metadata.kind == FileKind::Directory {
-            let child = directory
-                .open_verified_directory(&name)
-                .map_err(cache_fs_error("open verified directory", &path))?;
-            let (child_bytes, child_newest) = measure_cache(child.as_ref(), &path, depth + 1)?;
+            let child = cache_gc_operation("open verified", &relative.join(&name), || {
+                directory.open_verified_directory(&name)
+            })
+            .map_err(cache_fs_error("open verified directory", &path))?;
+            let (child_bytes, child_newest) = measure_cache(&child, &path, depth + 1)?;
             bytes = bytes.saturating_add(child_bytes);
             newest = newest.max(child_newest);
         }
@@ -848,28 +878,40 @@ fn remove_cache_contents_at(
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
     }
-    let names = entry_names(directory.directory(), MAX_CACHE_DIRECTORY_ENTRIES)
+    let names = cache_gc_entries(directory.directory(), relative)
+        .map_err(cache_fs_error("readdir", relative))?
+        .take(MAX_CACHE_DIRECTORY_ENTRIES + 1)
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|names| {
+            if names.len() > MAX_CACHE_DIRECTORY_ENTRIES {
+                Err(FsError::EntryLimit {
+                    limit: MAX_CACHE_DIRECTORY_ENTRIES,
+                })
+            } else {
+                Ok(names)
+            }
+        })
         .map_err(cache_fs_error("readdir", relative))?;
     for name in names {
         if depth == 0 && name == CARGO_CACHE_OWNER {
             continue;
         }
         let path = relative.join(&name);
-        let metadata = directory
-            .metadata_at(&name)
-            .map_err(cache_fs_error("stat", &path))?;
+        let metadata = cache_gc_operation("stat", &relative.join(&name), || {
+            directory.metadata_at(&name)
+        })
+        .map_err(cache_fs_error("stat", &path))?;
         if metadata.kind == FileKind::Directory {
-            let child = directory
-                .child(&name)
-                .map_err(cache_fs_error("open verified directory", &path))?;
+            let child = cache_gc_operation("open verified", &relative.join(&name), || {
+                directory.child(&name)
+            })
+            .map_err(cache_fs_error("open verified directory", &path))?;
             remove_cache_contents_at(&child, &path, depth + 1, bytes_freed)?;
             drop(child);
-            directory
-                .rmdir(&name)
+            cache_gc_operation("rmdir", &relative.join(&name), || directory.rmdir(&name))
                 .map_err(cache_fs_error("rmdir", &path))?;
         } else {
-            directory
-                .unlink(&name)
+            cache_gc_operation("unlink", &relative.join(&name), || directory.unlink(&name))
                 .map_err(cache_fs_error("unlink", &path))?;
         }
         *bytes_freed = bytes_freed.saturating_add(metadata.allocated.max(metadata.size));
@@ -878,10 +920,10 @@ fn remove_cache_contents_at(
 }
 
 pub(crate) fn verify_cache_metadata(
-    metadata: &provenant_supervisor::fs::Metadata,
+    metadata: &provenant_os::fs::Metadata,
 ) -> Result<(), PermissionError> {
     if metadata.kind != FileKind::Directory
-        || metadata.uid != provenant_supervisor::fs::effective_uid()
+        || metadata.uid != provenant_os::fs::effective_uid()
         || metadata.mode & 0o7777 != 0o700
     {
         return Err(PermissionError::AnchorMismatch);
@@ -895,10 +937,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-    use crate::worktrees::WorkerState;
-    use provenant_supervisor::fs::FsError;
-    use std::ffi::{OsStr, OsString};
-    use std::path::{Path, PathBuf};
+    use provenant_core::CancelToken;
 
     #[test]
     fn lane_cache_gc_sweep_removes_only_marked_caches_for_missing_worktrees()
@@ -996,8 +1035,8 @@ mod tests {
         Ok(())
     }
 
-    fn test_writer_lock(home: &Path) -> Result<provenant_supervisor::fs::Directory, FsError> {
-        use provenant_supervisor::fs::{Directory, LockMode};
+    fn test_writer_lock(home: &Path) -> Result<provenant_os::fs::Directory, FsError> {
+        use provenant_os::fs::{Directory, LockMode};
         let parent = Directory::open_anchor(home)?;
         parent.mkdir(OsStr::new("writer-state"), 0o700)?;
         let directory = parent.open_verified_directory(OsStr::new("writer-state"))?;
@@ -1005,118 +1044,71 @@ mod tests {
         Ok(directory)
     }
 
-    // Exercise races and I/O failures at the filesystem boundary, without
-    // timing-dependent threads or production-only test hooks.
-    mod gc_faults {
+    // Exercise races and I/O failures at GC operations without timing-dependent threads.
+    pub(super) mod gc_faults {
         use super::*;
-        use provenant_core::{CancelToken, Clock, WaitBudget};
-        use provenant_supervisor::fs::{
-            FsError, LocalFs, LockGuard, LockMode, Metadata, PayloadRemoval, Publication,
-            PublishMode, SafeDir, SafeFile,
-        };
+        use provenant_core::{Clock, WaitBudget};
+        use provenant_os::fs::LockMode;
         use std::{io, os::unix::fs::PermissionsExt, sync::Arc};
 
-        type Event = Arc<dyn Fn(&str, &Path) -> io::Result<()> + Send + Sync>;
+        type CacheGcCallback =
+            std::sync::Arc<dyn Fn(&str, &Path) -> std::io::Result<()> + Send + Sync>;
 
-        struct EventDir {
-            inner: Box<dyn SafeDir>,
-            path: PathBuf,
-            event: Event,
+        thread_local! {
+            static CACHE_GC_EVENT: std::cell::RefCell<Option<(PathBuf, CacheGcCallback)>> =
+                const { std::cell::RefCell::new(None) };
         }
 
-        impl EventDir {
-            fn notify(&self, event: &str, name: &OsStr) -> Result<(), FsError> {
-                let path = self.path.join(name);
-                (self.event)(event, &path).map_err(|source| FsError::Io {
-                    operation: "GC test event",
-                    path,
-                    source,
+        struct CacheGcEvent;
+        impl CacheGcEvent {
+            fn install(root: PathBuf, event: CacheGcCallback) -> Self {
+                CACHE_GC_EVENT.with(|slot| *slot.borrow_mut() = Some((root, event)));
+                Self
+            }
+        }
+        impl Drop for CacheGcEvent {
+            fn drop(&mut self) {
+                CACHE_GC_EVENT.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+
+        pub(crate) fn operation<T>(
+            event: &str,
+            relative: &Path,
+            operation: impl FnOnce() -> Result<T, FsError>,
+        ) -> Result<T, FsError> {
+            cache_gc_event(event, relative)?;
+            let result = operation()?;
+            if event == "before rename" {
+                cache_gc_event("after rename", relative)?;
+            }
+            Ok(result)
+        }
+
+        fn cache_gc_event(event: &str, relative: &Path) -> Result<(), FsError> {
+            CACHE_GC_EVENT.with(|slot| {
+                let slot = slot.borrow();
+                let Some((root, callback)) = slot.as_ref() else {
+                    return Ok(());
+                };
+                let path = root.join(relative);
+                callback(event, &path).map_err(|source| {
+                    if event == "open verified" {
+                        FsError::RaceRefused {
+                            name: relative.into(),
+                        }
+                    } else {
+                        FsError::Io {
+                            operation: "GC test event",
+                            path,
+                            source,
+                        }
+                    }
                 })
-            }
+            })
         }
 
-        macro_rules! forward {
-            ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
-                $(fn $name(&self, $($arg: $ty),*) -> $ret {
-                    self.inner.$name($($arg),*)
-                })*
-            };
-        }
-
-        impl SafeDir for EventDir {
-            forward! {
-                metadata() -> Result<Metadata, FsError>;
-                open_directory(name: &OsStr, follow: bool) -> Result<Box<dyn SafeDir>, FsError>;
-                create_new(name: &OsStr) -> Result<Box<dyn SafeFile>, FsError>;
-                mkdir(name: &OsStr, mode: u32) -> Result<(), FsError>;
-                make_writable() -> Result<(), FsError>;
-                lock(name: &OsStr, mode: LockMode, budget: WaitBudget, cancel: &CancelToken, clock: &dyn Clock) -> Result<LockGuard, FsError>;
-                replace(source: &OsStr, destination: &OsStr) -> Result<(), FsError>;
-                symlink(target: &Path, name: &OsStr) -> Result<(), FsError>;
-                read_link(name: &OsStr) -> Result<PathBuf, FsError>;
-                sync() -> Result<(), FsError>;
-                atomic_write(name: &OsStr, prefix: &str, bytes: &[u8], permissions: u32, mode: PublishMode) -> Result<Publication, FsError>;
-                replace_link(name: &OsStr, target: &Path) -> Result<Publication, FsError>;
-            }
-            fn metadata_at(&self, name: &OsStr, follow: bool) -> Result<Metadata, FsError> {
-                self.notify("stat", name)?;
-                self.inner.metadata_at(name, follow)
-            }
-            fn open_verified_directory(&self, name: &OsStr) -> Result<Box<dyn SafeDir>, FsError> {
-                // A failed hook stands in for a swap detected inside the open.
-                self.notify("open verified", name)
-                    .map_err(|_| FsError::RaceRefused { name: name.into() })?;
-                Ok(Box::new(Self {
-                    inner: self.inner.open_verified_directory(name)?,
-                    path: self.path.join(name),
-                    event: self.event.clone(),
-                }))
-            }
-            fn open_read(&self, name: &OsStr) -> Result<Box<dyn SafeFile>, FsError> {
-                self.notify("read", name)?;
-                self.inner.open_read(name)
-            }
-            fn entries(
-                &self,
-            ) -> Result<Box<dyn Iterator<Item = Result<OsString, FsError>>>, FsError> {
-                let mut entries: Vec<_> = self.inner.entries()?.collect();
-                entries.sort_by(|a, b| a.as_ref().ok().cmp(&b.as_ref().ok()));
-                let path = self.path.clone();
-                let event = self.event.clone();
-                Ok(Box::new(entries.into_iter().map(move |entry| {
-                    let name = entry?;
-                    let path = path.join(&name);
-                    event("readdir", &path).map_err(|source| FsError::Io {
-                        operation: "readdir",
-                        path,
-                        source,
-                    })?;
-                    Ok(name)
-                })))
-            }
-            fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<(), FsError> {
-                self.notify("before rename", source)?;
-                self.inner.rename_noreplace(source, destination)?;
-                self.notify("after rename", source)
-            }
-            fn unlink(&self, name: &OsStr) -> Result<(), FsError> {
-                self.notify("unlink", name)?;
-                self.inner.unlink(name)
-            }
-            fn rmdir(&self, name: &OsStr) -> Result<(), FsError> {
-                self.notify("rmdir", name)?;
-                self.inner.rmdir(name)
-            }
-            fn remove_payload(
-                &self,
-                name: &OsStr,
-                directory: bool,
-                grant: PayloadRemoval,
-            ) -> Result<(), FsError> {
-                self.notify(if directory { "rmdir" } else { "unlink" }, name)?;
-                self.inner.remove_payload(name, directory, grant)
-            }
-        }
+        type Event = Arc<dyn Fn(&str, &Path) -> io::Result<()> + Send + Sync>;
 
         fn sweep(
             home: &Path,
@@ -1137,22 +1129,10 @@ mod tests {
                 dry_run: policy.dry_run,
                 ..CacheGcReport::default()
             };
-            let result = LocalFs
-                .open_anchor(&path)
+            let _event = CacheGcEvent::install(path.clone(), event);
+            let result = Directory::open_anchor(&path)
                 .map_err(PermissionError::Filesystem)
-                .and_then(|inner| {
-                    sweep_cache_root(
-                        &EventDir {
-                            inner,
-                            path: path.clone(),
-                            event,
-                        },
-                        &path,
-                        policy,
-                        &mut report,
-                        writer_guard,
-                    )
-                });
+                .and_then(|root| sweep_cache_root(&root, &path, policy, &mut report, writer_guard));
             result
                 .map(|()| report.clone())
                 .map_err(|source| CacheGcError {
@@ -1565,8 +1545,8 @@ mod tests {
                 }
             }
 
-            // Use LocalFs through the public GC entry point: EventDir snapshots
-            // its entries and would hide a lazy readdir deletion failure.
+            // Exercise the public GC entry point, including its root snapshot
+            // and descriptor-relative payload removal.
             let result = gc_worktree_cargo_caches(home, &CacheGcPolicy::default());
             assert!(result.is_ok(), "large cache removal failed: {result:#?}");
             assert_eq!(result?.removed.len(), 1);
@@ -1687,9 +1667,9 @@ mod tests {
         fn gc_idle_releases_writer_lock_before_tombstone_cleanup_and_writer_retries()
         -> Result<(), Box<dyn std::error::Error>> {
             use provenant_core::{AttemptId, GitOid, RunId};
-            use provenant_supervisor::clock::SystemClock;
+            use provenant_os::clock::SystemClock;
+            use provenant_os::fs::Directory;
             use provenant_supervisor::custody::{self, CustodyError, Scope, WriterBinding};
-            use provenant_supervisor::fs::Directory;
             use std::sync::atomic::{AtomicUsize, Ordering};
 
             let temporary = tempfile::tempdir()?;
@@ -2025,14 +2005,21 @@ mod tests {
             );
             assert_eq!(error.report.removed.len(), 1);
             assert!(!ordinary.exists());
-            assert_eq!(
-                error.report.bytes_freed,
-                bytes + error.report.removed[0].bytes
-            );
             let root = path.parent().ok_or("cache parent")?;
             let tombstone = std::fs::read_dir(root)?.next().ok_or("tombstone")??.path();
             assert!(tombstone.join(CARGO_CACHE_OWNER).is_file());
-            assert!(!tombstone.join("artifact").exists());
+            assert!(tombstone.join("z-fail").is_file());
+            // Filesystem order determines whether the artifact preceded the
+            // failed unlink. Account for exactly the removals that completed.
+            let payload_bytes = if tombstone.join("artifact").exists() {
+                0
+            } else {
+                bytes
+            };
+            assert_eq!(
+                error.report.bytes_freed,
+                payload_bytes + error.report.removed[0].bytes
+            );
             let report = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?;
             assert_eq!(report.removed.len(), 1);
             assert_eq!(report.removed[0].reason, CacheGcReason::Tombstone);
@@ -2268,7 +2255,7 @@ mod tests {
             locks
                 .try_lock_existing(
                     OsStr::new("writer.lock"),
-                    provenant_supervisor::fs::LockMode::Exclusive,
+                    provenant_os::fs::LockMode::Exclusive,
                 )
                 .map_err(|_| WorkerState::Unknown)
         };

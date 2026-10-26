@@ -3,11 +3,11 @@
 use crate::inspection::InspectionEvidence;
 use crate::managed::{InstallError, ReleaseSmoke, directory, normal_absolute, path_wire, snapshot};
 use provenant_core::CancelToken;
+use provenant_os::fs::{FileKind, PublishMode};
 use provenant_records::{
     CanonicalV1, Limits, ReleaseFile, ReleaseManifest, SourceDigest, SourceInput, VersionInfo,
     source_digest,
 };
-use provenant_supervisor::fs::{FileKind, PublishMode, SafeFs};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
@@ -34,8 +34,8 @@ impl Release {
     pub fn source(&self) -> &Path {
         &self.source
     }
-    pub fn read(source: &Path, target: &str, fs: &dyn SafeFs) -> Result<Self, InstallError> {
-        let anchor = directory(source, false, fs).map_err(|error| match error {
+    pub fn read(source: &Path, target: &str) -> Result<Self, InstallError> {
+        let anchor = directory(source, false).map_err(|error| match error {
             InstallError::Fs(error) if error.is_not_found() => {
                 InstallError::Tampered(source.join("release.json"))
             }
@@ -46,11 +46,10 @@ impl Release {
     pub(crate) fn read_scoped_inspected(
         source: &Path,
         target: &str,
-        fs: &dyn SafeFs,
         state_root: &Path,
         mut evidence: Option<&mut InspectionEvidence>,
     ) -> Result<Self, InstallError> {
-        let anchor = match crate::managed::directory_scoped(source, state_root, false, fs) {
+        let anchor = match crate::managed::directory_scoped(source, state_root, false) {
             Ok(anchor) => anchor,
             Err(InstallError::Fs(error)) if error.is_not_found() => {
                 if let Some(evidence) = evidence.as_deref_mut() {
@@ -65,14 +64,14 @@ impl Release {
     fn read_held(
         source: &Path,
         target: &str,
-        anchor: Box<dyn provenant_supervisor::fs::SafeDir>,
+        anchor: provenant_os::fs::Directory,
     ) -> Result<Self, InstallError> {
         Self::read_held_inspected(source, target, anchor, None)
     }
     fn read_held_inspected(
         source: &Path,
         target: &str,
-        anchor: Box<dyn provenant_supervisor::fs::SafeDir>,
+        anchor: provenant_os::fs::Directory,
         mut evidence: Option<&mut InspectionEvidence>,
     ) -> Result<Self, InstallError> {
         normal_absolute(source)?;
@@ -83,7 +82,7 @@ impl Release {
         }) = crate::managed::snapshot_below_inspected(
             &manifest_path,
             source,
-            anchor.as_ref(),
+            &anchor,
             evidence.as_deref_mut(),
         )?
         else {
@@ -95,8 +94,7 @@ impl Release {
             return Err(InstallError::Platform);
         }
         check_bounds(&manifest)?;
-        let actual =
-            inventory_held_inspected(source, anchor.as_ref(), false, evidence.as_deref_mut())?;
+        let actual = inventory_held_inspected(source, &anchor, false, evidence.as_deref_mut())?;
         let mut files = BTreeMap::new();
         for item in &manifest.files {
             let relative = item.path.to_relative_path()?.as_path().to_path_buf();
@@ -105,7 +103,7 @@ impl Release {
             let current = crate::managed::snapshot_below_inspected(
                 &path,
                 source,
-                anchor.as_ref(),
+                &anchor,
                 evidence.as_deref_mut(),
             )?;
             let Some(crate::managed::Snapshot {
@@ -230,17 +228,16 @@ pub(crate) fn asset_inventory_digest(
 pub fn package_release(
     source: &Path,
     expected: &VersionInfo,
-    fs: &dyn SafeFs,
     smoke: &dyn ReleaseSmoke,
     cancel: &CancelToken,
 ) -> Result<Release, InstallError> {
     normal_absolute(source)?;
-    let names = inventory(source, fs)?;
+    let names = inventory(source)?;
     let mut files = BTreeMap::new();
     let mut release_files = Vec::new();
     for relative in names {
         let path = source.join(&relative);
-        let current = crate::managed::snapshot_scoped(&path, source, fs)?
+        let current = crate::managed::snapshot_scoped(&path, source)?
             .ok_or_else(|| InstallError::Tampered(path.clone()))?;
         let crate::managed::Value::File { bytes, mode } = current.value else {
             return Err(InstallError::Tampered(path));
@@ -276,7 +273,7 @@ pub fn package_release(
         source: source.into(),
     };
     let manifest_path = source.join("release.json");
-    if let Some(old) = snapshot(&manifest_path, fs)? {
+    if let Some(old) = snapshot(&manifest_path)? {
         let crate::managed::Value::File {
             bytes: old_bytes,
             mode: 0o600,
@@ -291,7 +288,7 @@ pub fn package_release(
                 recovery: "keep the completed release immutable; use a fresh state root or a new source digest for the other build",
             });
         }
-        let release = Release::read(source, &expected.target, fs)?;
+        let release = Release::read(source, &expected.target)?;
         verify_binary_identity(&release, smoke, cancel)?;
         return Ok(release);
     }
@@ -299,15 +296,15 @@ pub fn package_release(
     // A published manifest is immutable, so refuse it before publication.
     check_bounds(&candidate.manifest)?;
     verify_binary_identity(&candidate, smoke, cancel)?;
-    normalise_staged_modes(source, &candidate.files, fs)?;
-    crate::managed::durable(directory(source, false, fs)?.atomic_write(
+    normalise_staged_modes(source, &candidate.files)?;
+    crate::managed::durable(directory(source, false)?.atomic_write_with_permissions(
         OsStr::new("release.json"),
         ".provenant-staging.",
         &bytes,
         0o600,
         PublishMode::NoReplace,
     )?)?;
-    Release::read(source, &expected.target, fs)
+    Release::read(source, &expected.target)
 }
 
 fn check_bounds(manifest: &ReleaseManifest) -> Result<(), InstallError> {
@@ -338,11 +335,10 @@ fn check_bounds(manifest: &ReleaseManifest) -> Result<(), InstallError> {
 fn normalise_staged_modes(
     source: &Path,
     files: &BTreeMap<PathBuf, (Vec<u8>, u64)>,
-    fs: &dyn SafeFs,
 ) -> Result<(), InstallError> {
     for (relative, (expected_bytes, expected_mode)) in files {
         let path = source.join(relative);
-        let Some(current) = crate::managed::snapshot_scoped(&path, source, fs)? else {
+        let Some(current) = crate::managed::snapshot_scoped(&path, source)? else {
             return Err(InstallError::Tampered(path));
         };
         let crate::managed::Value::File { bytes, mode } = current.value else {
@@ -362,13 +358,14 @@ fn normalise_staged_modes(
             .ok_or_else(|| InstallError::Path(path.clone()))?;
         let permissions = u32::try_from(*expected_mode)
             .map_err(|_| InstallError::Manifest("invalid release mode"))?;
-        let published = crate::managed::directory_scoped(parent, source, false, fs)?.atomic_write(
-            name,
-            ".provenant-staging.",
-            expected_bytes,
-            permissions,
-            PublishMode::Replace,
-        )?;
+        let published = crate::managed::directory_scoped(parent, source, false)?
+            .atomic_write_with_permissions(
+                name,
+                ".provenant-staging.",
+                expected_bytes,
+                permissions,
+                PublishMode::Replace,
+            )?;
         crate::managed::durable(published)?;
     }
     Ok(())
@@ -392,13 +389,13 @@ pub(crate) fn verify_binary_identity(
     Ok(())
 }
 
-pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, InstallError> {
-    inventory_held(root, directory(root, false, fs)?.as_ref(), false)
+pub(crate) fn inventory(root: &Path) -> Result<Vec<PathBuf>, InstallError> {
+    inventory_held(root, &directory(root, false)?, false)
 }
 
-// These are the exact names produced by supervisor temporary_name and
+// These are the exact names produced by OS temporary_name and
 // replace_link/atomic_write with the release staging prefix.
-fn is_supervisor_staging_name(name: &OsStr) -> bool {
+fn is_staging_name(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
@@ -417,14 +414,14 @@ fn is_supervisor_staging_name(name: &OsStr) -> bool {
 
 pub(crate) fn inventory_held(
     root: &Path,
-    anchor: &dyn provenant_supervisor::fs::SafeDir,
+    anchor: &provenant_os::fs::Directory,
     remove_staging: bool,
 ) -> Result<Vec<PathBuf>, InstallError> {
     inventory_held_inspected(root, anchor, remove_staging, None)
 }
 pub(crate) fn inventory_held_inspected(
     root: &Path,
-    anchor: &dyn provenant_supervisor::fs::SafeDir,
+    anchor: &provenant_os::fs::Directory,
     remove_staging: bool,
     evidence: Option<&mut InspectionEvidence>,
 ) -> Result<Vec<PathBuf>, InstallError> {
@@ -450,7 +447,7 @@ pub(crate) fn inventory_held_inspected(
         root: &Path,
         tail: &Path,
         depth: usize,
-        dir: &dyn provenant_supervisor::fs::SafeDir,
+        dir: &provenant_os::fs::Directory,
         output: &mut Vec<PathBuf>,
         scan: &mut Scan<'_>,
         remove_staging: bool,
@@ -479,7 +476,7 @@ pub(crate) fn inventory_held_inspected(
                 evidence.metadata(&root.join(&path), metadata);
             }
             if matches!(metadata.kind, FileKind::Regular | FileKind::Symlink)
-                && is_supervisor_staging_name(&name)
+                && is_staging_name(&name)
             {
                 if remove_staging {
                     dir.unlink(&name)?;
@@ -488,15 +485,17 @@ pub(crate) fn inventory_held_inspected(
                 continue;
             }
             match metadata.kind {
-                FileKind::Directory if allowed_directory(&path) => walk(
-                    root,
-                    &path,
-                    depth + 1,
-                    dir.open_verified_directory(&name)?.as_ref(),
-                    output,
-                    scan,
-                    remove_staging,
-                )?,
+                FileKind::Directory if allowed_directory(&path) => {
+                    walk(
+                        root,
+                        &path,
+                        depth + 1,
+                        &crate::managed::open_verified_directory(dir, &name)?,
+                        output,
+                        scan,
+                        remove_staging,
+                    )?;
+                }
                 FileKind::Regular if path == Path::new("release.json") => {}
                 FileKind::Regular => output.push(path),
                 _ => return Err(InstallError::Tampered(root.join(path))),

@@ -5,8 +5,8 @@ use crate::{
     identity::{CrossHostProjectKey, Identity},
 };
 use provenant_core::{ActorId, CancelToken, Clock, HostId, OperationId, WaitBudget};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use provenant_records::{CanonicalV1, Limits, Trace};
-use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -22,7 +22,7 @@ pub fn discover_ssh_executable(
 ) -> Result<std::path::PathBuf, PeerError> {
     if let Some(path) = override_path {
         if !crate::config::valid_executable_override(path)
-            || !provenant_supervisor::sys::is_executable(path)
+            || !provenant_os::sys::is_executable(path)
         {
             return Err(PeerError::Unavailable);
         }
@@ -31,7 +31,7 @@ pub fn discover_ssh_executable(
     ["/usr/bin/ssh", "/bin/ssh"]
         .into_iter()
         .map(Path::new)
-        .find(|path| provenant_supervisor::sys::is_executable(path))
+        .find(|path| provenant_os::sys::is_executable(path))
         .map(Path::to_path_buf)
         .ok_or(PeerError::Unavailable)
 }
@@ -641,7 +641,7 @@ impl PeerTransport for SshTransport<'_> {
 mod tests {
     use super::*;
     use provenant_core::{MonoTime, TestClock, WallTime};
-    use provenant_supervisor::exec::{CapturedStream, ExecError, ExecOutcome};
+    use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},

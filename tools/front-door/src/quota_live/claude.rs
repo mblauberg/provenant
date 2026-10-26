@@ -1,5 +1,5 @@
 use super::*;
-use provenant_supervisor::fs::{Directory, Publication, PublishMode, SafeDir};
+use provenant_os::fs::{Directory, PublishMode};
 use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
 // No Debug/Serialize: an identity can carry an access token only in memory.
@@ -38,7 +38,7 @@ fn claude_executable() -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join("claude"))
-        .filter(|path| provenant_supervisor::sys::is_executable(path))
+        .filter(|path| provenant_os::sys::is_executable(path))
         .find_map(|path| path.canonicalize().ok())
 }
 fn may_refresh(
@@ -234,7 +234,7 @@ impl LiveQuota {
         });
         markers.insert(key, expires);
         let bytes = serde_json::to_vec(&markers).map_err(|_| ProbeFailure::Malformed)?;
-        match SafeDir::atomic_write(
+        provenant_os::fs::Directory::atomic_write_with_permissions(
             &dir,
             OsStr::new("quota-claude-refresh.json"),
             ".quota-refresh",
@@ -243,10 +243,9 @@ impl LiveQuota {
             PublishMode::Replace,
         )
         .map_err(|_| ProbeFailure::Network)?
-        {
-            Publication::Durable => Ok(true),
-            Publication::VisibleDurabilityUnconfirmed { .. } => Err(ProbeFailure::Network),
-        }
+        .require_durable()
+        .map_err(|_| ProbeFailure::Network)?;
+        Ok(true)
     }
     pub(super) fn claude(
         &self,

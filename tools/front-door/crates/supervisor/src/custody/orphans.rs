@@ -38,14 +38,14 @@ impl OrphanProbe for SystemProbe {
             return false;
         };
         i32::try_from(pid)
-            .is_ok_and(|pid| crate::sys::census::darwin_in_attempt_sandbox(pid, &name))
+            .is_ok_and(|pid| crate::process_os::census::darwin_in_attempt_sandbox(pid, &name))
     }
     #[cfg(not(target_os = "macos"))]
     fn in_attempt_sandbox(&self, _: i64, _: &Scope) -> bool {
         false
     }
     fn signal(&self, identity: &ProcessIdentity, escalation: bool) -> bool {
-        crate::sys::provider::signal_identity(identity, escalation)
+        crate::process_os::provider::signal_identity(identity, escalation)
     }
 }
 
@@ -141,7 +141,7 @@ impl Recovery {
                 if live.is_empty() || Instant::now() >= deadline {
                     break;
                 }
-                crate::sys::wait_pause(Duration::from_millis(20));
+                provenant_os::sys::wait_pause(Duration::from_millis(20));
             }
         }
         report.stopped = proven
@@ -161,7 +161,7 @@ impl Recovery {
         resolved.omitted_descendants = 0;
         resolved.descendants.clear();
         resolved.validate()?;
-        require_durable(write_record(
+        Publication::require_durable(write_record(
             &self.directory,
             "reservation.json",
             &resolved,
@@ -185,7 +185,7 @@ impl Recovery {
             serde_json::to_value(evidence).map_err(|_| CustodyError::InvalidRecord)?,
         );
         let settled = serde_json::to_vec(&document).map_err(|_| CustodyError::InvalidRecord)?;
-        require_durable(attempt.atomic_write(
+        Publication::require_durable(attempt.atomic_write(
             OsStr::new("process-exit.json"),
             ".exit-",
             &settled,
@@ -327,7 +327,7 @@ mod tests {
         recorded: &[ProcessIdentity],
     ) -> std::result::Result<Fixture, Box<dyn Error>> {
         let root = tempfile::tempdir()?;
-        let clock = crate::clock::SystemClock::new();
+        let clock = provenant_os::clock::SystemClock::new();
         let lease = crate::fixture::acquire_writer(
             Directory::open_anchor(root.path())?,
             scope(),

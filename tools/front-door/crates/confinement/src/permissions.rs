@@ -2,6 +2,20 @@
 //!
 //! Provider-owned profile data bounds every requested permission.
 //! Linux deliberately exposes an unavailable backend.
+use crate::cache::{CARGO_CACHE_OWNER, CARGO_CACHE_OWNER_PREFIX, verify_cache_metadata};
+use crate::repo::{GitRefName, VerifiedWorktree};
+use provenant_core::CancelToken;
+#[cfg(target_os = "macos")]
+use provenant_os::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
+#[cfg(target_os = "macos")]
+use provenant_os::fs::Metadata;
+use provenant_os::{
+    exec::Executor,
+    fs::{Directory, FileKind, FsError, PublishMode},
+};
+pub use provenant_records::run::{NetworkAccess, PathScope, WriteSource};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -10,23 +24,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
-
-use provenant_core::CancelToken;
-use provenant_supervisor::exec::Executor;
-#[cfg(target_os = "macos")]
-use provenant_supervisor::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
-#[cfg(target_os = "macos")]
-use provenant_supervisor::fs::Metadata;
-#[cfg(target_os = "macos")]
-use provenant_supervisor::fs::SafeDir;
-use provenant_supervisor::fs::{FileKind, FsError, PublishMode, SafeFs};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use crate::cache::{CARGO_CACHE_OWNER, CARGO_CACHE_OWNER_PREFIX, verify_cache_metadata};
-use crate::repo::{GitRefName, VerifiedWorktree};
-pub use provenant_records::run::{NetworkAccess, PathScope, WriteSource};
 
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_GRANTS: usize = 128;
@@ -200,9 +198,9 @@ pub enum PermissionError {
     #[error("sandbox probe was cancelled")]
     Cancelled,
     #[error("safe filesystem operation failed: {0}")]
-    Filesystem(#[source] provenant_supervisor::fs::FsError),
+    Filesystem(#[source] provenant_os::fs::FsError),
     #[error("sandbox probe execution failed")]
-    Execution(#[source] provenant_supervisor::exec::ExecError),
+    Execution(#[source] provenant_os::exec::ExecError),
     #[error("verified repository authority could not be revalidated")]
     Repository(#[from] crate::repo::RepoError),
     #[error("bounded Git HEAD read failed")]
@@ -376,7 +374,6 @@ pub fn worktree_cargo_cache(
 /// before collecting `required_anchors`. Shared config and packed refs remain
 /// immutable: the host fetches before launch and sets upstream after exit.
 pub fn prepare_writer_directories(
-    safe_fs: &dyn SafeFs,
     worktree: &VerifiedWorktree,
     selected_ref: &GitRefName,
     authority: &WorktreeWriteAuthority,
@@ -398,22 +395,21 @@ pub fn prepare_writer_directories(
         })
         .collect();
     for path in paths {
-        let mut directory = safe_fs
-            .open_anchor(Path::new("/"))
-            .map_err(PermissionError::Filesystem)?;
+        let mut directory =
+            Directory::open_anchor(Path::new("/")).map_err(PermissionError::Filesystem)?;
         let mut traversed = PathBuf::from("/");
         for component in path.components() {
             let Component::Normal(name) = component else {
                 continue;
             };
-            directory = match directory.open_directory(name, false) {
+            directory = match directory.open_directory(name) {
                 Ok(child) => child,
                 Err(error) if error.is_not_found() => {
                     directory
                         .mkdir(name, 0o700)
                         .map_err(PermissionError::Filesystem)?;
                     directory
-                        .open_directory(name, false)
+                        .open_directory(name)
                         .map_err(PermissionError::Filesystem)?
                 }
                 Err(error) => return Err(PermissionError::Filesystem(error)),
@@ -435,7 +431,6 @@ pub fn prepare_writer_directories(
                         OsStr::new(CARGO_CACHE_OWNER),
                         ".provenant-owner-",
                         &marker,
-                        0o600,
                         PublishMode::Replace,
                     )
                     .map_err(PermissionError::Filesystem)?;
@@ -707,28 +702,23 @@ pub struct ProviderProfile {
 pub struct AnchoredDirectory {
     path: PathBuf,
     #[cfg(target_os = "macos")]
-    directory: Box<dyn SafeDir>,
+    directory: Directory,
     #[cfg(target_os = "macos")]
     identity: Metadata,
 }
 
 impl AnchoredDirectory {
     /// `path` must be the canonical absolute spelling resolved by the caller's
-    /// verified-path logic. Operations use only the held SafeDir thereafter.
-    pub fn open_canonical(
-        safe_fs: &dyn SafeFs,
-        path: impl AsRef<Path>,
-    ) -> Result<Self, PermissionError> {
+    /// verified-path logic. Operations use only the held Directory thereafter.
+    pub fn open_canonical(path: impl AsRef<Path>) -> Result<Self, PermissionError> {
         let path = path.as_ref();
         validate_absolute(path)?;
         let canonical =
-            provenant_supervisor::fs::canonicalize(path).map_err(PermissionError::Filesystem)?;
+            provenant_os::fs::canonicalize(path).map_err(PermissionError::Filesystem)?;
         if canonical.as_path() != path {
             return Err(PermissionError::InvalidPath(path.to_owned()));
         }
-        let directory = safe_fs
-            .open_anchor(path)
-            .map_err(PermissionError::Filesystem)?;
+        let directory = Directory::open_anchor(path).map_err(PermissionError::Filesystem)?;
         let identity = directory.metadata().map_err(PermissionError::Filesystem)?;
         if identity.kind != FileKind::Directory {
             return Err(PermissionError::AnchorMismatch);
@@ -747,15 +737,13 @@ impl AnchoredDirectory {
     }
 
     #[cfg(target_os = "macos")]
-    fn verify(&self, safe_fs: &dyn SafeFs) -> Result<(), PermissionError> {
-        let canonical = provenant_supervisor::fs::canonicalize(&self.path)
-            .map_err(PermissionError::Filesystem)?;
+    fn verify(&self) -> Result<(), PermissionError> {
+        let canonical =
+            provenant_os::fs::canonicalize(&self.path).map_err(PermissionError::Filesystem)?;
         if canonical.as_path() != self.path {
             return Err(PermissionError::AnchorMismatch);
         }
-        let named = safe_fs
-            .open_anchor(&self.path)
-            .map_err(PermissionError::Filesystem)?;
+        let named = Directory::open_anchor(&self.path).map_err(PermissionError::Filesystem)?;
         let named_identity = named.metadata().map_err(PermissionError::Filesystem)?;
         let held_identity = self
             .directory
@@ -776,7 +764,7 @@ pub struct Anchors<'a> {
     /// Canonical user home resolved by the host, independent of plan records.
     pub home: &'a Path,
     pub directories: &'a [AnchoredDirectory],
-    pub safe_fs: &'a dyn SafeFs,
+
     /// Linked tree and selected branch derive Git paths at the authority edge.
     pub worktree: Option<(&'a VerifiedWorktree, &'a GitRefName)>,
 }
@@ -785,7 +773,7 @@ pub struct Anchors<'a> {
 impl Anchors<'_> {
     fn verify_all(&self) -> Result<(), PermissionError> {
         for anchor in self.directories {
-            anchor.verify(self.safe_fs)?;
+            anchor.verify()?;
         }
         Ok(())
     }
@@ -798,7 +786,7 @@ impl Anchors<'_> {
                     .iter()
                     .find(|anchor| anchor.path == grant.path)
                     .ok_or(PermissionError::AnchorMismatch)?;
-                anchor.verify(self.safe_fs)
+                anchor.verify()
             }
             PathScope::Exact => {
                 self.exact_grant_metadata(&grant.path)?;
@@ -840,7 +828,7 @@ impl Anchors<'_> {
             .iter()
             .find(|anchor| anchor.path == parent)
             .ok_or(PermissionError::AnchorMismatch)?;
-        anchor.verify(self.safe_fs)?;
+        anchor.verify()?;
         match anchor.directory.metadata_at(name, false) {
             Ok(metadata) if metadata.kind == FileKind::Regular => Ok(Some(metadata)),
             Ok(_) => Err(PermissionError::AnchorMismatch),
@@ -946,7 +934,6 @@ pub fn required_anchors(
 }
 
 pub struct BackendContext<'a> {
-    pub safe_fs: &'a dyn SafeFs,
     pub executor: &'a dyn Executor,
     pub cancel: &'a CancelToken,
     #[cfg(target_os = "macos")]
@@ -1066,7 +1053,7 @@ fn probe_sandbox_with_diagnostic(
     if context.cancel.is_cancelled() {
         return Err(PermissionError::Cancelled);
     }
-    let executable = match context.safe_fs.open_source(Path::new(SANDBOX_EXEC)) {
+    let executable = match provenant_os::fs::FileHandle::open_source(Path::new(SANDBOX_EXEC)) {
         Ok(executable) => executable,
         Err(error) if error.is_not_found() => {
             return Ok((
@@ -1104,7 +1091,7 @@ fn probe_sandbox_with_diagnostic(
     let options = probe_exec_options(&argv, context);
     match context.executor.execute(options) {
         Ok(outcome) if successful_probe(&outcome) => (),
-        Err(provenant_supervisor::exec::ExecError::Cancelled) => {
+        Err(provenant_os::exec::ExecError::Cancelled) => {
             return Err(PermissionError::Cancelled);
         }
         Err(error) => return Err(PermissionError::Execution(error)),
@@ -1136,7 +1123,7 @@ fn probe_sandbox_with_diagnostic(
             },
             None,
         )),
-        Err(provenant_supervisor::exec::ExecError::Cancelled) => Err(PermissionError::Cancelled),
+        Err(provenant_os::exec::ExecError::Cancelled) => Err(PermissionError::Cancelled),
         Err(error) => Err(PermissionError::Execution(error)),
         Ok(outcome) => Ok((
             Availability::Unavailable {
@@ -1209,7 +1196,7 @@ fn compile_sbpl(
         if !matches!(plan.mode, AccessMode::ReadOnly) {
             return Err(PermissionError::InvalidReadOnlyPolicy);
         }
-        read_only.revalidate(anchors.safe_fs)?;
+        read_only.revalidate()?;
         for grant in &read_only.writes {
             validate_noncredential_grant(grant)?;
             if plan
@@ -1373,7 +1360,7 @@ fn compile_sbpl(
     }
     verify_state_writes(plan, profile, anchors)?;
     if let Some(read_only) = &plan.read_only {
-        read_only.revalidate(anchors.safe_fs)?;
+        read_only.revalidate()?;
         for grant in &read_only.writes {
             verify_writable_tree(&grant.path, anchors)?;
         }
@@ -1599,13 +1586,13 @@ fn verify_private_scratch(
         .iter()
         .find(|anchor| anchor.path == scratch.path)
         .ok_or(PermissionError::AnchorMismatch)?;
-    anchor.verify(anchors.safe_fs)?;
+    anchor.verify()?;
     let metadata = anchor
         .directory
         .metadata()
         .map_err(PermissionError::Filesystem)?;
     if scratch.scope != PathScope::Subtree
-        || metadata.uid != provenant_supervisor::fs::effective_uid()
+        || metadata.uid != provenant_os::fs::effective_uid()
         || metadata.mode & 0o077 != 0
     {
         return Err(PermissionError::AnchorMismatch);
@@ -1621,7 +1608,7 @@ fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), Permis
         .iter()
         .find(|anchor| anchor.path == path)
         .ok_or(PermissionError::AnchorMismatch)?;
-    root.verify(anchors.safe_fs)?;
+    root.verify()?;
     let identity = root
         .directory
         .metadata()
@@ -1630,13 +1617,13 @@ fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), Permis
         return Err(PermissionError::AnchorMismatch);
     }
     let mut entries = 0;
-    inspect_writable_directory(root.directory.as_ref(), 0, &mut entries)?;
+    inspect_writable_directory(&root.directory, 0, &mut entries)?;
     let after = root
         .directory
         .metadata()
         .map_err(PermissionError::Filesystem)?;
-    root.verify(anchors.safe_fs)?;
-    if !crate::stable_read::same_metadata(&identity, &after) || after.kind != FileKind::Directory {
+    root.verify()?;
+    if !identity.unchanged(&after) || after.kind != FileKind::Directory {
         return Err(PermissionError::AnchorMismatch);
     }
     Ok(())
@@ -1644,7 +1631,7 @@ fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), Permis
 
 #[cfg(target_os = "macos")]
 fn inspect_writable_directory(
-    directory: &dyn SafeDir,
+    directory: &Directory,
     depth: usize,
     count: &mut usize,
 ) -> Result<(), PermissionError> {
@@ -1668,23 +1655,21 @@ fn inspect_writable_directory(
                 .open_verified_directory(&name)
                 .map_err(PermissionError::Filesystem)?;
             let opened = child.metadata().map_err(PermissionError::Filesystem)?;
-            if !crate::stable_read::same_metadata(&before, &opened) {
+            if !before.unchanged(&opened) {
                 return Err(PermissionError::AnchorMismatch);
             }
-            inspect_writable_directory(child.as_ref(), depth + 1, count)?;
+            inspect_writable_directory(&child, depth + 1, count)?;
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
-            if after.kind != FileKind::Directory
-                || !crate::stable_read::same_metadata(&opened, &after)
-            {
+            if after.kind != FileKind::Directory || !opened.unchanged(&after) {
                 return Err(PermissionError::AnchorMismatch);
             }
         } else {
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
-            if !crate::stable_read::same_metadata(&before, &after) {
+            if !before.unchanged(&after) {
                 return Err(PermissionError::AnchorMismatch);
             }
             if after.kind == FileKind::Regular && after.links != 1 {
@@ -2365,8 +2350,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-    use provenant_supervisor::exec::SystemExecutor;
-    use provenant_supervisor::fs::LocalFs;
+    use provenant_os::exec::SystemExecutor;
 
     #[test]
     fn invalid_path_error_names_the_refused_path() {
@@ -2863,7 +2847,7 @@ mod tests {
         let anchors = Anchors {
             home,
             directories: &[],
-            safe_fs: &LocalFs,
+
             worktree: None,
         };
         for root in [home, Path::new("/srv/team"), Path::new("/srv")] {
@@ -2900,14 +2884,13 @@ mod tests {
         // An explicit alias exercises macOS symlink rejection inside a writable fixture.
         let alias = temp.path().join("alias");
         std::os::unix::fs::symlink(temp.path(), &alias).expect("temporary anchor alias");
-        let canonical =
-            provenant_supervisor::fs::canonicalize(&alias).expect("canonical temporary anchor");
+        let canonical = provenant_os::fs::canonicalize(&alias).expect("canonical temporary anchor");
         assert_ne!(alias, canonical);
         assert!(matches!(
-            AnchoredDirectory::open_canonical(&LocalFs, &alias),
+            AnchoredDirectory::open_canonical(&alias),
             Err(PermissionError::InvalidPath(path)) if path == alias
         ));
-        assert!(AnchoredDirectory::open_canonical(&LocalFs, canonical).is_ok());
+        assert!(AnchoredDirectory::open_canonical(canonical).is_ok());
     }
 
     #[cfg(target_os = "macos")]
@@ -2916,10 +2899,9 @@ mod tests {
         let temp = crate::test_support::tempdir().expect("temporary anchor root");
         let original = temp.path().join("root");
         std::fs::create_dir(&original).expect("anchor directory");
-        let path =
-            provenant_supervisor::fs::canonicalize(&original).expect("canonical anchor path");
-        let safe_fs = LocalFs;
-        let anchor = AnchoredDirectory::open_canonical(&safe_fs, &path).expect("open anchor");
+        let path = provenant_os::fs::canonicalize(&original).expect("canonical anchor path");
+
+        let anchor = AnchoredDirectory::open_canonical(&path).expect("open anchor");
         let moved = temp.path().join("moved");
         std::fs::rename(&original, &moved).expect("move held anchor");
         std::fs::create_dir(&original).expect("replacement directory");
@@ -2927,7 +2909,6 @@ mod tests {
         let anchors = Anchors {
             home: Path::new("/fixture/home"),
             directories: &directories,
-            safe_fs: &safe_fs,
             worktree: None,
         };
         assert!(matches!(
@@ -3017,7 +2998,7 @@ mod tests {
                 .open_read_repo(&f.executor, &linked, f.budget()?, &CancelToken::new())?;
         let root = repo.root_path();
         std::fs::create_dir_all(root.join(".agent-run/locks"))?;
-        let scratch = provenant_supervisor::fs::canonicalize(f._temp.path())?.join("private-tmp");
+        let scratch = provenant_os::fs::canonicalize(f._temp.path())?.join("private-tmp");
         std::fs::create_dir(&scratch)?;
         std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
         let policy: ReadOnlyPolicy =
@@ -3051,7 +3032,7 @@ mod tests {
         )?;
         use FixtureOperation as O;
         use FixtureOutcome::{Allowed, Denied};
-        let home = provenant_supervisor::fs::canonicalize(&f.home)?;
+        let home = provenant_os::fs::canonicalize(&f.home)?;
         for directory in [
             home.join(".cargo/bin"),
             home.join(".cargo/registry"),
@@ -3107,12 +3088,12 @@ mod tests {
         let paths = required_anchors(plan.permissions(), &profile, None);
         let directories = paths
             .iter()
-            .map(|p| AnchoredDirectory::open_canonical(&LocalFs, p))
+            .map(AnchoredDirectory::open_canonical)
             .collect::<Result<Vec<_>, _>>()?;
         let anchors = Anchors {
             home: &home,
             directories: &directories,
-            safe_fs: &LocalFs,
+
             worktree: None,
         };
         let compiled =
@@ -3184,7 +3165,7 @@ mod tests {
         let mut outcome = ExecOutcome {
             termination: Termination::Exit(44),
             stdout: Default::default(),
-            stderr: provenant_supervisor::exec::CapturedStream {
+            stderr: provenant_os::exec::CapturedStream {
                 bytes: b"security: The specified item could not be found in the keychain.".to_vec(),
                 ..Default::default()
             },
@@ -3216,12 +3197,11 @@ mod tests {
                 scope: PathScope::Subtree,
             },
         };
-        let safe_fs = LocalFs;
+
         let directories = [];
         let anchors = Anchors {
             home: Path::new("/fixture/home"),
             directories: &directories,
-            safe_fs: &safe_fs,
             worktree: None,
         };
         assert!(matches!(
@@ -3251,7 +3231,7 @@ mod tests {
         };
         let path = fixture._temp.path().join("package");
         let linked = add(&fixture, &path, "cache-test")?;
-        let home = provenant_supervisor::fs::canonicalize(&fixture.home)?;
+        let home = provenant_os::fs::canonicalize(&fixture.home)?;
         let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?;
         let cache = &authority.cargo_cache.path;
         assert_eq!(
@@ -3281,9 +3261,9 @@ mod tests {
                 .path
         );
 
-        prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home)?;
-        prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home)?;
-        let mut metadata = LocalFs.open_anchor(cache)?.metadata()?;
+        prepare_writer_directories(&linked, &selected_ref, &authority, &home)?;
+        prepare_writer_directories(&linked, &selected_ref, &authority, &home)?;
+        let mut metadata = Directory::open_anchor(cache)?.metadata()?;
         verify_cache_metadata(&metadata)?;
         metadata.uid = metadata.uid.wrapping_add(1);
         assert!(matches!(
@@ -3294,7 +3274,7 @@ mod tests {
             std::fs::set_permissions(cache, std::fs::Permissions::from_mode(mode))?;
             assert!(
                 matches!(
-                    prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home),
+                    prepare_writer_directories(&linked, &selected_ref, &authority, &home),
                     Err(PermissionError::AnchorMismatch)
                 ),
                 "mode {mode:o}"
@@ -3304,7 +3284,7 @@ mod tests {
         let namespace = cache.parent().ok_or("namespace")?;
         std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o755))?;
         assert!(matches!(
-            prepare_writer_directories(&LocalFs, &linked, &selected_ref, &authority, &home),
+            prepare_writer_directories(&linked, &selected_ref, &authority, &home),
             Err(PermissionError::AnchorMismatch)
         ));
         std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o700))?;
@@ -3363,7 +3343,7 @@ mod tests {
         let authority = WorktreeWriteAuthority::for_worktree(
             &linked,
             &selected_ref,
-            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+            &provenant_os::fs::canonicalize(&fixture.home)?,
         )?;
         fixture.run(&["pack-refs", "--all"])?;
         let missing_parent = common.join("refs/heads/s3");
@@ -3373,11 +3353,10 @@ mod tests {
         assert!(!missing_parent.exists());
 
         prepare_writer_directories(
-            &LocalFs,
             &linked,
             &selected_ref,
             &authority,
-            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+            &provenant_os::fs::canonicalize(&fixture.home)?,
         )?;
         let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
         assert_eq!(
@@ -3410,15 +3389,14 @@ mod tests {
             common_heads,
             common_logs,
         ];
-        let safe_fs = LocalFs;
+
         let directories = anchor_paths
             .iter()
-            .map(|path| AnchoredDirectory::open_canonical(&safe_fs, path))
+            .map(AnchoredDirectory::open_canonical)
             .collect::<Result<Vec<_>, _>>()?;
         let anchors = Anchors {
-            home: &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+            home: &provenant_os::fs::canonicalize(&fixture.home)?,
             directories: &directories,
-            safe_fs: &safe_fs,
             worktree: Some((&linked, &selected_ref)),
         };
         assert!(missing_parent.is_dir());
@@ -3491,9 +3469,8 @@ mod tests {
 
         let other_ref = GitRefName::branch("s3/other")?;
         let mismatched = Anchors {
-            home: &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+            home: &provenant_os::fs::canonicalize(&fixture.home)?,
             directories: &directories,
-            safe_fs: &safe_fs,
             worktree: Some((&linked, &other_ref)),
         };
         assert!(matches!(
@@ -3541,7 +3518,7 @@ mod tests {
                 &WorktreeWriteAuthority::for_worktree(
                     &linked,
                     &selected_ref,
-                    &provenant_supervisor::fs::canonicalize(&fixture.home)?
+                    &provenant_os::fs::canonicalize(&fixture.home)?
                 )?,
                 &anchors
             ),
@@ -3558,8 +3535,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
-        let root = provenant_supervisor::fs::canonicalize(temp.path())?;
-        let fs = LocalFs;
+        let root = provenant_os::fs::canonicalize(temp.path())?;
+
         let scratch_path = root.join("scratch");
         std::fs::create_dir(&scratch_path)?;
         std::fs::set_permissions(&scratch_path, std::fs::Permissions::from_mode(0o700))?;
@@ -3567,11 +3544,11 @@ mod tests {
             path: scratch_path.clone(),
             scope: PathScope::Subtree,
         };
-        let directories = [AnchoredDirectory::open_canonical(&fs, &scratch_path)?];
+        let directories = [AnchoredDirectory::open_canonical(&scratch_path)?];
         let anchors = Anchors {
             home: Path::new("/fixture/home"),
             directories: &directories,
-            safe_fs: &fs,
+
             worktree: None,
         };
         verify_private_scratch(&scratch, &[], &anchors)?;
@@ -3607,7 +3584,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let fixture = crate::test_support::Fixture::new()?;
-        let root = provenant_supervisor::fs::canonicalize(fixture._temp.path())?;
+        let root = provenant_os::fs::canonicalize(fixture._temp.path())?;
         let home = root.join("home");
         let state = root.join("state");
         let xdg = root.join("xdg");
@@ -3639,14 +3616,13 @@ mod tests {
         let authority = WorktreeWriteAuthority::for_worktree(
             &linked,
             &selected_ref,
-            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+            &provenant_os::fs::canonicalize(&fixture.home)?,
         )?;
         prepare_writer_directories(
-            &LocalFs,
             &linked,
             &selected_ref,
             &authority,
-            &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+            &provenant_os::fs::canonicalize(&fixture.home)?,
         )?;
         let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
 
@@ -3671,7 +3647,7 @@ mod tests {
         symlink(&protected_file, &symlink_path)?;
         // Shared tool stores and dispatch write roots are writable; Cargo
         // credentials stay hidden inside an otherwise readable Cargo home.
-        let cargo = provenant_supervisor::fs::canonicalize(&fixture.home)?.join(".cargo");
+        let cargo = provenant_os::fs::canonicalize(&fixture.home)?.join(".cargo");
         std::fs::create_dir_all(cargo.join("registry"))?;
         std::fs::create_dir_all(cargo.join("bin"))?;
         let cargo_credentials = cargo.join("credentials.toml");
@@ -3693,13 +3669,13 @@ mod tests {
             std::fs::write(path, b"ref: refs/remotes/origin/main\n")?;
         }
         let executables = [
-            provenant_supervisor::fs::canonicalize(Path::new("/usr/bin/touch"))?,
-            provenant_supervisor::fs::canonicalize(Path::new("/bin/mv"))?,
-            provenant_supervisor::fs::canonicalize(Path::new("/bin/ln"))?,
-            provenant_supervisor::fs::canonicalize(Path::new("/bin/sh"))?,
-            provenant_supervisor::fs::canonicalize(Path::new("/bin/cat"))?,
-            provenant_supervisor::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
-            provenant_supervisor::fs::canonicalize(Path::new("/usr/bin/perl"))?,
+            provenant_os::fs::canonicalize(Path::new("/usr/bin/touch"))?,
+            provenant_os::fs::canonicalize(Path::new("/bin/mv"))?,
+            provenant_os::fs::canonicalize(Path::new("/bin/ln"))?,
+            provenant_os::fs::canonicalize(Path::new("/bin/sh"))?,
+            provenant_os::fs::canonicalize(Path::new("/bin/cat"))?,
+            provenant_os::fs::canonicalize(Path::new("/usr/sbin/sysctl"))?,
+            provenant_os::fs::canonicalize(Path::new("/usr/bin/perl"))?,
         ];
 
         let profile = ProviderProfile {
@@ -3795,7 +3771,7 @@ mod tests {
             network: NetworkAccess::Provider,
             nested_confinement: false,
         };
-        let safe_fs = LocalFs;
+
         let mut anchor_paths = vec![
             root.clone(),
             cargo.clone(),
@@ -3820,12 +3796,11 @@ mod tests {
         anchor_paths.extend(executable_directories);
         let directories = anchor_paths
             .iter()
-            .map(|path| AnchoredDirectory::open_canonical(&safe_fs, path))
+            .map(AnchoredDirectory::open_canonical)
             .collect::<Result<Vec<_>, _>>()?;
         let anchors = Anchors {
-            home: &provenant_supervisor::fs::canonicalize(&fixture.home)?,
+            home: &provenant_os::fs::canonicalize(&fixture.home)?,
             directories: &directories,
-            safe_fs: &safe_fs,
             worktree: Some((&linked, &selected_ref)),
         };
         let backend = MacOsSandboxBackend { ready: true };
@@ -3872,7 +3847,6 @@ mod tests {
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ];
         let (baseline, baseline_diagnostic) = probe_sandbox_with_diagnostic(&BackendContext {
-            safe_fs: &LocalFs,
             executor: &fixture.executor,
             cancel: &CancelToken::new(),
             env: &env,
@@ -4321,8 +4295,7 @@ mod tests {
     #[test]
     fn macos_sandbox_probe_runs_through_executor_with_isolated_environment() {
         let temp = crate::test_support::tempdir().expect("temporary isolated root");
-        let root =
-            provenant_supervisor::fs::canonicalize(temp.path()).expect("canonical isolated root");
+        let root = provenant_os::fs::canonicalize(temp.path()).expect("canonical isolated root");
         let home = root.join("home");
         let state = root.join("state");
         let xdg = root.join("xdg");
@@ -4343,11 +4316,10 @@ mod tests {
             ("CLAUDE_CONFIG_DIR".into(), claude.into_os_string()),
             ("CODEX_HOME".into(), codex.into_os_string()),
         ];
-        let safe_fs = LocalFs;
+
         let executor = SystemExecutor::new(2).expect("bounded utility executor");
         let cancel = CancelToken::new();
         let context = BackendContext {
-            safe_fs: &safe_fs,
             executor: &executor,
             cancel: &cancel,
             env: &env,
@@ -4362,11 +4334,9 @@ mod tests {
     fn linux_has_no_confinement_backend() {
         #[cfg(target_os = "linux")]
         {
-            let safe_fs = LocalFs;
             let executor = SystemExecutor::new(1).expect("bounded executor");
             let cancel = CancelToken::new();
             let context = BackendContext {
-                safe_fs: &safe_fs,
                 executor: &executor,
                 cancel: &cancel,
             };

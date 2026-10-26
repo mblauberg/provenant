@@ -1,10 +1,10 @@
 //! Read-only classification of physical run-store contents.
 use crate::{Result, RunStore};
-use provenant_records::{AttemptFile, AttemptFileClass};
-use provenant_supervisor::{
+use provenant_os::{
     disk::{DiskEntry, DiskReport},
     fs::Directory,
 };
+use provenant_records::{AttemptFile, AttemptFileClass};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},

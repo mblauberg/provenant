@@ -4,11 +4,9 @@ use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs, RunId, WaitBudget,
 };
+use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
-    clock::SystemClock,
     custody::{self, CustodyError, ExitObservation},
-    exec::Termination,
-    fs::{Directory, LocalFs},
     machine::StopReason,
 };
 use serde::{Deserialize, Serialize};
@@ -109,7 +107,7 @@ impl HolderContext {
             RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
         inputs.state_dir = Some(context.roots.state_root.clone());
         let state_root = inputs
-            .resolve(&LocalFs)
+            .resolve(&provenant_os::fs::SystemPathResolver)
             .map_err(|_| RunError::UnsafePath)?
             .state;
         if state_root.as_path() != context.roots.state_root {
@@ -239,7 +237,7 @@ impl RunStore {
             let commit = recovery
                 .verify_settlement(attempt)
                 .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
-            let mut scratch = provenant_supervisor::scratch::Scratch::new(attempt.try_clone()?)?;
+            let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
             recovery
                 .settle(commit, &mut scratch)
                 .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;

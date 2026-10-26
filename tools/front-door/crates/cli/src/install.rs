@@ -7,7 +7,6 @@ use provenant_config::{
     ReleaseSmoke, Targets,
 };
 use provenant_core::Roots;
-use provenant_supervisor::fs::SafeFs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, clap::Args)]
@@ -54,14 +53,13 @@ pub fn configured_targets(
     roots: Roots,
     home: &Path,
     harnesses: &[Harness],
-    fs: &dyn SafeFs,
     claude_config_dir: Option<&Path>,
     codex_home: Option<&Path>,
 ) -> Result<Targets, InstallError> {
     let mut targets = Targets::new(roots, home, harnesses);
     // Validate against every registered domain, so sections other commands
     // write (accounts, routing, quota) never block installation.
-    config::apply_install_config_with_domains(&mut targets, fs, &crate::domains::SECTIONS)?;
+    config::apply_install_config_with_domains(&mut targets, &crate::domains::SECTIONS)?;
     targets.apply_environment(claude_config_dir, codex_home)?;
     Ok(targets)
 }
@@ -83,7 +81,7 @@ pub fn execute_install(
     targets.hooks = matches!(args.hooks, Some(Switch::On));
     targets.remove_hooks = matches!(args.hooks, Some(Switch::Off));
     targets.validate()?;
-    let release = Release::read(&args.source, target, context.fs)?;
+    let release = Release::read(&args.source, target)?;
     config::plan_and_install(&release, &targets, context, reporter, smoke, args.dry_run)
 }
 

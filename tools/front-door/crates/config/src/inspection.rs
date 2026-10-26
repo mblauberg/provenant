@@ -1,6 +1,6 @@
 //! Input observations collected by existing readers, without additional I/O.
+use provenant_os::fs::{FileKind, Metadata};
 use provenant_records::{CanonicalV1, FileDigest};
-use provenant_supervisor::fs::{FileKind, Metadata};
 use std::path::Path;
 
 #[derive(Default)]

@@ -426,7 +426,7 @@ impl SparingTracker {
         census: &Census,
         custody_root: &ProcessIdentity,
         registration: &OwnerRegistration,
-        proof: &crate::sys::census::HeldCustodyProof,
+        proof: &crate::process_os::census::HeldCustodyProof,
     ) -> Result<(), SparingError> {
         if proof.owner_identity() != registration.identity() {
             return Err(SparingError::ProofMismatch);
@@ -542,12 +542,12 @@ impl SparingTracker {
     }
 }
 
-pub use crate::sys::census::SystemProcessObserver;
+pub use crate::process_os::census::SystemProcessObserver;
 
 /// Current-process observation for excluding the management caller from a
 /// repository worker census. This grants no signal or adoption authority.
 pub fn current_process() -> ProcessObservation {
-    crate::sys::census::current_process()
+    crate::process_os::census::current_process()
 }
 
 pub trait ProcessObserver {

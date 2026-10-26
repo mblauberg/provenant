@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use provenant_core::{PathResolver, RootInputs};
+use provenant_os::clock::SystemClock;
 use provenant_records::{SourceInput, source_digest};
-use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
 use std::{
     fs, io,
     os::unix::fs::{PermissionsExt, symlink},
@@ -65,7 +65,7 @@ impl Fixture {
     }
     fn plan(&self) -> InstallPlan {
         let r = self.release();
-        let s = Snapshots::capture(&r, &self.targets, &LocalFs).unwrap();
+        let s = Snapshots::capture(&r, &self.targets).unwrap();
         plan_install(r, self.targets.clone(), s).unwrap()
     }
     fn link(&self) -> PathBuf {
@@ -84,7 +84,7 @@ fn package_fixture_release(
     source_digest: provenant_records::SourceDigest,
 ) -> Release {
     let mut files = BTreeMap::new();
-    for relative in crate::release::inventory(source, &LocalFs).unwrap() {
+    for relative in crate::release::inventory(source).unwrap() {
         let path = source.join(&relative);
         let bytes = fs::read(&path).unwrap();
         let actual_mode = fs::metadata(&path).unwrap().permissions().mode();
@@ -103,7 +103,7 @@ fn package_fixture_release(
         record_schema_version: 1,
         config_schema_version: 1,
     };
-    crate::package_release(source, &expected, &LocalFs, &Smoke, &CancelToken::new()).unwrap()
+    crate::package_release(source, &expected, &Smoke, &CancelToken::new()).unwrap()
 }
 
 #[derive(Default)]
@@ -134,7 +134,7 @@ fn peer_agent_accepts_a_symlinked_home() {
     f.targets.home = alias;
     f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
     let release = f.release();
-    let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
+    let snapshots = Snapshots::capture(&release, &f.targets).unwrap();
     let plan = plan_install(release, f.targets.clone(), snapshots).unwrap();
     assert!(plan.actions().iter().any(|action| {
         action.selector == "peer-agent"
@@ -283,7 +283,7 @@ fn missing_peer_agent_is_stopped_only_when_the_last_harness_is_removed() {
     uninstall(&f.targets, &ctx, &mut reporter).unwrap();
     assert_eq!(reporter.0, 0);
     assert!(
-        read_receipt(&f.targets, &LocalFs)
+        read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -294,7 +294,7 @@ fn missing_peer_agent_is_stopped_only_when_the_last_harness_is_removed() {
     uninstall(&f.targets, &ctx, &mut reporter).unwrap();
     assert_eq!(reporter.0, 1);
     assert!(
-        !read_receipt(&f.targets, &LocalFs)
+        !read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -330,8 +330,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     let mut targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
     targets.peer_agent = Some(b"new home plist\n".to_vec());
     let plist = peer_agent_plist(targets.roots.state.as_path()).unwrap();
-    let inspection =
-        inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel).unwrap();
+    let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert_eq!(
         inspection
@@ -369,16 +368,16 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     assert_eq!(fs::read(&plist).unwrap(), b"old home plist\n");
     assert_eq!(reporter.0, 0);
     assert!(
-        !read_receipt(&targets, &LocalFs)
+        !read_receipt(&targets)
             .unwrap()
             .unwrap()
             .harnesses
             .contains(&Harness::Codex)
     );
-    assert_eq!(installed_binary(&targets, &LocalFs).unwrap(), None);
+    assert_eq!(installed_binary(&targets).unwrap(), None);
     let release = f.release();
     assert!(matches!(
-        Snapshots::capture(&release, &targets, &LocalFs),
+        Snapshots::capture(&release, &targets),
         Err(InstallError::Conflict(path)) if path == targets.harnesses[0].mcp_file
     ));
     targets.adopt_existing = true;
@@ -388,7 +387,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
         moved_home.join(".codex/HARNESS.md"),
         targets.bin_dir.join("provenant"),
     ] {
-        let snapshots = Snapshots::capture(&release, &targets, &LocalFs).unwrap();
+        let snapshots = Snapshots::capture(&release, &targets).unwrap();
         assert!(matches!(
             plan_install(release.clone(), targets.clone(), snapshots),
             Err(InstallError::Conflict(_))
@@ -399,11 +398,10 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     // launchctl bootout is a manual process-edge step; the fixture pins that
     // uninstall did not stop it and completes the documented plist cleanup.
     fs::rename(&plist, plist.with_extension("plist.saved")).unwrap();
-    let snapshots = Snapshots::capture(&release, &targets, &LocalFs).unwrap();
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
     let plan = plan_install(release, targets.clone(), snapshots).unwrap();
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let inspection =
-        inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel).unwrap();
+    let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
     assert_eq!(fs::read_link(f.link()).unwrap(), original_target);
@@ -436,7 +434,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             let cancel = CancelToken::new();
             let ctx = context(&clock, &cancel);
             let release = f.release();
-            let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
+            let snapshots = Snapshots::capture(&release, &f.targets).unwrap();
             // Keep the caller's HOME spelling after capturing the resolved
             // destinations.
             if let Some(alias) = alias {
@@ -444,13 +442,13 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             }
             let plan = plan_install(release, f.targets.clone(), snapshots).unwrap();
             install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-            let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+            let receipt = read_receipt(&f.targets).unwrap().unwrap();
             let canaries: Vec<_> = receipt
                 .entries
                 .iter()
                 .map(|entry| {
                     let path = entry.path.to_path_buf().unwrap();
-                    let value = snapshot_scoped(&path, f.targets.roots.state.as_path(), &LocalFs)
+                    let value = snapshot_scoped(&path, f.targets.roots.state.as_path())
                         .unwrap()
                         .unwrap()
                         .value;
@@ -486,10 +484,9 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             );
             // A --bin-dir install flag is not available to uninstall.
             let inspection =
-                inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel)
-                    .unwrap();
+                inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
             assert!(inspection.error.is_none(), "{:?}", inspection.error);
-            assert_eq!(installed_binary(&targets, &LocalFs).unwrap(), None);
+            assert_eq!(installed_binary(&targets).unwrap(), None);
             let outcome = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
             assert!(
                 outcome
@@ -513,7 +510,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             );
             for (path, value) in canaries {
                 assert_eq!(
-                    snapshot_scoped(&path, targets.roots.state.as_path(), &LocalFs)
+                    snapshot_scoped(&path, targets.roots.state.as_path())
                         .unwrap()
                         .unwrap()
                         .value,
@@ -547,7 +544,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let outside_config = fs::read(f.base.join("claude.json")).unwrap();
-    let old_receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let old_receipt = read_receipt(&f.targets).unwrap().unwrap();
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
     let mut targets = Targets::new(f.targets.roots.clone(), &moved_home, &[Harness::Codex]);
@@ -556,10 +553,10 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     // State stayed outside the home, so these links still resolve. The old
     // paths nevertheless cannot be carried into a fresh receipt.
     let release = f.release();
-    let snapshots = Snapshots::capture(&release, &targets, &LocalFs).unwrap();
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
     let plan = plan_install(release, targets.clone(), snapshots).unwrap();
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let receipt = read_receipt(&targets, &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&targets).unwrap().unwrap();
     assert_eq!(receipt.harnesses, [Harness::Codex]);
     assert_eq!(receipt.harness_targets.len(), 1);
     assert!(
@@ -572,8 +569,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
         fs::read(f.base.join("claude.json")).unwrap(),
         outside_config
     );
-    let inspection =
-        inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel).unwrap();
+    let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
 
@@ -593,15 +589,14 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     let canary = f.home.join(".agents/AGENTS.md");
     fs::create_dir_all(canary.parent().unwrap()).unwrap();
     fs::write(&canary, b"AGENT_FABRIC_LABEL\n").unwrap();
-    let inspection =
-        inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel).unwrap();
+    let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
     let release = f.release();
-    let snapshots = Snapshots::capture(&release, &targets, &LocalFs).unwrap();
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
     let plan = plan_install(release, targets.clone(), snapshots).unwrap();
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let receipt = read_receipt(&targets, &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&targets).unwrap().unwrap();
     assert_eq!(receipt.harness_targets.len(), 1);
     assert_eq!(fs::read(&canary).unwrap(), b"AGENT_FABRIC_LABEL\n");
 }
@@ -630,8 +625,7 @@ fn check_after_home_rename_never_inspects_old_config_paths() {
         .resolve(&Resolver)
         .unwrap();
     let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
-    let inspection =
-        inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel).unwrap();
+    let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(
         inspection
@@ -658,7 +652,7 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     inputs.environment_state_dir = Some(moved_state);
     f.targets.roots = inputs.resolve(&Resolver).unwrap();
     let release = f.release();
-    let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
+    let snapshots = Snapshots::capture(&release, &f.targets).unwrap();
     assert!(matches!(
         plan_install(release, f.targets.clone(), snapshots),
         Err(InstallError::Conflict(path)) if path == f.link()
@@ -679,7 +673,7 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     assert!(f.plan().findings().is_empty());
     assert_eq!(
-        installed_binary(&f.targets, &LocalFs).unwrap(),
+        installed_binary(&f.targets).unwrap(),
         Some(f.targets.bin_dir.join("provenant"))
     );
     assert_eq!(fs::read(&old_binary).unwrap(), b"old release canary\n");
@@ -754,7 +748,7 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
             .iter()
             .any(|entry| entry.selector == "peer-agent")
     );
-    assert!(read_receipt(&targets, &LocalFs).unwrap().is_some());
+    assert!(read_receipt(&targets).unwrap().is_some());
     let result = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
     assert!(result.actions.is_empty());
     assert_eq!(result.findings[0].rule, "not_installed");
@@ -773,7 +767,7 @@ fn moved_receipt_rejects_entries_outside_both_state_roots() {
         false,
     )
     .unwrap();
-    let mut receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let mut receipt = read_receipt(&f.targets).unwrap().unwrap();
     let moved_state = f.base.join("state-moved");
     fs::rename(f.targets.roots.state.as_path(), &moved_state).unwrap();
     let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
@@ -789,7 +783,7 @@ fn moved_receipt_rejects_entries_outside_both_state_roots() {
     };
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
     assert!(matches!(
-        read_receipt(&f.targets, &LocalFs),
+        read_receipt(&f.targets),
         Err(InstallError::Manifest(
             "receipt entry outside resolved targets"
         ))
@@ -817,14 +811,13 @@ fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = InstallContext {
-            fs: &LocalFs,
             clock: &clock,
             cancel: &cancel,
             budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
         };
         install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
         assert!(f.plan().actions().is_empty());
-        let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+        let receipt = read_receipt(&f.targets).unwrap().unwrap();
         assert!(
             receipt
                 .entries
@@ -834,7 +827,7 @@ fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
         if modified {
             fs::write(&plist, b"user edited plist\n").unwrap();
             let release = f.release();
-            let error = Snapshots::capture(&release, &f.targets, &LocalFs)
+            let error = Snapshots::capture(&release, &f.targets)
                 .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
                 .unwrap_err()
                 .to_string();
@@ -893,14 +886,13 @@ fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let context = InstallContext {
-        fs: &LocalFs,
         clock: &clock,
         cancel: &cancel,
         budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
     };
     install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
     let hook = f.targets.harnesses[0].hook_file.clone().unwrap();
-    let old = read_receipt(&f.targets, &LocalFs)
+    let old = read_receipt(&f.targets)
         .unwrap()
         .unwrap()
         .entries
@@ -916,7 +908,7 @@ fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
             .is_none()
     );
     assert!(
-        read_receipt(&f.targets, &LocalFs)
+        read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -942,14 +934,13 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = InstallContext {
-            fs: &LocalFs,
             clock: &clock,
             cancel: &cancel,
             budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
         };
         install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
         let hook = f.targets.harnesses[0].hook_file.clone().unwrap();
-        let entry = read_receipt(&f.targets, &LocalFs)
+        let entry = read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -972,7 +963,7 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
         if !edit_command {
             let receipt_before = fs::read(f.receipt()).unwrap();
             let release = f.release();
-            let error = Snapshots::capture(&release, &f.targets, &LocalFs)
+            let error = Snapshots::capture(&release, &f.targets)
                 .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
                 .unwrap_err();
             assert!(error.to_string().contains("--hooks off"), "{error}");
@@ -996,7 +987,7 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
                             && finding.path == entry.path)
                 );
             }
-            let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+            let receipt = read_receipt(&f.targets).unwrap().unwrap();
             assert!(
                 !receipt
                     .entries
@@ -1039,7 +1030,6 @@ fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = InstallContext {
-            fs: &LocalFs,
             clock: &clock,
             cancel: &cancel,
             budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
@@ -1053,7 +1043,7 @@ fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
         f.targets.peer_agent_previous = recognised.then(|| b"historical plist\n".to_vec());
         if upgrade {
             let release = f.release();
-            let plan = Snapshots::capture(&release, &f.targets, &LocalFs)
+            let plan = Snapshots::capture(&release, &f.targets)
                 .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
             if recognised {
                 install(
@@ -1070,7 +1060,7 @@ fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
                     0o600
                 );
                 assert!(
-                    read_receipt(&f.targets, &LocalFs)
+                    read_receipt(&f.targets)
                         .unwrap()
                         .unwrap()
                         .entries
@@ -1112,7 +1102,6 @@ fn failed_peer_stop_keeps_the_plist_and_receipt_for_retry() {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = InstallContext {
-            fs: &LocalFs,
             clock: &clock,
             cancel: &cancel,
             budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
@@ -1171,7 +1160,7 @@ fn peer_agent_refuses_symlinked_plist_and_parent_before_writes() {
             symlink(&outside, &plist).unwrap();
         }
         let release = f.release();
-        let result = Snapshots::capture(&release, &f.targets, &LocalFs)
+        let result = Snapshots::capture(&release, &f.targets)
             .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
         assert!(result.is_err());
         assert!(!f.receipt().exists());
@@ -1232,7 +1221,6 @@ impl ReleaseSmoke for MismatchedSmoke {
 }
 fn context<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> InstallContext<'a> {
     InstallContext {
-        fs: &LocalFs,
         clock,
         budget: WaitBudget::cli(clock.mono_now(), 1).unwrap(),
         cancel,
@@ -1278,7 +1266,7 @@ fn occupied_skill_is_refused_without_touching_unmanaged_bytes() {
     fs::create_dir_all(f.link()).unwrap();
     fs::write(f.link().join("custom"), b"unmanaged").unwrap();
     let r = f.release();
-    let s = Snapshots::capture(&r, &f.targets, &LocalFs).unwrap();
+    let s = Snapshots::capture(&r, &f.targets).unwrap();
     let error = plan_install(r, f.targets.clone(), s).unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -1306,7 +1294,6 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
             &f.targets,
             Some(&f.release()),
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -1315,7 +1302,7 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
         .is_empty()
     );
     let binary = f.targets.bin_dir.join("provenant");
-    let before = snapshot(&binary, &LocalFs).unwrap();
+    let before = snapshot(&binary).unwrap();
     let link_before = fs::symlink_metadata(f.link()).unwrap();
     assert!(f.plan().actions().is_empty());
     // Crash after every desired file/link has been published but before receipt.
@@ -1331,7 +1318,7 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
         false,
     )
     .unwrap();
-    assert_eq!(snapshot(&binary, &LocalFs).unwrap(), before);
+    assert_eq!(snapshot(&binary).unwrap(), before);
     use std::os::unix::fs::MetadataExt;
     assert_eq!(
         fs::symlink_metadata(f.link()).unwrap().ino(),
@@ -1348,14 +1335,7 @@ fn crash_after_any_publication_reapplies_without_a_receipt() {
     for action in plan.actions().iter().filter(|a| a.selector != "receipt") {
         let path = action.path.to_path_buf().unwrap();
         let desired = &plan.desired.get(&path).unwrap().value;
-        publish(
-            &path,
-            desired,
-            false,
-            &LocalFs,
-            f.targets.roots.state.as_path(),
-        )
-        .unwrap();
+        publish(&path, desired, false, f.targets.roots.state.as_path()).unwrap();
         let recovery = f.plan();
         assert!(!recovery.actions().iter().any(|a| a.path == action.path));
         assert!(!f.receipt().exists());
@@ -1378,7 +1358,7 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
     f.release();
     fs::write(f.source.join("bin/provenant"), b"tampered").unwrap();
     assert_eq!(
-        Release::read(&f.source, "fixture-target", &LocalFs)
+        Release::read(&f.source, "fixture-target")
             .unwrap_err()
             .to_string(),
         format!(
@@ -1394,7 +1374,7 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
     )
     .unwrap();
     assert!(
-        matches!(Release::read(&f.source, "fixture-target", &LocalFs), Err(InstallError::Tampered(p)) if p == f.source.join("bin/provenant"))
+        matches!(Release::read(&f.source, "fixture-target"), Err(InstallError::Tampered(p)) if p == f.source.join("bin/provenant"))
     );
     let f = Fixture::new();
     let plan = f.plan();
@@ -1418,7 +1398,7 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
         .join("bin/provenant");
     fs::write(&path, b"changed").unwrap();
     let r = f.release();
-    let s = Snapshots::capture(&r, &f.targets, &LocalFs).unwrap();
+    let s = Snapshots::capture(&r, &f.targets).unwrap();
     assert_eq!(
         plan_install(r, f.targets.clone(), s)
             .unwrap_err()
@@ -1430,7 +1410,6 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
             &f.targets,
             None,
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -1522,16 +1501,12 @@ fn explicit_harnesses_platform_links_and_schema_refuse_before_mutation() {
     let mut f = Fixture::new();
     let r = f.release();
     assert_eq!(
-        Release::read(&f.source, "other", &LocalFs)
-            .unwrap_err()
-            .to_string(),
+        Release::read(&f.source, "other").unwrap_err().to_string(),
         "release platform does not match selected target"
     );
     f.targets.harnesses.clear();
     assert_eq!(
-        Snapshots::capture(&r, &f.targets, &LocalFs)
-            .unwrap_err()
-            .to_string(),
+        Snapshots::capture(&r, &f.targets).unwrap_err().to_string(),
         "select at least one harness explicitly, without duplicates"
     );
     assert!(!f.targets.roots.state.as_path().exists());
@@ -1540,26 +1515,22 @@ fn explicit_harnesses_platform_links_and_schema_refuse_before_mutation() {
     fs::remove_file(f.source.join("bin/provenant")).unwrap();
     symlink("/never/open", f.source.join("bin/provenant")).unwrap();
     assert!(matches!(
-        Release::read(&f.source, "fixture-target", &LocalFs),
+        Release::read(&f.source, "fixture-target"),
         Err(InstallError::Tampered(_))
     ));
 }
-// Exercise the real filesystem seam so partial-apply accounting and recovery
-// are tested without adding production-only failure hooks.
-use provenant_core::{
-    CancelToken as TestCancelToken, Clock as TestClock, WaitBudget as TestWaitBudget,
-};
-use provenant_supervisor::fs::{
-    FsError as TestFsError, LockGuard, LockMode, Metadata, Publication, PublishMode,
-    Result as TestFsResult, SafeDir, SafeFile, SafeFs,
-};
+// Inject individual publication and confinement failures while retaining the
+// concrete filesystem implementation and real handles.
+use provenant_core::{CancelToken as TestCancelToken, WaitBudget as TestWaitBudget};
+use provenant_os::fs::{Directory, FsError as TestFsError, Result as TestFsResult};
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     sync::{Arc, atomic::Ordering},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultMode {
+    NoReads,
     StateMount,
     SourceMount,
     ReceiptPublish,
@@ -1570,210 +1541,129 @@ enum FaultMode {
 struct FaultState {
     mode: FaultMode,
     fired: std::sync::atomic::AtomicBool,
-    link_published: std::sync::atomic::AtomicBool,
     cancel: Option<TestCancelToken>,
 }
-struct FaultFs {
-    state: Arc<FaultState>,
+struct FaultInjection {
+    _state: Arc<FaultState>,
 }
-impl FaultFs {
+impl FaultInjection {
     fn new(mode: FaultMode, cancel: Option<TestCancelToken>) -> Self {
-        Self {
-            state: Arc::new(FaultState {
-                mode,
-                fired: std::sync::atomic::AtomicBool::new(false),
-                link_published: std::sync::atomic::AtomicBool::new(false),
-                cancel,
-            }),
+        let state = Arc::new(FaultState {
+            mode,
+            fired: std::sync::atomic::AtomicBool::new(false),
+            cancel,
+        });
+        ACTIVE_FAULT.with(|active| *active.borrow_mut() = Some(state.clone()));
+        Self { _state: state }
+    }
+}
+impl Drop for FaultInjection {
+    fn drop(&mut self) {
+        ACTIVE_FAULT.with(|active| *active.borrow_mut() = None);
+    }
+}
+thread_local! {
+    static ACTIVE_FAULT: std::cell::RefCell<Option<Arc<FaultState>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn filesystem_operation<T>(
+    directory: &Directory,
+    name: &OsStr,
+    bytes: Option<&[u8]>,
+    kind: FilesystemOperation,
+    operation: impl FnOnce() -> TestFsResult<T>,
+) -> TestFsResult<T> {
+    match kind {
+        FilesystemOperation::Open => fault_directory(name)?,
+        FilesystemOperation::Publish => fault_publish(directory, name, bytes.unwrap())?,
+        FilesystemOperation::SyncLink => fault_link_sync(directory, name)?,
+    }
+    let result = operation()?;
+    if matches!(kind, FilesystemOperation::Publish) {
+        fault_after_publish();
+    }
+    Ok(result)
+}
+
+pub(crate) fn fault_directory(name: &OsStr) -> TestFsResult<()> {
+    ACTIVE_FAULT.with(|active| {
+        if let Some(state) = active.borrow().as_ref() {
+            assert!(
+                state.mode != FaultMode::NoReads,
+                "unexpected filesystem read"
+            );
         }
-    }
-    fn wrap(&self, dir: Box<dyn SafeDir>) -> Box<dyn SafeDir> {
-        Box::new(FaultDir {
-            inner: dir,
-            state: self.state.clone(),
-        })
-    }
-}
-impl SafeFs for FaultFs {
-    fn root(&self, absolute: bool) -> TestFsResult<Box<dyn SafeDir>> {
-        Ok(self.wrap(LocalFs.root(absolute)?))
-    }
-    fn open_anchor(&self, path: &Path) -> TestFsResult<Box<dyn SafeDir>> {
-        Ok(self.wrap(LocalFs.open_anchor(path)?))
-    }
-    fn open_source(&self, path: &Path) -> TestFsResult<Box<dyn SafeFile>> {
-        LocalFs.open_source(path)
-    }
-    fn temporary_name(&self) -> TestFsResult<OsString> {
-        LocalFs.temporary_name()
-    }
-}
-struct FaultDir {
-    inner: Box<dyn SafeDir>,
-    state: Arc<FaultState>,
-}
-impl FaultDir {
-    fn child(&self, dir: Box<dyn SafeDir>) -> Box<dyn SafeDir> {
-        Box::new(Self {
-            inner: dir,
-            state: self.state.clone(),
-        })
-    }
-    fn link_changed(&self, name: &OsStr, result: TestFsResult<()>) -> TestFsResult<()> {
-        if result.is_ok()
-            && self.state.mode == FaultMode::SkillLinkSync
-            && self
-                .inner
-                .read_link(name)
-                .is_ok_and(|target| target.components().any(|part| part.as_os_str() == "skills"))
-        {
-            self.state.link_published.store(true, Ordering::Release);
-        }
-        result
-    }
-}
-impl SafeDir for FaultDir {
-    fn into_anchor(self: Box<Self>) -> TestFsResult<Box<dyn SafeDir>> {
-        Ok(Box::new(Self {
-            inner: self.inner.into_anchor()?,
-            state: self.state,
-        }))
-    }
-    fn metadata(&self) -> TestFsResult<Metadata> {
-        self.inner.metadata()
-    }
-    fn metadata_at(&self, name: &OsStr, follow: bool) -> TestFsResult<Metadata> {
-        self.inner.metadata_at(name, follow)
-    }
-    fn open_directory(&self, name: &OsStr, follow: bool) -> TestFsResult<Box<dyn SafeDir>> {
-        Ok(self.child(self.inner.open_directory(name, follow)?))
-    }
-    fn open_verified_directory(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeDir>> {
-        if (self.state.mode == FaultMode::StateMount && name == "install")
-            || (self.state.mode == FaultMode::SourceMount && name == "skills")
+        if let Some(state) = active.borrow().as_ref()
+            && ((state.mode == FaultMode::StateMount && name == "install")
+                || (state.mode == FaultMode::SourceMount && name == "skills"))
         {
             return Err(FsError::CrossDevice { path: name.into() });
         }
-        Ok(self.child(self.inner.open_verified_directory(name)?))
-    }
-    fn open_read(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeFile>> {
-        assert!(
-            !(self.state.mode == FaultMode::SourceMount && name == "SKILL.md"),
-            "asset read before source confinement"
-        );
-        self.inner.open_read(name)
-    }
-    fn create_new(&self, name: &OsStr) -> TestFsResult<Box<dyn SafeFile>> {
-        self.inner.create_new(name)
-    }
-    fn mkdir(&self, name: &OsStr, mode: u32) -> TestFsResult<()> {
-        self.inner.mkdir(name, mode)
-    }
-    fn entries(&self) -> TestFsResult<Box<dyn Iterator<Item = TestFsResult<OsString>>>> {
-        self.inner.entries()
-    }
-    fn make_writable(&self) -> TestFsResult<()> {
-        self.inner.make_writable()
-    }
-    fn lock(
-        &self,
-        name: &OsStr,
-        mode: LockMode,
-        budget: TestWaitBudget,
-        cancel: &TestCancelToken,
-        clock: &dyn TestClock,
-    ) -> TestFsResult<LockGuard> {
-        self.inner.lock(name, mode, budget, cancel, clock)
-    }
-    fn unlink(&self, name: &OsStr) -> TestFsResult<()> {
-        self.inner.unlink(name)
-    }
-    fn rmdir(&self, name: &OsStr) -> TestFsResult<()> {
-        self.inner.rmdir(name)
-    }
-    fn replace(&self, source: &OsStr, destination: &OsStr) -> TestFsResult<()> {
-        self.link_changed(destination, self.inner.replace(source, destination))
-    }
-    fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> TestFsResult<()> {
-        self.link_changed(
-            destination,
-            self.inner.rename_noreplace(source, destination),
-        )
-    }
-    fn symlink(&self, target: &Path, name: &OsStr) -> TestFsResult<()> {
-        self.inner.symlink(target, name)
-    }
-    fn read_link(&self, name: &OsStr) -> TestFsResult<PathBuf> {
-        self.inner.read_link(name)
-    }
-    fn atomic_write(
-        &self,
-        name: &OsStr,
-        prefix: &str,
-        bytes: &[u8],
-        permissions: u32,
-        mode: PublishMode,
-    ) -> TestFsResult<Publication> {
-        if self.state.mode == FaultMode::InterruptedReleasePublish
-            && name == OsStr::new("release.json")
-            && !self.state.fired.swap(true, Ordering::AcqRel)
+        Ok(())
+    })
+}
+pub(crate) fn fault_publish(dir: &Directory, name: &OsStr, bytes: &[u8]) -> TestFsResult<()> {
+    ACTIVE_FAULT.with(|active| {
+        let active = active.borrow();
+        let Some(state) = active.as_ref() else {
+            return Ok(());
+        };
+        if state.mode == FaultMode::InterruptedReleasePublish
+            && name == "release.json"
+            && !state.fired.swap(true, Ordering::AcqRel)
         {
-            // Leave the actual supervisor staging name and bytes behind, as a
-            // process interrupted between staging and rename would do.
-            let temporary = LocalFs.temporary_name()?;
-            let mut file = self.inner.create_new(&temporary)?;
+            let temporary = provenant_os::fs::temporary_name()?;
+            let mut file = dir.create_new(&temporary)?;
             std::io::Write::write_all(&mut file, bytes).unwrap();
             file.sync()?;
             return Err(TestFsError::Io {
                 operation: "publish",
-                path: PathBuf::from(name),
+                path: name.into(),
                 source: io::Error::other("interrupted release publication"),
             });
         }
-        if self.state.mode == FaultMode::ReceiptPublish
-            && name == OsStr::new("receipt.json")
-            && !self.state.fired.swap(true, Ordering::AcqRel)
+        if state.mode == FaultMode::ReceiptPublish
+            && name == "receipt.json"
+            && !state.fired.swap(true, Ordering::AcqRel)
         {
             return Err(TestFsError::Io {
                 operation: "publish",
-                path: PathBuf::from("receipt.json"),
+                path: name.into(),
                 source: io::Error::other("injected receipt publication failure"),
             });
         }
-        let publication = self
-            .inner
-            .atomic_write(name, prefix, bytes, permissions, mode)?;
-        if self.state.mode == FaultMode::CancelAfterFirstPublication
-            && !self.state.fired.swap(true, Ordering::AcqRel)
-            && let Some(cancel) = &self.state.cancel
+        Ok(())
+    })
+}
+pub(crate) fn fault_after_publish() {
+    ACTIVE_FAULT.with(|active| {
+        if let Some(state) = active.borrow().as_ref()
+            && state.mode == FaultMode::CancelAfterFirstPublication
+            && !state.fired.swap(true, Ordering::AcqRel)
+            && let Some(cancel) = &state.cancel
         {
             cancel.cancel();
         }
-        Ok(publication)
-    }
-    fn sync(&self) -> TestFsResult<()> {
-        if self.state.mode == FaultMode::SkillLinkSync
-            && self.state.link_published.swap(false, Ordering::AcqRel)
+    });
+}
+pub(crate) fn fault_link_sync(dir: &Directory, name: &OsStr) -> TestFsResult<()> {
+    ACTIVE_FAULT.with(|active| {
+        if let Some(state) = active.borrow().as_ref()
+            && state.mode == FaultMode::SkillLinkSync
+            && dir
+                .read_link(name)
+                .is_ok_and(|target| target.components().any(|part| part.as_os_str() == "skills"))
         {
             return Err(TestFsError::Io {
                 operation: "sync",
-                path: PathBuf::from("skill-link-parent"),
+                path: "skill-link-parent".into(),
                 source: io::Error::other("injected skill link directory sync failure"),
             });
         }
-        self.inner.sync()
-    }
-    fn replace_link(&self, name: &OsStr, target: &Path) -> TestFsResult<Publication> {
-        self.inner.replace_link(name, target)
-    }
+        Ok(())
+    })
 }
-fn fault_context<'a>(
-    fs: &'a dyn SafeFs,
-    clock: &'a SystemClock,
-    cancel: &'a TestCancelToken,
-) -> InstallContext<'a> {
+fn fault_context<'a>(clock: &'a SystemClock, cancel: &'a TestCancelToken) -> InstallContext<'a> {
     InstallContext {
-        fs,
         clock,
         budget: TestWaitBudget::cli(clock.mono_now(), 1).unwrap(),
         cancel,
@@ -1786,15 +1676,16 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     let plan = f.plan();
     let clock = SystemClock::new();
     let cancel = TestCancelToken::new();
-    let fault_fs = FaultFs::new(FaultMode::ReceiptPublish, None);
+    let _fault_fs = FaultInjection::new(FaultMode::ReceiptPublish, None);
     let error = install(
         &plan,
-        &fault_context(&fault_fs, &clock, &cancel),
+        &fault_context(&clock, &cancel),
         &mut Reporter::default(),
         &Smoke,
         false,
     )
     .unwrap_err();
+    drop(_fault_fs);
     let InstallError::Partial {
         completed,
         remaining,
@@ -1829,7 +1720,6 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
             &f.targets,
             Some(&f.release()),
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -1845,10 +1735,11 @@ fn cancelled_apply_reports_completed_and_remaining_actions() {
     let plan = f.plan();
     let clock = SystemClock::new();
     let cancel = TestCancelToken::new();
-    let fault_fs = FaultFs::new(FaultMode::CancelAfterFirstPublication, Some(cancel.clone()));
+    let _fault_fs =
+        FaultInjection::new(FaultMode::CancelAfterFirstPublication, Some(cancel.clone()));
     let error = install(
         &plan,
-        &fault_context(&fault_fs, &clock, &cancel),
+        &fault_context(&clock, &cancel),
         &mut Reporter::default(),
         &Smoke,
         false,
@@ -1889,15 +1780,16 @@ fn visible_skill_link_with_failed_directory_sync_is_reconciled_on_retry() {
     let plan = f.plan();
     let clock = SystemClock::new();
     let cancel = TestCancelToken::new();
-    let fault_fs = FaultFs::new(FaultMode::SkillLinkSync, None);
+    let _fault_fs = FaultInjection::new(FaultMode::SkillLinkSync, None);
     let error = install(
         &plan,
-        &fault_context(&fault_fs, &clock, &cancel),
+        &fault_context(&clock, &cancel),
         &mut Reporter::default(),
         &Smoke,
         false,
     )
     .unwrap_err();
+    drop(_fault_fs);
     let InstallError::Partial {
         completed,
         remaining,
@@ -1947,7 +1839,7 @@ fn adopt_existing_binary_does_not_adopt_a_symlink() {
     let mut targets = f.targets.clone();
     targets.adopt_existing = true;
     let release = f.release();
-    let snapshots = Snapshots::capture(&release, &targets, &LocalFs).unwrap();
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
     let error = plan_install(release, targets, snapshots).unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -1986,17 +1878,10 @@ fn check_install_smokes_installed_and_requested_release_identity() {
             digest: installed_digest,
             field,
         };
-        let error = inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &smoke,
-            &cancel,
-        )
-        .unwrap()
-        .error
-        .unwrap();
+        let error = inspect_install(&f.targets, None, "fixture-target", &smoke, &cancel)
+            .unwrap()
+            .error
+            .unwrap();
         assert_eq!(
             error.to_string(),
             "invalid release manifest: binary identity differs from release manifest"
@@ -2024,7 +1909,6 @@ fn check_install_smokes_installed_and_requested_release_identity() {
             &f.targets,
             Some(&other_source),
             "fixture-target",
-            &LocalFs,
             &smoke,
             &cancel,
         )
@@ -2062,7 +1946,6 @@ fn check_install_compares_the_requested_source_digest() {
         &f.targets,
         Some(&other_source),
         "fixture-target",
-        &LocalFs,
         &Smoke,
         &CancelToken::new(),
     )
@@ -2116,7 +1999,7 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
         ["config", "receipt"]
     );
     assert!(
-        read_receipt(&f.targets, &LocalFs)
+        read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -2128,7 +2011,6 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
             &f.targets,
             None,
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -2191,7 +2073,7 @@ fn regular_user_instructions_are_preserved_with_manual_include_advice() {
         instruction
     );
     assert!(
-        !read_receipt(&f.targets, &LocalFs)
+        !read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -2257,7 +2139,7 @@ fn completed_immutable_release_missing_a_file_is_not_repaired() {
         .join("bin/provenant");
     fs::remove_file(&missing).unwrap();
     assert_eq!(
-        Snapshots::capture(&f.release(), &f.targets, &LocalFs)
+        Snapshots::capture(&f.release(), &f.targets)
             .unwrap_err()
             .to_string(),
         format!("release file bytes or mode differ: {}", missing.display())
@@ -2277,7 +2159,7 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
         false,
     )
     .unwrap();
-    let mut receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let mut receipt = read_receipt(&f.targets).unwrap().unwrap();
     let original = receipt.clone();
     receipt.entries.clear();
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
@@ -2286,7 +2168,6 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
             &f.targets,
             None,
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -2310,7 +2191,6 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
             &f.targets,
             None,
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -2353,7 +2233,7 @@ impl Fixture {
     }
 
     fn plan_for(&self, release: Release) -> InstallPlan {
-        let snapshots = Snapshots::capture(&release, &self.targets, &LocalFs).unwrap();
+        let snapshots = Snapshots::capture(&release, &self.targets).unwrap();
         plan_install(release, self.targets.clone(), snapshots).unwrap()
     }
 
@@ -2414,14 +2294,7 @@ fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replace
         }
         let desired = &plan_b.desired.get(&path).unwrap().value;
         let replace = plan_b.before.entries.get(&path).unwrap().is_some();
-        publish(
-            &path,
-            desired,
-            replace,
-            &LocalFs,
-            f.targets.roots.state.as_path(),
-        )
-        .unwrap();
+        publish(&path, desired, replace, f.targets.roots.state.as_path()).unwrap();
     }
     let receipt_after_crash: InstallReceipt =
         provenant_records::decode_v1(fs::read(f.receipt()).unwrap().as_slice(), Limits::CONFIG)
@@ -2501,7 +2374,7 @@ fn bin_dir_upgrade_removes_only_the_unchanged_previous_shim() {
             assert!(fs::symlink_metadata(&old_binary).is_err());
         }
         assert!(f.targets.bin_dir.join("provenant").is_file());
-        let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+        let receipt = read_receipt(&f.targets).unwrap().unwrap();
         assert_eq!(receipt.bin_dir.to_path_buf().unwrap(), f.targets.bin_dir);
         assert!(
             receipt
@@ -2555,7 +2428,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     )
     .unwrap();
 
-    let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
     assert_eq!(receipt.bin_dir.to_path_buf().unwrap(), f.targets.bin_dir);
     assert_eq!(receipt.harnesses, vec![Harness::Claude, Harness::Codex]);
     assert_eq!(
@@ -2585,7 +2458,6 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
             &changed,
             None,
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -2611,7 +2483,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     assert!(fs::symlink_metadata(codex_skills.join("example")).is_ok());
     assert!(fs::symlink_metadata(claude_instruction).is_err());
     assert!(fs::symlink_metadata(codex_instruction).is_ok());
-    let shrunk = read_receipt(&changed, &LocalFs).unwrap().unwrap();
+    let shrunk = read_receipt(&changed).unwrap().unwrap();
     assert_eq!(shrunk.harnesses, vec![Harness::Codex]);
     assert_eq!(shrunk.harness_targets.len(), 1);
     assert_eq!(shrunk.harness_targets[0].harness, Harness::Codex);
@@ -2620,7 +2492,6 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
             &changed,
             None,
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -2646,7 +2517,7 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     )
     .unwrap();
 
-    let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
     assert_eq!(receipt.bin_dir.to_path_buf().unwrap(), f.targets.bin_dir);
     assert_eq!(receipt.harnesses, vec![Harness::Codex]);
     assert_eq!(
@@ -2671,7 +2542,6 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
             &changed_targets,
             Some(&release),
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -2690,7 +2560,7 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
             && action.path == AbsolutePath::new(&f.link()).unwrap()
     }));
     assert!(!f.link().exists());
-    let receipt = read_receipt(&changed_targets, &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&changed_targets).unwrap().unwrap();
     assert!(receipt.harnesses.is_empty());
     assert!(receipt.harness_targets.is_empty());
     assert_eq!(
@@ -2723,7 +2593,7 @@ fn a_completed_release_with_a_different_manifest_is_a_typed_conflict() {
     second.manifest.toolchain = "different-toolchain".into();
     second.manifest_bytes = provenant_records::encode(&second.manifest).unwrap();
     let second_digest = CanonicalV1::file_digest(&second.manifest_bytes);
-    let error = Snapshots::capture(&second, &f.targets, &LocalFs).unwrap_err();
+    let error = Snapshots::capture(&second, &f.targets).unwrap_err();
     assert!(matches!(
         error,
         InstallError::ReleaseConflict {
@@ -2756,10 +2626,10 @@ fn interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_stagin
 
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let faults = FaultFs::new(FaultMode::InterruptedReleasePublish, None);
+    let _faults = FaultInjection::new(FaultMode::InterruptedReleasePublish, None);
     let error = install(
         &f.plan_for(release.clone()),
-        &fault_context(&faults, &clock, &cancel),
+        &fault_context(&clock, &cancel),
         &mut Reporter::default(),
         &Smoke,
         false,
@@ -2792,7 +2662,7 @@ fn interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_stagin
     )
     .unwrap();
     assert!(!staging.exists());
-    Release::read(&release_root, &release.manifest.target, &LocalFs).unwrap();
+    Release::read(&release_root, &release.manifest.target).unwrap();
 }
 
 #[test]
@@ -2806,12 +2676,7 @@ fn capture_does_not_unlink_an_active_install_staging_file() {
         .as_path()
         .join("releases")
         .join(release.manifest.source_digest.to_string());
-    let install_dir = directory(
-        &f.targets.roots.state.as_path().join("install"),
-        true,
-        &LocalFs,
-    )
-    .unwrap();
+    let install_dir = directory(&f.targets.roots.state.as_path().join("install"), true).unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let _lock = install_dir
@@ -2823,17 +2688,17 @@ fn capture_does_not_unlink_an_active_install_staging_file() {
             &clock,
         )
         .unwrap();
-    let binary_dir = directory(&root.join("bin"), true, &LocalFs).unwrap();
-    let temporary = LocalFs.temporary_name().unwrap();
+    let binary_dir = directory(&root.join("bin"), true).unwrap();
+    let temporary = provenant_os::fs::temporary_name().unwrap();
     let mut file = binary_dir.create_new(&temporary).unwrap();
     std::io::Write::write_all(&mut file, b"live staged bytes").unwrap();
     file.sync().unwrap();
 
     // A second caller can preview while the first writer owns the lock. Its
     // inventory must leave that writer's open staging entry intact.
-    Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
+    Snapshots::capture(&release, &f.targets).unwrap();
     binary_dir
-        .rename_noreplace(&temporary, OsStr::new("provenant"))
+        .rename_noreplace(&temporary, &binary_dir, OsStr::new("provenant"))
         .unwrap();
     assert_eq!(
         fs::read(root.join("bin/provenant")).unwrap(),
@@ -2862,14 +2727,14 @@ fn completed_release_tolerates_only_supervisor_staging_names() {
         .as_path()
         .join("releases")
         .join(release.manifest.source_digest.to_string());
-    let staging = root.join(LocalFs.temporary_name().unwrap());
+    let staging = root.join(provenant_os::fs::temporary_name().unwrap());
     fs::write(&staging, b"leftover staging").unwrap();
     f.plan_for(release.clone());
-    Release::read(&root, &release.manifest.target, &LocalFs).unwrap();
+    Release::read(&root, &release.manifest.target).unwrap();
     assert!(staging.exists());
     let foreign = root.join(".provenant-staging.not-supervisor");
     fs::write(&foreign, b"foreign").unwrap();
-    assert!(matches!(Snapshots::capture(&release, &f.targets, &LocalFs),
+    assert!(matches!(Snapshots::capture(&release, &f.targets),
         Err(InstallError::Tampered(path)) if path == foreign));
 }
 
@@ -2946,7 +2811,6 @@ fn mcp_selector_ownership_preserves_user_edits_and_uninstalls_only_unchanged() {
             &f.targets,
             None,
             "fixture-target",
-            &LocalFs,
             &Smoke,
             &CancelToken::new()
         )
@@ -2969,7 +2833,7 @@ fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
     f.targets.hooks = true;
     let release = f.release();
     assert_eq!(
-        Snapshots::capture(&release, &f.targets, &LocalFs)
+        Snapshots::capture(&release, &f.targets)
             .unwrap_err()
             .to_string(),
         "hook registration refused: no fixture-backed HookSpec is available"
@@ -2981,7 +2845,7 @@ fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
     let regular = f.home.join("foreign.toml");
     fs::write(&regular, "model='keep'\n").unwrap();
     symlink(&regular, &config).unwrap();
-    let err = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap_err();
+    let err = Snapshots::capture(&release, &f.targets).unwrap_err();
     assert_eq!(
         err.to_string(),
         format!(
@@ -3003,7 +2867,7 @@ fn mcp_conflict_does_not_adopt_foreign_env_or_create_state() {
     fs::write(&config, foreign).unwrap();
     f.targets.adopt_existing = true;
     let release = f.release();
-    let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs);
+    let snapshots = Snapshots::capture(&release, &f.targets);
     assert_eq!(
         snapshots.unwrap_err().to_string(),
         format!("unmanaged destination conflicts: {}", config.display())
@@ -3083,15 +2947,7 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
             .contains("// foreign comment")
     );
     assert!(f.plan().actions().is_empty());
-    let inspection = inspect_install(
-        &f.targets,
-        None,
-        "fixture-target",
-        &LocalFs,
-        &Smoke,
-        &cancel,
-    )
-    .unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
     uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
@@ -3123,7 +2979,7 @@ fn duplicate_owned_instruction_values_refuse_before_writes() {
         serde_json::to_vec(&serde_json::json!({"instructions":[instruction,instruction]})).unwrap();
     fs::write(&config, &bytes).unwrap();
     assert_eq!(
-        Snapshots::capture(&release, &f.targets, &LocalFs)
+        Snapshots::capture(&release, &f.targets)
             .unwrap_err()
             .to_string(),
         "invalid harness configuration: duplicate owned instruction"
@@ -3168,8 +3024,7 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
         serde_json::to_string(f.home.join(".codex/config.toml").to_str().unwrap()).unwrap()
     );
     fs::write(state.join("config.toml"), &config).unwrap();
-    crate::apply_install_config_with_domains(&mut f.targets, &LocalFs, &crate::domains::NO_DOMAINS)
-        .unwrap();
+    crate::apply_install_config_with_domains(&mut f.targets, &crate::domains::NO_DOMAINS).unwrap();
     f.targets
         .apply_environment(None, Some(&f.home.join("alternate")))
         .unwrap();
@@ -3227,16 +3082,9 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
                 .is_ok_and(|text| text.contains("pre-tool-use"))
     };
     let inspect = |targets: &Targets| {
-        inspect_install(
-            targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &CancelToken::new(),
-        )
-        .unwrap()
-        .findings
+        inspect_install(targets, None, "fixture-target", &Smoke, &CancelToken::new())
+            .unwrap()
+            .findings
     };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -3256,7 +3104,7 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     apply(claude(Some(&alternate)));
     assert!(installed(&default, &default_mcp));
     assert!(installed(&alternate, &alternate_mcp));
-    let receipt = read_receipt(&claude(None), &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&claude(None)).unwrap().unwrap();
     assert_eq!(receipt.harnesses, vec![Harness::Claude]);
     assert_eq!(receipt.harness_targets.len(), 2);
 
@@ -3290,7 +3138,7 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
             .unwrap()
             .contains("pre-tool-use")
     );
-    let receipt = read_receipt(&claude(None), &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&claude(None)).unwrap().unwrap();
     assert_eq!(receipt.harness_targets.len(), 1);
     assert_eq!(
         receipt.harness_targets[0].skills_dir.to_path_buf().unwrap(),
@@ -3341,12 +3189,9 @@ fn install_uses_strict_configuration_before_planning() {
     fs::create_dir_all(state).unwrap();
     let bytes = b"schema_version=1\nforeign_key='private sentinel'\n";
     fs::write(state.join("config.toml"), bytes).unwrap();
-    let error = crate::apply_install_config_with_domains(
-        &mut f.targets,
-        &LocalFs,
-        &crate::domains::NO_DOMAINS,
-    )
-    .unwrap_err();
+    let error =
+        crate::apply_install_config_with_domains(&mut f.targets, &crate::domains::NO_DOMAINS)
+            .unwrap_err();
     assert!(matches!(
         error,
         InstallError::Config(crate::ConfigError::Schema {
@@ -3363,21 +3208,6 @@ fn install_uses_strict_configuration_before_planning() {
 
 #[test]
 fn protected_destination_is_refused_before_any_filesystem_read() {
-    struct NoReads;
-    impl SafeFs for NoReads {
-        fn root(&self, _: bool) -> TestFsResult<Box<dyn SafeDir>> {
-            panic!("unexpected root read")
-        }
-        fn open_anchor(&self, _: &Path) -> TestFsResult<Box<dyn SafeDir>> {
-            panic!("unexpected anchor read")
-        }
-        fn open_source(&self, _: &Path) -> TestFsResult<Box<dyn SafeFile>> {
-            panic!("unexpected source read")
-        }
-        fn temporary_name(&self) -> TestFsResult<OsString> {
-            panic!("unexpected write")
-        }
-    }
     let mut f = Fixture::new();
     let release = f.release();
     let old = f.home.join("old-checkout");
@@ -3394,12 +3224,13 @@ fn protected_destination_is_refused_before_any_filesystem_read() {
     f.targets.harnesses[0].mcp_file = alias.join("config.toml");
     assert_eq!(
         f.targets
-            .resolve_destinations(&LocalFs)
+            .resolve_destinations(&provenant_os::fs::SystemPathResolver)
             .unwrap_err()
             .to_string(),
         format!("unmanaged destination conflicts: {}", sentinel.display())
     );
-    let error = Snapshots::capture(&release, &f.targets, &NoReads).unwrap_err();
+    let _fault = FaultInjection::new(FaultMode::NoReads, None);
+    let error = Snapshots::capture(&release, &f.targets).unwrap_err();
     assert_eq!(
         error.to_string(),
         format!("unmanaged destination conflicts: {}", sentinel.display())
@@ -3534,7 +3365,7 @@ fn absolute_bootstrap_refuses_intermediate_state_and_release_symlinks() {
         fs::create_dir_all(&root).unwrap();
         let link = root.join("escaped");
         symlink(&foreign, &link).unwrap();
-        assert!(directory(&link.join("nested"), true, &LocalFs).is_err());
+        assert!(directory(&link.join("nested"), true).is_err());
         assert!(!foreign.join("nested").exists());
         assert_eq!(fs::read(foreign.join("sentinel")).unwrap(), b"untouched");
     }
@@ -3545,13 +3376,12 @@ fn state_mount_descendant_refuses_before_lock_or_receipt_writes() {
     let f = Fixture::new();
     let plan = f.plan();
     fs::create_dir_all(f.targets.roots.state.as_path().join("install")).unwrap();
-    let fault = FaultFs::new(FaultMode::StateMount, None);
+    let _fault = FaultInjection::new(FaultMode::StateMount, None);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let error = install(
         &plan,
         &InstallContext {
-            fs: &fault,
             ..context(&clock, &cancel)
         },
         &mut Reporter::default(),
@@ -3577,8 +3407,8 @@ fn state_mount_descendant_refuses_before_lock_or_receipt_writes() {
 fn source_mount_descendant_refuses_before_reading_manifest_assets() {
     let f = Fixture::new();
     f.release();
-    let fault = FaultFs::new(FaultMode::SourceMount, None);
-    let error = Release::read(&f.source, "fixture-target", &fault).unwrap_err();
+    let _fault = FaultInjection::new(FaultMode::SourceMount, None);
+    let error = Release::read(&f.source, "fixture-target").unwrap_err();
     assert!(
         matches!(error, InstallError::Fs(FsError::CrossDevice { path }) if path == Path::new("skills"))
     );
@@ -3628,7 +3458,7 @@ fn claude_large_harness_config_is_bounded_and_byte_preserved() {
     .unwrap();
     assert!(fs::read_to_string(&path).unwrap().contains(&payload));
     fs::write(&path, " ".repeat(16 * 1024 * 1024 + 1)).unwrap();
-    assert!(Snapshots::capture(&f.release(), &f.targets, &LocalFs).is_err());
+    assert!(Snapshots::capture(&f.release(), &f.targets).is_err());
 }
 
 #[test]
@@ -3701,7 +3531,7 @@ fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
         document["instructions"].as_array().unwrap(),
         &vec![serde_json::json!("personal.md"), serde_json::json!(new)]
     );
-    let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
     assert!(
         receipt
             .entries
@@ -3717,7 +3547,7 @@ fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     let bytes = serde_json::to_vec(&duplicate).unwrap();
     fs::write(&config, &bytes).unwrap();
     assert!(matches!(
-        Snapshots::capture(&b, &f.targets, &LocalFs),
+        Snapshots::capture(&b, &f.targets),
         Err(InstallError::InvalidConfig("duplicate owned instruction"))
     ));
     assert_eq!(fs::read(&config).unwrap(), bytes);
@@ -3737,17 +3567,8 @@ fn inspect_install_binds_changed_tampered_bytes_with_identical_metadata_and_find
         false,
     )
     .unwrap();
-    let inspect = || {
-        inspect_install(
-            &fixture.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &cancel,
-        )
-        .unwrap()
-    };
+    let inspect =
+        || inspect_install(&fixture.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     let clean = inspect();
     assert!(clean.findings.is_empty());
     let repeated = inspect();
@@ -3772,12 +3593,9 @@ fn inspect_install_binds_changed_tampered_bytes_with_identical_metadata_and_find
     };
     set_bytes(b'a');
     let first = inspect();
-    let metadata = snapshot(&asset, &LocalFs).unwrap().unwrap().metadata;
+    let metadata = snapshot(&asset).unwrap().unwrap().metadata;
     set_bytes(b'b');
-    assert_eq!(
-        metadata,
-        snapshot(&asset, &LocalFs).unwrap().unwrap().metadata
-    );
+    assert_eq!(metadata, snapshot(&asset).unwrap().unwrap().metadata);
     let second = inspect();
     assert_eq!(first.findings, second.findings);
     assert!(
@@ -3918,7 +3736,7 @@ fn missing_gc_agent_is_stopped_only_when_the_last_harness_is_removed() {
     uninstall(&f.targets, &ctx, &mut reporter).unwrap();
     assert_eq!(reporter.0, 0);
     assert!(
-        read_receipt(&f.targets, &LocalFs)
+        read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -3929,7 +3747,7 @@ fn missing_gc_agent_is_stopped_only_when_the_last_harness_is_removed() {
     uninstall(&f.targets, &ctx, &mut reporter).unwrap();
     assert_eq!(reporter.0, 1);
     assert!(
-        !read_receipt(&f.targets, &LocalFs)
+        !read_receipt(&f.targets)
             .unwrap()
             .unwrap()
             .entries
@@ -3959,14 +3777,13 @@ fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = InstallContext {
-            fs: &LocalFs,
             clock: &clock,
             cancel: &cancel,
             budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
         };
         install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
         assert!(f.plan().actions().is_empty());
-        let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+        let receipt = read_receipt(&f.targets).unwrap().unwrap();
         assert!(
             receipt
                 .entries
@@ -3976,7 +3793,7 @@ fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
         if modified {
             fs::write(&plist, b"user edited plist\n").unwrap();
             let release = f.release();
-            let error = Snapshots::capture(&release, &f.targets, &LocalFs)
+            let error = Snapshots::capture(&release, &f.targets)
                 .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
                 .unwrap_err()
                 .to_string();
@@ -4074,7 +3891,7 @@ fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
             !removable
         );
         assert!(
-            !read_receipt(&f.targets, &LocalFs)
+            !read_receipt(&f.targets)
                 .unwrap()
                 .unwrap()
                 .entries
@@ -4096,15 +3913,7 @@ fn receipt_with_null_legacy_upgrades_cleanly() {
     receipt["legacy"] = serde_json::Value::Null;
     fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
 
-    let inspection = inspect_install(
-        &f.targets,
-        None,
-        "fixture-target",
-        &LocalFs,
-        &Smoke,
-        &cancel,
-    )
-    .unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(inspection.findings.is_empty());
 
@@ -4155,15 +3964,7 @@ fn receipt_with_a_legacy_object_upgrades_and_drops_it() {
     });
     fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
 
-    let inspection = inspect_install(
-        &f.targets,
-        None,
-        "fixture-target",
-        &LocalFs,
-        &Smoke,
-        &cancel,
-    )
-    .unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(inspection.findings.is_empty());
 

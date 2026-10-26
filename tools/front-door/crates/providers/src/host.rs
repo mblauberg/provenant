@@ -1,5 +1,5 @@
 //! Host-only command preparation, kept separate from attempt-owned storage.
-use provenant_supervisor::{
+use provenant_os::{
     exec::{CaptureFilter, ExecError, ExecOptions, ExecOutcome, Executor},
     fs::{self, Directory, LockGuard, LockMode, temporary_name},
 };

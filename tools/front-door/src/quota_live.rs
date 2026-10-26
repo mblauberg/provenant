@@ -3,14 +3,18 @@ mod claude;
 mod opencode;
 
 use provenant_core::Roots;
+use provenant_os::exec::ExecError;
+use provenant_os::exec::ExecOptions;
+use provenant_os::exec::ExecOutcome;
+use provenant_os::exec::Executor;
+use provenant_os::exec::StreamPolicy;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::exec::Termination;
 use provenant_providers::host::PROBE_DIR_OPERATION;
 use provenant_providers::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
     QuotaError, QuotaProbePlan,
-};
-use provenant_supervisor::exec::{
-    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
 use serde_json::{Value, json};
 use std::{
@@ -94,12 +98,8 @@ fn signin_key(adapter: &str, dir: &Path) -> Option<String> {
 impl LiveQuota {
     pub(crate) fn new(roots: &Roots) -> Result<Self, QuotaError> {
         let home = PathBuf::from(std::env::var_os("HOME").ok_or(QuotaError::Invalid("home"))?);
-        let config = provenant_config::read_with_domains(
-            roots,
-            &provenant_supervisor::fs::LocalFs,
-            &provenant_cli::domains::SECTIONS,
-        )
-        .map_err(|_| QuotaError::Invalid("accounts configuration"))?;
+        let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+            .map_err(|_| QuotaError::Invalid("accounts configuration"))?;
         let mut accounts = Vec::new();
         for registration in config.domains.accounts.entries.values() {
             let dir = &registration.directory;
@@ -449,11 +449,7 @@ pub(crate) fn registered_claude(
     roots: &Roots,
 ) -> Result<Vec<provenant_providers::identity::RegisteredAccount>, Box<dyn std::error::Error>> {
     use provenant_providers::identity::{Accounts, RegisteredAccount};
-    let config = provenant_config::read_with_domains(
-        roots,
-        &provenant_supervisor::fs::LocalFs,
-        &provenant_cli::domains::SECTIONS,
-    )?;
+    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
     let mut accounts = Vec::new();
     for registration in config.domains.accounts.entries.values() {
         if registration.adapter != "claude" {
@@ -479,7 +475,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use provenant_supervisor::exec::ExecError;
+    use provenant_os::exec::ExecError;
 
     #[allow(dead_code)]
     fn quota(home: &Path, state: PathBuf) -> LiveQuota {

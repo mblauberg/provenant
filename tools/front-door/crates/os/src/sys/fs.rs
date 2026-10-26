@@ -7,11 +7,11 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
-pub(crate) fn canonicalize(path: &Path) -> io::Result<std::path::PathBuf> {
+pub fn canonicalize(path: &Path) -> io::Result<std::path::PathBuf> {
     std::fs::canonicalize(path)
 }
 
-pub(crate) fn resolve_existing_ancestor(path: &Path) -> io::Result<std::path::PathBuf> {
+pub fn resolve_existing_ancestor(path: &Path) -> io::Result<std::path::PathBuf> {
     let mut existing = path;
     let mut missing = Vec::new();
     loop {
@@ -112,7 +112,7 @@ fn open_at(directory: i32, path: &OsStr, flags: i32, mode: u32) -> io::Result<Fi
     // No other owner exists; File closes it once on Drop.
     Ok(unsafe { File::from_raw_fd(fd) })
 }
-pub(crate) fn open_anchor(path: &Path) -> io::Result<File> {
+pub fn open_anchor(path: &Path) -> io::Result<File> {
     // Trailing / asks the kernel to follow a symlink as a directory even with
     // O_NOFOLLOW. Remove separators first while preserving the root path.
     let mut bytes = path.as_os_str().as_bytes();
@@ -121,7 +121,7 @@ pub(crate) fn open_anchor(path: &Path) -> io::Result<File> {
     }
     open_directory_at(libc::AT_FDCWD, OsStr::from_bytes(bytes), libc::O_NOFOLLOW)
 }
-pub(crate) fn open_directory(dir: &File, name: &OsStr, follow: bool) -> io::Result<File> {
+pub fn open_directory(dir: &File, name: &OsStr, follow: bool) -> io::Result<File> {
     open_directory_at(
         dir.as_raw_fd(),
         name,
@@ -147,7 +147,7 @@ fn open_directory_at(directory: i32, path: &OsStr, flags: i32) -> io::Result<Fil
     }
     result
 }
-pub(crate) fn open_lock(dir: &File, name: &OsStr) -> io::Result<File> {
+pub fn open_lock(dir: &File, name: &OsStr) -> io::Result<File> {
     open_at(
         dir.as_raw_fd(),
         name,
@@ -155,7 +155,7 @@ pub(crate) fn open_lock(dir: &File, name: &OsStr) -> io::Result<File> {
         0o600,
     )
 }
-pub(crate) fn open_read(dir: &File, name: &OsStr) -> io::Result<File> {
+pub fn open_read(dir: &File, name: &OsStr) -> io::Result<File> {
     open_at(
         dir.as_raw_fd(),
         name,
@@ -163,7 +163,7 @@ pub(crate) fn open_read(dir: &File, name: &OsStr) -> io::Result<File> {
         0,
     )
 }
-pub(crate) fn open_source(path: &Path) -> io::Result<File> {
+pub fn open_source(path: &Path) -> io::Result<File> {
     open_at(
         libc::AT_FDCWD,
         path.as_os_str(),
@@ -171,7 +171,7 @@ pub(crate) fn open_source(path: &Path) -> io::Result<File> {
         0,
     )
 }
-pub(crate) fn create_new(dir: &File, name: &OsStr) -> io::Result<File> {
+pub fn create_new(dir: &File, name: &OsStr) -> io::Result<File> {
     open_at(
         dir.as_raw_fd(),
         name,
@@ -179,7 +179,7 @@ pub(crate) fn create_new(dir: &File, name: &OsStr) -> io::Result<File> {
         0o600,
     )
 }
-pub(crate) fn open_append_at(dir: &File, name: &OsStr) -> io::Result<File> {
+pub fn open_append_at(dir: &File, name: &OsStr) -> io::Result<File> {
     open_at(
         dir.as_raw_fd(),
         name,
@@ -187,7 +187,7 @@ pub(crate) fn open_append_at(dir: &File, name: &OsStr) -> io::Result<File> {
         0o600,
     )
 }
-pub(crate) fn metadata_at(dir: &File, name: &OsStr, follow: bool) -> io::Result<Metadata> {
+pub fn metadata_at(dir: &File, name: &OsStr, follow: bool) -> io::Result<Metadata> {
     let name = string(name)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: dir is borrowed and live, name is NUL-terminated, and stat has
@@ -227,7 +227,7 @@ pub(crate) fn metadata_at(dir: &File, name: &OsStr, follow: bool) -> io::Result<
 }
 /// APFS exclusive allocation. Unsupported filesystems omit this attribute.
 #[cfg(target_os = "macos")]
-pub(crate) fn private_size_at(dir: &File, name: &OsStr) -> io::Result<Option<u64>> {
+pub fn private_size_at(dir: &File, name: &OsStr) -> io::Result<Option<u64>> {
     const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
     const ATTR_CMNEXT_PRIVATESIZE: u32 = 8;
     const FSOPT_ATTR_CMN_EXTENDED: libc::c_ulong = 0x20;
@@ -320,7 +320,7 @@ fn decode_private_size(buffer: &[u8; 32]) -> io::Result<Option<u64>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn private_size_at(_dir: &File, _name: &OsStr) -> io::Result<Option<u64>> {
+pub fn private_size_at(_dir: &File, _name: &OsStr) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
@@ -344,14 +344,14 @@ mod private_size_tests {
     }
 }
 
-pub(crate) fn mkdir(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
+pub fn mkdir(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
     let name = string(name)?;
     // SAFETY: borrowed fd and NUL-terminated name stay live; mkdirat retains
     // neither, transfers no ownership, and reports thread-local errno.
     retry(|| unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) })
         .map(|_| ())
 }
-pub(crate) fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()> {
+pub fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()> {
     let name = string(name)?;
     // SAFETY: live borrowed fd/name; unlinkat acts on the directory entry, never
     // follows a final symlink, retains no memory and reports errno on failure.
@@ -364,14 +364,14 @@ pub(crate) fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()
     })
     .map(|_| ())
 }
-pub(crate) enum Rename {
+pub enum Rename {
     Replace,
     NoReplace,
     // Kept crate-private until an authorised caller lands.
     #[allow(dead_code)]
     Exchange,
 }
-pub(crate) fn rename(
+pub fn rename(
     from: &File,
     source: &OsStr,
     to: &File,
@@ -435,21 +435,21 @@ pub(crate) fn rename(
     })
     .map(|_| ())
 }
-pub(crate) fn symlink(target: &Path, dir: &File, name: &OsStr) -> io::Result<()> {
+pub fn symlink(target: &Path, dir: &File, name: &OsStr) -> io::Result<()> {
     let target = string(target.as_os_str())?;
     let name = string(name)?;
     // SAFETY: strings and borrowed descriptor remain live; symlinkat copies
     // target bytes, retains no pointers and reports thread-local errno.
     status(unsafe { libc::symlinkat(target.as_ptr(), dir.as_raw_fd(), name.as_ptr()) })
 }
-pub(crate) fn entropy<const N: usize>() -> io::Result<[u8; N]> {
+pub fn entropy<const N: usize>() -> io::Result<[u8; N]> {
     let mut bytes = [0; N];
     // SAFETY: exclusive writable buffer is live and below getentropy's 256-byte
     // bound. It retains no pointer; concurrent calls share no Rust state.
     status(unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) })?;
     Ok(bytes)
 }
-pub(crate) struct Entries {
+pub struct Entries {
     stream: *mut libc::DIR,
     finished: bool,
 }
@@ -501,7 +501,7 @@ impl Iterator for Entries {
         }
     }
 }
-pub(crate) fn entries(dir: &File) -> io::Result<Entries> {
+pub fn entries(dir: &File) -> io::Result<Entries> {
     // openat(.) gives an independent offset; dup would share enumeration state.
     let fresh = open_at(
         dir.as_raw_fd(),
@@ -523,7 +523,7 @@ pub(crate) fn entries(dir: &File) -> io::Result<Entries> {
 }
 
 /// Called only after fstat has verified a regular file; FIFOs are refused first.
-pub(crate) fn clear_nonblocking(file: &File) -> io::Result<()> {
+pub fn clear_nonblocking(file: &File) -> io::Result<()> {
     // SAFETY: borrowed live fd; fcntl retains no pointers or ownership. The file
     // has not escaped yet, so flags cannot race another user of this description.
     let flags = retry(|| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) })?;
@@ -532,7 +532,7 @@ pub(crate) fn clear_nonblocking(file: &File) -> io::Result<()> {
         .map(|_| ())
 }
 
-pub(crate) fn open_append(path: &Path, mode: u32) -> io::Result<File> {
+pub fn open_append(path: &Path, mode: u32) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     // O_NONBLOCK prevents a FIFO open from waiting before regular-file refusal.
     std::fs::OpenOptions::new()
@@ -543,14 +543,14 @@ pub(crate) fn open_append(path: &Path, mode: u32) -> io::Result<File> {
         .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
 }
-pub(crate) fn open_following(path: &Path) -> io::Result<File> {
+pub fn open_following(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
 }
-pub(crate) fn try_flock(file: &File, mode: crate::fs::LockMode) -> io::Result<()> {
+pub fn try_flock(file: &File, mode: crate::fs::LockMode) -> io::Result<()> {
     let op = match mode {
         crate::fs::LockMode::Shared => libc::LOCK_SH,
         crate::fs::LockMode::Exclusive => libc::LOCK_EX,
@@ -561,19 +561,19 @@ pub(crate) fn try_flock(file: &File, mode: crate::fs::LockMode) -> io::Result<()
     // safe owner can retry within its WaitBudget.
     status(unsafe { libc::flock(file.as_raw_fd(), op) })
 }
-pub(crate) fn effective_uid() -> u32 {
+pub fn effective_uid() -> u32 {
     // SAFETY: geteuid reads only the calling process's effective UID and has no
     // pointer, ownership, lifetime or concurrency requirements.
     unsafe { libc::geteuid() }
 }
 
-pub(crate) fn wait(duration: std::time::Duration) {
+pub fn wait(duration: std::time::Duration) {
     std::thread::sleep(duration);
 }
 
 /// Read a link's native bytes without following the target. The explicit cap
 /// refuses truncation, including an entry that grows during inspection.
-pub(crate) fn read_link(directory: &File, name: &OsStr) -> io::Result<std::path::PathBuf> {
+pub fn read_link(directory: &File, name: &OsStr) -> io::Result<std::path::PathBuf> {
     let name = string(name)?;
     let mut bytes = vec![0u8; 65_537];
     // SAFETY: directory is borrowed and live, name is NUL-terminated and bytes
@@ -600,15 +600,15 @@ pub(crate) fn read_link(directory: &File, name: &OsStr) -> io::Result<std::path:
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
-    pub(crate) fn mkfifo(path: &Path) -> io::Result<()> {
+    pub fn mkfifo(path: &Path) -> io::Result<()> {
         let path = string(path.as_os_str())?;
         // SAFETY: owned NUL-terminated path lives through mkfifo, which retains
         // no pointer and creates no owning descriptor. Errors use thread errno.
         status(unsafe { libc::mkfifo(path.as_ptr(), 0o600) })
     }
-    pub(crate) fn is_nonblocking(file: &File) -> bool {
+    pub fn is_nonblocking(file: &File) -> bool {
         // SAFETY: read-only fcntl on a live borrowed fd, no ownership transfer.
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0);

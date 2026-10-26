@@ -139,13 +139,9 @@ fn config_command(
         let project = roots::selected_project(globals.project.as_deref(), false)?;
         let roots = roots::roots(globals, &assets, &project)?;
         if let Some(edit) = edit {
-            provenant_config::edit_config(&roots, &provenant_supervisor::fs::LocalFs, edit)?;
+            provenant_config::edit_config(&roots, edit)?;
         }
-        let mut config = provenant_config::config_show(
-            &roots,
-            &provenant_supervisor::fs::LocalFs,
-            &provenant_cli::domains::SECTIONS,
-        )?;
+        let mut config = provenant_config::config_show(&roots, &provenant_cli::domains::SECTIONS)?;
         if let Some(class) = task_class {
             config.apply_task_class(class)?;
         }

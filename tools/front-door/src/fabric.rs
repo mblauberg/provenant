@@ -13,7 +13,7 @@ use provenant_fabric_runtime::{
     hosts::*,
     identity::Identity,
 };
-use provenant_supervisor::{clock::SystemClock, exec::SystemExecutor};
+use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
@@ -24,11 +24,11 @@ use std::{
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
-    Exec(#[from] provenant_supervisor::exec::ExecError),
+    Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
     #[error(transparent)]
-    Fs(#[from] provenant_supervisor::fs::FsError),
+    Fs(#[from] provenant_os::fs::FsError),
     #[error(transparent)]
     Identity(#[from] provenant_fabric_runtime::identity::IdentityError),
     #[error(transparent)]
@@ -367,7 +367,7 @@ impl stdio::Input for Stdin {
 struct Stdout;
 impl stdio::Output for Stdout {
     fn write_frame(&mut self, bytes: &[u8], deadline: Instant) -> io::Result<()> {
-        provenant_supervisor::sys::hook_io::write_stdout(bytes, deadline)
+        provenant_os::sys::hook_io::write_stdout(bytes, deadline)
     }
 }
 
@@ -481,14 +481,14 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
         if provenant_cli::fabric::in_lane() {
             return Err(CoordinationError::LaneMutation.into());
         }
-        let bytes = provenant_supervisor::sys::hook_io::read_stdin(
+        let bytes = provenant_os::sys::hook_io::read_stdin(
             MAX_FRAME,
             Instant::now() + std::time::Duration::from_secs(30),
         )?;
         if let Some(refusal) = protocol_refusal(&bytes)? {
             let mut reply = serde_json::to_vec(&refusal)?;
             reply.push(b'\n');
-            provenant_supervisor::sys::hook_io::write_stdout(
+            provenant_os::sys::hook_io::write_stdout(
                 &reply,
                 Instant::now() + std::time::Duration::from_secs(30),
             )?;
@@ -520,7 +520,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                 crate::peer_agent::Forward::Unreachable => None,
             };
             if let Some(reply) = reply {
-                provenant_supervisor::sys::hook_io::write_stdout(
+                provenant_os::sys::hook_io::write_stdout(
                     &reply,
                     Instant::now() + std::time::Duration::from_secs(30),
                 )?;
@@ -529,7 +529,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
         }
         let request = decode_request(&bytes)?;
         let common = request.project.resolve(&home)?;
-        if provenant_supervisor::fs::canonicalize(&common)? != common {
+        if provenant_os::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());
         }
         let cwd = if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
@@ -764,7 +764,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
             return Err(PeerError::Frame.into());
         }
         bytes.push(b'\n');
-        provenant_supervisor::sys::hook_io::write_stdout(
+        provenant_os::sys::hook_io::write_stdout(
             &bytes,
             Instant::now() + std::time::Duration::from_secs(30),
         )?;
@@ -1084,7 +1084,10 @@ pub(crate) fn remote_base(
     timeout: std::time::Duration,
     fetch: bool,
 ) -> Result<provenant_core::GitOid, FacadeError> {
-    use provenant_supervisor::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+    use provenant_os::exec::ExecOptions;
+    use provenant_os::exec::Executor;
+    use provenant_os::exec::StreamPolicy;
+    use provenant_os::exec::Termination;
     let git = crate::roots::git_binary().ok_or(FacadeError::OwnerUnavailable)?;
     let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter(|(key, _)| !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key)))
@@ -2157,19 +2160,19 @@ pub(crate) fn advance_settled_graphs(
         return Ok(());
     };
     use provenant_fabric_runtime::graph::{FileJournal, advance};
-    use provenant_supervisor::fs::LocalFs;
+
     let Some(host) = &settled.launch else {
         return Ok(());
     };
     let mut inputs =
         provenant_core::RootInputs::new(settled.roots.home.clone(), settled.roots.checkout.clone());
     inputs.state_dir = Some(host.configuration_root.clone());
-    let roots = inputs.resolve(&LocalFs)?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let mut first_error = None;
-    for id in FileJournal::graph_ids(&roots.state, settled.project_id, &LocalFs)? {
+    for id in FileJournal::graph_ids(&roots.state, settled.project_id)? {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let Some(execution) =
-                FileJournal::pending_execution(&roots.state, settled.project_id, &id, &LocalFs)?
+                FileJournal::pending_execution(&roots.state, settled.project_id, &id)?
             else {
                 return Ok(());
             };
@@ -2197,7 +2200,6 @@ pub(crate) fn advance_settled_graphs(
                 &roots.state,
                 settled.project_id,
                 &id,
-                &LocalFs,
                 budget,
                 &cancel,
                 &factory.clock,
@@ -2220,7 +2222,6 @@ pub(crate) fn advance_settled_graphs(
                 .err()
                 .map(|error| error.to_string())
                 .as_deref(),
-            &LocalFs,
         );
         if let Err(error) = result {
             first_error.get_or_insert(error);
@@ -2372,12 +2373,11 @@ impl Factory {
                 } else {
                     self.cwd.join(document)
                 };
-                let path =
-                    provenant_supervisor::fs::canonicalize(&path).map_err(|_| FacadeError::Io)?;
+                let path = provenant_os::fs::canonicalize(&path).map_err(|_| FacadeError::Io)?;
                 if !path.starts_with(&self.cwd) {
                     return Err(FacadeError::ConfinementRefused);
                 }
-                let bytes = provenant_supervisor::fs::FileHandle::open_source(&path)
+                let bytes = provenant_os::fs::FileHandle::open_source(&path)
                     .and_then(|mut file| file.read_bounded(1_048_576))
                     .map_err(|_| FacadeError::Io)?;
                 let document: GraphDocument = provenant_records::decode_v1(
@@ -2407,7 +2407,6 @@ impl Factory {
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
-                &provenant_supervisor::fs::LocalFs,
             )
             .map_err(|error| {
                 use provenant_fabric_runtime::graph::JournalError;
@@ -2425,7 +2424,6 @@ impl Factory {
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
-                &provenant_supervisor::fs::LocalFs,
             )
             .map_err(|_| FacadeError::Io)?;
             return Ok(run);
@@ -2434,7 +2432,6 @@ impl Factory {
             &self.context.roots.state,
             self.context.identity.project,
             id,
-            &provenant_supervisor::fs::LocalFs,
             budget,
             cancel,
             &self.clock,
@@ -2471,7 +2468,6 @@ impl Factory {
                 self.context.identity.project,
                 id,
                 None,
-                &provenant_supervisor::fs::LocalFs,
             )
             .map_err(|_| FacadeError::Io)?;
             return Ok(run);

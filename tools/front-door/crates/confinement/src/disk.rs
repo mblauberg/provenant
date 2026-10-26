@@ -12,9 +12,11 @@ use crate::worktrees::{
     WorktreeInfo, WriterState, combine_worker_state, disk_writer_state, parse_worktree_list,
 };
 use provenant_core::CancelToken;
-use provenant_supervisor::disk::DiskReport;
-use provenant_supervisor::exec::{Executor, Termination};
-use provenant_supervisor::fs::{Directory, FileKind, SafeDir, effective_uid, entry_names};
+use provenant_os::{
+    disk::DiskReport,
+    exec::{Executor, Termination},
+    fs::{Directory, FileKind, effective_uid, entry_names},
+};
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -95,7 +97,7 @@ pub fn lane_caches(home: &Path, policy: &CacheGcPolicy, report: &mut DiskReport)
 }
 
 fn classify_lane_cache(
-    cache: &dyn SafeDir,
+    cache: &Directory,
     relative: &Path,
     policy: &CacheGcPolicy,
     newest_write_ns: i128,

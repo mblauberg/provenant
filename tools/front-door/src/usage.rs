@@ -1,8 +1,8 @@
 //! Local demand counters. The command edge owns these effects, not the reducer.
 use provenant_cli::{Globals, Stats};
 use provenant_core::{ProjectId, Roots};
+use provenant_os::fs::{Directory, LockMode};
 use provenant_records::{CommandResult, Outcome, Trace};
-use provenant_supervisor::fs::{Directory, LockMode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -51,8 +51,7 @@ pub fn selected_roots(globals: &Globals) -> Option<Roots> {
 }
 
 pub fn attribution_enabled(roots: &Roots) -> bool {
-    use provenant_supervisor::fs::LocalFs;
-    provenant_config::read_with_domains(roots, &LocalFs, &provenant_cli::domains::SECTIONS)
+    provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
         .ok()
         .and_then(|config| config.knobs.get("usage.project_attribution").cloned())
         .and_then(|knob| knob.value.as_bool())
@@ -67,15 +66,12 @@ pub fn project_id(roots: &Roots, globals: &Globals) -> Option<ProjectId> {
         Some(project) => project.clone(),
         None => std::env::current_dir().ok()?,
     };
-    use provenant_supervisor::fs::LocalFs;
-    use std::{sync::Arc, time::Duration};
+
+    use std::time::Duration;
     let git = crate::roots::git_binary()?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(
-        Arc::new(LocalFs),
-        std::fs::canonicalize(git).ok()?,
-    )
-    .ok()?;
-    let executor = provenant_supervisor::exec::SystemExecutor::new(1).ok()?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(std::fs::canonicalize(git).ok()?).ok()?;
+    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(1)).ok()?;
     let location = runtime
         .project_location(
@@ -86,7 +82,7 @@ pub fn project_id(roots: &Roots, globals: &Globals) -> Option<ProjectId> {
         )
         .ok()?
         .location;
-    provenant_config::lookup_project(roots, &location, &LocalFs)
+    provenant_config::lookup_project(roots, &location)
         .ok()?
         .map(|binding| binding.project_id())
 }
@@ -185,7 +181,7 @@ pub fn record_tool(
 fn timestamp() -> Option<String> {
     // SystemClock's wall time is the shared timestamp boundary.
     use provenant_core::Clock;
-    provenant_supervisor::clock::SystemClock
+    provenant_os::clock::SystemClock
         .wall_now()
         .ok()
         .map(|time| time.to_string())

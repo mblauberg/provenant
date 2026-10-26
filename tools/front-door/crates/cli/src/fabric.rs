@@ -490,7 +490,7 @@ pub enum Landing {
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
-    Exec(#[from] provenant_supervisor::exec::ExecError),
+    Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     Coordination(#[from] CoordinationError),
     #[error(transparent)]
@@ -498,7 +498,7 @@ pub enum EdgeError {
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
     #[error(transparent)]
-    Fs(#[from] provenant_supervisor::fs::FsError),
+    Fs(#[from] provenant_os::fs::FsError),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -619,7 +619,7 @@ fn execute(
     if matches!(cmd, Fabric::Identity) {
         return Ok((json(ctx.identity)?, false));
     }
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
     let backoff = ThreadWait;

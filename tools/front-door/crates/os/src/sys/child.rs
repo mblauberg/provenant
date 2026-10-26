@@ -9,9 +9,9 @@ use std::process::Command;
 
 /// Owns the sole read end until spawn returns. `std::io::pipe` creates both
 /// ends close-on-exec. Only this reader is passed to the selected child.
-pub(crate) struct SecretPipe(std::io::PipeReader);
+pub struct SecretPipe(std::io::PipeReader);
 impl SecretPipe {
-    pub(crate) fn new(input: &crate::exec::SecretInput) -> io::Result<Self> {
+    pub fn new(input: &crate::exec::SecretInput) -> io::Result<Self> {
         // An empty pipe can hold at least POSIX's 512-byte PIPE_BUF without
         // blocking. Refuse larger secrets rather than needing a writer thread.
         if input.bytes.is_empty() || input.bytes.len() > 512 {
@@ -26,11 +26,11 @@ impl SecretPipe {
         Ok(Self(reader))
     }
 
-    pub(crate) fn fd(&self) -> BorrowedFd<'_> {
+    pub fn fd(&self) -> BorrowedFd<'_> {
         self.0.as_fd()
     }
 
-    pub(crate) fn environment(
+    pub fn environment(
         &self,
         input: &crate::exec::SecretInput,
         env: &[(OsString, OsString)],
@@ -46,7 +46,7 @@ impl SecretPipe {
 }
 
 /// Install the same strict argv/PATH/env syscall boundary for all utilities.
-pub(crate) fn configure_command(
+pub fn configure_command(
     command: &mut Command,
     pass_fds: &[BorrowedFd<'_>],
     env: Option<&[(OsString, OsString)]>,
@@ -95,7 +95,7 @@ fn run_pre_exec(pass: &[i32], new_session: bool, spec: &ExecSpec) -> io::Result<
 
 /// Attempt exec in the current process without running the post-fork reset.
 /// Failure leaves dispositions, signal mask and descriptor flags untouched.
-pub(crate) fn replace_process(command: &Command, env: &[(OsString, OsString)]) -> io::Error {
+pub fn replace_process(command: &Command, env: &[(OsString, OsString)]) -> io::Error {
     match prepare(command, Some(env)) {
         Ok(spec) => spec.exec(),
         Err(error) => error,

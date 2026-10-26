@@ -2,7 +2,8 @@
 #![allow(clippy::disallowed_methods)]
 
 use provenant_core::CancelToken;
-use provenant_supervisor::{exec::*, fixture};
+use provenant_os::exec::*;
+use provenant_supervisor::fixture;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io;
@@ -436,7 +437,7 @@ const TESTS: &[&str] = &[
 ];
 
 fn run_case(name: &str) -> Result<()> {
-    let root = fixture::short_tempdir("parent-exit.sock", |root| {
+    let root = provenant_os::fixture::short_tempdir("parent-exit.sock", |root| {
         tempfile::Builder::new().prefix("s1-").tempdir_in(root)
     })?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());

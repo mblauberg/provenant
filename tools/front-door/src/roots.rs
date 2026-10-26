@@ -1,8 +1,6 @@
 //! Read-only edge resolution. No provider, database, or legacy-content reads.
 use provenant_core::{PathResolver, RootInputs, Roots};
-use provenant_supervisor::exec::{
-    ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
     fs, io,
@@ -39,7 +37,7 @@ pub fn product_root() -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
-pub(crate) use provenant_supervisor::git::git_executable as git_binary;
+pub(crate) use provenant_os::git::git_executable as git_binary;
 
 pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf, RootError> {
     let path = match selected {

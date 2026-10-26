@@ -115,9 +115,9 @@ pub enum RunError {
     #[error("run-store call was cancelled")]
     Cancelled,
     #[error("publication is visible but not durably synced")]
-    Publication(#[source] provenant_supervisor::fs::FsError),
+    Publication(#[source] provenant_os::fs::FsError),
     #[error(transparent)]
-    Filesystem(#[from] provenant_supervisor::fs::FsError),
+    Filesystem(#[from] provenant_os::fs::FsError),
     #[error("run database operation failed")]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]

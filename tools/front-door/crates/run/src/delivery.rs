@@ -7,7 +7,7 @@ use crate::{
 use provenant_confinement::redact::Redactor;
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
-use provenant_supervisor::{
+use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
@@ -325,10 +325,9 @@ impl HostDeliveryContext {
                 .iter()
                 .find(|(key, _)| key == b"PROVENANT_GIT")
                 .map(|(_, value)| OsString::from_vec(value.clone()));
-            let path = provenant_supervisor::git::resolve_git_executable(
-                override_path.as_deref().map(Path::new),
-            )
-            .ok_or_else(|| prepare_error("git executable", "git is unavailable"))?;
+            let path =
+                provenant_os::git::resolve_git_executable(override_path.as_deref().map(Path::new))
+                    .ok_or_else(|| prepare_error("git executable", "git is unavailable"))?;
             return host_path(&path, writer)
                 .map_err(|error| prepare_error("git executable", error));
         }
@@ -347,9 +346,7 @@ impl HostDeliveryContext {
             .filter(|p| p.is_absolute())
             .map(|p| p.join(tool))
             .filter_map(|p| std::fs::canonicalize(p).ok())
-            .find(|p| {
-                !p.starts_with(&writer.worktree) && provenant_supervisor::sys::is_executable(p)
-            })
+            .find(|p| !p.starts_with(&writer.worktree) && provenant_os::sys::is_executable(p))
             .ok_or_else(|| prepare_error("gh executable", format!("{tool} is unavailable on PATH")))
     }
     fn command(&self, cwd: &Path, tool: &str, args: &[&str], stage: Stage) -> Result<String> {
@@ -437,7 +434,7 @@ impl HostDeliveryContext {
         };
         options.stderr_filter = redactor
             .as_mut()
-            .map(|redactor| redactor as &mut dyn provenant_supervisor::exec::CaptureFilter);
+            .map(|redactor| redactor as &mut dyn provenant_os::exec::CaptureFilter);
         let output = executor
             .execute(options)
             .map_err(|error| failure(format!("{}: {error}", executable.display())))?;
@@ -622,7 +619,7 @@ fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
         .to_string_lossy();
     let helper = host_path(path, writer)
         .map_err(|error| prepare_error("credential helper", format!("{name}: {error}")))?;
-    if !helper.is_file() || !provenant_supervisor::sys::is_executable(&helper) {
+    if !helper.is_file() || !provenant_os::sys::is_executable(&helper) {
         return Err(prepare_error(
             "credential helper",
             format!("{name} is unavailable ({})", path.display()),

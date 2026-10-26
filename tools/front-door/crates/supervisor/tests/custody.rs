@@ -2,13 +2,15 @@
 #![allow(clippy::disallowed_methods)]
 
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, FileHandle, LockMode},
+};
 use provenant_supervisor::{
     ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,
     census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
-    clock::SystemClock,
     custody::*,
     fixture,
-    fs::{Directory, FileHandle, LockMode},
     machine::StopReason,
 };
 use std::error::Error;
@@ -252,21 +254,19 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
     Ok(())
 }
 struct Decoder;
-impl provenant_supervisor::capture::FrameDecoder for Decoder {
+impl provenant_os::capture::FrameDecoder for Decoder {
     fn decode(
         &self,
         frame: &[u8],
-    ) -> std::result::Result<
-        provenant_supervisor::capture::FrameEvent,
-        provenant_supervisor::capture::DecodeFailure,
-    > {
+    ) -> std::result::Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure>
+    {
         if frame == b"crash-guardian" {
             std::process::exit(70);
         }
         Ok(if frame == b"terminal" {
-            provenant_supervisor::capture::FrameEvent::Terminal
+            provenant_os::capture::FrameEvent::Terminal
         } else {
-            provenant_supervisor::capture::FrameEvent::Progress
+            provenant_os::capture::FrameEvent::Progress
         })
     }
 }
@@ -290,11 +290,7 @@ fn start_with_custody_identity(
     scenario: &str,
     extra: &[OsString],
     plan: CapturePlan,
-) -> Result<(
-    CustodyLease,
-    CustodyHandle,
-    provenant_supervisor::fs::Metadata,
-)> {
+) -> Result<(CustodyLease, CustodyHandle, provenant_os::fs::Metadata)> {
     let writer = root.join(format!("{name}-writer"));
     let attempt = root.join(format!("{name}-attempt"));
     std::fs::create_dir(&writer)?;
@@ -602,7 +598,7 @@ fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
     let exit = exited(&handle)?;
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     assert!(exit.terminal_observed);
     assert!(
@@ -663,7 +659,7 @@ fn cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root: &Path) 
     let exit = exited(&handle)?;
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Signal(9))
+        Some(provenant_os::exec::Termination::Signal(9))
     );
     assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
     drop(writer);
@@ -854,7 +850,7 @@ fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Pa
         Directory::open_anchor(&root.join("pending-writer"))?
             .lock(
                 OsStr::new("writer.lock"),
-                provenant_supervisor::fs::LockMode::Exclusive,
+                provenant_os::fs::LockMode::Exclusive,
                 WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
                 &CancelToken::new(),
                 &clock
@@ -865,7 +861,7 @@ fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Pa
     let exit = exited(&handle)?;
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     assert_eq!(exit.stop_reason, None);
     let bytes = std::fs::read(&destination)?;
@@ -876,7 +872,7 @@ fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Pa
                 OsStr::new("process-exit.json"),
                 ".late-",
                 b"{}",
-                provenant_supervisor::fs::PublishMode::NoReplace
+                provenant_os::fs::PublishMode::NoReplace
             )
             .is_err()
     );
@@ -996,7 +992,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
     assert!(exit.terminal_observed);
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     assert_eq!(
         std::fs::read(attempt_path.join("stdout.log"))?,
@@ -1559,7 +1555,7 @@ fn checkpoint_failure_preserves_terminal_publication(root: &Path) -> Result<()> 
     assert!(exit.delivered_signals.is_empty());
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     assert!(
         root.join("terminal-checkpoint-attempt/process-exit.json")
@@ -1590,7 +1586,7 @@ fn checkpoint_enospc_while_provider_lives_never_signals_it(root: &Path) -> Resul
     assert!(exit.delivered_signals.is_empty());
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     Ok(())
 }
@@ -1617,7 +1613,7 @@ fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str)
     assert!(exit.delivered_signals.contains(&i64::from(libc::SIGTERM)));
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Signal(i64::from(
+        Some(provenant_os::exec::Termination::Signal(i64::from(
             libc::SIGKILL
         )))
     );
@@ -1690,7 +1686,7 @@ fn natural_exit_races_cancel(root: &Path) -> Result<()> {
     let exit = exited(&handle)?;
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     assert_eq!(exit.stop_reason, None);
     assert!(exit.delivered_signals.is_empty());
@@ -1723,14 +1719,14 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     let clock = SystemClock::new();
     let lock = Directory::open_anchor(&root.join("orphan-writer"))?.lock(
         OsStr::new("writer.lock"),
-        provenant_supervisor::fs::LockMode::Exclusive,
+        provenant_os::fs::LockMode::Exclusive,
         WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
         &CancelToken::new(),
         &clock,
     );
     assert!(matches!(
         lock,
-        Err(provenant_supervisor::fs::FsError::LockTimeout { .. })
+        Err(provenant_os::fs::FsError::LockTimeout { .. })
     ));
     assert!(!root.join("orphan-attempt/process-exit.json").exists());
     drop(held);
@@ -1740,7 +1736,7 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     )?;
     assert_eq!(
         exited(&handle)?.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     let guardian = reservation_identity(&root.join("orphan-writer"), "guardian")?;
     wait_for_identity_absence(&guardian)?;
@@ -1782,7 +1778,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     assert!(matches!(
         locked,
         Err(CustodyError::Filesystem(
-            provenant_supervisor::fs::FsError::LockTimeout { .. }
+            provenant_os::fs::FsError::LockTimeout { .. }
         ))
     ));
     assert!(!root.join("crash-attempt/process-exit.json").exists());
@@ -1826,7 +1822,7 @@ fn capture_failure_never_requests_a_stop(root: &Path) -> Result<()> {
     let exit = exited(&handle)?;
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Exit(0))
+        Some(provenant_os::exec::Termination::Exit(0))
     );
     assert_eq!(exit.stop_reason, None);
     Ok(())
@@ -1852,7 +1848,7 @@ fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
     assert_eq!(exit.stop_reason, Some(StopReason::WallDeadline));
     assert_eq!(
         exit.termination,
-        Some(provenant_supervisor::exec::Termination::Signal(9))
+        Some(provenant_os::exec::Termination::Signal(9))
     );
     Ok(())
 }
@@ -2011,7 +2007,7 @@ fn settle_writers(root: &Path) -> Result<()> {
 }
 
 fn run_case(name: &str) -> Result<()> {
-    let root = fixture::short_tempdir("terminal-checkpoint.sock", |root| {
+    let root = provenant_os::fixture::short_tempdir("terminal-checkpoint.sock", |root| {
         tempfile::Builder::new().prefix("s2-").tempdir_in(root)
     })?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());

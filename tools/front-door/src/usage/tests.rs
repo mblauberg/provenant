@@ -37,8 +37,7 @@ fn project_attribution_requires_the_knob_and_an_available_resolver() -> Result {
     let project = temp.path().join("project");
     std::fs::create_dir(&project)?;
     let location = provenant_config::ProjectLocation::new(&project)?;
-    let binding =
-        provenant_config::bind_project(&roots, location, &provenant_supervisor::fs::LocalFs)?;
+    let binding = provenant_config::bind_project(&roots, location)?;
     let expected_id = binding.project_id();
     let globals = Globals {
         project: Some(project),

@@ -4,8 +4,9 @@ use crate::{
     *,
 };
 use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime};
+use provenant_os::{exec::Termination, fs::LockMode};
 use provenant_records::{AttemptFile, CanonicalV1};
-use provenant_supervisor::{custody::ExitObservation, exec::Termination, fs::LockMode};
+use provenant_supervisor::custody::ExitObservation;
 use rusqlite::{OptionalExtension, params};
 use std::ffi::OsStr;
 
@@ -774,13 +775,12 @@ struct SealedExit {
     settlement_evidence: provenant_supervisor::custody::SettlementEvidence,
 }
 fn sealed_exit(
-    dir: &provenant_supervisor::fs::Directory,
+    dir: &provenant_os::fs::Directory,
     exit: &ExitObservation,
 ) -> Result<ArtifactRecord> {
-    use provenant_supervisor::{
-        custody::{PublicationState, SettlementEvidence},
-        fs::FileKind,
-    };
+    use provenant_os::fs::FileKind;
+    use provenant_supervisor::custody::PublicationState;
+    use provenant_supervisor::custody::SettlementEvidence;
     if !matches!(exit.publication, PublicationState::Durable)
         || exit.settlement_evidence == SettlementEvidence::Unresolved
     {

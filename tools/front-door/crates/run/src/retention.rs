@@ -5,8 +5,8 @@ use crate::{
     *,
 };
 use provenant_core::{AttemptId, WallTime};
+use provenant_os::fs::{Directory, FileKind, LockGuard, LockMode, PayloadTree};
 use provenant_records::AttemptFile;
-use provenant_supervisor::fs::{Directory, FileKind, LockGuard, LockMode, PayloadTree};
 use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},
@@ -207,9 +207,7 @@ impl RunStore {
                 if matches!(
                     error,
                     RunError::Validation(_)
-                        | RunError::Filesystem(
-                            provenant_supervisor::fs::FsError::LockTimeout { .. }
-                        )
+                        | RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
                 ) {
                     report.kept.push(issue);
                 } else {
@@ -465,7 +463,7 @@ fn prefix_removals(report: &mut ProviderStateGc, first: usize, prefix: &std::pat
 fn names(directory: &Directory) -> Result<Vec<OsString>> {
     Ok(directory
         .entries()?
-        .collect::<provenant_supervisor::fs::Result<_>>()?)
+        .collect::<provenant_os::fs::Result<_>>()?)
 }
 
 fn existing(parent: &Directory, name: &str) -> Result<Option<Directory>> {
@@ -568,7 +566,7 @@ fn remove_contents(tree: &PayloadTree, depth: usize) -> Result<()> {
     tree.make_writable()?;
     let entries = tree
         .entries()?
-        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
     for name in entries {
         if tree.metadata_at(&name)?.kind == FileKind::Directory {
             remove_contents(&tree.child(&name)?, depth + 1)?;

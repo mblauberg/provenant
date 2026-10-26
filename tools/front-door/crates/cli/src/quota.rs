@@ -1,15 +1,15 @@
-//! Quota arguments, composition through supervisor's safe filesystem, and render.
+//! Quota arguments, composition through OS crate's safe filesystem, and render.
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, FsError, LockMode, Publication, PublishMode},
+};
 use provenant_quota::{
     schedule::{self, Detection, QuotaQuery, QuotaTick},
     *,
 };
 use provenant_records::{CommandError, CommandResult, Outcome};
-use provenant_supervisor::{
-    clock::SystemClock,
-    fs::{Directory, FsError, LockMode, Publication, PublishMode, SafeDir},
-};
 use std::{
     ffi::OsStr,
     io::{self, Read},
@@ -131,10 +131,7 @@ pub(crate) enum EdgeError {
     Path,
 }
 fn durable(publication: Publication) -> Result<(), EdgeError> {
-    match publication {
-        Publication::Durable => Ok(()),
-        Publication::VisibleDurabilityUnconfirmed { sync_error } => Err(sync_error.into()),
-    }
+    Ok(publication.require_durable()?)
 }
 fn create_path(path: &Path) -> Result<Directory, EdgeError> {
     let dir = match Directory::open_anchor(path) {
@@ -156,7 +153,7 @@ fn create_path(path: &Path) -> Result<Directory, EdgeError> {
 fn private(path: &Path) -> Result<Directory, EdgeError> {
     let dir = create_path(path)?;
     let meta = dir.metadata()?;
-    if meta.mode & 0o077 != 0 || meta.uid != provenant_supervisor::fs::effective_uid() {
+    if meta.mode & 0o077 != 0 || meta.uid != provenant_os::fs::effective_uid() {
         return Err(EdgeError::Permissions);
     }
     Ok(dir)
@@ -169,14 +166,14 @@ fn child(parent: &Directory, name: &OsStr) -> Result<Directory, EdgeError> {
     }
     let dir = parent.open_verified_directory(name)?;
     let meta = dir.metadata()?;
-    if meta.mode & 0o077 != 0 || meta.uid != provenant_supervisor::fs::effective_uid() {
+    if meta.mode & 0o077 != 0 || meta.uid != provenant_os::fs::effective_uid() {
         return Err(EdgeError::Permissions);
     }
     Ok(dir)
 }
 fn check_private(dir: &Directory) -> Result<(), EdgeError> {
     let meta = dir.metadata()?;
-    if meta.mode & 0o777 != 0o700 || meta.uid != provenant_supervisor::fs::effective_uid() {
+    if meta.mode & 0o777 != 0o700 || meta.uid != provenant_os::fs::effective_uid() {
         return Err(EdgeError::Permissions);
     }
     Ok(())
@@ -210,7 +207,7 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
             let mut bytes = Vec::new();
             let reader = account_dir.open_read(&file)?;
             let meta = reader.metadata()?;
-            if meta.mode & 0o777 != 0o600 || meta.uid != provenant_supervisor::fs::effective_uid() {
+            if meta.mode & 0o777 != 0o600 || meta.uid != provenant_os::fs::effective_uid() {
                 return Err(EdgeError::Permissions);
             }
             reader
@@ -334,7 +331,7 @@ fn write_intent(
             if bytes.len() as u64 > MAX_RECORD_BYTES {
                 return Err(QuotaError::Invalid("record bound").into());
             }
-            durable(SafeDir::atomic_write(
+            durable(provenant_os::fs::Directory::atomic_write_with_permissions(
                 &account_dir,
                 OsStr::new(&name),
                 ".quota",
@@ -470,12 +467,7 @@ fn execute(
     {
         return Err(EdgeError::Adapter);
     }
-    let domains = provenant_config::read_with_domains(
-        roots,
-        &provenant_supervisor::fs::LocalFs,
-        &crate::domains::SECTIONS,
-    )?
-    .domains;
+    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
     let (settings, entries) = (domains.quota, domains.accounts);
     let clock = SystemClock::new();
     let now = clock
@@ -624,7 +616,7 @@ fn execute(
     if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(EdgeError::TooLarge);
     }
-    durable(SafeDir::atomic_write(
+    durable(provenant_os::fs::Directory::atomic_write_with_permissions(
         &dir,
         OsStr::new("report.json"),
         ".report",

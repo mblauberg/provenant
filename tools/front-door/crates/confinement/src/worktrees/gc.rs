@@ -1,6 +1,6 @@
 //! The GC worktree selection, shared by merged removal and declared output.
 use super::*;
-use provenant_supervisor::fs::{FileKind, PayloadTree, entry_names, temporary_name};
+use provenant_os::fs::{FileKind, PayloadTree, entry_names, temporary_name};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
@@ -317,7 +317,7 @@ fn clean_after_preview(
             }
             directory = directory.open_verified_directory(component.as_os_str())?;
         }
-        if !preview_directory_removed(directory.as_ref(), &absolute, &planned, 0)? {
+        if !preview_directory_removed(&directory, &absolute, &planned, 0)? {
             return Ok(false);
         }
     }
@@ -325,7 +325,7 @@ fn clean_after_preview(
 }
 
 fn preview_directory_removed(
-    directory: &dyn SafeDir,
+    directory: &Directory,
     path: &Path,
     planned: &HashSet<PathBuf>,
     depth: usize,
@@ -342,7 +342,7 @@ fn preview_directory_removed(
             return Ok(false);
         }
         if !preview_directory_removed(
-            directory.open_verified_directory(&name)?.as_ref(),
+            &directory.open_verified_directory(&name)?,
             &child,
             planned,
             depth + 1,
@@ -354,7 +354,7 @@ fn preview_directory_removed(
 }
 
 fn walk_output(
-    directory: &dyn SafeDir,
+    directory: &Directory,
     root: &Path,
     relative: &Path,
     policy: &WorktreeGcPolicy<'_>,
@@ -388,15 +388,7 @@ fn walk_output(
                 Ok(true)
             } else {
                 let child = directory.open_verified_directory(&name)?;
-                walk_output(
-                    child.as_ref(),
-                    root,
-                    &path,
-                    policy,
-                    protected,
-                    report,
-                    depth + 1,
-                )?;
+                walk_output(&child, root, &path, policy, protected, report, depth + 1)?;
                 Ok(false)
             }
         };
@@ -422,7 +414,7 @@ fn walk_output(
     Ok(())
 }
 
-fn newest(directory: &dyn SafeDir, depth: usize) -> Result<i128, FsError> {
+fn newest(directory: &Directory, depth: usize) -> Result<i128, FsError> {
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -432,7 +424,7 @@ fn newest(directory: &dyn SafeDir, depth: usize) -> Result<i128, FsError> {
         time = time.max(meta.modified_ns);
         if meta.kind == FileKind::Directory {
             time = time.max(newest(
-                directory.open_verified_directory(&name)?.as_ref(),
+                &directory.open_verified_directory(&name)?,
                 depth + 1,
             )?);
         }
@@ -441,13 +433,13 @@ fn newest(directory: &dyn SafeDir, depth: usize) -> Result<i128, FsError> {
 }
 
 fn prune_output(
-    parent: &dyn SafeDir,
+    parent: &Directory,
     name: &OsStr,
     policy: &WorktreeGcPolicy<'_>,
 ) -> Result<(), FsError> {
     let directory = parent.open_verified_directory(name)?;
     let identity = directory.metadata()?;
-    if newest(directory.as_ref(), 0)? >= policy.written_before_ns {
+    if newest(&directory, 0)? >= policy.written_before_ns {
         return Err(FsError::RaceRefused { name: name.into() });
     }
     if policy.dry_run {
@@ -459,7 +451,7 @@ fn prune_output(
     let payload = PayloadTree::claim(parent, &staging_name, &staging.metadata()?)?;
     // A private parent grants payload disposal without changing the original
     // directory's permissions or following links in the output tree.
-    if let Err(error) = parent.rename_noreplace_to(name, staging.as_ref(), OsStr::new("output")) {
+    if let Err(error) = parent.rename_noreplace(name, &staging, OsStr::new("output")) {
         parent.rmdir(&staging_name)?;
         return Err(error);
     }
@@ -474,7 +466,7 @@ fn prune_output(
         payload.rmdir(OsStr::new("output"))
     };
     if let Err(error) = removed() {
-        staging.rename_noreplace_to(OsStr::new("output"), parent, name)?;
+        staging.rename_noreplace(OsStr::new("output"), parent, name)?;
         parent.rmdir(&staging_name)?;
         return Err(error);
     }

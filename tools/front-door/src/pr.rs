@@ -2,10 +2,10 @@
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Pr};
 use provenant_core::GitOid;
-use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::exec::{
+use provenant_os::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
+use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
@@ -28,7 +28,7 @@ fn execute(project: &Path, argv: &[&str], watch: bool) -> Result<ExecOutcome> {
     let output = SystemExecutor::new(1)?
         .execute(options)
         .map_err(|error| match error {
-            provenant_supervisor::exec::ExecError::Io { operation, source } => {
+            provenant_os::exec::ExecError::Io { operation, source } => {
                 format!("cannot {operation} {}: {source}", argv[0].to_string_lossy())
             }
             error => error.to_string(),

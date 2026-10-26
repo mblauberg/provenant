@@ -33,7 +33,7 @@ fn rig() -> Result<TestRig> {
     )?;
     Ok(rig)
 }
-fn merge(rig: &TestRig) -> Result<provenant_supervisor::exec::ExecOutcome> {
+fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
     rig.command(&["pr", "merge", "1668", "--head", HEAD, "--json"])
 }
 fn no_merge(rig: &TestRig) -> Result {
@@ -130,7 +130,7 @@ fn pr_merge_guards_head_and_uses_optional_git_email() -> Result {
     for email in [None, Some("123+fixture@users.noreply.github.com")] {
         let rig = rig()?;
         if let Some(email) = email {
-            let git = provenant_supervisor::git::git_executable().ok_or("Git executable")?;
+            let git = provenant_os::git::git_executable().ok_or("Git executable")?;
             assert_eq!(
                 code(&rig.execute(&git, &["config", "user.email", email], None)?),
                 0

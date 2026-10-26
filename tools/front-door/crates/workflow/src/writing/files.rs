@@ -1,5 +1,5 @@
 use super::*;
-use provenant_supervisor::fs::{Directory, FileKind};
+use provenant_os::fs::{Directory, FileKind};
 use std::{ffi::OsStr, path::Component};
 const MAX_FILES: usize = 256;
 const MAX_TOTAL: usize = 16 * 1024 * 1024;

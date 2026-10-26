@@ -3,15 +3,10 @@ use crate::roots;
 use provenant_cli::{Globals, RenderError, RenderMode};
 use provenant_confinement::{UtilityBudget, UtilityRuntime, cache::CacheGcPolicy};
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, WaitBudget};
+use provenant_os::{clock::SystemClock, disk::DiskReport, exec::SystemExecutor, fs::Directory};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use provenant_run::{ExecutionContext, Request, RunStore};
-use provenant_supervisor::{
-    clock::SystemClock,
-    disk::DiskReport,
-    exec::SystemExecutor,
-    fs::{Directory, LocalFs},
-};
-use std::{io, path::Path, sync::Arc, time::Duration};
+use std::{io, path::Path, time::Duration};
 
 pub fn run(globals: &Globals) -> u8 {
     let mut result = match collect(globals) {
@@ -156,14 +151,13 @@ fn collect_resolved(
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
         let git = roots::git_binary().ok_or("Git executable unavailable")?;
-        let utility = UtilityRuntime::read_only(Arc::new(LocalFs), git)?;
+        let utility = UtilityRuntime::read_only(git)?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = utility.open_repo(&executor, project, budget, &cancel)?;
         let registration = (|| -> Result<_, Box<dyn std::error::Error>> {
             let location = provenant_config::ProjectLocation::new(repo.common_git_dir())?;
-            let Some(binding) = provenant_config::lookup_project(roots, &location, &LocalFs)?
-            else {
+            let Some(binding) = provenant_config::lookup_project(roots, &location)? else {
                 return Ok(None);
             };
             let project_state = Directory::open_anchor(state)?
@@ -175,7 +169,7 @@ fn collect_resolved(
             Ok(registration) => registration,
             Err(error)
                 if error
-                    .downcast_ref::<provenant_supervisor::fs::FsError>()
+                    .downcast_ref::<provenant_os::fs::FsError>()
                     .is_some_and(|error| error.is_not_found()) =>
             {
                 None
@@ -257,7 +251,7 @@ fn other_state(path: &Path, report: &mut DiskReport) {
     };
     let names = match directory
         .entries()
-        .and_then(|names| names.collect::<provenant_supervisor::fs::Result<Vec<_>>>())
+        .and_then(|names| names.collect::<provenant_os::fs::Result<Vec<_>>>())
     {
         Ok(mut names) => {
             names.sort();
@@ -268,7 +262,7 @@ fn other_state(path: &Path, report: &mut DiskReport) {
             return;
         }
     };
-    let mut other = provenant_supervisor::disk::DiskEntry {
+    let mut other = provenant_os::disk::DiskEntry {
         class: "other_state".into(),
         path: path.into(),
         ..Default::default()
@@ -316,7 +310,7 @@ mod tests {
         let rig = crate::worktree_tests::repository()?;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
         inputs.state_dir = Some(rig.state.clone());
-        let roots = inputs.resolve(&LocalFs)?;
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let before = snapshot(&rig.root)?;
         let report = collect_resolved(&roots, &rig.home, &rig.project)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -368,7 +362,7 @@ mod tests {
         fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
         // A project identity need not have any worktree registry yet.
         let location = provenant_config::ProjectLocation::new(rig.project.join(".git"))?;
-        let _binding = provenant_config::bind_project(&roots, location, &LocalFs)?;
+        let _binding = provenant_config::bind_project(&roots, location)?;
         let before = snapshot(&rig.root)?;
         let report = collect_resolved(&roots, &rig.home, &rig.project)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -447,7 +441,7 @@ mod tests {
         let state = root.join("state");
         let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("project"));
         inputs.state_dir = Some(state.clone());
-        let roots = inputs.resolve(&LocalFs)?;
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         fs::create_dir_all(state.join("children"))?;
         // Mostly empty files and directories exercise physical classification
         // without SQLite inserts or provider setup. Only the first and last

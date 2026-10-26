@@ -1,6 +1,6 @@
 //! Bounded host-side history for lanes whose tools cannot execute Git.
 use crate::{Result, RunError, artifacts::seal};
-use provenant_supervisor::{
+use provenant_os::{
     exec::{CapturedStream, ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
@@ -289,7 +289,8 @@ impl GitContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_supervisor::exec::{ExecError, ExecOutcome};
+    use provenant_os::exec::ExecError;
+    use provenant_os::exec::ExecOutcome;
     use std::sync::Mutex;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -586,7 +587,7 @@ mod tests {
     fn small_history() -> std::result::Result<HistoryFixture, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
-        let binary = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
+        let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let executor = SystemExecutor::new(1)?;
         git(&executor, &binary, &root, &["init", "--quiet"])?;
         for text in ["original line\n", "changed line\n"] {
@@ -625,7 +626,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let scratch = tempfile::tempdir()?;
         let root = std::fs::canonicalize(scratch.path())?;
-        let binary = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
+        let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let executor = SystemExecutor::new(1)?;
         git(&executor, &binary, &root, &["init", "--quiet"])?;
         std::fs::write(root.join("large.txt"), "base\n")?;

@@ -9,17 +9,16 @@ use provenant_fabric_runtime::{
     },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
-use provenant_records::{AbsolutePath, CommandResult, Outcome};
-use provenant_supervisor::{
+use provenant_os::{
     exec::{Executor, SystemExecutor},
-    fs::{Directory, LocalFs, PublishMode},
+    fs::{Directory, PublishMode},
 };
+use provenant_records::{AbsolutePath, CommandResult, Outcome};
 use serde::Serialize;
 use std::{
     ffi::OsStr,
     io,
     path::{Component, Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -34,7 +33,7 @@ pub struct Context {
     pub(super) cwd: PathBuf,
 }
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
-    Ok(provenant_supervisor::fs::canonicalize(path)?)
+    Ok(provenant_os::fs::canonicalize(path)?)
 }
 pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
     let mut dir = match Directory::open_anchor(root) {
@@ -93,10 +92,9 @@ pub fn in_lane() -> bool {
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
-        let config =
-            provenant_config::read_with_domains(&roots, &LocalFs, &crate::domains::SECTIONS)?
-                .domains
-                .fabric;
+        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+            .domains
+            .fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_root = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
             .map(PathBuf::from)
@@ -104,20 +102,16 @@ impl Context {
         let utility_home = utility_root.join("tmp/git-home");
         private_dir(roots.state.as_path(), &utility_home)?;
         let lane = in_lane();
-        let git = provenant_supervisor::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(
-            Arc::new(LocalFs),
-            canonical(&git)?,
-            &utility_home,
-        )?;
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(canonical(&git)?, &utility_home)?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
         let binding = if lane {
-            provenant_config::lookup_project(&roots, &discovered.location, &LocalFs)?
+            provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
         } else {
-            provenant_config::bind_project(&roots, discovered.location, &LocalFs)?
+            provenant_config::bind_project(&roots, discovered.location)?
         };
         let key = if discovered.repository.is_some() {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -128,7 +122,7 @@ impl Context {
         } else {
             None
         };
-        let host = provenant_config::bind_host(&roots, &LocalFs)?;
+        let host = provenant_config::bind_host(&roots)?;
         let identity = Identity::bind(
             &binding,
             host,
@@ -350,14 +344,10 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
             .unwrap_or_else(|| roots.state.as_path().to_owned());
         let path = base.join("tmp/results");
         let dir = private_dir(roots.state.as_path(), &path)?;
-        let name = provenant_supervisor::fs::temporary_name()?;
+        let name = provenant_os::fs::temporary_name()?;
         let bytes = serde_json::to_vec(value)?;
-        match dir.atomic_write(&name, ".result-", &bytes, PublishMode::NoReplace)? {
-            provenant_supervisor::fs::Publication::Durable => {}
-            provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { sync_error } => {
-                return Err(sync_error.into());
-            }
-        }
+        dir.atomic_write(&name, ".result-", &bytes, PublishMode::NoReplace)?
+            .require_durable()?;
         AbsolutePath::new(&path.join(OsStr::new(&name))).map_err(|_| EdgeError::Invalid)
     }
     perform(value, roots).map_err(|_| io::Error::other("cannot publish oversized result"))

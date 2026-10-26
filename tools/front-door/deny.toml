@@ -80,6 +80,7 @@ allow = [
   "provenant-fabric-mcp",
   "provenant-fabric-runtime",
   "provenant-fabric-store",
+  "provenant-os",
   "provenant-providers",
   "provenant-quota",
   "provenant-records",

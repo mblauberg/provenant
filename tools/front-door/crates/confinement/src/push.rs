@@ -5,7 +5,7 @@ use crate::{
     utility::run_release_read_utility,
 };
 use provenant_core::{CancelToken, GitOid};
-use provenant_supervisor::exec::{Executor, Termination};
+use provenant_os::exec::{Executor, Termination};
 use thiserror::Error;
 
 pub struct PushUpdate {
@@ -43,10 +43,7 @@ pub struct PushContext<'a> {
     pub cancel: &'a CancelToken,
 }
 impl PushContext<'_> {
-    fn read(
-        &self,
-        request: GitRead,
-    ) -> Result<provenant_supervisor::exec::ExecOutcome, PushRefusal> {
+    fn read(&self, request: GitRead) -> Result<provenant_os::exec::ExecOutcome, PushRefusal> {
         run_release_read_utility(
             self.executor,
             request,

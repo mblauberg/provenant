@@ -17,8 +17,8 @@ Run owns the registry, admission, attempts, retries and publication
 ([run](run.md)). Supervisor owns process custody and signalling, and
 confinement owns disclosure and access grants ([supervisor](supervisor.md)).
 These crates add no daemon, no second execution registry and no process
-spawning of their own: supervisor executes every launch, preflight and quota
-effect.
+spawning of their own: supervisor executes provider launches; os executes
+utility preflight and quota effects.
 
 ## Boundaries
 
@@ -146,7 +146,7 @@ Percentages are basis points, money is checked scaled integers, and no integer
 passes through `f64`. Clocks are injected; reset times use `jiff`, and
 ambiguous local times are rejected.
 
-Writes are typed update intents applied through supervisor's safe filesystem
+Writes are typed update intents applied through the OS crate's concrete filesystem
 API: bounded lock, re-read revision, atomic replace, file and parent fsync,
 0700 directories and 0600 files. A refresh reserves a claim with a token and
 deadline, releases the lock, runs, then commits only against the matching
@@ -275,7 +275,7 @@ reading; only the non-secret authority reference is kept.
 
 | Source | Rule |
 | --- | --- |
-| Claude `.credentials.json` in the selected config directory, otherwise the macOS Keychain item `Claude Code-credentials` (suffix from the config path hash for other directories) | Read through supervisor with memory-only capture that bypasses attempt spooling, even on error, overflow or cancel. Linked credential files are rejected. |
+| Claude `.credentials.json` in the selected config directory, otherwise the macOS Keychain item `Claude Code-credentials` (suffix from the config path hash for other directories) | Read through os with memory-only capture that bypasses attempt spooling, even on error, overflow or cancel. Linked credential files are rejected. |
 | Cursor `state.vscdb`, key `cursorAuth/accessToken` | Read-only query into memory. No copy, export or raw row in diagnostics. |
 
 Codex and Agy quota use their own CLI protocols, not auth-store reads. Claude

@@ -1,7 +1,9 @@
-//! Fast manifest policy checks. No Cargo subprocess or metadata build required.
-use std::error::Error;
-use std::fs;
-use std::path::{Path, PathBuf};
+//! Fast manifest and source policy checks. No Cargo subprocess required.
+use std::{
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 // ADR 0028 decision 3 and docs/specs/rust-workspace.md#dependencies. tempfile is checked separately below.
@@ -22,19 +24,16 @@ const DIRECT: &[&str] = &[
 const LAYERS: &[(&str, &[&str])] = &[
     ("core", &[]),
     ("records", &["core"]),
-    ("config", &["core", "records", "supervisor"]),
-    ("supervisor", &["core", "records"]),
-    ("confinement", &["core", "records", "config", "supervisor"]),
+    ("config", &["core", "records", "os"]),
+    ("os", &["core"]),
+    ("supervisor", &["core", "records", "os"]),
+    (
+        "confinement",
+        &["core", "records", "config", "os", "supervisor"],
+    ),
     (
         "providers",
-        &[
-            "core",
-            "records",
-            "config",
-            "confinement",
-            "quota",
-            "supervisor",
-        ],
+        &["core", "records", "config", "confinement", "quota", "os"],
     ),
     ("quota", &["records", "config"]),
     ("telemetry", &["core", "records"]),
@@ -48,19 +47,20 @@ const LAYERS: &[(&str, &[&str])] = &[
             "core",
             "records",
             "config",
+            "os",
             "supervisor",
             "confinement",
             "sqlite",
         ],
     ),
-    ("sqlite", &["core", "supervisor"]),
-    ("fabric-store", &["core", "records", "supervisor", "sqlite"]),
+    ("sqlite", &["core", "os"]),
+    ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
         "fabric-runtime",
-        &["core", "records", "config", "supervisor", "fabric-store"],
+        &["core", "records", "config", "os", "fabric-store"],
     ),
     ("fabric-mcp", &["core", "records", "fabric-runtime"]),
-    ("workflow", &["core", "records", "supervisor"]),
+    ("workflow", &["core", "records", "os"]),
     (
         "cli",
         &[
@@ -75,6 +75,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "run",
             "fabric-runtime",
             "workflow",
+            "os",
             "supervisor",
         ],
     ),
@@ -84,6 +85,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "core",
             "records",
             "config",
+            "os",
             "supervisor",
             "confinement",
             "providers",
@@ -100,6 +102,244 @@ const LAYERS: &[(&str, &[&str])] = &[
 
 fn read_manifest(path: &Path) -> Result<DocumentMut, Box<dyn Error>> {
     Ok(fs::read_to_string(path)?.parse()?)
+}
+
+// Ignore comments and literals so examples cannot satisfy or violate policy.
+fn rust_tokens(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[i] == b'r' {
+            let mut quote = i + 1;
+            while bytes.get(quote) == Some(&b'#') {
+                quote += 1;
+            }
+            if bytes.get(quote) == Some(&b'"') {
+                let hashes = quote - i - 1;
+                i = quote + 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'"'
+                        && bytes
+                            .get(i + 1..i + 1 + hashes)
+                            .is_some_and(|tail| tail.iter().all(|byte| *byte == b'#'))
+                    {
+                        i += hashes + 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        if bytes[i] == b'\'' {
+            let mut end = i + 1;
+            if bytes.get(end) == Some(&b'\\') {
+                end += 2;
+            } else if let Some(character) = source[end..].chars().next() {
+                end += character.len_utf8();
+            }
+            if bytes.get(end) == Some(&b'\'') {
+                i = end + 1;
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i = (i + 2).min(bytes.len()),
+                    b'"' => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            continue;
+        }
+        // Raw identifiers name the same Rust item as their plain spelling.
+        if bytes[i..].starts_with(b"r#")
+            && bytes
+                .get(i + 2)
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            i += 2;
+        }
+        let start = i;
+        if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+        } else if bytes[i..].starts_with(b"::") {
+            i += 2;
+        } else {
+            let Some(character) = source[i..].chars().next() else {
+                break;
+            };
+            i += character.len_utf8();
+            if character.is_whitespace() || !character.is_ascii() {
+                continue;
+            }
+        }
+        tokens.push(&source[start..i]);
+    }
+    tokens
+}
+
+fn check_os_path<'a>(
+    tokens: &[&'a str],
+    cursor: &mut usize,
+    mut path: Vec<&'a str>,
+) -> Result<(), String> {
+    if tokens.get(*cursor) == Some(&"{") {
+        *cursor += 1;
+        while *cursor < tokens.len() && tokens[*cursor] != "}" {
+            check_os_path(tokens, cursor, path.clone())?;
+            if tokens.get(*cursor) != Some(&",") {
+                break;
+            }
+            *cursor += 1;
+        }
+        if tokens.get(*cursor) == Some(&"}") {
+            *cursor += 1;
+        }
+        return Ok(());
+    }
+    let Some(segment) = tokens.get(*cursor) else {
+        return Ok(());
+    };
+    path.push(segment);
+    *cursor += 1;
+    if tokens.get(*cursor) == Some(&"::") {
+        *cursor += 1;
+        return check_os_path(tokens, cursor, path);
+    }
+    let tail = &path[1..];
+    // Namespace imports, aliases and globs could hide a later restricted use.
+    if tail.is_empty()
+        || ["*", "self"].contains(&tail[0])
+        || (tail[0] == "sys"
+            && (tail.len() == 1
+                || ["*", "self", "fs", "child", "raw_exec", "reaper"].contains(&tail[1])))
+    {
+        return Err(format!(
+            "{} is reserved for provenant-supervisor",
+            path.join("::")
+        ));
+    }
+    if tokens.get(*cursor) == Some(&"as") {
+        *cursor = (*cursor + 2).min(tokens.len());
+    }
+    Ok(())
+}
+
+fn check_os_source(source: &str) -> Result<(), String> {
+    let tokens = rust_tokens(source);
+    for (index, token) in tokens.iter().enumerate() {
+        if ["handoff_file", "from_handoff"].contains(token) {
+            return Err(format!("{token} is reserved for provenant-supervisor"));
+        }
+        if *token == "provenant_os" {
+            let mut cursor = index;
+            check_os_path(&tokens, &mut cursor, Vec::new())?;
+        }
+    }
+    Ok(())
+}
+
+fn check_os_sources(path: &Path) -> Result<(), Box<dyn Error>> {
+    if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_symlink() {
+                check_os_sources(&entry.path())?;
+            }
+        }
+    } else if path.extension().is_some_and(|extension| extension == "rs") {
+        check_os_source(&fs::read_to_string(path)?)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn os_internals_are_reserved_for_supervisor() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = read_manifest(&root.join("Cargo.toml"))?;
+    for manifest in member_manifests(root, &workspace)? {
+        let document = read_manifest(&manifest)?;
+        if matches!(
+            document["package"]["name"].as_str(),
+            Some("provenant-os" | "provenant-supervisor")
+        ) {
+            continue;
+        }
+        let directory = manifest.parent().ok_or("manifest has no parent")?;
+        for source in ["src", "tests", "examples", "benches", "build.rs"] {
+            let path = directory.join(source);
+            if path.exists() {
+                check_os_sources(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn os_internal_policy_handles_grouped_imports_and_namespace_escapes() {
+    for source in [
+        "provenant_os::sys::child::configure_command();",
+        "provenant_os::r#sys::fs::unlink();",
+        "use provenant_os::sys::{r#fs as raw_fs};",
+        "use provenant_os::sys::{resources, fs as raw_fs};",
+        "use provenant_os::{fs::Directory, sys::{raw_exec::OwnedPid}};",
+        "use provenant_os::sys::reaper::*;",
+        "use provenant_os as os;",
+        "extern crate provenant_os as os;",
+        "use provenant_os::*;",
+        "use provenant_os::{self as os, fs::Directory};",
+        "use provenant_os::sys as sys;",
+        "use provenant_os::{sys::{self as sys, resources}};",
+        "root.handoff_file();",
+        "Directory::from_handoff(file);",
+        "let quote = '\"'; provenant_os::sys::fs::unlink();",
+    ] {
+        assert!(check_os_source(source).is_err(), "{source}");
+    }
+    for source in [
+        "use provenant_os::{fs::Directory, sys::{resources::MemorySample}};",
+        "use provenant_os::sys::resources as memory;",
+        "provenant_os::sys::account(provenant_os::sys::Account::Current);",
+        "let state_handoff_file = None;",
+        "// provenant_os::sys::child\nlet x = \"handoff_file\";",
+        "/* nested /* handoff_file */ provenant_os::sys::fs */",
+        "let x = r##\"provenant_os::sys::child\"##;",
+    ] {
+        assert!(check_os_source(source).is_ok(), "{source}");
+    }
 }
 
 fn member_manifests(root: &Path, workspace: &DocumentMut) -> Result<Vec<PathBuf>, Box<dyn Error>> {
@@ -187,6 +427,9 @@ fn check_internal_dependencies(
             let Some(internal) = package.strip_prefix("provenant-") else {
                 continue;
             };
+            if internal == "os" && alias != "provenant-os" {
+                return Err("provenant-os must keep its name for source policy checks".into());
+            }
             let dev_exception = kind == "dev-dependencies"
                 && (internal == name || (name == "fabric-mcp" && internal == "fabric-store"));
             if (internal == "cli" && name != "provenant")
@@ -247,6 +490,30 @@ fn internal_edges_obey_the_layering_table() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn os_cannot_depend_on_supervisor() -> Result<(), Box<dyn Error>> {
+    let workspace: DocumentMut = "[workspace.dependencies]\nprovenant-supervisor = { path = 'crates/supervisor' }\nprocesses = { package = 'provenant-supervisor', path = 'crates/supervisor' }".parse()?;
+    for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
+            for declaration in [
+                "provenant-supervisor = { path = '../supervisor' }",
+                "processes = { package = 'provenant-supervisor', path = '../supervisor' }",
+                "provenant-supervisor.workspace = true",
+                "processes.workspace = true",
+            ] {
+                let manifest: DocumentMut =
+                    format!("[package]\nname = 'provenant-os'\n[{scope}{kind}]\n{declaration}")
+                        .parse()?;
+                let error = check_internal_edges(&manifest, &workspace)
+                    .err()
+                    .ok_or("os must not import supervisor")?;
+                assert!(error.contains("provenant-supervisor"), "{error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
     let workspace: DocumentMut = "[workspace.dependencies]\nprovenant-run = { path = 'crates/run' }\nrunner = { package = 'provenant-run', path = 'crates/run' }".parse()?;
     for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
@@ -274,7 +541,11 @@ fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
 #[test]
 fn internal_dev_exceptions_do_not_allow_production_edges() -> Result<(), Box<dyn Error>> {
     let workspace: DocumentMut = "".parse()?;
-    for (member, dependency) in [("supervisor", "supervisor"), ("fabric-mcp", "fabric-store")] {
+    for (member, dependency) in [
+        ("os", "os"),
+        ("supervisor", "supervisor"),
+        ("fabric-mcp", "fabric-store"),
+    ] {
         for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
             for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
                 let manifest: DocumentMut = format!(
@@ -288,6 +559,21 @@ fn internal_dev_exceptions_do_not_allow_production_edges() -> Result<(), Box<dyn
                 );
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn os_dependency_keeps_its_policy_checked_name() -> Result<(), Box<dyn Error>> {
+    let workspace: DocumentMut = "".parse()?;
+    for alias in ["provenant-os", "native"] {
+        let manifest: DocumentMut = format!(
+            "[package]\nname = 'provenant-config'\n[dependencies]\n{alias} = {{ package = 'provenant-os', path = '../os' }}"
+        ).parse()?;
+        assert_eq!(
+            check_internal_edges(&manifest, &workspace).is_ok(),
+            alias == "provenant-os"
+        );
     }
     Ok(())
 }
@@ -360,20 +646,22 @@ fn tempfile_is_allowed_only_for_dev_dependencies() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn supervisor_mirrors_workspace_lints_except_for_its_unsafe_boundary() -> Result<(), Box<dyn Error>>
-{
+fn native_boundaries_mirror_workspace_lints_except_for_unsafe_code() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = read_manifest(&root.join("Cargo.toml"))?;
-    let supervisor = read_manifest(&root.join("crates/supervisor/Cargo.toml"))?;
+
     let mut expected = workspace["workspace"]["lints"].clone();
     assert_eq!(expected["rust"]["unsafe_code"].as_str(), Some("forbid"));
     expected["rust"]["unsafe_code"] = toml_edit::value("deny");
     // Compare parsed values, so key order, comments and whitespace do not matter.
     let expected: serde_json::Value = toml_edit::de::from_str(&expected.to_string())?;
-    let actual: serde_json::Value = toml_edit::de::from_str(&supervisor["lints"].to_string())?;
-    assert_eq!(
-        actual, expected,
-        "supervisor must mirror the workspace lint policy"
-    );
+    for member in ["os", "supervisor"] {
+        let manifest = read_manifest(&root.join(format!("crates/{member}/Cargo.toml")))?;
+        let actual: serde_json::Value = toml_edit::de::from_str(&manifest["lints"].to_string())?;
+        assert_eq!(
+            actual, expected,
+            "{member} must mirror workspace lint policy"
+        );
+    }
     Ok(())
 }

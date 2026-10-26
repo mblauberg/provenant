@@ -753,7 +753,7 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let context = provenant_run::ExecutionContext {
-        state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
         project_id: identity["data"]["project"]
             .as_str()
             .ok_or("project")?
@@ -765,7 +765,7 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
         read_prompts: false,
     };
     use provenant_core::Clock;
-    let clock = provenant_supervisor::clock::SystemClock::new();
+    let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
@@ -882,7 +882,8 @@ fn graph_resume_clears_a_recorded_advance_failure() -> Result {
 fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result {
     use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal};
-    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+    use provenant_os::clock::SystemClock;
+
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let identity = federated_identity(&mut rig)?;
@@ -904,7 +905,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
     // Model a crash after acceptance but before the reference was saved.
     let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
     roots.state_dir = Some(rig.state.clone());
-    let state = roots.resolve(&LocalFs)?.state;
+    let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
     let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -913,7 +914,6 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
             &state,
             project,
             "lost",
-            &LocalFs,
             WaitBudget::cli(clock.mono_now(), 10)?,
             &cancel,
             &clock,
@@ -944,18 +944,19 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
         RunId, TaskId, WaitBudget,
     };
+    use provenant_os::clock::SystemClock;
     use provenant_records::{
         CanonicalV1,
         run::{CanonicalRequest, RequestedRoute, TaskRequest},
     };
-    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+
     let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
     let identity = federated_identity(&mut rig)?;
     let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
     let actor = ActorId::parse(identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?)?;
     let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
     roots.state_dir = Some(rig.state.clone());
-    let state = roots.resolve(&LocalFs)?.state;
+    let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -2722,7 +2723,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
 fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
     let mut argv = vec!["-C", cwd.to_str().ok_or("git cwd")?];
     argv.extend_from_slice(args);
-    let executable = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+    let executable = provenant_os::git::git_executable().ok_or("git executable")?;
     let output = rig.execute(&executable, &argv, None)?;
     assert_eq!(
         code(&output),

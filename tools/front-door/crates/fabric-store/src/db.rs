@@ -1,9 +1,9 @@
 use crate::*;
 use provenant_core::{CancelToken, Clock, StateRoot, WaitBudget};
-pub use provenant_sqlite::{RetryWait, ThreadWait};
-use provenant_supervisor::fs::Directory;
+use provenant_os::fs::Directory;
 #[cfg(test)]
-use provenant_supervisor::fs::Metadata;
+use provenant_os::fs::Metadata;
+pub use provenant_sqlite::{RetryWait, ThreadWait};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 #[cfg(test)]
 use std::path::PathBuf;
@@ -277,7 +277,7 @@ fn companions(directory: &Directory, path: &std::path::Path, request: &Request<'
 fn companion(
     request: &Request<'_>,
     path: PathBuf,
-    mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
+    mut metadata: impl FnMut() -> provenant_os::fs::Result<Metadata>,
 ) -> Result<()> {
     provenant_sqlite::check_companion(
         &mut metadata,
@@ -330,7 +330,7 @@ mod tests {
             "fabric.sqlite3-journal",
         ] {
             let metadata = Metadata {
-                uid: provenant_supervisor::fs::effective_uid().wrapping_add(1),
+                uid: provenant_os::fs::effective_uid().wrapping_add(1),
                 ..directory.create_new(OsStr::new(name))?.metadata()?
             };
             let path = temp.path().join(name);
@@ -428,11 +428,11 @@ mod tests {
         for unsafe_metadata in [
             Metadata { links: 2, ..safe },
             Metadata {
-                kind: provenant_supervisor::fs::FileKind::Symlink,
+                kind: provenant_os::fs::FileKind::Symlink,
                 ..safe
             },
             Metadata {
-                kind: provenant_supervisor::fs::FileKind::Directory,
+                kind: provenant_os::fs::FileKind::Directory,
                 ..safe
             },
             Metadata {

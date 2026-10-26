@@ -1,10 +1,9 @@
 //! Execute bounded private-home data recipes through held filesystem handles.
 //! No process custody or signalling capability is accepted here.
-use crate::fs::{FileKind, FsError, Metadata, Publication, PublishMode, SafeDir, SafeFs};
+use crate::fs::{Directory, FileKind, FsError, Metadata, Publication, PublishMode};
 use provenant_core::RelativePath;
 use std::{
     ffi::OsStr,
-    io::Read,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -93,28 +92,28 @@ impl HomeRecipe {
 
     /// Exclusively create a 0700 home under retained provider-state. A failed
     /// preparation remains retained; the owner decides settlement, never Drop.
-    pub fn prepare(&self, fs: &dyn SafeFs) -> Result<PreparedHome, HomeError> {
-        let source = canonical_anchor(fs, &self.source)?;
+    pub fn prepare(&self) -> Result<PreparedHome, HomeError> {
+        let source = canonical_anchor(&self.source)?;
         let metadata = source.metadata()?;
         if metadata.uid != crate::fs::effective_uid() || metadata.mode & 0o022 != 0 {
             return Err(HomeError::UnsafeEntry);
         }
-        refuse_present(source.as_ref(), &self.files.refuse_source)?;
-        let parent = canonical_anchor(fs, &self.private_parent)?;
-        private_directory(parent.as_ref())?;
+        refuse_present(&source, &self.files.refuse_source)?;
+        let parent = canonical_anchor(&self.private_parent)?;
+        private_directory(&parent)?;
         let name = self.home.as_path().as_os_str();
         parent.mkdir(name, 0o700)?;
         let home = parent.open_verified_directory(name)?;
         let home_identity = home.metadata()?;
-        let state = descend(home.as_ref(), self.state.as_path(), true)?;
+        let state = descend(&home, self.state.as_path(), true)?;
         state.mkdir(OsStr::new("bin"), 0o700)?;
         let mut remaining = self.byte_limit;
         for name in &self.files.copy {
             if self.files.refuse_source.contains(name) {
                 continue;
             }
-            if let Some(bytes) = read_optional(source.as_ref(), OsStr::new(name), &mut remaining)? {
-                durable(state.atomic_write(
+            if let Some(bytes) = read_optional(&source, OsStr::new(name), &mut remaining)? {
+                durable(state.atomic_write_with_permissions(
                     OsStr::new(name),
                     ".home-",
                     &bytes,
@@ -123,7 +122,7 @@ impl HomeRecipe {
                 )?)?;
             }
         }
-        refuse_present(source.as_ref(), &self.files.refuse_source)?;
+        refuse_present(&source, &self.files.refuse_source)?;
         state.sync()?;
         home.sync()?;
         parent.sync()?;
@@ -147,11 +146,11 @@ impl HomeRecipe {
 /// enter a plan, launch argv, environment or Debug implementation.
 pub struct PreparedHome {
     path: PathBuf,
-    source: Box<dyn SafeDir>,
-    parent: Box<dyn SafeDir>,
-    home: Box<dyn SafeDir>,
+    source: Directory,
+    parent: Directory,
+    home: Directory,
     home_identity: Metadata,
-    state: Box<dyn SafeDir>,
+    state: Directory,
     state_identity: Metadata,
     home_name: RelativePath,
     state_path: RelativePath,
@@ -175,30 +174,31 @@ impl PreparedHome {
         if !named.metadata()?.same_identity(&self.home_identity) {
             return Err(HomeError::UnsafeEntry);
         }
-        let state = descend(self.home.as_ref(), self.state_path.as_path(), false)?;
+        let state = descend(&self.home, self.state_path.as_path(), false)?;
         if !state.metadata()?.same_identity(&self.state_identity) {
             return Err(HomeError::UnsafeEntry);
         }
-        refuse_present(self.state.as_ref(), &self.files.refuse_private)?;
+        refuse_present(&self.state, &self.files.refuse_private)?;
         let mut remaining = self.byte_limit;
         let mut user_remaining = self.byte_limit;
         for name in &self.files.copy {
             let name_os = OsStr::new(name);
-            let Some(bytes) = read_optional(self.state.as_ref(), name_os, &mut remaining)? else {
+            let Some(bytes) = read_optional(&self.state, name_os, &mut remaining)? else {
                 continue;
             };
-            if let Some(existing) =
-                read_optional(self.source.as_ref(), name_os, &mut user_remaining)?
-            {
+            if let Some(existing) = read_optional(&self.source, name_os, &mut user_remaining)? {
                 if existing == bytes {
                     continue;
                 }
                 return Err(HomeError::Conflict { name: name.clone() });
             }
-            match self
-                .source
-                .atomic_write(name_os, ".home-", &bytes, 0o600, PublishMode::NoReplace)
-            {
+            match self.source.atomic_write_with_permissions(
+                name_os,
+                ".home-",
+                &bytes,
+                0o600,
+                PublishMode::NoReplace,
+            ) {
                 Ok(publication) => durable(publication)?,
                 Err(error) if error.is_exists() => {
                     return Err(HomeError::Conflict { name: name.clone() });
@@ -210,7 +210,7 @@ impl PreparedHome {
     }
 }
 
-fn refuse_present(dir: &dyn SafeDir, names: &[String]) -> Result<(), HomeError> {
+fn refuse_present(dir: &Directory, names: &[String]) -> Result<(), HomeError> {
     for name in names {
         match dir.metadata_at(OsStr::new(name), false) {
             Ok(_) => return Err(HomeError::UnsupportedState),
@@ -221,19 +221,19 @@ fn refuse_present(dir: &dyn SafeDir, names: &[String]) -> Result<(), HomeError> 
     Ok(())
 }
 
-fn canonical_anchor(fs: &dyn SafeFs, path: &Path) -> Result<Box<dyn SafeDir>, HomeError> {
-    let held = fs.open_anchor(path)?;
+fn canonical_anchor(path: &Path) -> Result<Directory, HomeError> {
+    let held = Directory::open_anchor(path)?;
     if crate::fs::canonicalize(path)? != path {
         return Err(HomeError::UnsafeEntry);
     }
-    let named = fs.open_anchor(path)?;
+    let named = Directory::open_anchor(path)?;
     if !held.metadata()?.same_identity(&named.metadata()?) {
         return Err(HomeError::UnsafeEntry);
     }
     Ok(held)
 }
 
-fn private_directory(dir: &dyn SafeDir) -> Result<(), HomeError> {
+fn private_directory(dir: &Directory) -> Result<(), HomeError> {
     let m = dir.metadata()?;
     if m.kind != FileKind::Directory || m.uid != crate::fs::effective_uid() || m.mode & 0o077 != 0 {
         return Err(HomeError::UnsafeEntry);
@@ -241,7 +241,7 @@ fn private_directory(dir: &dyn SafeDir) -> Result<(), HomeError> {
     Ok(())
 }
 
-fn descend(root: &dyn SafeDir, path: &Path, create: bool) -> Result<Box<dyn SafeDir>, HomeError> {
+fn descend(root: &Directory, path: &Path, create: bool) -> Result<Directory, HomeError> {
     let mut parts = path.iter();
     let first = parts.next().ok_or(HomeError::InvalidRecipe)?;
     if create {
@@ -254,31 +254,18 @@ fn descend(root: &dyn SafeDir, path: &Path, create: bool) -> Result<Box<dyn Safe
         }
         dir = dir.open_verified_directory(part)?;
     }
-    private_directory(dir.as_ref())?;
+    private_directory(&dir)?;
     Ok(dir)
 }
 
 fn durable(publication: Publication) -> Result<(), HomeError> {
-    match publication {
-        Publication::Durable => Ok(()),
-        Publication::VisibleDurabilityUnconfirmed { sync_error } => {
-            Err(HomeError::DurabilityUnconfirmed(sync_error))
-        }
-    }
-}
-
-fn unchanged(a: &Metadata, b: &Metadata) -> bool {
-    a.same_identity(b)
-        && a.kind == b.kind
-        && a.links == b.links
-        && a.size == b.size
-        && a.modified_ns == b.modified_ns
-        && a.mode == b.mode
-        && a.uid == b.uid
+    publication
+        .require_durable()
+        .map_err(HomeError::DurabilityUnconfirmed)
 }
 
 fn read_optional(
-    dir: &dyn SafeDir,
+    dir: &Directory,
     name: &OsStr,
     remaining: &mut u64,
 ) -> Result<Option<Vec<u8>>, HomeError> {
@@ -293,22 +280,15 @@ fn read_optional(
     if entry.size > *remaining {
         return Err(HomeError::TooLarge);
     }
-    let mut file = dir.open_read(name)?;
-    if !unchanged(&entry, &file.metadata()?) {
-        return Err(HomeError::UnsafeEntry);
-    }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take(*remaining + 1)
-        .read_to_end(&mut bytes)
-        .map_err(HomeError::Read)?;
-    if bytes.len() as u64 > *remaining {
-        return Err(HomeError::TooLarge);
-    }
-    if bytes.len() as u64 != entry.size
-        || !unchanged(&entry, &file.metadata()?)
-        || !unchanged(&entry, &dir.metadata_at(name, false)?)
-    {
+    let bytes = dir
+        .read_stable(name, *remaining)
+        .map_err(|error| match error {
+            FsError::TooLarge { .. } => HomeError::TooLarge,
+            FsError::RaceRefused { .. } => HomeError::UnsafeEntry,
+            FsError::ReadIo { source, .. } => HomeError::Read(source),
+            error => HomeError::Filesystem(error),
+        })?;
+    if bytes.len() as u64 != entry.size || !entry.unchanged(&dir.metadata_at(name, false)?) {
         return Err(HomeError::UnsafeEntry);
     }
     *remaining -= bytes.len() as u64;
