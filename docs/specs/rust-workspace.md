@@ -27,7 +27,7 @@ same PR. The binary `provenant` is the only executable.
 Direct dependencies come only from the `DIRECT` list in
 `tests/workspace_policy.rs` (ADR 0028 decision 3), declared once in
 `[workspace.dependencies]`; `tempfile` is dev-only. A new crate, feature or
-material transitive addition changes this rule with a reason. So far:
+material transitive addition needs a recorded reason and an update to this rule. So far:
 `rusqlite` also serves run's store, keeping admission atomic in one
 database, and `toml_edit` enables `serde` for typed config. There is no
 async runtime and no daemon.
@@ -38,8 +38,7 @@ async runtime and no daemon.
 
 ## Errors
 
-Libraries return `thiserror` enums, including refusal, contention, cancel
-and I/O. Production code has no `unwrap`, `expect`, `panic!` or direct
+Libraries return `thiserror` enums, including refusal, contention, cancellation and I/O. Production code has no `unwrap`, `expect`, `panic!` or direct
 printing; the binary edge owns wording and exit codes. Errors keep cause and
 path, never secret values. Publication and recovery never rely on `Drop`.
 - Why: a panic or silent success on a failed write loses evidence or
@@ -66,7 +65,7 @@ reviewer.
 
 ## Numbers, digests and diagnostics
 
-Integers are `i64` or `u64`, never `f64`, and `arbitrary_precision` stays
+Integers are `i64` or `u64`, never `f64`, and the `serde_json` feature `arbitrary_precision` stays
 off. Digest bytes come from the canonical encoder, never `HashMap` order.
 Diagnostics go to bounded, redacted stderr, never MCP stdout or result
 bytes, and never carry prompt or credential contents.

@@ -32,7 +32,7 @@ state; mutations create directories 0700 and files 0600.
 ### Exact identifiers and time
 
 IDs are newtypes over 16 random bytes, shown as 32 lowercase hex digits.
-`GitOid` accepts only complete 40 or 64 digit names. `RelativePath` rejects
+`GitOid` accepts only complete 40- or 64-hex-digit object names. `RelativePath` rejects
 absolute components, `.` and `..`, and durable paths use tagged `PathWire`,
 never lossy text. `WallTime` is UTC integer microseconds with one rendering,
 durations use checked arithmetic, and `CancelToken` is never serialised or a
@@ -91,7 +91,7 @@ symlinked or unreadable file is an error. There is no include,
 interpolation, migration, profile layering or per-knob environment
 variable, and a preset never grants authority. `config set` writes
 atomically and refuses to rewrite an invalid file; `config show` redacts
-secret leaves and never mutates.
+secret values and never mutates.
 - Why: implicit or executable configuration cannot be audited.
 - Test: `crates/config/src/tests.rs::closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_without_echoing_input`;
   `::knob_edit_refuses_to_rewrite_an_invalid_config`

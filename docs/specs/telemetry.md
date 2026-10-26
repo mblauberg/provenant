@@ -44,13 +44,13 @@ regex or alias. Cost is an estimate, not a bill.
 - Why: rounding drift or a guessed price corrupts route comparison.
 - Test: `crates/telemetry/src/tests.rs::rounding_occurs_once_across_categories_attempts_and_groups`;
   `::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
-- Owner: `crates/telemetry/src/`, `config/telemetry-prices.toml`
+- Owner: `crates/telemetry/src/`, `../../config/telemetry-prices.toml`
 
 ## Trace export
 
 `telemetry trace` writes Chrome Trace Event JSON, one process per host and
 one thread per attempt, with flow arrows to `Trace.parent` across hosts. An
-unreadable peer is listed with its error and the rest of the export stands.
+unreadable peer is listed with its error and the rest of the export is still written.
 - Why: one peer outage must not hide the local picture.
 - Test: `crates/telemetry/src/tests.rs::trace_groups_hosts_and_links_a_child_to_its_parent_across_them`;
   `crates/cli/src/run/remote.rs::peer_export_asks_every_configured_peer_for_its_lanes`
@@ -80,5 +80,5 @@ to `most_constrained` with a warning and leaves config unchanged.
 
 ## Not provided
 
-- A ledger, OTel ingest or collector; prompt and tool logging stays off.
+- A ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
 - Delivery cost columns, a telemetry MCP tool or an `--account` selector.

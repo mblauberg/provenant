@@ -124,14 +124,13 @@ file, withholds stale content and caps output at 8 KiB.
 `workflow session handoff` sends a generated prompt, never the transcript,
 to a fresh Claude session on a peer in one `session_handoff` action. Source
 worktrees must be clean and pushed unless `--wip` or `--allow-dirty`. The
-target must opt in, checks the account against its own registrations and
-recreates branches through its own worktree owner. The owner lease moves
+target must opt in, check the account against its own registrations and recreate branches through its own worktree owner. The owner lease moves
 only after the peer accepts, and a repeated operation never launches again.
 - Why: a handoff must not lose work, launch twice or use an unregistered
   account.
 - Test: `crates/fabric-runtime/src/handoff/session/tests.rs::receive_refuses_until_the_host_opts_in`;
   `::the_peer_takes_the_lease_only_for_a_launch_or_no_launch`
-- Owner: `crates/fabric-runtime/src/handoff/session/`, `src/handoff.rs`
+- Owner: `crates/fabric-runtime/src/handoff/session/`, `crates/fabric-runtime/src/handoff.rs`
 
 ## Writing checks
 

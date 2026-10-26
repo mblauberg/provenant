@@ -19,8 +19,7 @@ An operation ID is 1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting
 alphanumeric. Run scopes it by caller and project and binds it to the
 operation kind and a digest of prompt, route, authority and execution
 controls, not reader waits. The same ID and digest returns the recorded
-outcome without repeating effects; a different digest is
-`operation_conflict`, exit 2.
+outcome without repeating effects; the same ID with a different digest is `operation_conflict`, exit 2.
 - Why: lost replies and concurrent duplicates, including resume, must never
   launch twice.
 - Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;
@@ -69,7 +68,7 @@ frees a writer early to hide a bookkeeping failure.
 - Why: each step is the evidence the next recovers from.
 - Test: `crates/run/src/tests.rs::publication_crashes_preserve_committed_records_and_allow_retry`;
   `::prelaunch_refusal_publishes_durable_never_launched_evidence`.
-  `launch_unknown` never being replayed has no run-level test (gap).
+  No run-level test asserts that `launch_unknown` is never replayed (gap).
 - Owner: `crates/run/src/launch.rs`, `crates/run/src/store.rs`
 
 ## Success needs proof
@@ -142,7 +141,7 @@ symlinks are unlinked, never followed. Only below a terminal, unreserved
 
 ## Store
 
-The run store is SQLite with WAL, foreign keys and `synchronous=FULL`.
+The run store is SQLite with write-ahead logging (WAL), foreign keys and `synchronous=FULL`.
 Unknown or newer versions fail closed without modification, unsafe
 companions are refused, and caps (1 MiB record or prompt, 64 MiB stream,
 4 MiB result) make an oversized result a typed failure, never a truncation.
