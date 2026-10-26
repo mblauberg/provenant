@@ -196,8 +196,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
         struct Settings {
             install: crate::InstallSettings,
         }
-        let settings: Settings = decode(table)
-            .map_err(|error| section_error(&error, "install", &user_sites, &user_origin))?;
+        let settings: Settings = decode(table.clone())
+            .map_err(|error| section_error(&error, &table, "install", &user_sites, &user_origin))?;
         settings
             .install
             .validate()
@@ -219,8 +219,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
         struct Settings {
             gc: crate::GcSettings,
         }
-        let settings: Settings = decode(table)
-            .map_err(|error| section_error(&error, "gc", &user_sites, &user_origin))?;
+        let settings: Settings = decode(table.clone())
+            .map_err(|error| section_error(&error, &table, "gc", &user_sites, &user_origin))?;
         settings.gc.validate().map_err(|rule| ConfigError::Schema {
             location: site(&user_sites, "gc", &user_origin, false),
             rule,
@@ -239,8 +239,9 @@ fn inspect<T: DeserializeOwned + Serialize>(
         struct Settings {
             retention: crate::RetentionSettings,
         }
-        let settings: Settings = decode(table)
-            .map_err(|error| section_error(&error, "retention", &user_sites, &user_origin))?;
+        let settings: Settings = decode(table.clone()).map_err(|error| {
+            section_error(&error, &table, "retention", &user_sites, &user_origin)
+        })?;
         settings
             .retention
             .validate()
@@ -464,37 +465,28 @@ fn domain_issue(
     }
 }
 /// A serde-decoded section's failure: an unknown key reports `unknown_key` at
-/// that key, any other decode failure reports `type` at the section.
+/// that key (found by the error's span, so equal names at two depths stay
+/// apart), any other decode failure reports `type` at the section.
 fn section_error(
     error: &toml_edit::de::Error,
+    table: &Table,
     section: &str,
     sites: &BTreeMap<String, Site>,
     origin: &Origin,
 ) -> ConfigError {
-    let unknown = error
-        .message()
-        .strip_prefix("unknown field `")
-        .and_then(|rest| rest.split('`').next());
-    if let Some(field) = unknown {
-        let prefix = format!("{section}.");
-        let suffix = format!(".{field}");
-        if let Some(path) = sites
-            .keys()
-            .find(|path| path.starts_with(&prefix) && path.ends_with(&suffix))
-        {
-            return ConfigError::Schema {
-                location: site(sites, path, origin, true),
-                rule: "unknown_key",
-            };
-        }
+    if error.message().starts_with("unknown field `") {
+        let path = error
+            .span()
+            .map(|span| key_at(table, span.start))
+            .filter(|path| sites.contains_key(path));
+        return ConfigError::Schema {
+            location: site(sites, path.as_deref().unwrap_or(section), origin, true),
+            rule: "unknown_key",
+        };
     }
     ConfigError::Schema {
         location: site(sites, section, origin, false),
-        rule: if unknown.is_some() {
-            "unknown_key"
-        } else {
-            "type"
-        },
+        rule: "type",
     }
 }
 fn decode<T: DeserializeOwned>(table: Table) -> Result<T, toml_edit::de::Error> {

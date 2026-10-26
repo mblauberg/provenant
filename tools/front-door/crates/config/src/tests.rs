@@ -1151,6 +1151,17 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
             "retention.unknown",
             3,
         ),
+        // The same name at two depths: the one serde rejected, not the first.
+        (
+            "schema_version=1\n[gc]\nidle_days=7\n[gc.projects.p]\nidle_days=7",
+            "gc.projects.p.idle_days",
+            5,
+        ),
+        (
+            "schema_version=1\n[gc]\nunknown=true\n[gc.projects.p]\nunknown=true",
+            "gc.unknown",
+            3,
+        ),
         (
             "schema_version=1\n[gc.projects.p]\nunknown=true",
             "gc.projects.p.unknown",
