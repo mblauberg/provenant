@@ -15,3 +15,9 @@ cases:
     expected: Raise an atomicity finding with the partial-failure sequence.
   - prompt: Run a comprehensive review of this auth and migration refactor.
     expected: Fan out blind correctness/spec, security/privacy, data/concurrency and test lenses, then anonymised claim challenge and evidence reduction.
+  - prompt: >-
+      Review this Rust test diff using the five-question test rubric in
+      skills/code-review/references/review-lenses.md. The diff replaces
+      assert!(matches!(result, Err(ConfigError::Schema { rule: "type", .. })))
+      with assert!(result.is_err()).
+    expected: Flag the loosened assertion, since unrelated error variants and codes now pass; keep the specific rejection oracle unless the approved contract changes.

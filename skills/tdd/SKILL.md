@@ -50,6 +50,12 @@ through the full path, then add behaviours from what each cycle reveals. Never
 write an imagined horizontal test batch first. Prioritise critical paths and
 complex logic.
 
+For crucial work, optionally have a fresh-context agent write acceptance tests
+from the approved spec and public interface, without implementation code,
+observed outputs or the author's proposed assertions. Keep the same vertical
+cycle: agree the oracle and witness each right-reason failure before its
+implementation. The author must not loosen those tests to reach green.
+
 ## Test boundaries
 
 Test what callers observe through the public interface, not private methods,
@@ -104,15 +110,24 @@ named existing test or check that already catches it.
 
 ## Existing tests
 
+Expected values come from the spec, never from running the code under test.
+Rejection tests assert the specific error variant or code, not just `is_err()`.
+If a test contradicts the spec, stop and report the conflict with evidence;
+do not edit the test or production code to resolve an unsettled contract.
+
 Agents copy the tests beside them. In a file you touch, rewrite or delete a
 rigid test on the behaviour you are changing rather than adding another like
 it. When a change meant to preserve behaviour fails a test, first establish
 whether the public contract still holds. If it does, the test pinned an
 incidental detail: rewrite it to pin behaviour or delete it; never bend
-production code around it. If it does not, the change is a regression. Never weaken, skip or delete a test to make a real
-behaviour change pass, and report every test you remove with its reason. A
-characterisation test that pins current, possibly wrong behaviour is temporary:
-replace it with an intended-behaviour test once the change lands.
+production code around it. If it does not, the change is a regression. Never
+weaken, skip or delete a test to make a real behaviour change pass. Gaming
+includes replacing a specific error with `is_err()`, an exact count with an
+at-least check, deriving expectations from implementation output, or
+special-casing a test input in production code. Report every test you remove
+with its reason. A characterisation test that pins current, possibly wrong
+behaviour is temporary: replace it with an intended-behaviour test once the
+change lands.
 
 ## Where a test lives
 
@@ -134,3 +149,5 @@ fail, then repair and watch it pass. If no correct seam reaches the bug, route
 to `diagnose`; do not bless a shallow test. `implement` owns independent review,
 repair loops, documentation and delivery acceptance under the tier and approved
 scope.
+
+Reference eval cases (not run by CI): [discipline cases](evals/discipline_cases.yaml).
