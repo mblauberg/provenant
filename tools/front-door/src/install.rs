@@ -446,6 +446,14 @@ fn output_install(
             }
             let mut human = format!("{command}:\n");
             for finding in &outcome.findings {
+                if finding.rule == "state_root_moved"
+                    && let Ok(path) = finding.path.to_path_buf()
+                {
+                    human.push_str(&format!(
+                        "  State root moved from {}; old paths left untouched\n",
+                        path.display()
+                    ));
+                }
                 if let Ok(path) = finding.path.to_path_buf()
                     && path.file_name() == Some(OsStr::new("dev.provenant.peer.plist"))
                 {

@@ -234,6 +234,13 @@ Install replaces only the selected targets and carries the rest over, and
 matching the environment's home, or else every recorded target of the harness.
 No cross-file or cross-host atomicity is claimed.
 
+After a home or state-root move, the recorded binary link identifies the old
+root. Stale entries produce `state_root_moved` and `relocated_stale_entry`
+findings without inspecting or changing their paths. Uninstall forgets selected
+stale ownership and retains unselected entries and the binary record. Reinstall
+writes a fresh receipt and requires manual cleanup of dangling links; see the
+[install runbook](../runbooks/install.md).
+
 Omitting `--hooks` on re-install retains and refreshes the selected target's
 unchanged owned hook registrations and the shared legacy Git pre-push launcher.
 Edited hooks and launchers are preserved, relinquished from the receipt and

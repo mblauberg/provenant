@@ -271,6 +271,257 @@ fn missing_peer_agent_is_stopped_only_when_the_last_harness_is_removed() {
 }
 
 #[test]
+fn uninstall_after_home_rename_never_acts_on_old_paths() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.peer_agent = Some(b"old home plist\n".to_vec());
+    // Keep MCP outside the moved home so reinstall reaches the dangling skill.
+    f.targets.harnesses[0].mcp_file = f.base.join("codex.toml");
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let original_target = fs::read_link(f.link()).unwrap();
+    let old_state = f.targets.roots.state.as_path().to_path_buf();
+    let moved_home = f.base.join("home-moved");
+    fs::rename(&f.home, &moved_home).unwrap();
+    fs::create_dir_all(f.link().parent().unwrap()).unwrap();
+    symlink(&original_target, f.link()).unwrap();
+    let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    let mut targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
+    targets.harnesses[0].mcp_file = f.base.join("codex.toml");
+    targets.peer_agent = Some(b"new home plist\n".to_vec());
+    let plist = peer_agent_plist(targets.roots.state.as_path()).unwrap();
+    let inspection =
+        inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel).unwrap();
+    assert!(inspection.error.is_none(), "{:?}", inspection.error);
+    assert_eq!(
+        inspection
+            .findings
+            .iter()
+            .filter(|finding| finding.rule == "relocated_stale_entry")
+            .count(),
+        3
+    );
+    struct StopReporter(usize);
+    impl InstallReporter for StopReporter {
+        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn before_remove(&mut self, _: &Action) -> io::Result<()> {
+            self.0 += 1;
+            Ok(())
+        }
+    }
+    let mut reporter = StopReporter(0);
+    let result = uninstall(&targets, &ctx, &mut reporter).unwrap();
+    assert!(result.findings.iter().any(|finding| {
+        finding.rule == "state_root_moved" && finding.path.to_path_buf().unwrap() == old_state
+    }));
+    assert!(result.findings.iter().any(|finding| {
+        finding.rule == "relocated_stale_entry" && finding.path.to_path_buf().unwrap() == f.link()
+    }));
+    assert!(
+        result
+            .actions
+            .iter()
+            .all(|action| { !action.path.to_path_buf().unwrap().starts_with(&f.home) })
+    );
+    assert_eq!(fs::read_link(f.link()).unwrap(), original_target);
+    assert_eq!(fs::read(&plist).unwrap(), b"old home plist\n");
+    assert_eq!(reporter.0, 0);
+    assert!(
+        !read_receipt(&targets, &LocalFs)
+            .unwrap()
+            .unwrap()
+            .harnesses
+            .contains(&Harness::Codex)
+    );
+    assert_eq!(installed_binary(&targets, &LocalFs).unwrap(), None);
+    let release = f.release();
+    let snapshots = Snapshots::capture(&release, &targets, &LocalFs).unwrap();
+    assert!(matches!(
+        plan_install(release, targets, snapshots),
+        Err(InstallError::Conflict(path))
+            if path == moved_home.join(".codex/skills/example")
+    ));
+}
+
+#[test]
+fn check_after_home_rename_never_inspects_old_legacy_paths() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.legacy_checkout = Some(f.base.join("legacy-checkout"));
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let moved_home = f.base.join("home-moved");
+    fs::rename(&f.home, &moved_home).unwrap();
+    fs::create_dir_all(f.home.join(".codex")).unwrap();
+    fs::write(f.home.join(".codex/config.toml"), b"invalid TOML\0").unwrap();
+    let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
+    let inspection =
+        inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel).unwrap();
+    assert!(inspection.error.is_none(), "{:?}", inspection.error);
+    assert!(
+        inspection
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "state_root_moved")
+    );
+}
+
+#[test]
+fn reinstall_after_state_rename_requires_manual_link_cleanup() {
+    let mut f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let old_state = f.targets.roots.state.as_path().to_path_buf();
+    let moved_state = f.base.join("state-moved");
+    fs::rename(&old_state, &moved_state).unwrap();
+    let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
+    inputs.environment_state_dir = Some(moved_state);
+    f.targets.roots = inputs.resolve(&Resolver).unwrap();
+    let release = f.release();
+    let snapshots = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
+    assert!(matches!(
+        plan_install(release, f.targets.clone(), snapshots),
+        Err(InstallError::Conflict(path)) if path == f.link()
+    ));
+    fs::remove_file(f.link()).unwrap();
+    fs::remove_file(f.targets.bin_dir.join("provenant")).unwrap();
+    let plan = f.plan();
+    assert!(plan.findings().iter().any(|finding| {
+        finding.rule == "state_root_moved" && finding.path.to_path_buf().unwrap() == old_state
+    }));
+    assert_eq!(
+        plan.findings()
+            .iter()
+            .filter(|finding| finding.rule == "relocated_stale_entry")
+            .count(),
+        2
+    );
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(f.plan().findings().is_empty());
+    assert_eq!(
+        installed_binary(&f.targets, &LocalFs).unwrap(),
+        Some(f.targets.bin_dir.join("provenant"))
+    );
+}
+
+#[test]
+fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
+    let mut f = Fixture::new();
+    let roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets = Targets::new(roots, &f.home, &[Harness::Claude, Harness::Codex]);
+    f.targets.peer_agent = Some(b"old home plist\n".to_vec());
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let moved_home = f.base.join("home-moved");
+    fs::rename(&f.home, &moved_home).unwrap();
+    let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
+    let mut environment_targets = targets.clone();
+    environment_targets.environment_homes.insert(Harness::Codex);
+    let result = uninstall(&environment_targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(result.actions.is_empty());
+    assert_eq!(result.findings[0].rule, "not_installed");
+    let result = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(
+        result
+            .actions
+            .iter()
+            .all(|action| action.selector == "receipt")
+    );
+    let bytes = fs::read(targets.roots.state.as_path().join("install/receipt.json")).unwrap();
+    let receipt: InstallReceipt =
+        provenant_records::decode_v1(bytes.as_slice(), Limits::CONFIG).unwrap();
+    assert_eq!(receipt.harnesses, vec![Harness::Claude]);
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .any(|entry| entry.harness == Some(Harness::Claude))
+    );
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .all(|entry| entry.harness != Some(Harness::Codex))
+    );
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "peer-agent")
+    );
+    assert!(read_receipt(&targets, &LocalFs).unwrap().is_some());
+    let result = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(result.actions.is_empty());
+    assert_eq!(result.findings[0].rule, "not_installed");
+}
+
+#[test]
+fn moved_receipt_rejects_entries_outside_both_state_roots() {
+    let mut f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let mut receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    let moved_state = f.base.join("state-moved");
+    fs::rename(f.targets.roots.state.as_path(), &moved_state).unwrap();
+    let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
+    inputs.environment_state_dir = Some(moved_state);
+    f.targets.roots = inputs.resolve(&Resolver).unwrap();
+    let skill = receipt
+        .entries
+        .iter_mut()
+        .find(|entry| entry.selector == "skill")
+        .unwrap();
+    skill.expected = OwnedValue::Link {
+        target: AbsolutePath::new(&f.base.join("foreign/skills/example")).unwrap(),
+    };
+    fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
+    assert!(matches!(
+        read_receipt(&f.targets, &LocalFs),
+        Err(InstallError::Manifest(
+            "receipt entry outside resolved targets"
+        ))
+    ));
+}
+
+#[test]
 fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
     for state in ["unchanged", "modified", "missing"] {
         let modified = state == "modified";

@@ -133,6 +133,14 @@ removes its unchanged plist. A modified plist is kept and reported; its
 service is left running. A failed bootout keeps the plist for a retry.
 A missing peer plist is stopped by its service label.
 
+If your home directory or state root has moved since install, uninstall reports
+`state_root_moved` and one `relocated_stale_entry` per entry it will not touch,
+then forgets the removed targets. It never acts on the old paths. To finish,
+run `launchctl bootout gui/$UID/dev.provenant.peer`, move
+`~/Library/LaunchAgents/dev.provenant.peer.plist` aside, and delete links under
+`~/.local/bin` and the harness skills directories that point into the old state
+root. Then reinstall.
+
 `build.rs` stamps the source and asset digests, and the packaging example
 produces the typed `release.json`. The CLI grammar is described in
 [cli.md](../specs/cli.md); `help --json` describes the command

@@ -488,9 +488,15 @@ impl Snapshots {
             Some(Snapshot {
                 value: Value::File { bytes, mode: 0o600 },
                 ..
-            }) => Some(decode_receipt(bytes, targets.roots.state.as_path())?),
+            }) => Some(decode_receipt(bytes, targets)?),
             Some(_) => return Err(InstallError::Conflict(receipt_path.clone())),
         };
+        let findings = receipt
+            .as_ref()
+            .map(Decoded::findings)
+            .transpose()?
+            .unwrap_or_default();
+        let receipt = receipt.map(|decoded| decoded.receipt);
         let selected: BTreeSet<_> = targets.harnesses.iter().map(HarnessTarget::id).collect();
         let mut paths: BTreeSet<_> = desired.keys().cloned().collect();
         if let Some(previous) = &receipt {
@@ -518,8 +524,9 @@ impl Snapshots {
             entries.insert(path, current);
         }
         entries.insert(receipt_path, receipt_snapshot);
-        let harness =
+        let mut harness =
             crate::harness::capture(release, targets, &mut entries, receipt.as_ref(), fs)?;
+        harness.findings.extend(findings);
         Ok(Self {
             entries,
             receipt,
@@ -1730,38 +1737,63 @@ pub struct InstallFinding {
     pub rule: String,
     pub path: AbsolutePath,
 }
+#[cfg(test)]
 pub(crate) fn read_receipt(
     targets: &Targets,
     fs: &dyn SafeFs,
 ) -> Result<Option<InstallReceipt>, InstallError> {
-    read_receipt_inspected(targets, fs, None)
+    Ok(read_receipt_inspected(targets, fs, None)?.map(|decoded| decoded.receipt))
 }
 /// Validated stable binary path for recognising a historical peer plist.
 pub fn installed_binary(
     targets: &Targets,
     fs: &dyn SafeFs,
 ) -> Result<Option<PathBuf>, InstallError> {
-    read_receipt(targets, fs)?
-        .map(|receipt| Ok(receipt.bin_dir.to_path_buf()?.join("provenant")))
+    read_receipt_inspected(targets, fs, None)?
+        .filter(|decoded| decoded.moved.is_none())
+        .map(|decoded| Ok(decoded.receipt.bin_dir.to_path_buf()?.join("provenant")))
         .transpose()
 }
-pub(crate) fn read_receipt_inspected(
+fn read_receipt_inspected(
     targets: &Targets,
     fs: &dyn SafeFs,
     evidence: Option<&mut InspectionEvidence>,
-) -> Result<Option<InstallReceipt>, InstallError> {
+) -> Result<Option<Decoded>, InstallError> {
     let path = targets.roots.state.as_path().join("install/receipt.json");
     match snapshot_scoped_inspected(&path, targets.roots.state.as_path(), fs, evidence)? {
         None => Ok(None),
         Some(Snapshot {
             value: Value::File { bytes, mode: 0o600 },
             ..
-        }) => Ok(Some(decode_receipt(&bytes, targets.roots.state.as_path())?)),
+        }) => Ok(Some(decode_receipt(&bytes, targets)?)),
         Some(_) => Err(InstallError::Conflict(path)),
     }
 }
-fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, InstallError> {
-    let receipt: InstallReceipt = provenant_records::decode_v1(bytes, Limits::CONFIG)?;
+#[derive(Debug)]
+struct Decoded {
+    receipt: InstallReceipt,
+    moved: Option<PathBuf>,
+    stale: Vec<OwnedEntry>,
+}
+impl Decoded {
+    fn findings(&self) -> Result<Vec<InstallFinding>, InstallError> {
+        let mut findings = Vec::new();
+        if let Some(old_state) = &self.moved {
+            findings.push(InstallFinding {
+                rule: "state_root_moved".into(),
+                path: AbsolutePath::new(old_state)?,
+            });
+        }
+        findings.extend(self.stale.iter().map(|entry| InstallFinding {
+            rule: "relocated_stale_entry".into(),
+            path: entry.path.clone(),
+        }));
+        Ok(findings)
+    }
+}
+fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
+    let mut receipt: InstallReceipt = provenant_records::decode_v1(bytes, Limits::CONFIG)?;
+    let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
     if let Some(legacy) = &receipt.legacy {
         normal_absolute(&legacy.checkout.to_path_buf()?)?;
@@ -1799,27 +1831,76 @@ fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, Ins
     }
     distinct_target_paths(receipt.harness_targets.iter())
         .map_err(|_| InstallError::Manifest("receipt targets share a path"))?;
-    let mut paths = BTreeSet::new();
-    for entry in &receipt.entries {
-        if !paths.insert((entry.path.to_path_buf()?, entry.selector.clone())) {
-            return Err(InstallError::Manifest("duplicate receipt path"));
+    let binaries: Vec<_> = receipt
+        .entries
+        .iter()
+        .filter(|entry| entry.selector == "binary" && entry.harness.is_none())
+        .collect();
+    let [binary] = binaries.as_slice() else {
+        return Err(InstallError::Manifest("receipt requires one binary entry"));
+    };
+    let old_state = match &binary.expected {
+        OwnedValue::Link { target } => {
+            let target = target.to_path_buf()?;
+            let root = target
+                .ancestors()
+                .nth(4)
+                .filter(|root| {
+                    target == release_root(root, receipt.source_digest).join("bin/provenant")
+                })
+                .ok_or(InstallError::Manifest(
+                    "receipt entry outside resolved targets",
+                ))?;
+            normal_absolute(root)?;
+            root.to_path_buf()
         }
-        if !permitted_entry(entry, &receipt, state_root)? {
+        _ => {
             return Err(InstallError::Manifest(
                 "receipt entry outside resolved targets",
             ));
         }
+    };
+    let moved = (old_state != state_root).then_some(old_state);
+    let old_home = moved.as_deref().and_then(|root| {
+        root.ancestors()
+            .nth(4)
+            .filter(|home| root == home.join(".local/share/provenant/v1"))
+    });
+    let mut paths = BTreeSet::new();
+    let mut entries = Vec::new();
+    let mut stale = Vec::new();
+    for entry in &receipt.entries {
+        let path = entry.path.to_path_buf()?;
+        if !paths.insert((path.clone(), entry.selector.clone())) {
+            return Err(InstallError::Manifest("duplicate receipt path"));
+        }
+        let permitted = permitted_entry(entry, &receipt, state_root)?;
+        if !permitted
+            && !moved
+                .as_deref()
+                .map(|root| permitted_entry(entry, &receipt, root))
+                .transpose()?
+                .unwrap_or(false)
+        {
+            return Err(InstallError::Manifest(
+                "receipt entry outside resolved targets",
+            ));
+        }
+        if !permitted
+            || old_home
+                .is_some_and(|home| path.starts_with(home) && !path.starts_with(&targets.home))
+        {
+            stale.push(entry.clone());
+        } else {
+            entries.push(entry.clone());
+        }
     }
-    if receipt
-        .entries
-        .iter()
-        .filter(|entry| entry.selector == "binary" && entry.harness.is_none())
-        .count()
-        != 1
-    {
-        return Err(InstallError::Manifest("receipt requires one binary entry"));
-    }
-    Ok(receipt)
+    receipt.entries = entries;
+    Ok(Decoded {
+        receipt,
+        moved,
+        stale,
+    })
 }
 /// Recorded targets never share a destination, so each entry has one owner.
 fn distinct_target_paths<'a>(
@@ -2047,13 +2128,14 @@ fn check_install_inspected(
 ) -> Result<Vec<InstallFinding>, InstallError> {
     let state_root = targets.roots.state.as_path();
     let receipt_path = state_root.join("install/receipt.json");
-    let Some(receipt) = read_receipt_inspected(targets, fs, Some(evidence))? else {
+    let Some(decoded) = read_receipt_inspected(targets, fs, Some(evidence))? else {
         return Ok(vec![InstallFinding {
             rule: "missing_receipt".into(),
             path: AbsolutePath::new(&receipt_path)?,
         }]);
     };
-    let mut findings = Vec::new();
+    let mut findings = decoded.findings()?;
+    let receipt = decoded.receipt;
     let release_path = release_root(state_root, receipt.source_digest);
     match Release::read_scoped_inspected(&release_path, target, fs, state_root, Some(evidence)) {
         Ok(release) => {
@@ -2067,11 +2149,13 @@ fn check_install_inspected(
                 let expected = OwnedValue::Link {
                     target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
                 };
-                if !receipt.entries.iter().any(|entry| {
-                    entry.selector == "binary"
-                        && entry.harness.is_none()
-                        && entry.expected == expected
-                }) {
+                if decoded.moved.is_none()
+                    && !receipt.entries.iter().any(|entry| {
+                        entry.selector == "binary"
+                            && entry.harness.is_none()
+                            && entry.expected == expected
+                    })
+                {
                     return Err(InstallError::Manifest(
                         "receipt binary differs from release",
                     ));
@@ -2128,7 +2212,10 @@ fn check_install_inspected(
             });
         }
     }
-    if let Some(legacy) = &receipt.legacy {
+    // Legacy audits also inspect recorded home and target paths.
+    if decoded.moved.is_none()
+        && let Some(legacy) = &receipt.legacy
+    {
         crate::harness::check_legacy(&receipt, legacy, &mut findings, evidence, fs)?;
     }
     Ok(findings)
@@ -2171,9 +2258,15 @@ pub fn uninstall(
         |path: &Path, fs: &dyn SafeFs| snapshot_scoped(path, targets.roots.state.as_path(), fs);
     let receipt_path = state_root.join("install/receipt.json");
     let before_receipt = snapshot(&receipt_path, fs)?;
-    let Some(mut receipt) = read_receipt(targets, fs)? else {
+    let Some(decoded) = read_receipt_inspected(targets, fs, None)? else {
         return not_installed(&receipt_path, reporter);
     };
+    let mut findings = decoded.findings()?;
+    let Decoded {
+        mut receipt,
+        moved,
+        stale,
+    } = decoded;
     let mut registered = BTreeSet::new();
     let mut selected = BTreeSet::new();
     for recorded in &receipt.harness_targets {
@@ -2230,7 +2323,6 @@ pub fn uninstall(
     };
 
     let mut removals = Vec::new();
-    let mut findings = Vec::new();
     let mut actions = Vec::new();
     let mut selector_files = BTreeMap::new();
     for (entry, owner) in receipt.entries.iter().zip(&owners) {
@@ -2306,6 +2398,14 @@ pub fn uninstall(
     receipt
         .entries
         .retain(|entry| owners.next().is_none_or(|owner| !removed(entry, owner)));
+    for entry in stale {
+        let owner = entry_owner(&entry, &receipt, moved.as_deref().unwrap_or(state_root))?;
+        if !owner.as_ref().is_some_and(|id| selected.contains(id))
+            && !(entry.selector == "peer-agent" && selected == registered)
+        {
+            receipt.entries.push(entry);
+        }
+    }
     receipt
         .harness_targets
         .retain(|target| recorded_id(target).is_ok_and(|id| !selected.contains(&id)));
