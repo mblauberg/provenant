@@ -44,9 +44,17 @@ const LAYERS: &[(&str, &[&str])] = &[
     ),
     (
         "run",
-        &["core", "records", "config", "supervisor", "confinement"],
+        &[
+            "core",
+            "records",
+            "config",
+            "supervisor",
+            "confinement",
+            "sqlite",
+        ],
     ),
-    ("fabric-store", &["core", "records", "supervisor"]),
+    ("sqlite", &["core", "supervisor"]),
+    ("fabric-store", &["core", "records", "supervisor", "sqlite"]),
     (
         "fabric-runtime",
         &["core", "records", "config", "supervisor", "fabric-store"],

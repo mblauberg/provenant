@@ -1,0 +1,14 @@
+[package]
+name = "provenant-sqlite"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+provenant-core = { workspace = true }
+provenant-supervisor = { workspace = true }
+rusqlite = { workspace = true }
+
+[lints]
+workspace = true

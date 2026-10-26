@@ -1,13 +1,17 @@
 use crate::*;
-use provenant_core::{CancelToken, Clock, DurationMicros, StateRoot, WaitBudget};
-use provenant_supervisor::fs::{Directory, FileKind, Metadata};
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use provenant_core::{CancelToken, Clock, StateRoot, WaitBudget};
+pub use provenant_sqlite::{RetryWait, ThreadWait};
+use provenant_supervisor::fs::Directory;
+#[cfg(test)]
+use provenant_supervisor::fs::Metadata;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
+#[cfg(test)]
+use std::path::PathBuf;
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     marker::PhantomData,
-    path::{Component, PathBuf},
+    path::Component,
     rc::Rc,
-    time::{Duration, Instant},
 };
 
 // Index + 1 is the schema version; each migration commits independently.
@@ -72,50 +76,23 @@ fn refuse_legacy_import_data(db: &Connection) -> Result<()> {
     Ok(())
 }
 fn schema_version(db: &Connection) -> Result<usize> {
-    // One statement reads both values from one snapshot, so a concurrent first
-    // migration cannot show tables without their version.
-    let (version, has_schema): (i64, bool) = db.query_row(
-        "SELECT (SELECT user_version FROM pragma_user_version), \
-         EXISTS(SELECT 1 FROM sqlite_schema)",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let version = usize::try_from(version)
-        .ok()
-        .filter(|v| *v <= MIGRATIONS.len())
-        .ok_or(Error::SchemaVersion(version))?;
-    if version == 0 && has_schema {
-        return Err(Error::UnversionedDatabase);
+    match provenant_sqlite::read_version(db, MIGRATIONS.len()) {
+        Ok(version) => Ok(version),
+        Err(provenant_sqlite::VersionError::Unsupported(version)) => {
+            Err(Error::SchemaVersion(version))
+        }
+        Err(provenant_sqlite::VersionError::Unversioned) => Err(Error::UnversionedDatabase),
+        Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
     }
-    Ok(version)
 }
 fn enable_wal(db: &Connection) -> Result<()> {
-    let mode: String = db.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        return Err(Error::JournalMode(mode));
+    match provenant_sqlite::enable_wal(db) {
+        Ok(()) => Ok(()),
+        Err(provenant_sqlite::WalError::Unavailable(mode)) => Err(Error::JournalMode(mode)),
+        Err(provenant_sqlite::WalError::Sqlite(error)) => Err(error.into()),
     }
-    db.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-    Ok(())
 }
 
-/// The only blocking seam: called between retries, with a bounded delay.
-pub trait RetryWait {
-    fn wait(&self, delay: DurationMicros, cancel: &CancelToken);
-}
-pub struct ThreadWait;
-impl RetryWait for ThreadWait {
-    fn wait(&self, delay: DurationMicros, cancel: &CancelToken) {
-        let started = Instant::now();
-        let delay = Duration::from_micros(delay.as_micros().min(250_000));
-        while !cancel.is_cancelled() {
-            let remaining = delay.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                break;
-            }
-            std::thread::park_timeout(remaining.min(Duration::from_millis(10)));
-        }
-    }
-}
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
     pub budget: WaitBudget,
@@ -133,47 +110,28 @@ impl Request<'_> {
         Ok(())
     }
     pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
-        self.wait(|| match action() {
-            Err(Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
-                if matches!(
-                    code.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                ) =>
-            {
-                Ok(None)
-            }
-            result => result.map(Some),
-        })
+        match provenant_sqlite::retry(
+            self.clock,
+            self.budget,
+            self.cancel,
+            self.backoff,
+            |error: &Error| matches!(error, Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)),
+            &mut action,
+        ) {
+            Ok(value) => Ok(value),
+            Err(provenant_sqlite::RetryError::Busy) => Err(Error::Busy),
+            Err(provenant_sqlite::RetryError::Cancelled) => Err(Error::Cancelled),
+            Err(provenant_sqlite::RetryError::Action(error)) => Err(error),
+        }
     }
     /// Retry an incomplete observation within the request's budget and cancellation.
-    fn wait<T>(&self, mut action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
-        // The real elapsed cap also bounds a frozen/inaccurate injected clock.
-        let started = Instant::now();
-        let cap = Duration::from_micros(self.budget.remaining(self.clock.mono_now()).as_micros());
-        let mut delay = 1_000_u64;
-        loop {
-            if self.cancel.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let remaining =
-                Duration::from_micros(self.budget.remaining(self.clock.mono_now()).as_micros())
-                    .min(cap.saturating_sub(started.elapsed()));
-            if remaining.is_zero() {
-                return Err(Error::Busy);
-            }
-            match action() {
-                Ok(None) => {
-                    let micros = u64::try_from(remaining.as_micros())
-                        .unwrap_or(u64::MAX)
-                        .min(delay);
-                    self.backoff
-                        .wait(DurationMicros::from_micros(micros), self.cancel);
-                    delay = delay.saturating_mul(2).min(250_000);
-                }
-                Ok(Some(value)) => return Ok(value),
-                Err(error) => return Err(error),
-            }
-        }
+    fn wait<T>(&self, action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
+        provenant_sqlite::observe(self.clock, self.budget, self.cancel, self.backoff, action)
+            .map_err(|error| match error {
+                provenant_sqlite::RetryError::Busy => Error::Busy,
+                provenant_sqlite::RetryError::Cancelled => Error::Cancelled,
+                provenant_sqlite::RetryError::Action(error) => error,
+            })
     }
 }
 
@@ -234,13 +192,7 @@ impl Store {
             Err(error) => return Err(error.into()),
         }
         companions(&fabric, &path, request)?;
-        let db = Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        db.busy_timeout(Duration::ZERO)?;
+        let db = provenant_sqlite::open_connection(&db_path, false)?;
         // Refuse future versions before journal-mode changes or schema writes.
         request.retry(|| schema_version(&db))?;
         request.retry(|| enable_wal(&db))?;
@@ -300,74 +252,52 @@ impl Store {
 }
 fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
     let metadata = directory.metadata()?;
-    if metadata.mode & 0o077 != 0 || metadata.uid != provenant_supervisor::fs::effective_uid() {
+    if !provenant_sqlite::is_private(metadata) {
         return Err(Error::UnsafePath(path.into()));
     }
     Ok(())
 }
 fn companions(directory: &Directory, path: &std::path::Path, request: &Request<'_>) -> Result<()> {
-    for name in [
+    let names = [
         "fabric.sqlite3",
         "fabric.sqlite3-wal",
         "fabric.sqlite3-shm",
         "fabric.sqlite3-journal",
-    ] {
-        companion(request, path.join(name), || {
-            directory.metadata_at(OsStr::new(name), false)
-        })?;
-    }
-    Ok(())
+    ]
+    .map(OsString::from);
+    provenant_sqlite::check_companions(
+        directory,
+        &names,
+        |check| request.wait(check),
+        Into::into,
+        |name| Error::UnsafePath(path.join(name)),
+    )
 }
+#[cfg(test)]
 fn companion(
     request: &Request<'_>,
     path: PathBuf,
     mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
 ) -> Result<()> {
-    // Mirrored in crates/run/src/db.rs::companion; keep metadata checks and
-    // unlink handling in sync.
-    request.wait(|| match metadata() {
-        Ok(meta)
-            if meta.kind == FileKind::Regular
-                && meta.mode & 0o077 == 0
-                && meta.uid == provenant_supervisor::fs::effective_uid() =>
-        {
-            match meta.links {
-                1 => Ok(Some(())),
-                // SQLite's last connection can unlink WAL/SHM files while
-                // another opener's stat is in flight. Re-stat the name;
-                // never accept the removed inode.
-                0 => Ok(None),
-                _ => Err(Error::UnsafePath(path.clone())),
-            }
-        }
-        Ok(_) => Err(Error::UnsafePath(path.clone())),
-        Err(error) if error.is_not_found() => Ok(Some(())),
-        Err(error) => Err(error.into()),
-    })
+    provenant_sqlite::check_companion(
+        &mut metadata,
+        |check| request.wait(check),
+        Into::into,
+        || Error::UnsafePath(path.clone()),
+    )
 }
 
 // The configured root may live on another local volume than `/`. Once there,
 // Fabric descendants stay on that volume. Every component remains no-follow
 // with the supervisor's stat/open/stat identity verification.
 fn checked_directory(parent: &Directory, name: &OsStr, device: Option<u64>) -> Result<Directory> {
-    let before = parent.metadata_at(name, false)?;
-    let child = parent.open_directory(name)?;
-    let opened = child.metadata()?;
-    let after = parent.metadata_at(name, false)?;
-    provenant_supervisor::fs::verify_directory_identity(
-        name,
-        before,
-        opened,
-        after,
-        device.unwrap_or(opened.device),
-    )?;
-    Ok(child)
+    provenant_sqlite::checked_directory(parent, name, device).map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{MonoTime, TestClock};
+    use provenant_core::{DurationMicros, MonoTime, TestClock};
     use std::cell::Cell;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -498,11 +428,11 @@ mod tests {
         for unsafe_metadata in [
             Metadata { links: 2, ..safe },
             Metadata {
-                kind: FileKind::Symlink,
+                kind: provenant_supervisor::fs::FileKind::Symlink,
                 ..safe
             },
             Metadata {
-                kind: FileKind::Directory,
+                kind: provenant_supervisor::fs::FileKind::Directory,
                 ..safe
             },
             Metadata {

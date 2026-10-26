@@ -26,8 +26,9 @@ responsibility or edges lands in this table in the same PR.
 | quota | Quota windows, reset schedules, refresh scheduling and admission advice | records, config |
 | telemetry | Pure terminal-attempt usage/cost reduction and price schema | core, records |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
-| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement |
-| fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
+| sqlite | Shared safe SQLite opening, WAL setup, migration execution and budgeted busy retry | core, supervisor's safe filesystem API |
+| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, sqlite |
+| fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API, sqlite |
 | fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime; fabric-store in tests only, to check store error rendering |
 | workflow | Delivery/review validators, session, tracker and writing tools | core, records, supervisor's safe filesystem API |
