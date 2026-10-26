@@ -94,7 +94,7 @@ fit.
 
 | Area | What Provenant does |
 | --- | --- |
-| **Subscription quota** | Drives each provider's own CLI with your existing sign-in, so lanes draw on the subscriptions you already have. |
+| **Subscription quota and API** | Drives each provider's own CLI with your existing sign-in, so lanes draw on the subscriptions you already have. Pay-per-token API models are available through OpenCode routes such as OpenRouter; OpenCode's own configuration holds the key, never Provenant. |
 | **Many accounts** | Register several accounts per provider. Dispatch resolves an account with headroom unless you pin one, and a quota refusal cools only the account that hit it. |
 | **Usage meter** | `provenant quota show` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
 | **Your harnesses** | One install wires Fabric MCP, skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
@@ -352,7 +352,3 @@ Report vulnerabilities privately through
 
 Released under the [MIT licence](LICENSE). Third-party components are listed in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
-Claude Code, Codex, Cursor, Agy and OpenCode are products of their respective
-owners. Provenant is an independent project that drives their command-line
-tools.
