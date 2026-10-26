@@ -311,11 +311,14 @@ automatically. Policy or control-file changes, concurrent edits or
 unaccountable history need review: evidence is kept and a completed writer
 publishes `review_required` with its candidate head and protected paths.
 Provider failures and invalid terminal Git state remain failures. Committed
-changes are compared with the merge base of the candidate and the locally
-observed default branch of the delivery remote (`origin` without automatic
-delivery). If that remote has no default-branch ref, the primary checkout's
-HEAD is the target. Terminal checks do not fetch. Clean protected changes
-merged from that target do not require review; staged and disk edits still do.
+changes are measured from the lane's start head. Protected paths that also
+differ from the merge base of the candidate and the locally observed default
+branch of the delivery remote (`origin` without automatic delivery) are
+attributed to the writer. Upstream changes are measured from the common
+ancestor of the start head and that merge base. Clean upstream changes are
+exempt; staged and disk edits, or changes that diverge from upstream, still
+require quarantine. If the remote HEAD, target ref or either merge base cannot
+be resolved, comparison uses the start head. Terminal checks do not fetch.
 Unrelated work and history are untouched. A tracked symlink at a
 protected path (mode 120000, such as `CLAUDE.md -> AGENTS.md`) is evidence whose
 bytes are the link target, read with `readlink` and checked against the

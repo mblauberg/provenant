@@ -198,22 +198,6 @@ impl Git<'_> {
         }
         canonical_paths(&paths).map_err(QuarantineError::from)
     }
-
-    fn protected_status_paths(&self) -> Result<Vec<RepoPath>, QuarantineError> {
-        let status = self.read(GitRead::StatusIncludingIgnored)?;
-        let mut paths = Vec::new();
-        for record in parse_porcelain_v2_z(&status.stdout.bytes)? {
-            for path in std::iter::once(&record.path).chain(record.original_path.iter()) {
-                if is_protected_evidence_path(path) {
-                    paths.push(
-                        RepoPath::new(Path::new(OsStr::from_bytes(path)))
-                            .map_err(|_| QuarantineError::InvalidPath)?,
-                    );
-                }
-            }
-        }
-        canonical_paths(&paths).map_err(QuarantineError::from)
-    }
 }
 
 #[derive(Debug, Error)]
@@ -650,10 +634,39 @@ fn quarantine_instruction_changes(
     let head_before = git.head()?;
     let status = git.read(GitRead::StatusIncludingIgnored)?;
     let mut status_paths = parse_porcelain_v2_z(&status.stdout.bytes)?;
-    let own_paths = git.protected_changed_paths(comparison_base, head_before)?;
+    // Only changes introduced on the target since the shared history can be
+    // upstream changes. An inverse diff from the start also includes PR edits.
+    let (comparison_base, upstream_base) = if comparison_base == snapshot.head {
+        (snapshot.head, snapshot.head)
+    } else {
+        git.read(GitRead::MergeBase {
+            left: snapshot.head,
+            right: comparison_base,
+        })
+        .ok()
+        .and_then(|output| {
+            GitOid::parse(std::str::from_utf8(&output.stdout.bytes).ok()?.trim()).ok()
+        })
+        .map(|upstream_base| (comparison_base, upstream_base))
+        .unwrap_or((snapshot.head, snapshot.head))
+    };
+    let mut own_paths = git.protected_changed_paths(snapshot.head, head_before)?;
+    if comparison_base != snapshot.head {
+        let delivery_paths = git.protected_changed_paths(comparison_base, head_before)?;
+        own_paths.retain(|path| delivery_paths.contains(path));
+    }
     let mut review_paths = own_paths.clone();
-    review_paths.extend(git.protected_status_paths()?);
-    let upstream_paths = git.protected_changed_paths(snapshot.head, comparison_base)?;
+    for record in &status_paths {
+        for path in std::iter::once(&record.path).chain(record.original_path.iter()) {
+            if is_protected_evidence_path(path) {
+                review_paths.push(
+                    RepoPath::new(Path::new(OsStr::from_bytes(path)))
+                        .map_err(|_| QuarantineError::InvalidPath)?,
+                );
+            }
+        }
+    }
+    let upstream_paths = git.protected_changed_paths(upstream_base, comparison_base)?;
     // Only clean paths whose tree matches the delivery baseline are exempt.
     // Staged, disk and conflict changes still require ordinary quarantine.
     let mut clean_upstream_paths = Vec::new();
@@ -669,6 +682,11 @@ fn quarantine_instruction_changes(
             clean_upstream_paths.push(path);
         } else {
             upstream_review = true;
+            // A writer can delete an upstream addition that was absent at
+            // launch. Retain its patch even when the start-to-head diff is empty.
+            if !own_paths.contains(&path) {
+                own_paths.push(path.clone());
+            }
             review_paths.push(path);
         }
     }
@@ -834,17 +852,21 @@ fn quarantine_instruction_changes(
     if evidence_paths.len() > MAX_DISCLOSURE_FILES {
         return Err(QuarantineError::Incomplete);
     }
-    let (commit_diff, index_diff, worktree_diff) = if evidence_paths.is_empty() {
-        (Vec::new(), Vec::new(), Vec::new())
+    let commit_diff = if own_paths.is_empty() {
+        Vec::new()
+    } else {
+        git.read(GitRead::Diff {
+            base: comparison_base,
+            head: head_before,
+            paths: own_paths,
+        })?
+        .stdout
+        .bytes
+    };
+    let (index_diff, worktree_diff) = if evidence_paths.is_empty() {
+        (Vec::new(), Vec::new())
     } else {
         (
-            git.read(GitRead::Diff {
-                base: comparison_base,
-                head: head_before,
-                paths: evidence_paths.clone(),
-            })?
-            .stdout
-            .bytes,
             git.read(GitRead::DiffIndex {
                 paths: evidence_paths.clone(),
             })?
@@ -1789,6 +1811,16 @@ mod custody_integration_tests {
                     .map_err(|error| format!("{change} quarantine: {error}"))?,
                 outcome
             );
+            if change == "delete" {
+                let patch = fs::read_to_string(
+                    fixture
+                        ._temp
+                        .path()
+                        .join("merge-archive/protected.head.patch"),
+                )?;
+                assert!(patch.contains(".github/new.yml"));
+                assert!(patch.contains("deleted file mode"));
+            }
             assert_eq!(
                 fs::read(fixture.root.join("AGENTS.md"))?,
                 if change == "hidden_disk" {

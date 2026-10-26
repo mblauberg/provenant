@@ -37,7 +37,7 @@ enum LaneBoard {
     /// Terminal outcomes that count as a failure; `succeeded` and `cancelled` never need attention.
     static let failures: Set<String> = [
         "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required",
-        "model_unavailable", "permission_denied", "quarantined", "lost",
+        "model_unavailable", "permission_denied", "quarantined", "review_required", "lost",
     ]
     /// Nonterminal states a lane passes through quickly.
     static let transitional: Set<String> = ["queued", "starting", "settling"]

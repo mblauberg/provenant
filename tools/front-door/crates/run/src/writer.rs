@@ -347,18 +347,6 @@ impl WriterLaunch {
         let snapshot = git
             .recover_instruction_snapshot(custody, base, &archive)
             .map_err(error)?;
-        let primary = utility
-            .open_repo(
-                &executor,
-                self.worktree
-                    .repo()
-                    .common_git_dir()
-                    .parent()
-                    .ok_or(RunError::UnsafePath)?,
-                budget()?,
-                &cancel,
-            )
-            .map_err(error)?;
         let oid = |repo: &provenant_confinement::repo::VerifiedRepo, operation| -> Result<GitOid> {
             let output = provenant_confinement::run_utility(
                 &executor,
@@ -381,52 +369,52 @@ impl WriterLaunch {
             )
             .map_err(error)
         };
-        let remote_head = provenant_confinement::run_utility(
-            &executor,
-            provenant_confinement::GitRead::RemoteHead {
-                remote: remote.into(),
-            },
-            &primary,
-            &utility,
-            budget()?,
-            &cancel,
-        )
-        .map_err(error)?;
-        let target = match remote_head.termination {
-            provenant_supervisor::exec::Termination::Exit(0) => {
-                let name = GitRefName::new(
-                    std::str::from_utf8(&remote_head.stdout.bytes)
-                        .map_err(error)?
-                        .trim(),
-                )
-                .map_err(error)?;
-                oid(
-                    &primary,
-                    provenant_confinement::GitRead::ResolveRef { name },
-                )?
-            }
-            provenant_supervisor::exec::Termination::Exit(1) => {
-                oid(&primary, provenant_confinement::GitRead::RevParseHead)?
-            }
-            _ => {
+        let tip = oid(
+            self.worktree.repo(),
+            provenant_confinement::GitRead::RevParseHead,
+        )?;
+        // Remote refs only refine attribution. Missing or stale refs must not
+        // prevent quarantine from publishing evidence against the lane start.
+        let comparison_base = (|| -> Result<GitOid> {
+            let remote_head = provenant_confinement::run_utility(
+                &executor,
+                provenant_confinement::GitRead::RemoteHead {
+                    remote: remote.into(),
+                },
+                self.worktree.repo(),
+                &utility,
+                budget()?,
+                &cancel,
+            )
+            .map_err(error)?;
+            if remote_head.termination != provenant_supervisor::exec::Termination::Exit(0)
+                || remote_head.stdout.truncated
+            {
                 return Err(RunError::Validation(
                     "writer delivery target cannot be resolved",
                 ));
             }
-        };
-        let tip = oid(
-            self.worktree.repo(),
-            provenant_confinement::GitRead::ResolveRef {
-                name: self.branch.clone(),
-            },
-        )?;
-        let comparison_base = oid(
-            self.worktree.repo(),
-            provenant_confinement::GitRead::MergeBase {
-                left: target,
-                right: tip,
-            },
-        )?;
+            let name = GitRefName::remote_tracking(
+                std::str::from_utf8(&remote_head.stdout.bytes)
+                    .map_err(error)?
+                    .trim()
+                    .strip_prefix("refs/remotes/")
+                    .ok_or(RunError::Validation("writer delivery target is not remote"))?,
+            )
+            .map_err(error)?;
+            let target = oid(
+                self.worktree.repo(),
+                provenant_confinement::GitRead::ResolveRef { name },
+            )?;
+            oid(
+                self.worktree.repo(),
+                provenant_confinement::GitRead::MergeBase {
+                    left: target,
+                    right: tip,
+                },
+            )
+        })()
+        .unwrap_or(snapshot.head());
         let outcome = git
             .quarantine_instructions(custody, &snapshot, comparison_base, &archive)
             .map_err(error)?;

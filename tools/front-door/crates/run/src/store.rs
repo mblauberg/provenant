@@ -522,7 +522,6 @@ impl RunStore {
             next.protected_paths = writer.protected_paths;
         }
         if publication.outcome == Outcome::Succeeded {
-            let attempt = self.attempt_dir(old.run_id, id, false)?;
             // Recovery reports uncertainty from the sealed start marker without
             // repeating an external effect or inferring success from prose.
             let raw = match read_sealed(&attempt, "delivery.json", RECORD_LIMIT)? {
