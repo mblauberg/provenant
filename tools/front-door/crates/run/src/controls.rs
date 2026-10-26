@@ -2,9 +2,12 @@
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, OperationId, RunId, WallTime};
-use provenant_supervisor::custody::{
-    self, CustodyError, Observation, RecoveryState, Scope, StopReceipt,
-};
+use provenant_supervisor::custody;
+use provenant_supervisor::custody::CustodyError;
+use provenant_supervisor::custody::Observation;
+use provenant_supervisor::custody::RecoveryState;
+use provenant_supervisor::custody::Scope;
+use provenant_supervisor::custody::StopReceipt;
 use provenant_supervisor::machine::StopReason;
 use rusqlite::params;
 use serde::Serialize;
@@ -68,7 +71,7 @@ impl RunStore {
     fn orphan_recovery(
         &self,
         record: &AttemptRecord,
-        attempt: provenant_supervisor::fs::Directory,
+        attempt: provenant_os::fs::Directory,
         call: &Request<'_>,
     ) -> Result<custody::Recovery> {
         let request = self.request(record.run_id, call)?;
@@ -435,7 +438,7 @@ impl RunStore {
     fn withdraw_prepared_writer(&self, fence: &WriterFence, call: &Request<'_>) -> Result<bool> {
         let directory = fence.reservation.parent().ok_or(RunError::UnsafePath)?;
         let recovery = custody::acquire_recovery(
-            provenant_supervisor::fs::Directory::open_anchor(directory)?,
+            provenant_os::fs::Directory::open_anchor(directory)?,
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
             call.cancel,
             call.clock,
@@ -612,7 +615,7 @@ impl RunStore {
             // its exclusion lock and refuse any retained reservation.
             let _lease = attempt.try_lock(
                 std::ffi::OsStr::new("writer.lock"),
-                provenant_supervisor::fs::LockMode::Exclusive,
+                provenant_os::fs::LockMode::Exclusive,
             )?;
             match attempt.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
                 Ok(_) => return Err(RunError::Validation("attempt reservation retained")),

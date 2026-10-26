@@ -38,7 +38,7 @@ reconcile retry inside the attempt's `tmp/`, including rustc incremental
 declared regenerable output GC (#1687) detached beneath a private staging
 directory while holding the worktree writer lock.
 ADR 0031 adds verified detached provider-state payloads.
-`PayloadTree::claim` in `supervisor::fs` is the only entry point (#1597). It
+`PayloadTree::claim` in `os::fs` is the only entry point (#1597). It
 refuses a root whose identity differs from the holder's observation, or that
 is not owned by the effective user or grants group or other access. Reconcile
 widens narrower owner bits, such as 0500, before removal. Ordinary directory

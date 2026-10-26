@@ -22,19 +22,16 @@ const DIRECT: &[&str] = &[
 const LAYERS: &[(&str, &[&str])] = &[
     ("core", &[]),
     ("records", &["core"]),
-    ("config", &["core", "records", "supervisor"]),
-    ("supervisor", &["core", "records"]),
-    ("confinement", &["core", "records", "config", "supervisor"]),
+    ("config", &["core", "records", "os"]),
+    ("os", &["core"]),
+    ("supervisor", &["core", "records", "os"]),
+    (
+        "confinement",
+        &["core", "records", "config", "os", "supervisor"],
+    ),
     (
         "providers",
-        &[
-            "core",
-            "records",
-            "config",
-            "confinement",
-            "quota",
-            "supervisor",
-        ],
+        &["core", "records", "config", "confinement", "quota", "os"],
     ),
     ("quota", &["records", "config"]),
     ("telemetry", &["core", "records"]),
@@ -48,19 +45,20 @@ const LAYERS: &[(&str, &[&str])] = &[
             "core",
             "records",
             "config",
+            "os",
             "supervisor",
             "confinement",
             "sqlite",
         ],
     ),
-    ("sqlite", &["core", "supervisor"]),
-    ("fabric-store", &["core", "records", "supervisor", "sqlite"]),
+    ("sqlite", &["core", "os"]),
+    ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
         "fabric-runtime",
-        &["core", "records", "config", "supervisor", "fabric-store"],
+        &["core", "records", "config", "os", "fabric-store"],
     ),
     ("fabric-mcp", &["core", "records", "fabric-runtime"]),
-    ("workflow", &["core", "records", "supervisor"]),
+    ("workflow", &["core", "records", "os"]),
     (
         "cli",
         &[
@@ -75,6 +73,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "run",
             "fabric-runtime",
             "workflow",
+            "os",
             "supervisor",
         ],
     ),
@@ -84,6 +83,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "core",
             "records",
             "config",
+            "os",
             "supervisor",
             "confinement",
             "providers",
@@ -247,6 +247,30 @@ fn internal_edges_obey_the_layering_table() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn os_cannot_depend_on_supervisor() -> Result<(), Box<dyn Error>> {
+    let workspace: DocumentMut = "[workspace.dependencies]\nprovenant-supervisor = { path = 'crates/supervisor' }\nprocesses = { package = 'provenant-supervisor', path = 'crates/supervisor' }".parse()?;
+    for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
+            for declaration in [
+                "provenant-supervisor = { path = '../supervisor' }",
+                "processes = { package = 'provenant-supervisor', path = '../supervisor' }",
+                "provenant-supervisor.workspace = true",
+                "processes.workspace = true",
+            ] {
+                let manifest: DocumentMut =
+                    format!("[package]\nname = 'provenant-os'\n[{scope}{kind}]\n{declaration}")
+                        .parse()?;
+                let error = check_internal_edges(&manifest, &workspace)
+                    .err()
+                    .ok_or("os must not import supervisor")?;
+                assert!(error.contains("provenant-supervisor"), "{error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
     let workspace: DocumentMut = "[workspace.dependencies]\nprovenant-run = { path = 'crates/run' }\nrunner = { package = 'provenant-run', path = 'crates/run' }".parse()?;
     for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
@@ -274,7 +298,11 @@ fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
 #[test]
 fn internal_dev_exceptions_do_not_allow_production_edges() -> Result<(), Box<dyn Error>> {
     let workspace: DocumentMut = "".parse()?;
-    for (member, dependency) in [("supervisor", "supervisor"), ("fabric-mcp", "fabric-store")] {
+    for (member, dependency) in [
+        ("os", "os"),
+        ("supervisor", "supervisor"),
+        ("fabric-mcp", "fabric-store"),
+    ] {
         for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
             for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
                 let manifest: DocumentMut = format!(
@@ -360,20 +388,22 @@ fn tempfile_is_allowed_only_for_dev_dependencies() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn supervisor_mirrors_workspace_lints_except_for_its_unsafe_boundary() -> Result<(), Box<dyn Error>>
-{
+fn native_boundaries_mirror_workspace_lints_except_for_unsafe_code() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = read_manifest(&root.join("Cargo.toml"))?;
-    let supervisor = read_manifest(&root.join("crates/supervisor/Cargo.toml"))?;
+
     let mut expected = workspace["workspace"]["lints"].clone();
     assert_eq!(expected["rust"]["unsafe_code"].as_str(), Some("forbid"));
     expected["rust"]["unsafe_code"] = toml_edit::value("deny");
     // Compare parsed values, so key order, comments and whitespace do not matter.
     let expected: serde_json::Value = toml_edit::de::from_str(&expected.to_string())?;
-    let actual: serde_json::Value = toml_edit::de::from_str(&supervisor["lints"].to_string())?;
-    assert_eq!(
-        actual, expected,
-        "supervisor must mirror the workspace lint policy"
-    );
+    for member in ["os", "supervisor"] {
+        let manifest = read_manifest(&root.join(format!("crates/{member}/Cargo.toml")))?;
+        let actual: serde_json::Value = toml_edit::de::from_str(&manifest["lints"].to_string())?;
+        assert_eq!(
+            actual, expected,
+            "{member} must mirror workspace lint policy"
+        );
+    }
     Ok(())
 }

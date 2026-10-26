@@ -2,7 +2,10 @@
 use super::delivery::*;
 use super::*;
 use provenant_core::GitOid;
-use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+use provenant_os::exec::ExecOptions;
+use provenant_os::exec::Executor;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::exec::Termination;
 use std::{ffi::OsString, path::Path, time::Duration};
 
 struct PrepareFixture {
@@ -63,7 +66,7 @@ impl PrepareFixture {
         Ok(fixture)
     }
     fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+        let git = provenant_os::git::git_executable().ok_or("git executable")?;
         let argv: Vec<OsString> = std::iter::once(git.into_os_string())
             .chain(args.iter().map(OsString::from))
             .collect();
@@ -205,7 +208,7 @@ fn prepare_failures_name_step_and_bound_git_stderr()
     ] {
         let mut fixture = PrepareFixture::new()?;
         let git = fixture.root.join("git");
-        let real_git = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+        let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
         fixture.executable(&git, &format!(
             "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
         fixture
@@ -280,7 +283,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     ];
     let host = HostDeliveryContext::new(environment.clone());
     let executor = SystemExecutor::new(1)?;
-    let git_executable = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+    let git_executable = provenant_os::git::git_executable().ok_or("git executable")?;
     let git =
         |cwd: &Path, args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
             let argv: Vec<OsString> = std::iter::once(git_executable.as_os_str().to_owned())

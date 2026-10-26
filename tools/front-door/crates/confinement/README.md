@@ -55,7 +55,7 @@ This is validated policy, not backend readiness: compile against held anchors
 immediately before handoff. Adapters are enabled by default; recordings do not gate launch.
 
 An optional Agy recipe selects one state directory and an attempt-private,
-retained `private_state` root, separate from disposable scratch. Supervisor
+retained `private_state` root, separate from disposable scratch. The OS crate
 creates a 0700 home with a private `.gemini/antigravity-cli/bin`, seeds only six
 named state files for copy-back, with five eligible for seeding, within a 64 MiB total bound, and never mirrors the user's
 home, credentials, config, plugins or executable helpers. No Agy credential
@@ -65,7 +65,7 @@ copy-back only after confirmed provider quiescence.
 Copy-back publishes absent files with atomic no-replace semantics. Identical
 existing files need no write; changed existing files return a typed conflict
 and keep both copies. This deliberately refuses even an unchanged baseline's
-replacement because SafeFs offers no atomic compare-and-replace against an
+replacement because Directory offers no atomic compare-and-replace against an
 uncooperative user writer. Run retains the private home on every failure and
 owns settlement; this module never removes it. Existing SQLite state requires
 a snapshot mechanism and is refused at preparation. Private WAL, SHM or journal

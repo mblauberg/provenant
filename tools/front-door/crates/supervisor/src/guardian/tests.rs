@@ -64,7 +64,7 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
         .to_vec(),
         cwd: b"/fixture/repo".to_vec(),
         stdin: vec![0xff; 1024 * 1024],
-        secret_input: Some(crate::exec::SecretInput {
+        secret_input: Some(provenant_os::exec::SecretInput {
             descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
             bytes: b"fixture-token".to_vec(),
         }),
@@ -75,9 +75,9 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let (mut sender, mut receiver) = std::os::unix::net::UnixStream::pair().unwrap();
     let timeout = Duration::from_secs(10);
     let sending = std::thread::spawn(move || {
-        crate::sys::handoff::send(&mut sender, &payload, timeout, &CancelToken::new())
+        crate::process_os::handoff::send(&mut sender, &payload, timeout, &CancelToken::new())
     });
-    let received = crate::sys::handoff::receive(&mut receiver, timeout);
+    let received = crate::process_os::handoff::receive(&mut receiver, timeout);
     sending.join().unwrap().unwrap();
     let received = received.unwrap();
     let decoded: LaunchMessage = decode_v1(received.as_slice(), LAUNCH_LIMITS).unwrap();
@@ -117,10 +117,13 @@ fn fresh_writer_lease_refuses_a_replaced_or_unlinked_original() {
         let root = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(root.path()).unwrap();
         let lease = directory
-            .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
+            .try_lock(
+                OsStr::new("writer.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            )
             .unwrap();
         let inherited = lease.handoff_file().try_clone().unwrap();
-        let expected = crate::fs::Metadata::from_std(inherited.metadata().unwrap());
+        let expected = provenant_os::fs::Metadata::from_std(inherited.metadata().unwrap());
         if unlink {
             std::fs::remove_file(root.path().join("writer.lock")).unwrap();
         } else {
@@ -133,9 +136,12 @@ fn fresh_writer_lease_refuses_a_replaced_or_unlinked_original() {
     let root = tempfile::tempdir().unwrap();
     let directory = Directory::open_anchor(root.path()).unwrap();
     let lease = directory
-        .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
+        .try_lock(
+            OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )
         .unwrap();
-    let expected = crate::fs::Metadata::from_std(lease.handoff_file().metadata().unwrap());
+    let expected = provenant_os::fs::Metadata::from_std(lease.handoff_file().metadata().unwrap());
     assert!(try_writer_lease(&directory, expected).is_err());
     drop(lease);
     assert!(try_writer_lease(&directory, expected).is_ok());

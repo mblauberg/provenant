@@ -1,7 +1,10 @@
 use crate::*;
 use provenant_core::{RelativePath, RunId};
+use provenant_os::fs::Directory;
+use provenant_os::fs::FileKind;
+use provenant_os::fs::PayloadTree;
+use provenant_os::fs::PublishMode;
 use provenant_records::{CanonicalV1, PathWire};
-use provenant_supervisor::fs::{Directory, FileKind, PayloadTree, Publication, PublishMode};
 use std::{ffi::OsStr, path::Component};
 
 pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<Directory> {
@@ -17,9 +20,7 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
     Ok(dir)
 }
 
-pub(crate) fn remove_temporary_best_effort(
-    attempt: &Directory,
-) -> provenant_supervisor::fs::Result<()> {
+pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os::fs::Result<()> {
     remove_entry_tree(attempt, OsStr::new("tmp"))
 }
 
@@ -30,7 +31,7 @@ pub(crate) fn remove_temporary_best_effort(
 /// The exception is rooted at the literal tmp entry, never the attempt itself.
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,
-) -> provenant_supervisor::fs::Result<()> {
+) -> provenant_os::fs::Result<()> {
     let name = OsStr::new("tmp");
     let metadata = match attempt.metadata_at(name, false) {
         Ok(metadata) => metadata,
@@ -47,11 +48,11 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     attempt.rmdir(name)
 }
 
-fn remove_payload_contents(directory: &PayloadTree) -> provenant_supervisor::fs::Result<()> {
+fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<()> {
     directory.make_writable()?;
     let entries = directory
         .entries()?
-        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
     for entry in entries {
         if directory.metadata_at(&entry)?.kind == FileKind::Directory {
             remove_payload_contents(&directory.child(&entry)?)?;
@@ -63,7 +64,7 @@ fn remove_payload_contents(directory: &PayloadTree) -> provenant_supervisor::fs:
     Ok(())
 }
 
-fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_supervisor::fs::Result<()> {
+fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_os::fs::Result<()> {
     let metadata = match parent.metadata_at(name, false) {
         Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => return Ok(()),
@@ -76,7 +77,7 @@ fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_supervisor::
     directory.make_writable()?;
     let entries = directory
         .entries()?
-        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
     for entry in entries {
         remove_entry_tree(&directory, &entry)?;
     }
@@ -118,7 +119,7 @@ impl RunStore {
                 if m.kind != FileKind::Regular
                     || m.links != 1
                     || m.mode & 0o077 != 0
-                    || m.uid != provenant_supervisor::fs::effective_uid()
+                    || m.uid != provenant_os::fs::effective_uid()
                 {
                     return Err(RunError::UnsafePath);
                 }
@@ -149,7 +150,7 @@ pub(crate) fn read_sealed(dir: &Directory, name: &str, limit: u64) -> Result<Opt
     if meta.kind != FileKind::Regular
         || meta.links != 1
         || meta.mode & 0o077 != 0
-        || meta.uid != provenant_supervisor::fs::effective_uid()
+        || meta.uid != provenant_os::fs::effective_uid()
     {
         return Err(RunError::UnsafePath);
     }
@@ -163,10 +164,7 @@ pub(crate) fn seal(dir: &Directory, name: &str, content: &[u8], limit: u64) -> R
         return Err(RunError::TooLarge { limit });
     }
     match dir.atomic_write(OsStr::new(name), ".run-", content, PublishMode::NoReplace) {
-        Ok(Publication::Durable) => Ok(()),
-        Ok(Publication::VisibleDurabilityUnconfirmed { sync_error }) => {
-            Err(RunError::Publication(sync_error))
-        }
+        Ok(publication) => publication.require_durable().map_err(RunError::Publication),
         Err(e) if e.is_exists() => {
             if read_sealed(dir, name, limit)?.ok_or(RunError::Conflict)? != content {
                 return Err(RunError::ArtifactMismatch);

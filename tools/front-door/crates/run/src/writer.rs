@@ -10,16 +10,15 @@ use provenant_confinement::{
     worktrees,
 };
 use provenant_core::{CancelToken, GitOid, ProjectId};
-use provenant_supervisor::{
-    custody::WriterBinding,
-    exec::SystemExecutor,
-    fs::{Directory, LocalFs, canonicalize},
-};
+use provenant_os::exec::SystemExecutor;
+use provenant_os::fs::Directory;
+use provenant_supervisor::custody::WriterBinding;
+
+use provenant_os::fs::canonicalize;
 use std::io::Read;
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -34,9 +33,9 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) if e.is_exists() => {}
         Err(e) => return Err(e.into()),
     }
-    let git = provenant_supervisor::git::git_executable()
+    let git = provenant_os::git::git_executable()
         .ok_or(RunError::Validation("Git executable unavailable"))?;
-    UtilityRuntime::new(Arc::new(LocalFs), canonicalize(&git)?, home).map_err(error)
+    UtilityRuntime::new(canonicalize(&git)?, home).map_err(error)
 }
 fn budget() -> Result<UtilityBudget> {
     UtilityBudget::bounded(Duration::from_secs(5)).map_err(error)
@@ -140,8 +139,7 @@ pub fn prepare_writer(
         &CancelToken::new(),
     )
     .map_err(error)?;
-    if base.termination != provenant_supervisor::exec::Termination::Exit(0) || base.stdout.truncated
-    {
+    if base.termination != provenant_os::exec::Termination::Exit(0) || base.stdout.truncated {
         return Err(RunError::Validation("writer branch cannot be resolved"));
     }
     let base = GitOid::parse(
@@ -153,7 +151,7 @@ pub fn prepare_writer(
     let state_dir = Directory::open_anchor(state)?;
     // Git knows the worktree but Provenant holds no state for it: it was not
     // created by `provenant worktree create`.
-    let unregistered = |error: provenant_supervisor::fs::FsError| {
+    let unregistered = |error: provenant_os::fs::FsError| {
         if error.is_not_found() {
             RunError::WorktreeUnregistered(request.worktree.clone())
         } else {
@@ -200,7 +198,6 @@ impl LaunchConfinement {
     ) -> Result<Vec<OsString>> {
         let executor = SystemExecutor::new(1).map_err(error)?;
         let backend = system_backend(&BackendContext {
-            safe_fs: &LocalFs,
             executor: &executor,
             cancel,
             #[cfg(target_os = "macos")]
@@ -213,18 +210,17 @@ impl LaunchConfinement {
         if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
             (writer, &self.plan.permissions().mode)
         {
-            prepare_writer_directories(&LocalFs, worktree, branch, authority, &self.home)
+            prepare_writer_directories(worktree, branch, authority, &self.home)
                 .map_err(RunError::Confinement)?;
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
-            .map(|p| AnchoredDirectory::open_canonical(&LocalFs, p))
+            .map(AnchoredDirectory::open_canonical)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(RunError::Confinement)?;
         let anchors = Anchors {
             home: &self.home,
             directories: &directories,
-            safe_fs: &LocalFs,
             worktree: writer,
         };
         self.plan
@@ -402,7 +398,7 @@ impl WriterLaunch {
             &cancel,
         )
         .map_err(error)?;
-        if ancestry.termination != provenant_supervisor::exec::Termination::Exit(0) {
+        if ancestry.termination != provenant_os::exec::Termination::Exit(0) {
             return Err(RunError::Validation(
                 "writer branch no longer descends from its recorded base",
             ));

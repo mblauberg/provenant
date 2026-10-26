@@ -9,10 +9,9 @@ use crate::{
 };
 use provenant_confinement::valid_read_only_writable;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WaitBudget, WallTime};
-use provenant_supervisor::{
-    fs::Directory,
-    sys::resources::{self, MemorySample},
-};
+use provenant_os::fs::Directory;
+use provenant_os::sys::resources;
+use provenant_os::sys::resources::MemorySample;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Duration;
 

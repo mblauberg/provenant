@@ -1,11 +1,14 @@
 //! Non-billable sign-in diagnostics. Captures remain bounded and in memory.
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Hosts};
+use provenant_os::exec::ExecOptions;
+use provenant_os::exec::ExecOutcome;
+use provenant_os::exec::Executor;
+use provenant_os::exec::StreamPolicy;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::exec::Termination;
 use provenant_providers::claude::{CredentialPresence, SigninStatus, signin_status};
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::exec::{
-    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
-};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -29,7 +32,7 @@ fn executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .filter(|p| p.is_absolute())
         .map(|p| p.join(name))
-        .find(|p| provenant_supervisor::sys::is_executable(p))
+        .find(|p| provenant_os::sys::is_executable(p))
 }
 fn probe(
     argv: &[OsString],

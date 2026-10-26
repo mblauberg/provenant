@@ -165,15 +165,15 @@ fn process_worker() -> io::Result<Arc<Worker>> {
 }
 /// Compose one shared executor at the process edge; clones share admission.
 #[derive(Clone, Debug)]
-pub(crate) struct Reaper(Arc<State>);
+pub struct Reaper(Arc<State>);
 #[derive(Debug)]
-pub(crate) struct Permit {
+pub struct Permit {
     state: Arc<State>,
     slot: usize,
     transferred: bool,
 }
 impl Reaper {
-    pub(crate) fn new(capacity: usize) -> io::Result<Self> {
+    pub fn new(capacity: usize) -> io::Result<Self> {
         if capacity == 0 || capacity > 1024 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -191,12 +191,12 @@ impl Reaper {
         Ok(Self(state))
     }
     #[cfg(feature = "fixture")]
-    pub(crate) fn new_paused(capacity: usize) -> io::Result<Self> {
+    pub fn new_paused(capacity: usize) -> io::Result<Self> {
         let reaper = Self::new(capacity)?;
         reaper.0.paused.store(true, Ordering::Release);
         Ok(reaper)
     }
-    pub(crate) fn reserve(&self) -> Option<Permit> {
+    pub fn reserve(&self) -> Option<Permit> {
         let mut slots = self.0.slots();
         let slot = slots.iter().position(|slot| matches!(slot, Slot::Free))?;
         *slots.get_mut(slot)? = Slot::Reserved;
@@ -207,7 +207,7 @@ impl Reaper {
         })
     }
     #[cfg(test)]
-    pub(crate) fn occupied(&self) -> usize {
+    pub fn occupied(&self) -> usize {
         self.0
             .slots()
             .iter()
@@ -215,7 +215,7 @@ impl Reaper {
             .count()
     }
     #[cfg(feature = "fixture")]
-    pub(crate) fn occupied_fixture(&self) -> usize {
+    pub fn occupied_fixture(&self) -> usize {
         self.0
             .slots()
             .iter()
@@ -223,14 +223,14 @@ impl Reaper {
             .count()
     }
     #[cfg(feature = "fixture")]
-    pub(crate) fn resume(&self) {
+    pub fn resume(&self) {
         self.0.paused.store(false, Ordering::Release);
         if let Some(worker) = self.0.worker.upgrade() {
             worker.notify();
         }
     }
     #[cfg(feature = "fixture")]
-    pub(crate) fn wait_for_occupied(&self, maximum: usize, timeout: Duration) -> io::Result<usize> {
+    pub fn wait_for_occupied(&self, maximum: usize, timeout: Duration) -> io::Result<usize> {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -265,11 +265,11 @@ impl Reaper {
         }
     }
     #[cfg(test)]
-    pub(crate) fn unknown_outcomes(&self) -> usize {
+    pub fn unknown_outcomes(&self) -> usize {
         self.0.unknown_outcomes.load(Ordering::Relaxed)
     }
     #[cfg(test)]
-    pub(crate) fn shares_process_worker(&self, other: &Self) -> bool {
+    pub fn shares_process_worker(&self, other: &Self) -> bool {
         self.0
             .worker
             .upgrade()
@@ -285,7 +285,7 @@ impl Drop for Reaper {
     }
 }
 impl Permit {
-    pub(crate) fn transfer(mut self, child: Child) {
+    pub fn transfer(mut self, child: Child) {
         // slot is reserved before spawn, never resized or released by a peer.
         // Its index cannot fail; match avoids a panic if an invariant regresses.
         let transferred = {
@@ -342,7 +342,7 @@ fn record_exit_status(pid: u32, status: std::process::ExitStatus) {
 }
 
 #[cfg(feature = "fixture")]
-pub(crate) fn take_exit_status(pid: u32) -> Option<std::process::ExitStatus> {
+pub fn take_exit_status(pid: u32) -> Option<std::process::ExitStatus> {
     let mut statuses = EXIT_STATUSES
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());

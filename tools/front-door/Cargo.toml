@@ -27,6 +27,7 @@ toml_edit = { version = "0.25", features = ["serde"] }
 provenant-core = { path = "crates/core" }
 provenant-records = { path = "crates/records" }
 provenant-config = { path = "crates/config" }
+provenant-os = { path = "crates/os" }
 provenant-supervisor = { path = "crates/supervisor" }
 provenant-confinement = { path = "crates/confinement" }
 provenant-providers = { path = "crates/providers" }
@@ -70,6 +71,7 @@ publish = false
 license.workspace = true
 
 [dependencies]
+provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
 jiff = { workspace = true }
 rusqlite = { workspace = true }

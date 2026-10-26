@@ -1,6 +1,9 @@
 //! The parent guardian's host-side consumer of lane child submissions.
 use super::*;
-use provenant_supervisor::{Holder, custody, fs::Directory, machine::StopReason};
+use provenant_os::fs::Directory;
+use provenant_supervisor::Holder;
+use provenant_supervisor::custody;
+use provenant_supervisor::machine::StopReason;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -91,7 +94,7 @@ impl provenant_supervisor::NestedChildStore for HostHolder<'_> {
             context.roots.checkout.clone(),
         );
         inputs.state_dir = Some(state);
-        let Ok(roots) = inputs.resolve(&provenant_supervisor::fs::LocalFs) else {
+        let Ok(roots) = inputs.resolve(&provenant_os::fs::SystemPathResolver) else {
             return false;
         };
         let clock = SystemClock::new();
@@ -197,7 +200,7 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
     inputs.state_dir = Some(launch.configuration_root.clone());
     let roots = inputs
-        .resolve(&provenant_supervisor::fs::LocalFs)
+        .resolve(&provenant_os::fs::SystemPathResolver)
         .map_err(|error| error.to_string())?;
     inputs.state_dir = Some(
         context
@@ -207,7 +210,7 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             .join(context.attempt_id.to_string()),
     );
     let child_state = inputs
-        .resolve(&provenant_supervisor::fs::LocalFs)
+        .resolve(&provenant_os::fs::SystemPathResolver)
         .map_err(|error| error.to_string())?
         .state;
     let session = Session {
@@ -247,12 +250,8 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         let stopping = cancel.is_cancelled();
         let scan_cancel = CancelToken::new();
         let call = request(&clock, &scan_cancel).map_err(|error| error.message)?;
-        let config = provenant_config::read_with_domains(
-            &roots,
-            &provenant_supervisor::fs::LocalFs,
-            &crate::domains::SECTIONS,
-        )
-        .map_err(|error| error.to_string())?;
+        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)
+            .map_err(|error| error.to_string())?;
         let maximum = config
             .knobs
             .get("lanes.max_depth")
@@ -582,10 +581,8 @@ mod tests {
         }
         struct Available;
         impl run::Resources for Available {
-            fn memory(
-                &self,
-            ) -> std::io::Result<provenant_supervisor::sys::resources::MemorySample> {
-                Ok(provenant_supervisor::sys::resources::MemorySample {
+            fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+                Ok(provenant_os::sys::resources::MemorySample {
                     total_bytes: 1,
                     available_bytes: 1,
                 })
@@ -727,7 +724,7 @@ mod tests {
         let mut inputs = RootInputs::new(home, checkout);
         inputs.state_dir = Some(base.join("state"));
         let context = run::ExecutionContext {
-            state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
             project_id: ProjectId::from_bytes([1; 16]),
             actor_id: ActorId::from_bytes([2; 16]),
             read_prompts: true,

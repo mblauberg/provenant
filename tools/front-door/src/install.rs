@@ -7,11 +7,8 @@ use provenant_config::{
     ManualInclude, Targets,
 };
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
+use provenant_os::clock::SystemClock;
 use provenant_records::{CommandError, CommandResult, Harness, Outcome};
-use provenant_supervisor::{
-    clock::SystemClock,
-    fs::{LocalFs, SafeFs},
-};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -42,7 +39,7 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
     let state = targets.roots.state.as_path();
     if super::peer_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
-        let previous = provenant_config::installed_binary(targets, &LocalFs)
+        let previous = provenant_config::installed_binary(targets)
             .map_err(EdgeError::Install)?
             .unwrap_or_else(|| program.clone());
         targets.peer_agent = Some(
@@ -51,9 +48,8 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
         targets.peer_agent_previous =
             super::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;
-        let config =
-            provenant_config::read_with_domains(&targets.roots, &LocalFs, &cli::domains::SECTIONS)
-                .map_err(|error| EdgeError::Install(InstallError::Config(error)))?;
+        let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
+            .map_err(|error| EdgeError::Install(InstallError::Config(error)))?;
         if config.gc.schedule {
             targets.gc_agent = Some(
                 super::gc_agent::render(&program, state, &config.gc).map_err(EdgeError::Peer)?,
@@ -95,12 +91,10 @@ fn selected_targets(
     harnesses: &[Harness],
 ) -> Result<(Environment, Targets), EdgeError> {
     let environment = environment(globals)?;
-    let fs = LocalFs;
     let mut targets = cli::install::configured_targets(
         environment.roots.clone(),
         &environment.home,
         harnesses,
-        &fs,
         environment.claude.as_deref(),
         environment.codex.as_deref(),
     )
@@ -123,13 +117,12 @@ fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targ
         environment.roots,
         &environment.home,
         harnesses,
-        &LocalFs,
         environment.claude.as_deref(),
         environment.codex.as_deref(),
     )
     .map_err(EdgeError::Install)?;
     targets
-        .resolve_destinations(&LocalFs)
+        .resolve_destinations(&provenant_os::fs::SystemPathResolver)
         .map_err(EdgeError::Install)?;
     Ok(targets)
 }
@@ -305,14 +298,12 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
 }
 
 fn context<'a>(
-    fs: &'a dyn SafeFs,
     clock: &'a SystemClock,
     cancel: &'a CancelToken,
 ) -> Result<InstallContext<'a>, String> {
     let budget = WaitBudget::cli(clock.mono_now(), 30)
         .map_err(|_| "invalid install wait budget".to_owned())?;
     Ok(InstallContext {
-        fs,
         clock,
         budget,
         cancel,
@@ -480,12 +471,15 @@ fn install_target(path: &Path) -> &'static str {
 }
 
 pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 {
-    match provenant_core::PathResolver::resolve_existing_ancestor(&LocalFs, &args.source) {
+    match provenant_core::PathResolver::resolve_existing_ancestor(
+        &provenant_os::fs::SystemPathResolver,
+        &args.source,
+    ) {
         Ok(source) => args.source = source,
         Err(source) => {
             return install_error(
                 "install",
-                &InstallError::Fs(provenant_supervisor::fs::FsError::Io {
+                &InstallError::Fs(provenant_os::fs::FsError::Io {
                     operation: "resolve install source",
                     path: args.source.clone(),
                     source,
@@ -499,14 +493,13 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         Err(error) => return edge_error("install", error, globals),
     };
     targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
-    if let Err(error) = targets.resolve_destinations(&LocalFs) {
+    if let Err(error) = targets.resolve_destinations(&provenant_os::fs::SystemPathResolver) {
         return install_error("install", &error, globals);
     }
     args.bin_dir = Some(targets.bin_dir.clone());
-    let fs = LocalFs;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let context = match context(&fs, &clock, &cancel) {
+    let context = match context(&clock, &cancel) {
         Ok(context) => context,
         Err(error) => {
             return super::fail("install", Outcome::Error, "WAIT_BUDGET", &error, globals);
@@ -576,10 +569,9 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     if let Err(error) = prepare_agents(&mut targets) {
         return edge_error("uninstall", error, globals);
     }
-    let fs = LocalFs;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let context = match context(&fs, &clock, &cancel) {
+    let context = match context(&clock, &cancel) {
         Ok(context) => context,
         Err(error) => {
             return super::fail("uninstall", Outcome::Error, "WAIT_BUDGET", &error, globals);

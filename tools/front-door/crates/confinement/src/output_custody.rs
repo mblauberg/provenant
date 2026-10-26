@@ -1,7 +1,7 @@
 //! Held-parent installation and verification for a single retained output file.
 use provenant_core::RelativePath;
+use provenant_os::fs::{Directory, FsError, Metadata, PublishMode};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
-use provenant_supervisor::fs::{FsError, Metadata, Publication, PublishMode, SafeDir};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::path::{Component, Path};
@@ -57,14 +57,14 @@ impl InstalledOutput {
     }
 }
 
-/// Installs output bytes through the supervisor's held parent capability. The
+/// Installs output bytes through the OS layer's held parent capability. The
 /// source and destination names are single components, never arbitrary paths.
 pub struct OutputCustody;
 impl OutputCustody {
     pub fn install(
-        source_parent: &dyn SafeDir,
+        source_parent: &Directory,
         source_name: &OsStr,
-        destination_parent: &dyn SafeDir,
+        destination_parent: &Directory,
         destination_name: &OsStr,
         limit: u64,
     ) -> Result<InstalledOutput, OutputCustodyError> {
@@ -76,15 +76,11 @@ impl OutputCustody {
             destination_name,
             ".provenant-output-",
             &bytes,
-            0o600,
             PublishMode::NoReplace,
         )?;
-        match publication {
-            Publication::Durable => {}
-            Publication::VisibleDurabilityUnconfirmed { .. } => {
-                return Err(OutputCustodyError::DurabilityUnconfirmed);
-            }
-        }
+        publication
+            .require_durable()
+            .map_err(|_| OutputCustodyError::DurabilityUnconfirmed)?;
         let (installed_bytes, installed) =
             read_regular(destination_parent, destination_name, limit)?;
         if installed_bytes != bytes || installed.device != parent.device || installed.links != 1 {
@@ -102,7 +98,7 @@ impl OutputCustody {
     }
 
     pub fn verify(
-        destination_parent: &dyn SafeDir,
+        destination_parent: &Directory,
         destination_name: &OsStr,
         expected: &InstalledOutput,
         limit: u64,
@@ -148,7 +144,7 @@ fn wire_name(name: &OsStr) -> Result<PathWire, OutputCustodyError> {
 }
 
 fn read_regular(
-    parent: &dyn SafeDir,
+    parent: &Directory,
     name: &OsStr,
     limit: u64,
 ) -> Result<(Vec<u8>, Metadata), OutputCustodyError> {
@@ -164,7 +160,8 @@ fn read_regular(
 #[cfg(test)]
 mod tests {
     use super::{OutputCustody, OutputCustodyError};
-    use provenant_supervisor::fs::{LocalFs, SafeFs};
+    use provenant_os::fs::Directory;
+
     use std::error::Error;
     use std::ffi::OsStr;
 
@@ -173,30 +170,30 @@ mod tests {
     {
         let root = crate::test_support::tempdir()?;
         std::fs::write(root.path().join("source"), b"complete output")?;
-        let fs = LocalFs;
-        let parent = fs.open_anchor(root.path())?;
+
+        let parent = Directory::open_anchor(root.path())?;
         let receipt = OutputCustody::install(
-            parent.as_ref(),
+            &parent,
             OsStr::new("source"),
-            parent.as_ref(),
+            &parent,
             OsStr::new("result"),
             64,
         )?;
-        OutputCustody::verify(parent.as_ref(), OsStr::new("result"), &receipt, 64)?;
+        OutputCustody::verify(&parent, OsStr::new("result"), &receipt, 64)?;
         assert!(
             OutputCustody::install(
-                parent.as_ref(),
+                &parent,
                 OsStr::new("source"),
-                parent.as_ref(),
+                &parent,
                 OsStr::new("result"),
                 64
             )
             .is_err()
         );
-        OutputCustody::verify(parent.as_ref(), OsStr::new("result"), &receipt, 64)?;
+        OutputCustody::verify(&parent, OsStr::new("result"), &receipt, 64)?;
         std::fs::write(root.path().join("result"), b"changed output")?;
         assert!(matches!(
-            OutputCustody::verify(parent.as_ref(), OsStr::new("result"), &receipt, 64),
+            OutputCustody::verify(&parent, OsStr::new("result"), &receipt, 64),
             Err(OutputCustodyError::IdentityMismatch | OutputCustodyError::Changed)
         ));
         Ok(())
@@ -208,26 +205,14 @@ mod tests {
         std::fs::write(root.path().join("large"), b"0123456789")?;
         std::fs::write(root.path().join("target"), b"x")?;
         std::fs::hard_link(root.path().join("target"), root.path().join("linked"))?;
-        let fs = LocalFs;
-        let parent = fs.open_anchor(root.path())?;
+
+        let parent = Directory::open_anchor(root.path())?;
         assert!(matches!(
-            OutputCustody::install(
-                parent.as_ref(),
-                OsStr::new("large"),
-                parent.as_ref(),
-                OsStr::new("out"),
-                4
-            ),
+            OutputCustody::install(&parent, OsStr::new("large"), &parent, OsStr::new("out"), 4),
             Err(OutputCustodyError::TooLarge)
         ));
         assert!(matches!(
-            OutputCustody::install(
-                parent.as_ref(),
-                OsStr::new("linked"),
-                parent.as_ref(),
-                OsStr::new("out"),
-                8
-            ),
+            OutputCustody::install(&parent, OsStr::new("linked"), &parent, OsStr::new("out"), 8),
             Err(OutputCustodyError::UnsupportedFile)
         ));
         Ok(())

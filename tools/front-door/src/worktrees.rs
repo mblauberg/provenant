@@ -8,18 +8,18 @@ use provenant_confinement::{
     },
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_os::clock::SystemClock;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::fs::Directory;
+use provenant_os::fs::FileKind;
+use provenant_os::fs::FsError;
+use provenant_os::fs::canonicalize;
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::{
-    clock::SystemClock,
-    exec::SystemExecutor,
-    fs::{Directory, FileKind, FsError, LocalFs, SafeDir, canonicalize},
-};
 use serde::Serialize;
 use std::{
     cell::RefCell,
     ffi::OsStr,
     path::{Component, Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
@@ -50,9 +50,9 @@ pub(crate) enum Error {
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
     #[error(transparent)]
-    Fs(#[from] provenant_supervisor::fs::FsError),
+    Fs(#[from] provenant_os::fs::FsError),
     #[error(transparent)]
-    Exec(#[from] provenant_supervisor::exec::ExecError),
+    Exec(#[from] provenant_os::exec::ExecError),
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
@@ -394,8 +394,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
-    let config =
-        provenant_config::read_with_domains(&roots, &LocalFs, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
     if command.scheduled {
         if !config.gc.schedule {
             return Ok(GcData {
@@ -409,7 +408,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                 ..Default::default()
             });
         }
-        for binding in provenant_config::registered_projects(&roots, &LocalFs)? {
+        for binding in provenant_config::registered_projects(&roots)? {
             project_ids.push(binding.project_id());
             let common = binding.common_dir();
             let path = if common.file_name() == Some(OsStr::new(".git")) {
@@ -613,7 +612,6 @@ pub(crate) fn with_context<T>(
     let utility_home = child(&state, "utility-home")?;
     let git = super::roots::git_binary().ok_or(Error::GitUnavailable)?;
     let runtime = UtilityRuntime::new(
-        Arc::new(LocalFs),
         canonicalize(&git)?,
         roots.state.as_path().join("utility-home"),
     )?;
@@ -624,17 +622,16 @@ pub(crate) fn with_context<T>(
     let binding = provenant_config::bind_project(
         roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
-        &LocalFs,
     )?;
     let worktrees_state = child(&state, "worktrees")?;
-    let project_state = child(worktrees_state.as_ref(), &binding.project_id().to_string())?;
+    let project_state = child(&worktrees_state, &binding.project_id().to_string())?;
     let clock = SystemClock;
     let home = roots::home()?;
     let context = WorktreeContext {
         home: &home,
         repo: &repo,
         binding: &binding,
-        project_state: project_state.as_ref(),
+        project_state: &project_state,
         executor: &executor,
         utility: &runtime,
         #[cfg(not(test))]
@@ -651,7 +648,10 @@ pub(crate) fn with_context<T>(
     result
 }
 
-fn child(parent: &dyn SafeDir, name: &str) -> Result<Box<dyn SafeDir>, Error> {
+fn child(
+    parent: &provenant_os::fs::Directory,
+    name: &str,
+) -> Result<provenant_os::fs::Directory, Error> {
     let name = OsStr::new(name);
     match parent.mkdir(name, 0o700) {
         Ok(()) => parent.sync()?,

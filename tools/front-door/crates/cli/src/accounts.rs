@@ -1,11 +1,11 @@
 //! Account registration at the CLI edge. No credentials enter config or output.
 use clap::{Subcommand, ValueEnum};
 use provenant_core::Roots;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::fs::Directory;
 use provenant_providers::accounts::{Registration, Settings};
-use provenant_supervisor::{
-    exec::SystemExecutor,
-    fs::{Directory, LocalFs, Publication, PublishMode},
-};
+
+use provenant_os::fs::PublishMode;
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -97,11 +97,10 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
     }
 }
 pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Settings, String> {
-    let mut settings =
-        provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)
-            .map_err(|e| e.to_string())?
-            .domains
-            .accounts;
+    let mut settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?
+        .domains
+        .accounts;
     if let Accounts::Set {
         account,
         display_name,
@@ -117,10 +116,10 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         let _lock = root
             .try_lock(
                 OsStr::new("config.lock"),
-                provenant_supervisor::fs::LockMode::Exclusive,
+                provenant_os::fs::LockMode::Exclusive,
             )
             .map_err(|e| e.to_string())?;
-        settings = provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)
+        settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|e| e.to_string())?
             .domains
             .accounts;
@@ -157,8 +156,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         if !provenant_providers::accounts::label(label) {
             return Err("invalid account label".into());
         }
-        let directory =
-            provenant_supervisor::fs::canonicalize(directory).map_err(|e| e.to_string())?;
+        let directory = provenant_os::fs::canonicalize(directory).map_err(|e| e.to_string())?;
         if adapter == "claude" && directory != home.join(format!(".claude-{label}")) {
             return Err(
                 "Claude registration requires its fixed ~/.claude-<label> directory".into(),
@@ -174,7 +172,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         let executor =
             provenant_providers::host::HostProbeExecutor::new(&system, roots.state.as_path())
                 .map_err(|e| e.to_string())?;
-        let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
+        let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
             .map_err(|e| e.to_string())?
             .ok_or("current user identity is unavailable")?
             .name;
@@ -215,10 +213,10 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         let _lock = root
             .try_lock(
                 OsStr::new("config.lock"),
-                provenant_supervisor::fs::LockMode::Exclusive,
+                provenant_os::fs::LockMode::Exclusive,
             )
             .map_err(|e| e.to_string())?;
-        settings = provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)
+        settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|e| e.to_string())?
             .domains
             .accounts;
@@ -272,10 +270,10 @@ pub fn set_quota_display(
     let _lock = root
         .try_lock(
             OsStr::new("config.lock"),
-            provenant_supervisor::fs::LockMode::Exclusive,
+            provenant_os::fs::LockMode::Exclusive,
         )
         .map_err(|e| e.to_string())?;
-    let domains = provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)
+    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?
         .domains;
     let icon = match icon {
@@ -311,20 +309,15 @@ pub fn set_quota_display(
     if let Some(icon) = icon {
         display["icon"] = toml_edit::value(icon);
     }
-    match root
-        .atomic_write(
-            OsStr::new("config.toml"),
-            ".quota-display-",
-            doc.to_string().as_bytes(),
-            PublishMode::Replace,
-        )
-        .map_err(|e| e.to_string())?
-    {
-        Publication::Durable => Ok(()),
-        Publication::VisibleDurabilityUnconfirmed { .. } => {
-            Err("quota display config durability unconfirmed".into())
-        }
-    }
+    root.atomic_write(
+        OsStr::new("config.toml"),
+        ".quota-display-",
+        doc.to_string().as_bytes(),
+        PublishMode::Replace,
+    )
+    .map_err(|e| e.to_string())?
+    .require_durable()
+    .map_err(|_| "quota display config durability unconfirmed".into())
 }
 
 fn write_settings(root: &Directory, settings: &Settings) -> Result<(), String> {
@@ -392,20 +385,15 @@ fn write_settings(root: &Directory, settings: &Settings) -> Result<(), String> {
         .and_then(toml_edit::Item::as_table_mut)
         .ok_or("domains must be a TOML table")?;
     domains["accounts"] = toml_edit::Item::Table(section);
-    match root
-        .atomic_write(
-            OsStr::new("config.toml"),
-            ".accounts-",
-            doc.to_string().as_bytes(),
-            PublishMode::Replace,
-        )
-        .map_err(|e| e.to_string())?
-    {
-        Publication::Durable => {}
-        Publication::VisibleDurabilityUnconfirmed { .. } => {
-            return Err("account config durability unconfirmed".into());
-        }
-    }
+    root.atomic_write(
+        OsStr::new("config.toml"),
+        ".accounts-",
+        doc.to_string().as_bytes(),
+        PublishMode::Replace,
+    )
+    .map_err(|e| e.to_string())?
+    .require_durable()
+    .map_err(|_| "account config durability unconfirmed")?;
     Ok(())
 }
 
@@ -416,14 +404,13 @@ pub fn record_org(roots: &Roots, adapter: &str, label: &str, org: &str) -> Resul
     let _lock = root
         .try_lock(
             OsStr::new("config.lock"),
-            provenant_supervisor::fs::LockMode::Exclusive,
+            provenant_os::fs::LockMode::Exclusive,
         )
         .map_err(|e| e.to_string())?;
-    let mut settings =
-        provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)
-            .map_err(|e| e.to_string())?
-            .domains
-            .accounts;
+    let mut settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?
+        .domains
+        .accounts;
     let entry = settings
         .entries
         .values_mut()
@@ -463,7 +450,7 @@ fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
                 let child = dir.open_directory(name).map_err(|e| e.to_string())?;
                 let opened = child.metadata().map_err(|e| e.to_string())?;
                 let after = dir.metadata_at(name, false).map_err(|e| e.to_string())?;
-                if before.kind != provenant_supervisor::fs::FileKind::Directory
+                if before.kind != provenant_os::fs::FileKind::Directory
                     || !before.same_identity(&opened)
                     || !opened.same_identity(&after)
                 {

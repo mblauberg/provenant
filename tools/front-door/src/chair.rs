@@ -1,17 +1,20 @@
 //! Opt-in chair handoff composition. Hooks read cached quota, never probe it.
 use provenant_cli::{Chair, Globals};
 use provenant_core::Roots;
+use provenant_os::exec::ExecOptions;
+use provenant_os::exec::Executor;
+use provenant_os::exec::StreamPolicy;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::exec::Termination;
+use provenant_os::fs::Directory;
 use provenant_providers::identity::RegisteredAccount;
 use provenant_quota::{
     AccountRecord, QuotaSnapshot,
     chair::{SwitchDecision, decide_switch},
 };
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::{
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-    fs::{Directory, LocalFs},
-    sys::hook_io,
-};
+
+use provenant_os::sys::hook_io;
 use provenant_workflow::{
     chair::{Handoff, HandoffStore},
     session::{HostSessionId, SessionStore},
@@ -263,11 +266,8 @@ fn switch(
     automatic: bool,
     deadline: Option<Instant>,
 ) -> Result<Option<Value>, Error> {
-    let config = provenant_config::read_with_domains(
-        &context.roots,
-        &LocalFs,
-        &provenant_cli::domains::SECTIONS,
-    )?;
+    let config =
+        provenant_config::read_with_domains(&context.roots, &provenant_cli::domains::SECTIONS)?;
     let knob = |name: &str| config.knobs.get(name).map(|k| &k.value);
     if automatic && knob("chair.auto_switch").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
@@ -410,11 +410,8 @@ fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
             .target_account
             .as_deref()
             .ok_or("handoff target unavailable")?;
-        let config = provenant_config::read_with_domains(
-            &context.roots,
-            &LocalFs,
-            &provenant_cli::domains::SECTIONS,
-        )?;
+        let config =
+            provenant_config::read_with_domains(&context.roots, &provenant_cli::domains::SECTIONS)?;
         if !config
             .knobs
             .get("chair.switch_accounts")

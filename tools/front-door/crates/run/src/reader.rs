@@ -353,7 +353,8 @@ impl RunStore {
     }
     /// A terminal row may precede the guardian releasing writer custody.
     pub fn custody_released(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
-        use provenant_supervisor::fs::{FsError, LockMode};
+        use provenant_os::fs::FsError;
+        use provenant_os::fs::LockMode;
         if record.project_id != self.context.project_id {
             return Err(RunError::UnsafePath);
         }

@@ -11,7 +11,7 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 /// The process edge must keep this policy fixed and never independently reap
 /// owned children. A blocked SIGCHLD is safe: polling still consumes status.
-pub(crate) fn verify_child_wait_policy() -> io::Result<()> {
+pub fn verify_child_wait_policy() -> io::Result<()> {
     let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
     // SAFETY: a null input only queries SIGCHLD. The output points to writable,
     // correctly aligned storage; libc retains no pointer and changes no action.
@@ -31,22 +31,22 @@ pub(crate) fn verify_child_wait_policy() -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) struct OwnedPid {
+pub struct OwnedPid {
     child: Option<Child>,
     permit: Option<Permit>,
     reaped: bool,
-    pub(crate) stdin: Option<ChildStdin>,
-    pub(crate) stdout: Option<ChildStdout>,
-    pub(crate) stderr: Option<ChildStderr>,
+    pub stdin: Option<ChildStdin>,
+    pub stdout: Option<ChildStdout>,
+    pub stderr: Option<ChildStderr>,
 }
-pub(crate) struct SpawnSpec<'a> {
-    pub(crate) argv: &'a [OsString],
-    pub(crate) env: Option<&'a [(OsString, OsString)]>,
-    pub(crate) cwd: &'a Path,
-    pub(crate) input: bool,
-    pub(crate) secret_input: Option<&'a crate::exec::SecretInput>,
-    pub(crate) capture_stdout: bool,
-    pub(crate) capture_stderr: bool,
+pub struct SpawnSpec<'a> {
+    pub argv: &'a [OsString],
+    pub env: Option<&'a [(OsString, OsString)]>,
+    pub cwd: &'a Path,
+    pub input: bool,
+    pub secret_input: Option<&'a crate::exec::SecretInput>,
+    pub capture_stdout: bool,
+    pub capture_stderr: bool,
 }
 fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     // SAFETY: fd is borrowed and live for both calls; flags belong to this
@@ -63,7 +63,7 @@ fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     Ok(())
 }
 impl OwnedPid {
-    pub(crate) fn spawn(permit: Permit, spec: SpawnSpec<'_>) -> io::Result<Self> {
+    pub fn spawn(permit: Permit, spec: SpawnSpec<'_>) -> io::Result<Self> {
         Self::spawn_with_setup(permit, spec, |result| {
             if let Some(pipe) = &result.stdin {
                 nonblocking(pipe)?;
@@ -77,7 +77,7 @@ impl OwnedPid {
             Ok(())
         })
     }
-    pub(crate) fn spawn_with_setup(
+    pub fn spawn_with_setup(
         permit: Permit,
         spec: SpawnSpec<'_>,
         setup: impl FnOnce(&mut Self) -> io::Result<()>,
@@ -174,14 +174,14 @@ impl OwnedPid {
             permit.transfer(child);
         }
     }
-    pub(crate) fn fail_and_transfer(mut self) {
+    pub fn fail_and_transfer(mut self) {
         self.kill_before_transfer();
     }
     #[cfg(test)]
-    pub(crate) fn pid_for_test(&self) -> Option<u32> {
+    pub fn pid_for_test(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
-    pub(crate) fn observe(&mut self) -> io::Result<Option<Termination>> {
+    pub fn observe(&mut self) -> io::Result<Option<Termination>> {
         let child = self
             .child
             .as_mut()
@@ -225,7 +225,7 @@ impl OwnedPid {
             Err(error)
         }
     }
-    pub(crate) fn ready(
+    pub fn ready(
         &self,
         out: Option<&ChildStdout>,
         err: Option<&ChildStderr>,
@@ -272,7 +272,7 @@ impl Drop for OwnedPid {
 }
 
 #[cfg(all(test, feature = "fixture"))]
-pub(crate) fn reap_pid_for_test(pid: u32) -> io::Result<i32> {
+pub fn reap_pid_for_test(pid: u32) -> io::Result<i32> {
     let mut status = 0;
     // SAFETY: callers pass the PID returned by this test process's own spawn;
     // the fixture pauses its reaper before intentionally taking the wait.
@@ -285,7 +285,7 @@ pub(crate) fn reap_pid_for_test(pid: u32) -> io::Result<i32> {
 }
 
 #[cfg(all(test, feature = "fixture"))]
-pub(crate) fn pid_is_absent_for_test(pid: u32) -> io::Result<bool> {
+pub fn pid_is_absent_for_test(pid: u32) -> io::Result<bool> {
     // SAFETY: signal zero only checks the status of the just-reaped fixture
     // PID and sends no signal; no pointer or ownership crosses the call.
     if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {

@@ -1,6 +1,6 @@
 //! Bounded Git transport for committed writer results and fenced landing.
 //!
-//! Every Git child runs through supervisor custody with a fixed executable,
+//! Every Git child uses bounded OS execution with a fixed executable,
 //! explicit environment, disabled hooks and bounded capture. Bundle refs are
 //! operation-scoped under `refs/provenant/transport/`; no caller supplied ref
 //! or command string reaches Git.
@@ -9,9 +9,9 @@ use provenant_fabric_store::{
     ClaimFence, Error as StoreError, LandingGuard, PushAction, PushOperation, PushPhase,
     Request as StoreRequest, Store,
 };
-use provenant_supervisor::{
+use provenant_os::{
     exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
-    fs::{self, Directory, FileKind, FsError, LockGuard, Publication, PublishMode},
+    fs::{self, Directory, FileKind, FsError, LockGuard, PublishMode},
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -220,13 +220,11 @@ impl<'a> GitTransport<'a> {
         ssh_auth_sock: Option<PathBuf>,
         max_bundle_bytes: usize,
     ) -> Result<Self> {
-        if !git_executable.is_absolute()
-            || !provenant_supervisor::sys::is_executable(&git_executable)
-        {
+        if !git_executable.is_absolute() || !provenant_os::sys::is_executable(&git_executable) {
             return Err(GitTransportError::GitUnavailable);
         }
         if !crate::config::valid_executable_override(&ssh_executable)
-            || !provenant_supervisor::sys::is_executable(&ssh_executable)
+            || !provenant_os::sys::is_executable(&ssh_executable)
         {
             return Err(GitTransportError::SshUnavailable);
         }
@@ -261,8 +259,7 @@ impl<'a> GitTransport<'a> {
         if bundle_bytes == 0 || bundle_bytes > MAX_BUNDLE_BYTES as u64 {
             return Err(GitTransportError::Invalid("Git bundle limit"));
         }
-        let git =
-            provenant_supervisor::git::git_executable().ok_or(GitTransportError::GitUnavailable)?;
+        let git = provenant_os::git::git_executable().ok_or(GitTransportError::GitUnavailable)?;
         let ssh = crate::hosts::discover_ssh_executable(ssh_executable).map_err(|_| {
             if ssh_executable.is_some() {
                 GitTransportError::Invalid("SSH executable")
@@ -361,10 +358,9 @@ impl<'a> GitTransport<'a> {
             &outcome.stdout.bytes,
             PublishMode::NoReplace,
         ) {
-            Ok(Publication::Durable) => {}
-            Ok(Publication::VisibleDurabilityUnconfirmed { .. }) => {
-                return Err(GitTransportError::BundleDurabilityUnconfirmed);
-            }
+            Ok(publication) => publication
+                .require_durable()
+                .map_err(|_| GitTransportError::BundleDurabilityUnconfirmed)?,
             Err(error) if error.is_exists() => {
                 if area.read_bundle(&name, self.max_bundle_bytes)? != outcome.stdout.bytes {
                     return Err(GitTransportError::TransportConflict);
@@ -414,10 +410,9 @@ impl<'a> GitTransport<'a> {
             bytes,
             PublishMode::NoReplace,
         ) {
-            Ok(Publication::Durable) => {}
-            Ok(Publication::VisibleDurabilityUnconfirmed { .. }) => {
-                return Err(GitTransportError::BundleDurabilityUnconfirmed);
-            }
+            Ok(publication) => publication
+                .require_durable()
+                .map_err(|_| GitTransportError::BundleDurabilityUnconfirmed)?,
             Err(error) if error.is_exists() => {
                 if area.read_bundle(&name, self.max_bundle_bytes)? != bytes {
                     return Err(GitTransportError::TransportConflict);
@@ -1259,7 +1254,7 @@ fn validate_remote_url(remote: &str) -> Result<()> {
 mod tests {
     use super::*;
     use provenant_core::{CancelToken, Clock, MonoTime, TestClock, WaitBudget, WallTime};
-    use provenant_supervisor::{
+    use provenant_os::{
         exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, SystemExecutor},
         fs::Directory,
     };
@@ -1436,7 +1431,7 @@ mod tests {
         let writer = writer_dir
             .lock(
                 OsStr::new("writer.lock"),
-                provenant_supervisor::fs::LockMode::Exclusive,
+                provenant_os::fs::LockMode::Exclusive,
                 WaitBudget::cli(fixture.clock.mono_now(), 1).unwrap(),
                 &fixture.cancel,
                 &fixture.clock,

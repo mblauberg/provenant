@@ -19,11 +19,13 @@ use provenant_fabric_runtime::{
     },
     hosts::{PeerAction, PeerResult, plain_text},
 };
+use provenant_os::clock::SystemClock;
+use provenant_os::exec::ExecOptions;
+use provenant_os::exec::Executor;
+use provenant_os::exec::StreamPolicy;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::exec::Termination;
 use provenant_records::{CommandResult, Outcome};
-use provenant_supervisor::{
-    clock::SystemClock,
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-};
 use provenant_workflow::session::{HostSessionId, SessionStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -129,7 +131,7 @@ fn write_owner(dir: &Path, owner: &Owner) -> io::Result<()> {
     let staged = dir.join(format!(
         ".owner.{}.{}.tmp",
         std::process::id(),
-        provenant_supervisor::fs::temporary_name()?.to_string_lossy()
+        provenant_os::fs::temporary_name()?.to_string_lossy()
     ));
     let result = write_new(&staged, &serde_json::to_vec_pretty(owner)?, 0o600)
         .and_then(|()| fs::rename(&staged, dir.join("owner.json")));
@@ -1596,7 +1598,6 @@ pub(crate) fn receive(
     // A config that cannot be read counts as off.
     let accepted = provenant_config::read_with_domains(
         &target.context.roots,
-        &provenant_supervisor::fs::LocalFs,
         &provenant_cli::domains::SECTIONS,
     )
     .ok()

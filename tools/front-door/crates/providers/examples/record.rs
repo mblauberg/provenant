@@ -26,23 +26,22 @@ use provenant_confinement::{
     verify_worktree,
 };
 use provenant_core::{CancelToken, ProjectId, WorkScope};
+use provenant_os::exec::{
+    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+};
+use provenant_os::fs::Directory;
 use provenant_providers::claude::{Login, refresh_for_account};
 use provenant_providers::{
     Adapter, ExitObservation, LaunchSpec, OutcomeStatus, PrepareInput, Prompt, REGISTRY, SetupStep,
     Stdin,
 };
 use provenant_records::ResolvedRoute;
-use provenant_supervisor::exec::{
-    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
-};
-use provenant_supervisor::fs::{Directory, LocalFs, SafeFs};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -427,7 +426,6 @@ fn claude_account_key(
 struct Context<'a> {
     home: &'a Path,
     executor: &'a SystemExecutor,
-    safe_fs: &'a LocalFs,
     backend: &'a dyn provenant_confinement::ConfinementBackend,
     worktree: Option<(&'a provenant_confinement::VerifiedWorktree, &'a GitRefName)>,
 }
@@ -441,7 +439,6 @@ fn compile(
         (&plan.permissions().mode, context.worktree)
     {
         provenant_confinement::permissions::prepare_writer_directories(
-            context.safe_fs,
             worktree,
             selected_ref,
             authority,
@@ -450,12 +447,11 @@ fn compile(
     }
     let directories = required_anchors(plan.permissions(), profile, context.worktree)
         .into_iter()
-        .map(|path| AnchoredDirectory::open_canonical(context.safe_fs, path))
+        .map(AnchoredDirectory::open_canonical)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let anchors = Anchors {
         home: context.home,
         directories: &directories,
-        safe_fs: context.safe_fs,
         worktree: context.worktree,
     };
     Ok(plan.compile(context.backend, profile, &anchors)?)
@@ -967,19 +963,16 @@ fn main() -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
     let user = std::env::var_os("USER").ok_or("USER")?;
     let executor = SystemExecutor::new(4)?;
-    let safe_fs = LocalFs;
     let cancel = CancelToken::new();
     let backend = system_backend(&BackendContext {
-        safe_fs: &safe_fs,
         executor: &executor,
         cancel: &cancel,
         #[cfg(target_os = "macos")]
         env: &[],
     })?;
     let selected_ref = GitRefName::branch(BRANCH)?;
-    let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
     let git = std::fs::canonicalize(which("git").ok_or("git")?)?;
-    let runtime = UtilityRuntime::new(fs, git.clone(), &layout.home_git)?;
+    let runtime = UtilityRuntime::new(git.clone(), &layout.home_git)?;
     let worktree = if args.writer {
         let repo = runtime.open_repo(
             &executor,
@@ -994,7 +987,6 @@ fn main() -> Result<()> {
     let context = Context {
         home: &home,
         executor: &executor,
-        safe_fs: &safe_fs,
         backend: backend.as_ref(),
         worktree: worktree.as_ref().map(|tree| (tree, &selected_ref)),
     };

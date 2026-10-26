@@ -1,28 +1,18 @@
-//! Sans-IO process policy and the safe operating-system boundary.
+//! Sans-IO process policy and provider custody.
 //!
 //! Utilities run through bounded execution; providers remain in guardian custody.
 #![deny(unsafe_code)]
 
-pub mod clock;
-pub mod disk;
-pub mod exec;
-pub mod fs;
-pub mod git;
-pub mod home;
-mod identity;
-pub mod pid;
-// This is the sole syscall boundary, including nonblocking child/lock waits.
+// Custody-specific syscalls remain alongside the process policy.
 #[allow(unsafe_code, clippy::disallowed_methods)]
-pub mod sys;
+mod process_os;
 
-pub mod capture;
 pub mod census;
 pub mod custody;
 #[cfg(feature = "fixture")]
 pub mod fixture;
 mod guardian;
 pub mod machine;
-pub mod scratch;
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
 pub use guardian::{

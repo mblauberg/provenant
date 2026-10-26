@@ -1,10 +1,12 @@
 //! Shared process-edge release smoke for installation and build packaging.
 use provenant_config::{self as config, Release, ReleaseSmoke};
 use provenant_core::CancelToken;
+use provenant_os::exec::ExecOptions;
+use provenant_os::exec::Executor;
+use provenant_os::exec::StreamPolicy;
+use provenant_os::exec::SystemExecutor;
+use provenant_os::exec::Termination;
 use provenant_records::VersionInfo;
-use provenant_supervisor::exec::{
-    ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::{ffi::OsString, io, path::Path, time::Duration};
 

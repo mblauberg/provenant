@@ -176,11 +176,14 @@ mod tests {
     }
 }
 
-mod child;
+#[doc(hidden)]
+pub mod child;
 pub(crate) mod pid;
-pub(crate) mod raw_exec;
+#[doc(hidden)]
+pub mod raw_exec;
 
-pub(crate) mod fs;
+#[doc(hidden)]
+pub mod fs;
 
 /// Named platform errno values; consumers must not import libc.
 pub mod errno {
@@ -190,7 +193,8 @@ pub mod errno {
     };
 }
 
-pub(crate) mod reaper;
+#[doc(hidden)]
+pub mod reaper;
 pub mod resources;
 
 /// Construct the fixture binary's only child command through the same strict
@@ -356,7 +360,7 @@ pub fn fixture_read_secret_pipe(fd: i32) -> io::Result<Vec<u8>> {
 
 /// Create deliberately inheritable state only in the isolated fixture process.
 #[cfg(feature = "fixture")]
-pub(crate) fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {
+pub fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let file = std::fs::File::open("/dev/null")?;
     // SAFETY: file is live; F_DUPFD returns a distinct owned descriptor without
@@ -387,7 +391,7 @@ pub(crate) fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {
 }
 
 #[cfg(feature = "fixture")]
-pub(crate) fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result<()> {
+pub fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result<()> {
     // SAFETY: F_GETFD inspects an integer fd without taking ownership.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     let descriptor_ok = if parent {
@@ -424,7 +428,7 @@ pub(crate) fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result
 /// Enter a sandbox that denies every Mach lookup except the attempt's own
 /// name, the shape of the production profile for this purpose. Irreversible.
 #[cfg(all(feature = "fixture", target_os = "macos"))]
-pub(crate) fn fixture_enter_attempt_sandbox(lookup_name: &str) -> io::Result<()> {
+pub fn fixture_enter_attempt_sandbox(lookup_name: &str) -> io::Result<()> {
     unsafe extern "C" {
         fn sandbox_init(
             profile: *const libc::c_char,
@@ -446,7 +450,7 @@ pub(crate) fn fixture_enter_attempt_sandbox(lookup_name: &str) -> io::Result<()>
 }
 
 #[cfg(feature = "fixture")]
-pub(crate) fn fixture_ignore_term() -> io::Result<()> {
+pub fn fixture_ignore_term() -> io::Result<()> {
     // SAFETY: the dedicated fixture changes only its own disposition; SIG_IGN
     // is a valid platform handler constant, no resource or pointer transfers,
     // and failure reports thread-local errno. Never used in a shared host.
@@ -458,7 +462,7 @@ pub(crate) fn fixture_ignore_term() -> io::Result<()> {
 
 /// Used only in a dedicated, single-threaded fixture process before any spawn.
 #[cfg(feature = "fixture")]
-pub(crate) fn fixture_wait_policy(mode: &str) -> io::Result<()> {
+pub fn fixture_wait_policy(mode: &str) -> io::Result<()> {
     extern "C" fn handler(_: libc::c_int) {}
     // SAFETY: libc's sigaction record permits zeroed integers, pointer-sized
     // handler and mask storage. sigemptyset below initialises its platform mask.
@@ -497,18 +501,14 @@ pub(crate) fn fixture_wait_policy(mode: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) mod census;
-pub(crate) mod handoff;
-pub(crate) mod provider;
-
 /// One bounded scheduler pause. Callers recheck cancellation between pauses.
-pub(crate) fn wait_pause(duration: std::time::Duration) {
+pub fn wait_pause(duration: std::time::Duration) {
     std::thread::sleep(duration.min(std::time::Duration::from_millis(50)));
 }
 
 /// All production clocks use this process-wide monotonic coordinate.
 #[allow(clippy::disallowed_methods)]
-pub(crate) fn monotonic_now() -> provenant_core::MonoTime {
+pub fn monotonic_now() -> provenant_core::MonoTime {
     static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let elapsed = ORIGIN
         .get_or_init(std::time::Instant::now)

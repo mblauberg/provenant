@@ -2,14 +2,14 @@
 //!
 //! Prompt-training callers use this before exposing a prompt to a run. Path
 //! overlap is refused before any traversal; every candidate is then scanned
-//! through held `SafeDir`/`SafeFile` capabilities with strict file and byte
+//! through held `Directory`/`FileHandle` capabilities with strict file and byte
 //! budgets. Secret-pattern matches and incomplete observations refuse.
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::Path;
 
-use provenant_supervisor::exec::CaptureFilter;
-use provenant_supervisor::fs::{FileKind, Metadata, SafeDir, SafeFs};
+use provenant_os::exec::CaptureFilter;
+use provenant_os::fs::{Directory, FileKind, Metadata};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -42,7 +42,7 @@ pub enum DisclosureError {
     #[error("disclosure secret set is invalid")]
     InvalidSecretSet(#[source] RedactorError),
     #[error("disclosure filesystem operation failed")]
-    Filesystem(#[source] provenant_supervisor::fs::FsError),
+    Filesystem(#[source] provenant_os::fs::FsError),
     #[error("disclosure scan read failed")]
     Read(#[source] std::io::Error),
     #[error("disclosure scan digest encoding failed")]
@@ -73,7 +73,6 @@ pub struct DisclosureReceipt {
 /// Scan candidate roots in deterministic path order. The digest commits to
 /// path bytes and file contents but contains no source text.
 pub fn scan_disclosure(
-    safe_fs: &dyn SafeFs,
     request: &DisclosureRequest<'_>,
 ) -> Result<DisclosureReceipt, DisclosureError> {
     let prompt = PathGrant {
@@ -116,7 +115,7 @@ pub fn scan_disclosure(
     }
 
     for protected in request.protected_roots {
-        verify_grant(safe_fs, protected)?;
+        verify_grant(protected)?;
     }
 
     candidates.sort_by(|left, right| {
@@ -152,7 +151,7 @@ pub fn scan_disclosure(
         digest: Sha256::new(),
     };
     for candidate in selected {
-        scanner.scan_root(safe_fs, &candidate)?;
+        scanner.scan_root(&candidate)?;
     }
     let digest = scanner.digest.finalize();
     let mut content_digest = String::with_capacity(64);
@@ -198,17 +197,13 @@ struct Scanner {
 }
 
 enum OpenedGrant {
-    Directory(Box<dyn SafeDir>),
-    ExactFile {
-        parent: Box<dyn SafeDir>,
-        name: OsString,
-    },
+    Directory(Directory),
+    ExactFile { parent: Directory, name: OsString },
 }
 
-fn open_grant(safe_fs: &dyn SafeFs, grant: &PathGrant) -> Result<OpenedGrant, DisclosureError> {
+fn open_grant(grant: &PathGrant) -> Result<OpenedGrant, DisclosureError> {
     match grant.scope {
-        PathScope::Subtree => safe_fs
-            .open_anchor(&grant.path)
+        PathScope::Subtree => Directory::open_anchor(&grant.path)
             .map(OpenedGrant::Directory)
             .map_err(DisclosureError::Filesystem),
         PathScope::Exact => {
@@ -218,21 +213,15 @@ fn open_grant(safe_fs: &dyn SafeFs, grant: &PathGrant) -> Result<OpenedGrant, Di
                 .file_name()
                 .ok_or(DisclosureError::InvalidPath)?
                 .to_owned();
-            let parent = safe_fs
-                .open_anchor(parent)
-                .map_err(DisclosureError::Filesystem)?;
+            let parent = Directory::open_anchor(parent).map_err(DisclosureError::Filesystem)?;
             Ok(OpenedGrant::ExactFile { parent, name })
         }
     }
 }
 
 impl Scanner {
-    fn scan_root(
-        &mut self,
-        safe_fs: &dyn SafeFs,
-        grant: &PathGrant,
-    ) -> Result<(), DisclosureError> {
-        match open_grant(safe_fs, grant)? {
+    fn scan_root(&mut self, grant: &PathGrant) -> Result<(), DisclosureError> {
+        match open_grant(grant)? {
             OpenedGrant::Directory(directory) => {
                 if directory
                     .metadata()
@@ -285,7 +274,7 @@ impl Scanner {
                                 child_directories.push((child_path, child, depth + 1));
                             }
                             FileKind::Regular => {
-                                self.scan_file(directory.as_ref(), &name, &child_path, metadata)?;
+                                self.scan_file(&directory, &name, &child_path, metadata)?;
                             }
                             FileKind::Symlink | FileKind::Other => {
                                 return Err(DisclosureError::UnsafeEntry);
@@ -299,7 +288,7 @@ impl Scanner {
                 let metadata = parent
                     .metadata_at(&name, false)
                     .map_err(DisclosureError::Filesystem)?;
-                self.scan_file(parent.as_ref(), &name, &grant.path, metadata)?;
+                self.scan_file(&parent, &name, &grant.path, metadata)?;
             }
         }
         Ok(())
@@ -307,7 +296,7 @@ impl Scanner {
 
     fn scan_file(
         &mut self,
-        directory: &dyn SafeDir,
+        directory: &Directory,
         name: &OsStr,
         absolute: &Path,
         before: Metadata,
@@ -396,8 +385,8 @@ impl Scanner {
     }
 }
 
-fn verify_grant(safe_fs: &dyn SafeFs, grant: &PathGrant) -> Result<(), DisclosureError> {
-    match open_grant(safe_fs, grant)? {
+fn verify_grant(grant: &PathGrant) -> Result<(), DisclosureError> {
+    match open_grant(grant)? {
         OpenedGrant::Directory(directory) => {
             let metadata = directory.metadata().map_err(DisclosureError::Filesystem)?;
             if metadata.kind != FileKind::Directory {
@@ -417,8 +406,7 @@ fn verify_grant(safe_fs: &dyn SafeFs, grant: &PathGrant) -> Result<(), Disclosur
 }
 
 fn require_canonical_path(path: &Path) -> Result<(), DisclosureError> {
-    let canonical =
-        provenant_supervisor::fs::canonicalize(path).map_err(DisclosureError::Filesystem)?;
+    let canonical = provenant_os::fs::canonicalize(path).map_err(DisclosureError::Filesystem)?;
     if canonical.as_path() != path {
         return Err(DisclosureError::InvalidPath);
     }
@@ -428,7 +416,6 @@ fn require_canonical_path(path: &Path) -> Result<(), DisclosureError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_supervisor::fs::LocalFs;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -447,9 +434,9 @@ mod tests {
             fs::create_dir(&work).expect("work directory");
             let prompt = temp.path().join("prompt.txt");
             fs::write(&prompt, b"prompt").expect("prompt file");
-            let prompt = provenant_supervisor::fs::canonicalize(&prompt).expect("canonical prompt");
+            let prompt = provenant_os::fs::canonicalize(&prompt).expect("canonical prompt");
             let cwd = PathGrant {
-                path: provenant_supervisor::fs::canonicalize(&work).expect("canonical work"),
+                path: provenant_os::fs::canonicalize(&work).expect("canonical work"),
                 scope: PathScope::Subtree,
             };
             Self {
@@ -485,11 +472,11 @@ mod tests {
         let prompt_path = &fixture.prompt;
         let cwd = &fixture.cwd;
         let protected = [PathGrant {
-            path: provenant_supervisor::fs::canonicalize(&protected_path)
+            path: provenant_os::fs::canonicalize(&protected_path)
                 .expect("canonical protected file"),
             scope: PathScope::Exact,
         }];
-        let result = scan_disclosure(&LocalFs, &request(prompt_path, cwd, &[], &protected, &[]));
+        let result = scan_disclosure(&request(prompt_path, cwd, &[], &protected, &[]));
         assert!(matches!(result, Err(DisclosureError::ProtectedOverlap)));
     }
 
@@ -507,9 +494,9 @@ mod tests {
         };
         assert_ne!(
             cwd.path,
-            provenant_supervisor::fs::canonicalize(&cwd.path).expect("canonical work root")
+            provenant_os::fs::canonicalize(&cwd.path).expect("canonical work root")
         );
-        let result = scan_disclosure(&LocalFs, &request(canonical_prompt, &cwd, &[], &[], &[]));
+        let result = scan_disclosure(&request(canonical_prompt, &cwd, &[], &[], &[]));
         assert!(matches!(result, Err(DisclosureError::InvalidPath)));
     }
 
@@ -517,16 +504,13 @@ mod tests {
     fn bounded_scan_refuses_secret_patterns_without_returning_content() {
         let fixture = DisclosureFixture::new();
         fs::write(fixture.work.join("notes.txt"), b"private token-abc-123").expect("file write");
-        let result = scan_disclosure(
-            &LocalFs,
-            &request(
-                &fixture.prompt,
-                &fixture.cwd,
-                &[],
-                &[],
-                &[b"token-abc-123".to_vec()],
-            ),
-        );
+        let result = scan_disclosure(&request(
+            &fixture.prompt,
+            &fixture.cwd,
+            &[],
+            &[],
+            &[b"token-abc-123".to_vec()],
+        ));
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
     }
 
@@ -538,16 +522,13 @@ mod tests {
             b"bearer values; Bearer values; bare sk-; Akia1234567890123456; read ssh://git@host and https://example.invalid/docs",
         )
         .expect("file write");
-        let result = scan_disclosure(
-            &LocalFs,
-            &request(
-                &fixture.prompt,
-                &fixture.cwd,
-                &[],
-                &[],
-                &[b"secret-123".to_vec()],
-            ),
-        );
+        let result = scan_disclosure(&request(
+            &fixture.prompt,
+            &fixture.cwd,
+            &[],
+            &[],
+            &[b"secret-123".to_vec()],
+        ));
         assert!(result.is_ok());
     }
 
@@ -555,16 +536,13 @@ mod tests {
     fn prompt_outside_read_roots_is_scanned_for_known_secrets() {
         let fixture = DisclosureFixture::new();
         fs::write(&fixture.prompt, b"prompt contains secret-123").expect("prompt file");
-        let result = scan_disclosure(
-            &LocalFs,
-            &request(
-                &fixture.prompt,
-                &fixture.cwd,
-                &[],
-                &[],
-                &[b"secret-123".to_vec()],
-            ),
-        );
+        let result = scan_disclosure(&request(
+            &fixture.prompt,
+            &fixture.cwd,
+            &[],
+            &[],
+            &[b"secret-123".to_vec()],
+        ));
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
     }
 
@@ -579,7 +557,7 @@ mod tests {
             path: PathBuf::from("/tmp/work-scoped"),
             scope: PathScope::Subtree,
         };
-        let result = scan_disclosure(&LocalFs, &request(prompt, &cwd, &[credential], &[], &[]));
+        let result = scan_disclosure(&request(prompt, &cwd, &[credential], &[], &[]));
         assert!(matches!(
             result,
             Err(DisclosureError::Grant(PermissionError::CredentialRoot))
@@ -592,10 +570,7 @@ mod tests {
         let file = fs::File::create(fixture.work.join("large.bin")).expect("file create");
         file.set_len(MAX_DISCLOSURE_BYTES + 1)
             .expect("sparse file size");
-        let result = scan_disclosure(
-            &LocalFs,
-            &request(&fixture.prompt, &fixture.cwd, &[], &[], &[]),
-        );
+        let result = scan_disclosure(&request(&fixture.prompt, &fixture.cwd, &[], &[], &[]));
         assert!(matches!(result, Err(DisclosureError::BudgetExceeded)));
     }
 }

@@ -98,7 +98,7 @@ impl RemoteCoordination<'_> {
             Some(match id {
                 Some(id) => id,
                 None => OperationId::parse(&provenant_core::hex(
-                    &provenant_supervisor::fs::entropy_128().map_err(CoordinationError::Entropy)?,
+                    &provenant_os::fs::entropy_128().map_err(CoordinationError::Entropy)?,
                 ))
                 .map_err(|_| CoordinationError::EntropyEncoding)?,
             })
@@ -338,7 +338,7 @@ impl CoordinationApi for CoordinationService<'_> {
         let operation_id = match operation_id {
             Some(operation_id) => operation_id,
             None => OperationId::parse(&provenant_core::hex(
-                &provenant_supervisor::fs::entropy_128().map_err(CoordinationError::Entropy)?,
+                &provenant_os::fs::entropy_128().map_err(CoordinationError::Entropy)?,
             ))
             .map_err(|_| CoordinationError::EntropyEncoding)?,
         };
@@ -362,7 +362,7 @@ impl<'a> CoordinationService<'a> {
         config: &crate::config::FabricConfig,
         home: &'a std::path::Path,
         cwd: &'a std::path::Path,
-        executor: &'a dyn provenant_supervisor::exec::Executor,
+        executor: &'a dyn provenant_os::exec::Executor,
         clock: &'a dyn Clock,
         backoff: &'a dyn RetryWait,
         budget: WaitBudget,
@@ -444,7 +444,7 @@ mod tests {
         WaitBudget,
     };
     use provenant_fabric_store::{PeerPhase, PeerPhaseChange, Request, Store, ThreadWait};
-    use provenant_supervisor::{clock::SystemClock, fs::LocalFs};
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
     use std::{
         os::unix::fs::PermissionsExt,
         path::Path,
@@ -566,7 +566,7 @@ mod tests {
             let base = temporary.path().canonicalize().unwrap();
             let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
             inputs.state_dir = Some(base.join("state"));
-            let root: StateRoot = inputs.resolve(&LocalFs).unwrap().state;
+            let root: StateRoot = inputs.resolve(&SystemPathResolver).unwrap().state;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let backoff = ThreadWait;

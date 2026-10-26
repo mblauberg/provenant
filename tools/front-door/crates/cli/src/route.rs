@@ -2,13 +2,14 @@
 use crate::{Globals, RenderMode};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Roots, WallTime};
+use provenant_os::fs::FsError;
 use provenant_providers::{AvailabilityRecord, REGISTRY};
 use provenant_records::{CommandError, CommandResult, Outcome, RouteReadiness};
 use provenant_routing::{
     AccessContext, BoundedModels, Catalogue, Fallback, ModelId, PacingPolicy, QuotaObservation,
     RouteChoice, RouteName, RoutePoolMember, RoutingContext, RoutingError,
 };
-use provenant_supervisor::fs::{FsError, LocalFs};
+
 use serde::Serialize;
 use std::{collections::BTreeSet, io, str::FromStr};
 
@@ -236,7 +237,7 @@ fn with_context<T>(
     host: &str,
     action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
-    let config = provenant_config::read_with_domains(roots, &LocalFs, &crate::domains::SECTIONS)?
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
         .domains
         .routing;
     let catalogue = Catalogue::bundled()?;
@@ -517,7 +518,6 @@ fn edit_config(
 ) -> Result<(), EdgeError> {
     let _ = provenant_config::edit_config_document::<crate::domains::Domains>(
         roots,
-        &LocalFs,
         &crate::domains::SECTIONS,
         edit,
     )?;

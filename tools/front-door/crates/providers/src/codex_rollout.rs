@@ -1,6 +1,6 @@
 //! Host-only, bounded identity projection from the selected attempt's Codex home.
 use crate::ProviderError;
-use provenant_supervisor::fs::Directory;
+use provenant_os::fs::Directory;
 use serde::Deserialize;
 use std::{
     ffi::OsStr,

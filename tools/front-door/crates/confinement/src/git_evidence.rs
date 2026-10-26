@@ -4,9 +4,9 @@ use crate::status::{StatusError, StatusKind, parse_index_entries, parse_porcelai
 use crate::utility::{GitRead, UtilityBudget, UtilityError, UtilityRuntime, run_utility};
 use provenant_core::CancelToken;
 use provenant_core::{GitOid, RelativePath};
+use provenant_os::exec::{ExecOutcome, Executor, Termination};
+use provenant_os::fs::{Directory, FsError, Metadata};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
-use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
-use provenant_supervisor::fs::{FsError, Metadata, SafeDir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -391,16 +391,16 @@ fn absent_fingerprint(path: &RepoPath) -> Result<TrackedFingerprint, GitEvidence
     })
 }
 
-/// Reads a single tracked leaf through held SafeDir handles. Symlinks, hard
+/// Reads a single tracked leaf through held Directory handles. Symlinks, hard
 /// links, special files, path drift and oversized files cannot become evidence.
 pub(crate) fn read_tracked_file(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<FileSnapshot, GitEvidenceError> {
     let (parent, leaf) = open_parent(root, path)?;
     let (bytes, after) =
-        crate::stable_read::read_regular(&*parent, &leaf, limit).map_err(map_stable_read_error)?;
+        crate::stable_read::read_regular(&parent, &leaf, limit).map_err(map_stable_read_error)?;
     let fingerprint = fingerprint(path, &bytes, after)?;
     Ok(FileSnapshot { bytes, fingerprint })
 }
@@ -420,7 +420,7 @@ fn map_stable_read_error(error: crate::stable_read::ReadError) -> GitEvidenceErr
 }
 
 pub(crate) fn read_optional_file(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<Option<FileSnapshot>, GitEvidenceError> {
@@ -439,14 +439,14 @@ pub(crate) fn read_optional_file(
 /// Like `read_tracked_file`, but a symlink leaf is evidence too: its bytes are
 /// the link target, read with readlink and never followed.
 pub(crate) fn read_protected_entry(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<FileSnapshot, GitEvidenceError> {
     use std::os::unix::ffi::OsStrExt;
     let (parent, leaf) = open_parent(root, path)?;
     let before = parent.metadata_at(&leaf, false)?;
-    if before.kind != provenant_supervisor::fs::FileKind::Symlink {
+    if before.kind != provenant_os::fs::FileKind::Symlink {
         return read_tracked_file(root, path, limit);
     }
     let target = parent.read_link(&leaf)?;
@@ -463,7 +463,7 @@ pub(crate) fn read_protected_entry(
 }
 
 pub(crate) fn read_optional_protected_entry(
-    root: &dyn SafeDir,
+    root: &Directory,
     path: &RepoPath,
     limit: u64,
 ) -> Result<Option<FileSnapshot>, GitEvidenceError> {
@@ -480,7 +480,7 @@ pub(crate) fn read_optional_protected_entry(
 }
 
 pub(crate) fn open_parent<'a>(
-    root: &'a dyn SafeDir,
+    root: &'a Directory,
     path: &RepoPath,
 ) -> Result<(HeldDir<'a>, OsString), GitEvidenceError> {
     let mut normals = Vec::new();
@@ -503,21 +503,21 @@ pub(crate) fn open_parent<'a>(
 }
 
 pub(crate) enum HeldDir<'a> {
-    Borrowed(&'a dyn SafeDir),
-    Owned(Box<dyn SafeDir>),
+    Borrowed(&'a Directory),
+    Owned(Directory),
 }
-impl<'a> Deref for HeldDir<'a> {
-    type Target = dyn SafeDir + 'a;
+impl Deref for HeldDir<'_> {
+    type Target = Directory;
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::Borrowed(directory) => *directory,
-            Self::Owned(directory) => directory.as_ref(),
+            Self::Borrowed(directory) => directory,
+            Self::Owned(directory) => directory,
         }
     }
 }
 
 pub(crate) fn read_index_fingerprint(
-    directory: &dyn SafeDir,
+    directory: &Directory,
 ) -> Result<IndexFingerprint, GitEvidenceError> {
     let (bytes, after) =
         crate::stable_read::read_regular(directory, OsStr::new("index"), MAX_GIT_RECORD_BYTES)
@@ -540,7 +540,7 @@ pub(crate) fn read_index_fingerprint(
     })
 }
 
-pub(crate) fn refuse_index_lock(directory: &dyn SafeDir) -> Result<(), GitEvidenceError> {
+pub(crate) fn refuse_index_lock(directory: &Directory) -> Result<(), GitEvidenceError> {
     match directory.metadata_at(OsStr::new("index.lock"), false) {
         Ok(_) => Err(GitEvidenceError::ConcurrentChange),
         Err(error) if error.is_not_found() => Ok(()),

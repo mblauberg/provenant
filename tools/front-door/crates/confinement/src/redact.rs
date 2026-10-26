@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 
-use provenant_supervisor::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
+use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 
 const REDACTED: &[u8] = b"[REDACTED]";
 const MAX_SECRETS: usize = 128;

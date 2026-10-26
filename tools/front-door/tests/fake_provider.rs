@@ -69,7 +69,9 @@ fn scenario(name: &str) -> Result<u8> {
             }
         }
         "descendants" => {
-            use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor};
+            use provenant_os::exec::ExecOptions;
+            use provenant_os::exec::Executor;
+            use provenant_os::exec::SystemExecutor;
             let argv = [std::env::current_exe()?.into_os_string(), "barrier".into()];
             let environment: Vec<_> = std::env::vars_os().collect();
             let cwd = std::env::current_dir()?;
@@ -164,6 +166,9 @@ fn account_placement() -> Result {
         AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions,
     };
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use provenant_os::exec::ExecOptions;
+    use provenant_os::exec::Executor;
+    use provenant_os::exec::SystemExecutor;
     use provenant_providers::{
         Adapter, PrepareInput, Prompt, SetupStep, Stdin,
         codex::Codex,
@@ -172,7 +177,6 @@ fn account_placement() -> Result {
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
-    use provenant_supervisor::exec::{ExecOptions, Executor, SystemExecutor};
     use std::{
         ffi::OsStr,
         fs,
@@ -263,7 +267,7 @@ fn account_placement() -> Result {
             provenant: provenant_providers::LaneRuntime {
                 executable: &executable,
                 git: &std::fs::canonicalize(
-                    provenant_supervisor::git::git_executable().ok_or("Git unavailable")?,
+                    provenant_os::git::git_executable().ok_or("Git unavailable")?,
                 )?,
                 state: &rig.state,
                 child_state: &rig.state.join(format!("children/{key}")),

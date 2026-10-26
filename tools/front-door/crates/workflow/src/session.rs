@@ -1,7 +1,7 @@
 //! Explicit host-keyed Markdown checkpoints. No transcript or latest-file lookup.
 use crate::store::{WaitStop, check_wait};
 use provenant_core::{CancelToken, Clock, ProjectId, StateRoot, UtcMicros, WaitBudget};
-use provenant_supervisor::fs::{Directory, FsError, LockMode, Publication, PublishMode};
+use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use thiserror::Error;
@@ -128,17 +128,14 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
-        match dir.atomic_write(
+        dir.atomic_write(
             OsStr::new("checkpoint.md"),
             ".checkpoint.",
             text,
             PublishMode::Replace,
-        )? {
-            Publication::Durable => Ok(()),
-            Publication::VisibleDurabilityUnconfirmed { sync_error } => {
-                Err(SessionError::Durability(sync_error))
-            }
-        }
+        )?
+        .require_durable()
+        .map_err(SessionError::Durability)
     }
     /// Atomic replacement allows a consistent unlocked read of one held file.
     pub fn read(&self) -> Result<Option<Checkpoint>, SessionError> {

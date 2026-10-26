@@ -5,7 +5,7 @@ use crate::{
     plan::valid_read_only_writable,
 };
 use provenant_core::RelativePath;
-use provenant_supervisor::fs::SafeDir;
+use provenant_os::fs::Directory;
 use serde::Deserialize;
 use std::{ffi::OsStr, io::Read, path::Component};
 
@@ -18,7 +18,7 @@ pub struct ReadOnlyPolicy {
 }
 
 impl ReadOnlyPolicy {
-    pub fn read(project: &dyn SafeDir) -> Result<Self, PermissionError> {
+    pub fn read(project: &Directory) -> Result<Self, PermissionError> {
         let file = match project.open_read(OsStr::new("read-only.json")) {
             Ok(file) => file,
             Err(e) if e.is_not_found() => return Ok(Self::default()),
@@ -112,27 +112,22 @@ impl ReadOnlyGrants {
         self.git_reads.iter().map(|grant| grant.path.as_path())
     }
     #[cfg(any(target_os = "macos", test))]
-    pub(crate) fn revalidate(
-        &self,
-        fs: &dyn provenant_supervisor::fs::SafeFs,
-    ) -> Result<(), PermissionError> {
-        let root = fs
-            .open_anchor(&self.root)
-            .map_err(PermissionError::Filesystem)?;
+    pub(crate) fn revalidate(&self) -> Result<(), PermissionError> {
+        let root = Directory::open_anchor(&self.root).map_err(PermissionError::Filesystem)?;
         for path in &self.relative {
             let relative =
                 RelativePath::parse(path).map_err(|_| PermissionError::InvalidReadOnlyPolicy)?;
-            verify_directory_path(root.as_ref(), &relative)?;
+            verify_directory_path(&root, &relative)?;
         }
         Ok(())
     }
 }
 
-fn verify_directory_path(root: &dyn SafeDir, path: &RelativePath) -> Result<(), PermissionError> {
-    let mut directory: Option<Box<dyn SafeDir>> = None;
+fn verify_directory_path(root: &Directory, path: &RelativePath) -> Result<(), PermissionError> {
+    let mut directory: Option<Directory> = None;
     for component in path.as_path().components() {
         if let Component::Normal(name) = component {
-            let parent = directory.as_deref().unwrap_or(root);
+            let parent = directory.as_ref().unwrap_or(root);
             directory = Some(
                 parent
                     .open_verified_directory(name)
@@ -195,7 +190,7 @@ pub(crate) fn exclusion_regex() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_supervisor::fs::{LocalFs, SafeFs};
+
     #[test]
     fn policy_defaults_and_refuses_escape_control_paths_and_symlinks()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -225,7 +220,7 @@ mod tests {
             grants.git_read_paths().collect::<Vec<_>>(),
             [binding.common_dir()]
         );
-        grants.revalidate(&LocalFs)?;
+        grants.revalidate()?;
         for path in [
             "/tmp/x",
             "../escape",
@@ -255,16 +250,16 @@ mod tests {
                 .is_err()
         );
         let project = tempfile::tempdir()?;
-        let dir = LocalFs.open_anchor(project.path())?;
-        assert!(ReadOnlyPolicy::read(dir.as_ref())?.writable.is_empty());
+        let dir = Directory::open_anchor(project.path())?;
+        assert!(ReadOnlyPolicy::read(&dir)?.writable.is_empty());
         std::fs::write(project.path().join("read-only.json"), b"{broken")?;
-        assert!(ReadOnlyPolicy::read(dir.as_ref()).is_err());
+        assert!(ReadOnlyPolicy::read(&dir).is_err());
         std::fs::remove_file(project.path().join("read-only.json"))?;
         std::os::unix::fs::symlink(
             root.join("tracked.txt"),
             project.path().join("read-only.json"),
         )?;
-        assert!(ReadOnlyPolicy::read(dir.as_ref()).is_err());
+        assert!(ReadOnlyPolicy::read(&dir).is_err());
         Ok(())
     }
 }

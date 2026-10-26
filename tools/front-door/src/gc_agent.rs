@@ -1,7 +1,7 @@
 //! Per-user scheduled lane cache collection, published by the install receipt.
 use crate::peer_agent::{self, AgentError, launchctl, utf8, xml};
 use provenant_config::GcSettings;
-use provenant_supervisor::fs::LocalFs;
+
 use serde::Serialize;
 use std::{
     ffi::OsStr,
@@ -87,7 +87,7 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
     if !enabled || !peer_agent::eligible(state, home) {
         return Installed::Skipped;
     }
-    let result = provenant_config::private_directory(&state.join("gc"), true, &LocalFs)
+    let result = provenant_config::private_directory(&state.join("gc"), true)
         .map_err(|error| std::io::Error::other(error).into())
         .and_then(|_| bootstrap_with(home, changed, launchctl));
     match result {
@@ -105,7 +105,7 @@ fn bootstrap_with(
     changed: bool,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<(), AgentError> {
-    let domain = format!("gui/{}", provenant_supervisor::fs::effective_uid());
+    let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
     let loaded = run(&["print".as_ref(), service.as_ref()], home)?.0;
     if loaded && !changed {
@@ -135,7 +135,7 @@ fn bootstrap_with(
 }
 
 pub fn stop(home: &Path) -> Result<(), AgentError> {
-    let service = format!("gui/{}/{LABEL}", provenant_supervisor::fs::effective_uid());
+    let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
     if launchctl(&["print".as_ref(), service.as_ref()], home)?.0 {
         let (ok, error) = launchctl(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {

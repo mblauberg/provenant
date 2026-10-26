@@ -1,41 +1,9 @@
-# Safe OS owner
+# Process supervision and custody
 
-`provenant-supervisor` owns the operating system boundary (see the [supervisor spec](../../../../docs/specs/supervisor.md)). All first-party unsafe code lives in `sys`.
-
-`exec::SystemExecutor` is constructed once at the process edge and shared with
-consumers through `Executor`. Its clones share fixed-capacity cleanup admission,
-reserved before spawn. Every child is reaped explicitly or transferred to that
-reaper. Error paths send SIGKILL before transfer; dropping an owner never waits.
-All executor instances share one reaper worker, which parks when idle. Utilities
-have direct-child authority only. Providers use the dedicated same-binary guardian, persistent writer reservation and explicit census/cleanup described under Custody and recovery below.
-
-Each stream selects `Capture`, `Discard` or `Tee`. Capture defaults to 8 MiB and
-refuses limits over 64 MiB. Discard creates no pipe. Tee uses a bounded
-nonblocking queue and records full/failed sink loss. Optional bounded frame
-consumers run before retention and filtering; oversized frames and decoder
-queue loss remain observations. Capture/filter failures never request a stop.
-Only a delivered deadline TERM sets `timed_out`; drain expiry and overflow have
-separate outcomes. `run_text` strictly decodes retained UTF-8 bytes.
-
-`fs::Directory` retains a directory descriptor and validates every relative
-component. `SafeFs`, `SafeDir`, `SafeFile` and `PathIo` are the filesystem seams;
-their filesystem methods preserve typed `FsError` results through trait objects.
-Authoritative parents must be private and trusted. Owner locks additionally
-validate directory ownership, leaf type, owner, permissions, link count and
-identity. `Directory::lock` uses nonblocking flock polling with core's
-`WaitBudget`, `CancelToken` and the `Clock` that defines its monotonic coordinate.
-Stable names end in `.lock`; generic mutation refuses these leaves.
-An expired budget permits one nonblocking attempt. The non-cloneable `LockGuard`
-has no explicit unlock or raw descriptor escape; its deadline never revokes it.
-
-`atomic_write` and `publish` sync exclusive 0600 staging files before atomic
-`Replace` or `NoReplace` publication, then sync the parent. No-replace conflict
-preserves existing bytes. A successful rename followed by failed sync returns
-`Publication::VisibleDurabilityUnconfirmed`; callers retain their custody and
-retry durability rather than overwrite the visible record.
-
-Confinement owns the closed Git/gh utility policy, repository verification and
-sanitised environment. It executes through this crate's bounded `Executor`.
+provenant-supervisor owns provider supervision and custody (see the
+[supervisor spec](../../../../docs/specs/supervisor.md)). It depends on
+provenant-os for utility execution, capture and concrete filesystem handles.
+Custody-specific unsafe code lives in the private process_os module.
 
 The dev-only `fixture` feature supplies self-re-exec scenarios for the
 `harness = false` process target. A self dev-dependency enables it for crate
@@ -44,17 +12,14 @@ Process children use temporary HOME, state and harness configuration paths.
 
 ## Native boundaries
 
-| Owner under `sys` | Operations and proof |
-| --- | --- |
-| `child`, `raw_exec` | Preallocated argv/environment, strict exec, signal reset, CLOEXEC sweep, owned utility child and bounded pipe polling. |
-| `reaper` | Fixed admission reserved before spawn, non-signalling transfer, bounded fair `try_wait` turns. |
-| `pid`, `census` | Linux procfs and Darwin libproc identity/CPU/CWD, native boot identity, complete/partial/unknown census. Observation never grants arbitrary PID signalling. |
-| `provider` | Guardian-local signal reactor and Linux subreaping, WNOWAIT leader reservation, direct-child delivery, exact adopted-child checks and explicit cleanup before reap. |
-| `handoff` | Bounded private same-binary channel; only the guardian inherits writer/attempt locks. Provider environment values and prompt remain ephemeral. |
-| `fs` | Held-directory open/stat/mutation, atomic publication, no-follow locks, descriptor ownership, directory sync and bounded flock. |
+process_os::census observes native process identity and proves held custody.
+process_os::provider owns guardian-local signals, subreaping and adopted-child
+cleanup. process_os::handoff passes writer and attempt locks over a bounded
+private same-binary channel. Shared child, filesystem and reaper primitives
+live in provenant_os::sys.
 
-`machine` is pure; `capture` decodes before bounded retention and never treats
-capture failure or silence as a reason to stop. `custody` owns generation-scoped
+`machine` is pure; `provenant_os::capture` decodes before bounded retention and
+never treats capture failure or silence as a reason to stop. `custody` owns generation-scoped
 records, reservation fencing, recovery and release. `internal supervise` is
 private descriptor handoff, not a raw launch API. Run composes provider decoding
 and its children journal through `GuardianHooks` in its same-binary entry point.
@@ -159,11 +124,8 @@ the executor/machine constants. Darwin PID listing over-allocates within its
 entry bound and retries a full buffer before claiming truncation. Native boot
 identity is cached only after a successful read.
 
-The design-required `PathIo`/append/following API and typed reconcile API are
-implemented but have no production consumers yet. Retain them as deferred
-consumer wiring under the supervisor design's API table and Run recovery
-contract; do not replace either with a new abstraction. Strict `run_text` stays
-for the same reason. The convenience tee queue is fixture-only. Further pump
+Strict `provenant_os::exec::run_text` remains available. The convenience tee
+queue is fixture-only. Further pump
 and exit-builder extraction, capture-loop consolidation, exit-record shape
 consolidation, scratch partial-write handling and staging-file recovery need
 separate focused changes; they are not mechanical changes in this audit lane.

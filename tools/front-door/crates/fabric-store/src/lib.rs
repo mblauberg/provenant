@@ -43,7 +43,7 @@ pub enum Error {
     #[error("SQLite operation failed")]
     Sqlite(#[from] rusqlite::Error),
     #[error("safe filesystem operation failed")]
-    Filesystem(#[from] provenant_supervisor::fs::FsError),
+    Filesystem(#[from] provenant_os::fs::FsError),
     #[error("filesystem I/O failed at {path}")]
     Io {
         path: std::path::PathBuf,

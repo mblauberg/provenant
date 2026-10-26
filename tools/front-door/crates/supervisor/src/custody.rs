@@ -1,11 +1,11 @@
 //! Guardian channels and persistent writer reservations. A PID is never a handle.
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
-use crate::exec::{CapturedStream, Termination};
-use crate::fs::{
-    Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode, SafeDir,
-};
 use crate::machine::StopReason;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, RunId, WaitBudget};
+use provenant_os::exec::{CapturedStream, Termination};
+use provenant_os::fs::{
+    Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode,
+};
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -77,8 +77,8 @@ impl WriterBinding {
         Self(StoredWriterBinding::ReadOnly)
     }
     pub fn from_verified(
-        worktree: &dyn SafeDir,
-        git: &dyn SafeDir,
+        worktree: &Directory,
+        git: &Directory,
         branch: &str,
         base: GitOid,
     ) -> Result<Self> {
@@ -275,7 +275,7 @@ impl CustodyLease {
     }
     fn ensure_lease(&mut self) -> Result<()> {
         if self.lease.is_none() {
-            let clock = crate::clock::SystemClock::new();
+            let clock = provenant_os::clock::SystemClock::new();
             self.lease = Some(self.directory.lock(
                 OsStr::new("writer.lock"),
                 LockMode::Exclusive,
@@ -421,13 +421,13 @@ pub(crate) fn acquire_writer_with_observer(
     };
     reservation.validate()?;
     // Publish the fence first: owner death cannot leave an invisible ownership gap.
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         &directory,
         "reservation.json",
         &reservation,
         PublishMode::NoReplace,
     )?)?;
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         &directory,
         "ownership.json",
         &OwnershipJournal {
@@ -456,12 +456,6 @@ pub(crate) fn write_record<T: Serialize>(
         return Err(CustodyError::InvalidRecord);
     }
     Ok(dir.atomic_write(OsStr::new(name), ".custody-", &bytes, mode)?)
-}
-pub(crate) fn require_durable(publication: Publication) -> Result<()> {
-    match publication {
-        Publication::Durable => Ok(()),
-        Publication::VisibleDurabilityUnconfirmed { sync_error } => Err(sync_error.into()),
-    }
 }
 pub(crate) fn read_record<T: serde::de::DeserializeOwned>(
     dir: &Directory,
@@ -540,7 +534,7 @@ pub struct ProviderCommand {
     pub environment: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
-    pub secret_input: Option<crate::exec::SecretInput>,
+    pub secret_input: Option<provenant_os::exec::SecretInput>,
     /// Opaque, bounded reference for the composed terminal holder. It travels
     /// on the handoff pipe only and is never written to the launch summary.
     pub holder_context: Vec<u8>,
@@ -583,10 +577,10 @@ impl Default for CapturePlan {
     fn default() -> Self {
         Self {
             stdout: StreamMode::Capture {
-                limit: crate::exec::DEFAULT_CAPTURE_LIMIT as u64,
+                limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT as u64,
             },
             stderr: StreamMode::Capture {
-                limit: crate::exec::DEFAULT_CAPTURE_LIMIT as u64,
+                limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT as u64,
             },
             wall_ms: 3600000,
             descendant_grace_ms: crate::machine::DEFAULT_DESCENDANT_GRACE_MS,
@@ -682,7 +676,7 @@ impl LaunchFailure {
         let mut result = publish();
         if result
             .as_ref()
-            .is_err_and(|error| error.raw_os_error() == Some(crate::sys::errno::ENOSPC))
+            .is_err_and(|error| error.raw_os_error() == Some(provenant_os::sys::errno::ENOSPC))
         {
             match self.custody.directory.unlink(OsStr::new("reserve")) {
                 Ok(()) => {
@@ -752,7 +746,7 @@ pub fn launch(
             &owned.lease.reservation,
             PublishMode::Replace,
         )
-        .and_then(require_durable)
+        .and_then(|publication| publication.require_durable().map_err(Into::into))
         .and_then(|()| {
             write_record(
                 &publication.directory,
@@ -761,7 +755,7 @@ pub fn launch(
                 PublishMode::NoReplace,
             )
         })
-        .and_then(require_durable);
+        .and_then(|publication| publication.require_durable().map_err(Into::into));
         let error = match publication_result {
             Err(error) => error,
             Ok(()) if reason.is_some() => CustodyError::Cancelled,
@@ -781,7 +775,7 @@ pub fn launch(
         &owned.lease.reservation,
         PublishMode::Replace,
     )
-    .and_then(require_durable)
+    .and_then(|publication| publication.require_durable().map_err(Into::into))
     {
         return Err(failure(error, publication));
     }
@@ -829,7 +823,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         PublishMode::NoReplace,
     ) {
         Ok(publication) => {
-            require_durable(publication)?;
+            Publication::require_durable(publication)?;
             Ok(StopReceipt::Requested)
         }
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
@@ -856,7 +850,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
             // The guardian honours only its own scope and requester, so a
             // stale, foreign or undecodable request would leave it running.
             // Replace it and confirm the replacement is the one now visible.
-            require_durable(write_record(
+            Publication::require_durable(write_record(
                 &handle.directory,
                 "cancel.json",
                 &request,
@@ -1085,7 +1079,7 @@ struct StoredObservation {
 }
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {
-    crate::sys::provider::any_pid_alive(pids)
+    crate::process_os::provider::any_pid_alive(pids)
 }
 #[derive(Debug)]
 pub enum Observation {
@@ -1145,7 +1139,7 @@ pub fn observe(
         if Instant::now() >= deadline {
             return observe_checkpoint(&handle.directory, handle.scope, &SystemProcessObserver);
         }
-        crate::sys::wait_pause(
+        provenant_os::sys::wait_pause(
             deadline
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(5)),
@@ -1278,7 +1272,7 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
         let name = name?;
         let path = PathBuf::from(&name).join("reservation.json");
         let entry = || -> Result<Option<WriterReservation>> {
-            if directory.metadata_at(&name, false)?.kind != crate::fs::FileKind::Directory {
+            if directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory {
                 return Ok(None);
             }
             let child = directory.open_verified_directory(&name)?;
@@ -1330,8 +1324,8 @@ impl Recovery {
     /// binding. The returned base was pinned before launch, never re-resolved.
     pub fn writer_base(
         &self,
-        worktree: &dyn SafeDir,
-        git: &dyn SafeDir,
+        worktree: &Directory,
+        git: &Directory,
         branch: &str,
     ) -> Result<GitOid> {
         let root = worktree.metadata()?;
@@ -1489,7 +1483,7 @@ pub(crate) fn verify_release(
 pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
     fn seal(dir: &Directory, name: &str, bytes: &[u8]) -> Result<()> {
         match dir.atomic_write(OsStr::new(name), ".release-", bytes, PublishMode::NoReplace) {
-            Ok(publication) => require_durable(publication),
+            Ok(publication) => publication.require_durable().map_err(Into::into),
             Err(error) if error.is_exists() => {
                 if dir.read_bounded(OsStr::new(name), RECORD_LIMIT)? != bytes {
                     return Err(CustodyError::InvalidRecord);
@@ -1533,7 +1527,7 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
 }
 /// Clear a verified, proven-absent fence while the writer lease is held.
 pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<()> {
-    require_durable(write_record(
+    Publication::require_durable(write_record(
         directory,
         "settlement.json",
         &SettlementJournal {
@@ -1561,7 +1555,7 @@ impl Recovery {
         }
         // A crash may have published the new fence but left the previous
         // generation's owner behind. Settlement must describe this reservation.
-        require_durable(write_record(
+        Publication::require_durable(write_record(
             &self.directory,
             "ownership.json",
             &OwnershipJournal {
@@ -1581,7 +1575,7 @@ impl Recovery {
             return Err(CustodyError::InvalidRecord);
         }
         let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
-        let clock = crate::clock::SystemClock::new();
+        let clock = provenant_os::clock::SystemClock::new();
         let budget =
             WaitBudget::cli(clock.mono_now(), 1).map_err(|_| CustodyError::InvalidRecord)?;
         let custody = attempt.lock(
@@ -1602,7 +1596,7 @@ impl Recovery {
     pub fn settle(
         self,
         commit: SettlementCommit,
-        scratch: &mut crate::scratch::Scratch,
+        scratch: &mut provenant_os::scratch::Scratch,
     ) -> Result<()> {
         if commit.scope != self.reservation.scope {
             return Err(CustodyError::InvalidRecord);
@@ -1651,7 +1645,7 @@ impl CustodyLease {
         // generation is visible but not yet durable. Recovery reloads it.
         self.launched = true;
         self.reservation = reservation;
-        require_durable(write_record(
+        Publication::require_durable(write_record(
             &self.directory,
             "reservation.json",
             &self.reservation,
@@ -1741,7 +1735,7 @@ impl Recovery {
             &decision,
             PublishMode::NoReplace,
         ) {
-            Ok(publication) => require_durable(publication)?,
+            Ok(publication) => Publication::require_durable(publication)?,
             Err(CustodyError::Filesystem(error)) if error.is_exists() => {
                 let previous = self
                     .directory
@@ -1766,7 +1760,7 @@ impl Recovery {
         self,
         decision: ReconcileReceipt,
         commit: SettlementCommit,
-        scratch: &mut crate::scratch::Scratch,
+        scratch: &mut provenant_os::scratch::Scratch,
     ) -> Result<()> {
         if decision.scope != self.scope()
             || commit.scope != self.scope()
@@ -1776,7 +1770,7 @@ impl Recovery {
         }
         self.finish_settlement(scratch)
     }
-    fn finish_settlement(self, scratch: &mut crate::scratch::Scratch) -> Result<()> {
+    fn finish_settlement(self, scratch: &mut provenant_os::scratch::Scratch) -> Result<()> {
         scratch.settle()?;
         clear_reservation(&self.directory, self.scope())?;
         drop(self.lease);

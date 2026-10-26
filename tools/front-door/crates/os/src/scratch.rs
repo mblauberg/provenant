@@ -45,7 +45,7 @@ impl Scratch {
         self.classified.insert(name.to_owned(), metadata);
         self.directory.sync()
     }
-    pub(crate) fn settle(&mut self) -> Result<(), FsError> {
+    pub fn settle(&mut self) -> Result<(), FsError> {
         let root = self.directory.metadata()?;
         if !root.same_identity(&self.identity) || root.mode & 0o077 != 0 {
             return Err(FsError::RaceRefused {

@@ -1,7 +1,7 @@
 //! The private same-binary guardian channel. Only this edge inherits leases.
 use crate::custody::{CustodyError, Result};
-use crate::fs::{Directory, LockGuard};
 use provenant_core::CancelToken;
+use provenant_os::fs::{Directory, LockGuard};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -127,8 +127,8 @@ pub(crate) fn spawn(
     if payload.len() > MESSAGE_LIMIT {
         return Err(CustodyError::InvalidRecord);
     }
-    super::raw_exec::verify_child_wait_policy()?;
-    let reaper = super::reaper::Reaper::new(1)?;
+    provenant_os::sys::raw_exec::verify_child_wait_policy()?;
+    let reaper = provenant_os::sys::reaper::Reaper::new(1)?;
     let permit = reaper.reserve().ok_or(CustodyError::HandoffUnknown)?;
     let (mut parent, child_channel) = UnixStream::pair()?;
     let descriptors = [
@@ -155,7 +155,7 @@ pub(crate) fn spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    super::child::configure_command(
+    provenant_os::sys::child::configure_command(
         &mut command,
         &descriptors,
         Some(&guardian_environment),
@@ -334,10 +334,10 @@ fn verify_lock(directory: &Directory, name: &str, file: File) -> Result<LockGuar
     let metadata = file.metadata()?;
     let root = directory.metadata()?;
     let leaf = directory.metadata_at(OsStr::new(name), false)?;
-    if root.kind != crate::fs::FileKind::Directory
+    if root.kind != provenant_os::fs::FileKind::Directory
         || !metadata.is_file()
         || metadata.nlink() != 1
-        || metadata.uid() != super::fs::effective_uid()
+        || metadata.uid() != provenant_os::sys::fs::effective_uid()
         || metadata.mode() & 0o022 != 0
         || root.uid != metadata.uid()
         || root.mode & 0o022 != 0
@@ -350,9 +350,9 @@ fn verify_lock(directory: &Directory, name: &str, file: File) -> Result<LockGuar
     // Acquiring on the inherited description succeeds only while that exact
     // open description holds exclusion (or was previously unlocked). Probe a
     // separate description too, proving that it now excludes every other owner.
-    super::fs::try_flock(&file, crate::fs::LockMode::Exclusive)?;
-    let probe = super::fs::open_lock(directory.handoff_file(), OsStr::new(name))?;
-    match super::fs::try_flock(&probe, crate::fs::LockMode::Exclusive) {
+    provenant_os::sys::fs::try_flock(&file, provenant_os::fs::LockMode::Exclusive)?;
+    let probe = provenant_os::sys::fs::open_lock(directory.handoff_file(), OsStr::new(name))?;
+    match provenant_os::sys::fs::try_flock(&probe, provenant_os::fs::LockMode::Exclusive) {
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             Ok(LockGuard::from_handoff(file))
         }

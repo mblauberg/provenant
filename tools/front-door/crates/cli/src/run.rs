@@ -10,11 +10,13 @@ use provenant_core::{
     WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
+use provenant_os::clock::SystemClock;
+use provenant_os::fs::entropy_128;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
-use provenant_supervisor::{clock::SystemClock, custody::ExitObservation, fs::entropy_128};
+use provenant_supervisor::custody::ExitObservation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -214,7 +216,7 @@ impl run::Providers for Registry<'_> {
         };
         let mut events = adapter.observe(&mut state, stdout).unwrap_or_default();
         let code = match exit.termination {
-            Some(provenant_supervisor::exec::Termination::Exit(code)) => Some(code),
+            Some(provenant_os::exec::Termination::Exit(code)) => Some(code),
             _ => None,
         };
         let timed_out =
@@ -436,7 +438,7 @@ pub fn execution_state(
     let mut inputs = provenant_core::RootInputs::new(home.into(), assets.into());
     inputs.state_dir = Some(path.into());
     let state = inputs
-        .resolve(&provenant_supervisor::fs::LocalFs)
+        .resolve(&provenant_os::fs::SystemPathResolver)
         .map_err(|error| Fail::new(Status::Refused, "LANE_CONTEXT", error.to_string()))?
         .state;
     if !state
@@ -468,7 +470,7 @@ fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
     let mut store =
         run::RunStore::open(&context, call)?.with_writer_registry(edge.roots.state.as_path());
     // Inside a lane the host binding may be unreadable; the trace then omits it.
-    if let Ok(host) = provenant_config::bind_host(edge.roots, &provenant_supervisor::fs::LocalFs) {
+    if let Ok(host) = provenant_config::bind_host(edge.roots) {
         store = store.with_host(host);
     }
     Ok(Session { store, context })
@@ -669,13 +671,13 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
         (None, _) => None,
     };
     // A first dispatch can precede the state root's creation; compare lexically then.
-    let state = provenant_supervisor::fs::canonicalize(state_root)
-        .unwrap_or_else(|_| state_root.to_path_buf());
+    let state =
+        provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
     let resolve = |paths: &[PathBuf], flag: &str| {
         paths
             .iter()
             .map(|path| {
-                let canonical = provenant_supervisor::fs::canonicalize(path)
+                let canonical = provenant_os::fs::canonicalize(path)
                     .ok()
                     .filter(|canonical| canonical.is_dir())
                     .ok_or_else(|| {
@@ -759,12 +761,8 @@ pub fn submit_with_host(
     };
     let mut requests = Vec::new();
     let mut attempts = Vec::new();
-    let config = provenant_config::read_with_domains(
-        edge.roots,
-        &provenant_supervisor::fs::LocalFs,
-        &crate::domains::SECTIONS,
-    )
-    .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
     let profile = |class: Option<&str>| {
         config
             .dispatch_profile(class, &submission.knobs)
@@ -828,7 +826,7 @@ pub fn submit_with_host(
             task.base
                 .as_deref()
                 .map(|base| {
-                    let git = provenant_supervisor::git::git_executable()
+                    let git = provenant_os::git::git_executable()
                         .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?;
                     run::resolve_git_base(
                         &git,
@@ -1163,12 +1161,8 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
 fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
-    let config = provenant_config::read_with_domains(
-        roots,
-        &provenant_supervisor::fs::LocalFs,
-        &crate::domains::SECTIONS,
-    )
-    .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Error, "CONFIG", error.to_string()))?;
     let max_depth = config
         .knobs
         .get("lanes.max_depth")
@@ -1319,7 +1313,7 @@ fn launch_on_host(
                         .map(|path| (name.into(), path))
                 })
                 .collect(),
-            git: provenant_supervisor::git::git_executable()
+            git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, "GIT", "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
             #[cfg(feature = "fixture")]
@@ -2532,9 +2526,10 @@ mod lane_depth_tests {
 mod tests {
     use super::*;
     use provenant_run::Providers;
-    use provenant_supervisor::custody::{
-        CaptureTotals, PublicationState, Scope, SettlementEvidence,
-    };
+    use provenant_supervisor::custody::CaptureTotals;
+    use provenant_supervisor::custody::PublicationState;
+    use provenant_supervisor::custody::Scope;
+    use provenant_supervisor::custody::SettlementEvidence;
 
     #[test]
     fn manifest_accepts_task_git_base() {
@@ -2554,10 +2549,12 @@ mod tests {
     fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{ActorId, ProjectId, RootInputs};
-        use provenant_supervisor::{
-            exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-            fs::LocalFs,
-        };
+        use provenant_os::exec::ExecOptions;
+        use provenant_os::exec::Executor;
+        use provenant_os::exec::StreamPolicy;
+        use provenant_os::exec::SystemExecutor;
+        use provenant_os::exec::Termination;
+
         use std::ffi::{OsStr, OsString};
         let executor = SystemExecutor::new(1)?;
         // The regression exercises a top-level submission, even when the
@@ -2600,8 +2597,8 @@ mod tests {
         std::fs::create_dir_all(&cwd)?;
         let mut inputs = RootInputs::new(home.clone(), cwd.clone());
         inputs.state_dir = Some(root.join("state"));
-        let roots = inputs.resolve(&LocalFs)?;
-        let git = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
             let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
                 .chain(
@@ -2761,7 +2758,7 @@ mod tests {
         let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
         inputs.state_dir = Some(root.join("state"));
         let context = run::ExecutionContext {
-            state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
             project_id: provenant_core::ProjectId::from_bytes([1; 16]),
             actor_id: provenant_core::ActorId::from_bytes([2; 16]),
             read_prompts: true,
@@ -3072,7 +3069,7 @@ mod tests {
         .map_err(|fail| fail.message)?;
         assert_eq!(
             granted.write_roots,
-            [provenant_supervisor::fs::canonicalize(&project)?]
+            [provenant_os::fs::canonicalize(&project)?]
         );
         for refused in [
             state.join("projects"),
@@ -3118,7 +3115,7 @@ mod tests {
                 attempt: AttemptId::from_bytes([2; 16]),
                 generation: 1,
             },
-            termination: Some(provenant_supervisor::exec::Termination::Exit(1)),
+            termination: Some(provenant_os::exec::Termination::Exit(1)),
             never_spawned: false,
             stop_reason: None,
             delivered_signals: vec![],
@@ -3197,7 +3194,7 @@ mod tests {
                 attempt: AttemptId::from_bytes([2; 16]),
                 generation: 1,
             },
-            termination: Some(provenant_supervisor::exec::Termination::Exit(0)),
+            termination: Some(provenant_os::exec::Termination::Exit(0)),
             never_spawned: false,
             stop_reason: None,
             delivered_signals: vec![],
@@ -3219,7 +3216,7 @@ mod tests {
     #[test]
     fn codex_rate_limit_reaches_the_decoded_outcome() {
         let mut exit = clean_exit();
-        exit.termination = Some(provenant_supervisor::exec::Termination::Exit(1));
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
         let route = run::RouteRecord {
             provider: Some("codex".into()),
             model: Some("codex/gpt-6-luna".into()),
