@@ -321,6 +321,7 @@ pub struct OperationRecord {
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Succeeded,
+    ReviewRequired,
     Failed,
     Rejected,
     Cancelled,
@@ -340,6 +341,7 @@ impl From<Outcome> for crate::AttemptOutcome {
     fn from(outcome: Outcome) -> Self {
         match outcome {
             Outcome::Succeeded => Self::Succeeded,
+            Outcome::ReviewRequired => Self::ReviewRequired,
             Outcome::Failed => Self::Failed,
             Outcome::Rejected => Self::Rejected,
             Outcome::Cancelled => Self::Cancelled,
@@ -465,6 +467,8 @@ pub struct AttemptRecord {
     pub git_grants_digest: Option<Digest>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
+    #[serde(default)]
+    pub protected_paths: Vec<PathWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<WriterDeliveryReceipt>,
     pub verified_owner: Option<ActorId>,
