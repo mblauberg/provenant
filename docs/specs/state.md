@@ -249,7 +249,9 @@ The receipt's Git hooks directory is user-editable evidence, not authority.
 Uninstall re-derives it with Git from the recorded checkout and refuses a
 recorded launcher anywhere else. If the checkout is gone, the launcher is
 kept, relinquished and reported as `legacy_checkout_unavailable`. A checkout
-that exists but no longer resolves its hooks directory refuses uninstall.
+that exists but no longer resolves its hooks directory refuses an uninstall
+that removes the launcher. Uninstalling some recorded targets keeps the
+shared launcher, so it needs no hooks directory.
 
 On macOS, installation into the account's default state root also owns
 `~/Library/LaunchAgents/dev.provenant.peer.plist`. The plist participates in

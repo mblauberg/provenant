@@ -554,6 +554,62 @@ fn uninstall_trusts_only_the_rederived_legacy_hooks_directory() {
 }
 
 #[test]
+fn partial_uninstall_needs_no_legacy_hooks_directory() {
+    let mut f = Fixture::new();
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude, Harness::Codex],
+    )
+    .harnesses;
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs.push(HookRegistration {
+        harness: None,
+        event: "pre-push",
+        matcher: None,
+        timeout: None,
+        command: &["hook", "git", "pre-push"],
+    });
+    let checkout = f.home.join("old-checkout");
+    let hooks = checkout.join(".git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let launcher = hooks.join("pre-push");
+    symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
+    f.targets.legacy_checkout = Some(checkout.clone());
+    f.targets.git_hooks_dir = Some(hooks);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    f.targets.hooks = false;
+    f.targets.legacy_checkout = None;
+    f.targets.git_hooks_dir = None;
+    assert_eq!(
+        recorded_hook_checkout(&f.targets, &LocalFs).unwrap(),
+        Some(checkout)
+    );
+    // Claude keeps the shared launcher, so uninstalling only Codex needs no
+    // hooks directory, even when the checkout has lost its Git metadata.
+    let mut codex = f.targets.clone();
+    codex
+        .harnesses
+        .retain(|target| target.harness == Harness::Codex);
+    assert_eq!(recorded_hook_checkout(&codex, &LocalFs).unwrap(), None);
+    let outcome = uninstall(&codex, &ctx, &mut Reporter::default()).unwrap();
+    assert!(outcome.findings.is_empty());
+    assert!(launcher.is_file());
+    let receipt = read_receipt(&codex, &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.harnesses, vec![Harness::Claude]);
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "git-hook:pre-push")
+    );
+}
+
+#[test]
 fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migration() {
     for missing in [false, true] {
         let mut f = Fixture::new();
