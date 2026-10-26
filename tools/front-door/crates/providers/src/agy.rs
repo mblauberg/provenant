@@ -72,6 +72,14 @@ fn prepare(
     }
     if access == Access::WorktreeWrite {
         argv.push("--dangerously-skip-permissions".into());
+    } else {
+        // Headless mode auto-denies reads outside the workspace, which holds
+        // only the working directory, so every other read root joins it.
+        for root in &plan.read_roots {
+            if !input.cwd.starts_with(&root.path) {
+                argv.extend(["--add-dir".into(), root.path.as_os_str().to_owned()]);
+            }
+        }
     }
     if let Some(parent) = input.prompt.file().and_then(std::path::Path::parent) {
         argv.extend(["--add-dir".into(), parent.as_os_str().to_owned()]);
