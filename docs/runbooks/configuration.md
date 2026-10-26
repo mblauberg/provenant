@@ -127,6 +127,54 @@ under `<state>/gc/`; a preview reports low space without changing it. An alert
 failure is logged without blocking collection. This setting is read each run
 and does not require reinstalling the agent.
 
+## Disk guard
+
+On macOS, the per-user disk guard checks available space on the state volume
+at login and every two minutes. It is enabled by default for installations
+in the account's default state root. Configure it in `config.toml`:
+
+```toml
+[disk_guard]
+enabled = true
+warn = "60G"
+pause = "25G"
+resume = "50G"
+processes = [
+  "cargo", "rustc", "ld", "ld64", "clang", "clang++", "cc1", "cc1plus",
+  "sccache", "swift-frontend", "swift-build", "xcodebuild", "turbo", "esbuild"
+]
+```
+
+Sizes use the same binary units as `gc.free_floor`; plain numbers mean GiB.
+Thresholds must satisfy `0 < pause < resume <= warn`. `processes` replaces the
+default list with exact executable names, without paths or whitespace. An
+empty list disables pausing while retaining warnings and GC.
+
+Below `warn`, the guard runs `gc --scheduled --apply --free-floor WARN` at
+most once every 30 minutes. It warns at most once every 30 minutes while
+space remains at or above `pause`. Below `pause`, it sends `SIGSTOP` to
+matching processes owned by the current user and sends a critical notification
+at most once every five minutes. Paused process identities are saved under
+`<state>/disk-guard/`. They receive `SIGCONT` only when space reaches `resume`;
+PID identity checks prevent signalling a replacement process that reused a PID.
+While its processes remain paused, the checker stays running and checks free
+space every two minutes. launchd does not start another instance while it is
+running. On recovery, it checks only the recorded PIDs before resuming them.
+
+Rerun `install` after changing any disk guard setting. The installer puts
+the settings in the LaunchAgent's arguments, so routine healthy checks need
+no config or state reads. The healthy path performs one `statfs` call on the
+state volume and exits before normal CLI initialisation, without process
+enumeration, GC, Fabric, network requests or log writes. State is written only
+when it changes.
+If the checker crashes while processes are paused and space recovers to
+`warn` or above, a fresh healthy check does not read the saved PIDs or resume
+them. Disable and reinstall the guard, or uninstall it, to resume those
+saved processes.
+Setting `enabled = false` and reinstalling stops the owned agent and resumes
+its saved paused processes. See [installation](install.md#install) for plist
+ownership and uninstall behaviour.
+
 ## Writer extra write paths
 
 Some projects keep shared run state outside the worktree. Writer lanes can

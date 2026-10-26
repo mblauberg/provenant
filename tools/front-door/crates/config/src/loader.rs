@@ -234,6 +234,31 @@ fn inspect<T: DeserializeOwned + Serialize>(
         crate::GcSettings::default()
     };
 
+    let disk_guard_item = user.remove("disk_guard");
+    let disk_guard = if let Some(item) = &disk_guard_item {
+        let mut table = Table::new();
+        table.insert("disk_guard", item.clone());
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Settings {
+            disk_guard: crate::DiskGuardSettings,
+        }
+        let settings: Settings = decode(table).map_err(|_| ConfigError::Schema {
+            location: site(&user_sites, "disk_guard", &user_origin, false),
+            rule: "type",
+        })?;
+        settings
+            .disk_guard
+            .validate()
+            .map_err(|rule| ConfigError::Schema {
+                location: site(&user_sites, "disk_guard", &user_origin, false),
+                rule,
+            })?;
+        settings.disk_guard
+    } else {
+        crate::DiskGuardSettings::default()
+    };
+
     let retention_item = user.remove("retention");
     let retention = if let Some(item) = &retention_item {
         let mut table = Table::new();
@@ -361,6 +386,29 @@ fn inspect<T: DeserializeOwned + Serialize>(
             origins.insert(key.into(), user_origin.clone());
         });
     }
+    for key in ["enabled", "warn", "pause", "resume", "processes"] {
+        origins.insert(format!("disk_guard.{key}"), compiled.clone());
+    }
+    let process_origin = if disk_guard_item
+        .as_ref()
+        .and_then(Item::as_table_like)
+        .is_some_and(|table| table.contains_key("processes"))
+    {
+        &user_origin
+    } else {
+        &compiled
+    };
+    for index in 0..disk_guard.processes.len() {
+        origins.insert(
+            format!("disk_guard.processes.{index}"),
+            process_origin.clone(),
+        );
+    }
+    if let Some(item) = &disk_guard_item {
+        walk_item(item, "disk_guard", None, &mut |key, _, _| {
+            origins.insert(key.into(), user_origin.clone());
+        });
+    }
     origins.insert("install.targets".into(), compiled.clone());
     origins.insert("retention.provider_state_days".into(), compiled.clone());
     if let Some(item) = &retention_item {
@@ -431,6 +479,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             domains,
             install,
             gc,
+            disk_guard,
             retention,
             knobs,
             origins,

@@ -8,8 +8,15 @@ mod checks;
 #[cfg(test)]
 mod compose_tests;
 mod disk;
+mod disk_guard;
+mod disk_guard_agent;
 mod fabric;
 mod gc_agent;
+
+/// Scheduled disk checks bypass the command catalogue and all state owners.
+pub fn disk_guard_early() -> Option<u8> {
+    disk_guard::early()
+}
 mod gc_support;
 mod handoff;
 mod hooks;
@@ -281,6 +288,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
     let command = match inv.command {
         Command::Hook(hook) => return hooks::run(hook, globals),
+        Command::DiskGuard(args) => return disk_guard::run(args, globals),
         command => command,
     };
     if let Err(error) = roots::validate_globals(globals) {
@@ -294,6 +302,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
+        Command::DiskGuard(args) => disk_guard::run(args, globals),
         Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
         Command::Hosts {
             command: Some(command),

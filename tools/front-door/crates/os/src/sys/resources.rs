@@ -3,6 +3,8 @@
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 /// Bytes the kernel can hand to a new process without paging out live work,
 /// and installed physical memory.
@@ -113,6 +115,35 @@ pub(crate) fn available_bytes(file: &File) -> io::Result<u64> {
     Ok(blocks.saturating_mul(size))
 }
 
+/// Sample an existing path's filesystem with one syscall, without opening it.
+pub(crate) fn available_bytes_at(path: &Path) -> io::Result<u64> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    #[cfg(target_os = "macos")]
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    #[cfg(target_os = "linux")]
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: path is NUL-terminated and stats is a live, writable record of
+    // the exact type required by the call; the kernel retains neither pointer.
+    #[cfg(target_os = "macos")]
+    let result = unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) };
+    // SAFETY: same pointer and buffer guarantees as the macOS call above.
+    #[cfg(target_os = "linux")]
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful syscall initialised the record.
+    let stats = unsafe { stats.assume_init() };
+    #[allow(clippy::useless_conversion)]
+    let blocks = u64::from(stats.f_bavail);
+    #[cfg(target_os = "macos")]
+    let size = u64::from(stats.f_bsize);
+    #[cfg(target_os = "linux")]
+    let size = stats.f_frsize;
+    Ok(blocks.saturating_mul(size))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -121,5 +152,16 @@ mod tests {
         assert!(memory.total_bytes > 0 && memory.available_bytes <= memory.total_bytes);
         let file = std::fs::File::open("/").unwrap();
         assert!(super::available_bytes(&file).unwrap() > 0);
+    }
+
+    #[test]
+    fn path_sample_uses_unprivileged_available_space() {
+        assert!(super::available_bytes_at(std::path::Path::new("/")).unwrap() > 0);
+        assert_eq!(
+            super::available_bytes_at(std::path::Path::new("/\0invalid"))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
     }
 }

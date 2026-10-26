@@ -56,6 +56,12 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
                 .map_err(EdgeError::Peer)?;
         let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
             .map_err(|error| EdgeError::Install(InstallError::Config(error)))?;
+        if config.disk_guard.enabled {
+            targets.disk_guard_agent = Some(
+                super::disk_guard_agent::render(&program, state, &config.disk_guard)
+                    .map_err(EdgeError::Peer)?,
+            );
+        }
         if config.gc.schedule {
             targets.gc_agent = Some(
                 super::gc_agent::render(&program, state, &config.gc).map_err(EdgeError::Peer)?,
@@ -127,13 +133,18 @@ impl PreviewReporter {
         action: &Action,
         stop: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
-        if matches!(action.selector.as_str(), "peer-agent" | "gc-agent") {
+        if matches!(
+            action.selector.as_str(),
+            "peer-agent" | "gc-agent" | "disk-guard-agent"
+        ) {
             let home = self
                 .home
                 .as_deref()
                 .ok_or_else(|| io::Error::other("missing agent home"))?;
             let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-            let expected = if action.selector == "gc-agent" {
+            let expected = if action.selector == "disk-guard-agent" {
+                super::disk_guard_agent::plist(&home)
+            } else if action.selector == "gc-agent" {
                 super::gc_agent::plist(&home)
             } else {
                 provenant_fabric_runtime::peer_agent::plist(&home)
@@ -150,7 +161,9 @@ impl PreviewReporter {
 impl InstallReporter for PreviewReporter {
     fn before_remove(&mut self, action: &Action) -> io::Result<()> {
         self.before_remove_with(action, |home| {
-            if action.selector == "gc-agent" {
+            if action.selector == "disk-guard-agent" {
+                super::disk_guard_agent::stop(home).map_err(io::Error::other)
+            } else if action.selector == "gc-agent" {
                 super::gc_agent::stop(home).map_err(io::Error::other)
             } else {
                 provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other)
@@ -177,6 +190,8 @@ struct InstallData {
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gc_agent: Option<super::gc_agent::Installed>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_guard_agent: Option<super::disk_guard_agent::Installed>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -186,6 +201,7 @@ impl InstallData {
             remaining: Vec::new(),
             peer_agent: None,
             gc_agent: None,
+            disk_guard_agent: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
@@ -200,6 +216,7 @@ impl InstallData {
             remaining: Vec::new(),
             peer_agent: None,
             gc_agent: None,
+            disk_guard_agent: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -214,6 +231,7 @@ impl InstallData {
                 remaining: remaining.clone(),
                 peer_agent: None,
                 gc_agent: None,
+                disk_guard_agent: None,
             },
             _ => Self::empty(),
         }
@@ -304,6 +322,7 @@ fn output_install(
     result: Result<InstallOutcome, InstallError>,
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     gc_agent: Option<super::gc_agent::Installed>,
+    disk_guard_agent: Option<super::disk_guard_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
     match result {
@@ -424,9 +443,13 @@ fn output_install(
                 human.push_str(&format!("scheduled gc: {}\n", agent.describe()));
             }
             let read_only = outcome.dry_run;
+            if let Some(agent) = &disk_guard_agent {
+                human.push_str(&format!("disk guard: {}\n", agent.describe()));
+            }
             let mut data = InstallData::success(outcome);
             data.peer_agent = peer_agent;
             data.gc_agent = gc_agent;
+            data.disk_guard_agent = disk_guard_agent;
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, data),
                 globals,
@@ -513,6 +536,7 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         return edge_error("install", error, globals);
     }
     let gc_enabled = targets.gc_agent.is_some();
+    let disk_guard_enabled = targets.disk_guard_agent.is_some();
     let mut reporter = PreviewReporter {
         home: Some(home.clone()),
     };
@@ -548,7 +572,26 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         )),
         _ => None,
     };
-    output_install("install", result, peer_agent, gc_agent, globals)
+    let disk_guard_agent = match &result {
+        Ok(outcome) if !outcome.dry_run => Some(super::disk_guard_agent::install(
+            &state,
+            &home,
+            outcome
+                .actions
+                .iter()
+                .any(|action| action.selector == "disk-guard-agent"),
+            disk_guard_enabled,
+        )),
+        _ => None,
+    };
+    output_install(
+        "install",
+        result,
+        peer_agent,
+        gc_agent,
+        disk_guard_agent,
+        globals,
+    )
 }
 
 pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 {
@@ -573,6 +616,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     output_install(
         "uninstall",
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),
+        None,
         None,
         None,
         globals,

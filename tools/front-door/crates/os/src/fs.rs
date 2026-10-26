@@ -88,6 +88,12 @@ pub fn effective_uid() -> u32 {
     os::effective_uid()
 }
 
+/// Unprivileged free bytes on an existing path's filesystem. This performs one
+/// filesystem-stat call with no open, metadata lookup or ancestor resolution.
+pub fn available_bytes_at(path: &Path) -> io::Result<u64> {
+    crate::sys::resources::available_bytes_at(path)
+}
+
 /// Resolve trusted setup paths without granting filesystem mutation authority.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemPathResolver;
