@@ -45,6 +45,9 @@ impl Admission<'_> {
         if let Some(r) = record {
             r.validate()?;
         }
+        let free = free_pool(&route.adapter);
+        // Only the adapter's own keyless free pool spans models.
+        let in_free = |pool: Option<&str>| free.is_some() && pool == free;
         let snapshot = record.and_then(|r| r.snapshot.as_ref());
         let fresh = snapshot.is_some_and(|s| {
             s.observed_unix_seconds <= self.now_unix_seconds
@@ -84,9 +87,8 @@ impl Admission<'_> {
                 r.account.adapter == route.adapter
                     && r.account.account_key == *key
                     && (r.model == route.model
-                        || (route.adapter == "opencode"
-                            && r.pool.as_deref() == Some("opencode-free")
-                            && self.pools.iter().any(|pool| pool == "opencode-free")))
+                        || (in_free(r.pool.as_deref())
+                            && self.pools.iter().any(|pool| Some(pool.as_str()) == free)))
             })
         {
             let expires = refusal.resets_unix_seconds.unwrap_or(
@@ -120,18 +122,14 @@ impl Admission<'_> {
                 });
             if expires > self.now_unix_seconds
                 && !comparable_newer
-                && ((route.adapter == "opencode"
-                    && refusal.pool.as_deref() == Some("opencode-free")
-                    && refusal.model == route.model)
+                && ((in_free(refusal.pool.as_deref()) && refusal.model == route.model)
                     || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
             {
-                return Err(QuotaError::Refused(
-                    if refusal.pool.as_deref() == Some("opencode-free") {
-                        "free tier exhausted; use a paid route or wait for its allowance reset"
-                    } else {
-                        "scoped provider refusal"
-                    },
-                ));
+                return Err(QuotaError::Refused(if in_free(refusal.pool.as_deref()) {
+                    "free tier exhausted; use a paid route or wait for its allowance reset"
+                } else {
+                    "scoped provider refusal"
+                }));
             }
         }
         Ok(())
@@ -195,6 +193,11 @@ pub fn record_refusal(
         expected: current.cloned(),
         replacement: Some(record),
     })
+}
+
+/// The keyless free pool an adapter draws on, if it has one.
+fn free_pool(adapter: &str) -> Option<&'static str> {
+    provenant_records::AdapterSpec::get(adapter).and_then(|spec| spec.free_pool)
 }
 
 fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {

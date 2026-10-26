@@ -382,7 +382,7 @@ impl Clock for FixedClock {
         &self,
         _deadline: provenant_core::MonoTime,
     ) -> std::result::Result<(), provenant_core::TimeError> {
-        Ok(())
+        unreachable!("fixed-time test clock never waits")
     }
 }
 

@@ -211,7 +211,9 @@ the worktree writer lock is not held during deletion.
 
 Nested submission uses a dedicated store under the submitting attempt, selected
 by `PROVENANT_RUN_STATE_DIR`, while identity and config stay on the original
-root. A host-side worker launches only runs whose operation is accepted. See
+root. A host-side worker launches only runs whose operation is accepted. A
+child may use a different adapter or account from its parent, by design; the
+host does not bind the two. See
 [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 
 A project may grant write exceptions to a read-only run in
