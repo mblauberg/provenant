@@ -9,6 +9,14 @@ configuration, the release packager (`examples/package-release.rs`) and the
 bundled assets. Edits under a member's `tests/`, `benches/` and other `examples/`
 no longer change it.
 
+## Stability
+
+The v1.0.0 stability promise is withdrawn. Commands, flags, `--json` output,
+`config.toml` keys, the state layout and Fabric MCP tool names and schemas can
+change in any release, with no deprecation period or compatibility shims. Each
+release's notes list its breaking changes. Upgrade every host together, since
+peers on different versions are not supported.
+
 ## Breaking changes
 
 - Installer cut-over support is removed: the `--legacy-checkout` install flag,

@@ -582,9 +582,7 @@ pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &P
         out.status = Outcome::Failed;
     }
     let human = if out.error.is_none() {
-        serde_json::to_string_pretty(&out.data)
-            .map(|s| format!("{s}\n"))
-            .unwrap_or_default()
+        crate::terse(&out.data)
     } else {
         String::new()
     };

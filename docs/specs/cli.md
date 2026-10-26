@@ -86,7 +86,7 @@ Global options are accepted before or after the subcommand:
 | Option | Meaning |
 | --- | --- |
 | `--help`, `--version` | Pure output, exit 0, except that `--help` on a hidden command (`internal` and its subcommands, `fabric peer`, `fabric peer-agent`) exits 2 as an unknown command. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree`, `disk report` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `config show|set|unset` and `workflow` print pretty JSON; `hosts doctor` and the remaining leaves print their own text. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree`, `disk report`, `config show|set|unset`, `workflow` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `hosts doctor` and the remaining leaves print their own text. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 
