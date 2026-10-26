@@ -73,7 +73,7 @@ bytes as a separate type. Domain owners choose which fields enter a digest.
 
 ### YAML subset
 
-Skill frontmatter and `agents/*.yaml` use a bounded YAML subset (ADR 0028)
+Skill frontmatter and `skills/*/agents/*.yaml` use a bounded YAML subset (ADR 0028)
 that refuses anchors, aliases, tags, flow maps, multiple documents, tabs,
 duplicate keys and multiline plain scalars; only `true` and `false` resolve.
 - Why: YAML's implicit typing and references are a parsing hazard.

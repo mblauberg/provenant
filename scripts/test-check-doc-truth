@@ -80,13 +80,28 @@ class DocTruthTests(unittest.TestCase):
         self.assertIn("unresolved command `provenant config vanished`", result.stdout)
 
     def test_missing_headers_are_advisory_unless_inventory_gate_is_requested(self):
-        self.document("# Missing inventory\n\nOwner: too late\nAnchor: too late\n")
+        self.document("# Missing inventory\n\nProse first.\n\nOwner: too late\nAnchor: too late\n")
         result = self.check("--inventory-only", source=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.count("unresolved inventory"), 2)
         result = self.check("--inventory-only", "--strict-inventory", source=False)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout.count("unresolved inventory"), 2)
+
+    def test_headers_may_follow_a_blank_line_and_wrap(self):
+        self.document("# Wrapped\n\nOwner: `crates/a` (one),\n`crates/b` (two)\nAnchor: `tests/a.rs`\n")
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "")
+
+    def test_test_name_suffix_is_not_part_of_the_path(self):
+        code = self.root / "tools/front-door/crates/example/src/lib.rs"
+        code.parent.mkdir(parents=True)
+        code.write_text("// example\n")
+        self.document("# Paths\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Test: `crates/example/src/lib.rs::keeps_order`.\n")
+        result = self.check()
+        self.assertEqual(result.stdout, "")
 
     def test_inline_multiline_references_keep_source_line_numbers(self):
         self.document("# Lines\nOwner: maintainers\nAnchor: tools/front-door\n"
