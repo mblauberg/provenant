@@ -321,6 +321,7 @@ impl WriterLaunch {
         attempt: &Directory,
         custody: &provenant_supervisor::custody::Recovery,
         remote: &str,
+        base_ref: Option<&str>,
     ) -> Result<bool> {
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), false)?;
         let base = custody
@@ -372,7 +373,10 @@ impl WriterLaunch {
         // Remote refs only refine attribution. Missing or stale refs must not
         // prevent quarantine from publishing evidence against the lane start.
         let comparison_base = (|| -> Result<GitOid> {
-            let remote_head = provenant_confinement::run_utility(
+            // Only the delivery remote's own refs count: a commit reachable
+            // from another remote (a fork's origin, say) was never reviewed
+            // for this delivery, so it must not be exempted.
+            let head = provenant_confinement::run_utility(
                 &executor,
                 provenant_confinement::GitRead::RemoteHead {
                     remote: remote.into(),
@@ -383,21 +387,24 @@ impl WriterLaunch {
                 &cancel,
             )
             .map_err(error)?;
-            if remote_head.termination != provenant_os::exec::Termination::Exit(0)
-                || remote_head.stdout.truncated
+            let name = if head.termination == provenant_os::exec::Termination::Exit(0)
+                && !head.stdout.truncated
             {
-                return Err(RunError::Validation(
+                GitRefName::remote_tracking(
+                    std::str::from_utf8(&head.stdout.bytes)
+                        .map_err(error)?
+                        .trim()
+                        .strip_prefix("refs/remotes/")
+                        .ok_or(RunError::Validation("writer delivery target is not remote"))?,
+                )
+                .map_err(error)?
+            } else {
+                // No remote HEAD: use the lane's base branch on that remote.
+                let base_ref = base_ref.ok_or(RunError::Validation(
                     "writer delivery target cannot be resolved",
-                ));
-            }
-            let name = GitRefName::remote_tracking(
-                std::str::from_utf8(&remote_head.stdout.bytes)
-                    .map_err(error)?
-                    .trim()
-                    .strip_prefix("refs/remotes/")
-                    .ok_or(RunError::Validation("writer delivery target is not remote"))?,
-            )
-            .map_err(error)?;
+                ))?;
+                GitRefName::remote_tracking(format!("{remote}/{base_ref}")).map_err(error)?
+            };
             let target = oid(
                 self.worktree.repo(),
                 provenant_confinement::GitRead::ResolveRef { name },
@@ -446,9 +453,7 @@ impl WriterLaunch {
             },
         )? != tip
         {
-            return Err(RunError::Validation(
-                "writer head changed during quarantine",
-            ));
+            return Err(RunError::Validation("writer HEAD is not the lane branch"));
         }
         let ancestry = provenant_confinement::run_utility(
             &executor,
