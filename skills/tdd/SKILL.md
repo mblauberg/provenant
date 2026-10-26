@@ -149,3 +149,5 @@ fail, then repair and watch it pass. If no correct seam reaches the bug, route
 to `diagnose`; do not bless a shallow test. `implement` owns independent review,
 repair loops, documentation and delivery acceptance under the tier and approved
 scope.
+
+Reference eval cases (not run by CI): [discipline cases](evals/discipline_cases.yaml).

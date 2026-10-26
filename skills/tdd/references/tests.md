@@ -68,25 +68,20 @@ assert_eq!(retrieved.name, "Alice");
 
 ## Independent oracles and weakening
 
-Expected values come from the spec, never from running the code under test.
-Do not copy today's output into an expected value or compute the expectation
-with the same production helper. If the spec is unsettled, stop and report it.
-If a failing test contradicts the spec, stop and report the conflict with
-evidence; do not edit the test to make it pass.
-
-Gaming includes replacing a specific error with `is_err()`, an exact count with
-an at-least check, deleting or skipping a failing assertion, or special-casing
-a test input in production. These hide defects rather than fix them.
+Rules and the list of gaming moves: see "Existing tests" in `SKILL.md`.
 
 ```rust
-// Spec: a denied checkout returns PermissionDenied and creates no order.
+// Spec: a denied checkout returns PermissionDenied; a valid checkout creates
+// exactly one order.
 let error = checkout_as(&denied_user, valid_cart()).unwrap_err();
 assert!(matches!(error, CheckoutError::PermissionDenied));
-assert_eq!(orders.count(), 0);
+checkout_as(&user, valid_cart()).unwrap();
+assert_eq!(orders.count(), 1);
 
-// BAD: A storage failure and an extra order would both escape these checks.
+// BAD: A storage failure and a duplicate order would both escape these checks.
 assert!(checkout_as(&denied_user, valid_cart()).is_err());
-assert!(orders.count() <= 1);
+checkout_as(&user, valid_cart()).unwrap();
+assert!(orders.count() >= 1);
 ```
 
 Rejection tests assert the specific error variant or code. An unrelated failure

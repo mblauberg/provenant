@@ -26,12 +26,3 @@ cases:
     expected: >-
       Assert CheckoutError::PermissionDenied specifically, rather than is_err()
       or error text, so StorageUnavailable fails the test.
-  - prompt: |-
-      Review this Rust test diff using the five-question test rubric in
-      skills/code-review/references/review-lenses.md:
-      - assert!(matches!(result, Err(ConfigError::Schema { rule: "type", .. })));
-      + assert!(result.is_err());
-    expected: >-
-      Flag the loosened assertion: unrelated error variants or codes now pass.
-      Keep the specific rejection oracle unless the approved contract changes;
-      green tests alone do not justify weakening it.

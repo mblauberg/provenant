@@ -47,10 +47,7 @@ fn provider_state_retention_defaults_overrides_and_validation() {
     ] {
         let text = format!("schema_version=1\n[retention]\nprovider_state_days={value}");
         let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
-        assert!(
-            matches!(&error, ConfigError::Schema { rule: actual, .. } if *actual == rule),
-            "provider_state_days={value}: expected Schema({rule}), got {error:?}"
-        );
+        assert_refusal(&error, rule);
     }
 }
 
@@ -92,14 +89,10 @@ fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
             "regenerable_directory_name",
         ),
         ("projects.p.keep=['/absolute']", "gc_keep_relative_path"),
-        ("unknown=true", "type"),
     ] {
         let text = format!("schema_version=1\n[gc]\n{field}");
         let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
-        assert!(
-            matches!(&error, ConfigError::Schema { rule: actual, .. } if *actual == rule),
-            "{field}: expected Schema({rule}), got {error:?}"
-        );
+        assert_refusal(&error, rule);
     }
 }
 

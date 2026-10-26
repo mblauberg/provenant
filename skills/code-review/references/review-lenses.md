@@ -108,6 +108,8 @@ For each changed test, ask:
 - Was any assertion loosened, such as a specific error becoming `is_err()` or
   an exact count becoming an at-least check?
 
+Then verify the evidence itself:
+
 - Map acceptance criteria to tests, checks or inspected evidence.
 - Prefer public-interface and integration-style coverage over implementation
   assertions.
