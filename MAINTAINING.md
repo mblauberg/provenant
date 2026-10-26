@@ -44,6 +44,11 @@ cross-tracker routes, not a second current-work owner.
 - Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
 - There is no changelog file; see [ADR
   0024](docs/adr/0024-git-log-and-adrs-own-history.md)
+- Release notes: each change adds a fragment under
+  [`docs/release-notes/next.d/`](docs/release-notes/next.d/). To release, run
+  `scripts/collate-release-notes vX.Y.Z`, which writes
+  `docs/release-notes/vX.Y.Z.md` and deletes the fragments but `_intro.md`;
+  edit `_intro.md` for the next release.
 
 ### Specifications
 
