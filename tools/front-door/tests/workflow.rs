@@ -52,6 +52,15 @@ fn session_checkpoints_round_trip_and_reject_unsafe_keys() -> Result {
     )?;
     let shown = call(&rig, &["workflow", "session", "show", "s-1"], 0)?;
     assert_eq!(shown["data"]["markdown"], "# Goal\nship it\n");
+    // Human output is terse: one line per record, never pretty JSON.
+    let human = rig.command(&["workflow", "session", "show", "s-1"])?;
+    assert_eq!(code(&human), 0);
+    let text = String::from_utf8_lossy(&human.stdout.bytes);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(
+        text.starts_with("markdown=\"# Goal\\nship it\\n\" modified_at="),
+        "{text}"
+    );
     call(&rig, &["workflow", "session", "show", "s-2"], 1)?;
     call(
         &rig,
