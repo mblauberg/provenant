@@ -2469,28 +2469,41 @@ mod tests {
     fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{ActorId, ProjectId, RootInputs};
-        use provenant_supervisor::fs::LocalFs;
+        use provenant_supervisor::{
+            exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+            fs::LocalFs,
+        };
+        use std::ffi::{OsStr, OsString};
+        let executor = SystemExecutor::new(1)?;
         // The regression exercises a top-level submission, even when the
         // contributor running it is itself inside a nested lane.
         if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
             || std::env::var_os(run::LANE_DEPTH_ENV).is_some()
             || std::env::var_os(run::PARENT_ATTEMPT_ENV).is_some()
         {
-            let out = std::process::Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "run::tests::operation_replays_after_its_context_ref_moves_or_is_deleted",
-                    "--nocapture",
-                ])
-                .env_remove(provenant_core::RUN_STATE_DIRECTORY_ENV)
-                .env_remove(run::LANE_DEPTH_ENV)
-                .env_remove(run::PARENT_ATTEMPT_ENV)
-                .output()?;
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::operation_replays_after_its_context_ref_moves_or_is_deleted".into(),
+                "--nocapture".into(),
+            ];
+            let removed = [
+                OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
+                OsStr::new(run::LANE_DEPTH_ENV),
+                OsStr::new(run::PARENT_ATTEMPT_ENV),
+            ];
+            let env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| !removed.contains(&key.as_os_str()))
+                .collect();
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let out = executor.execute(options)?;
             assert!(
-                out.status.success(),
-                "{} {}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
+                out.termination == Termination::Exit(0) && !out.timed_out,
+                "{out:?}"
             );
             return Ok(());
         }
@@ -2505,27 +2518,38 @@ mod tests {
         let roots = inputs.resolve(&LocalFs)?;
         let git = provenant_supervisor::git::git_executable().ok_or("Git unavailable")?;
         let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
-            let out = std::process::Command::new(&git)
-                .current_dir(&cwd)
-                .env_clear()
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .args([
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
-                ])
-                .args(args)
-                .output()?;
+            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(
+                    [
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "user.name=Fixture",
+                        "-c",
+                        "user.email=fixture@example.test",
+                    ]
+                    .into_iter()
+                    .chain(args.iter().copied())
+                    .map(OsString::from),
+                )
+                .collect();
+            let env = vec![
+                (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
+                (
+                    OsString::from("GIT_CONFIG_GLOBAL"),
+                    OsString::from("/dev/null"),
+                ),
+            ];
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(10));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let out = executor.execute(options)?;
             assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
+                out.termination == Termination::Exit(0) && !out.timed_out,
+                "{out:?}"
             );
-            Ok(String::from_utf8(out.stdout)?.trim().to_owned())
+            Ok(String::from_utf8(out.stdout.bytes)?.trim().to_owned())
         };
         command(&["init", "-q"])?;
         command(&["commit", "--allow-empty", "-qm", "initial"])?;
