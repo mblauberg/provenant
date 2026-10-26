@@ -55,8 +55,10 @@ pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
 
 #[derive(Debug, Error)]
 pub enum RunError {
-    #[error("host writer delivery failed at {0:?}; inspect the attempt delivery receipt")]
+    #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    #[error("host writer delivery failed at Prepare ({step}): {reason}")]
+    DeliveryPrepare { step: &'static str, reason: String },
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
     #[error("confinement refused: {0}")]

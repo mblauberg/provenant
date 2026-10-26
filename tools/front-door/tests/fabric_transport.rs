@@ -2369,7 +2369,8 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
 fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
     let mut argv = vec!["-C", cwd.to_str().ok_or("git cwd")?];
     argv.extend_from_slice(args);
-    let output = rig.execute(Path::new("/usr/bin/git"), &argv, None)?;
+    let executable = provenant_supervisor::git::git_executable().ok_or("git executable")?;
+    let output = rig.execute(&executable, &argv, None)?;
     assert_eq!(
         code(&output),
         0,
@@ -2377,6 +2378,122 @@ fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
+}
+
+#[test]
+fn peer_writer_reports_delivery_prepare_failure() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        std::fs::create_dir_all(rig.home.join(path))?;
+    }
+    std::fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let bin = rig.root.join("provider/bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(bin.join("codex"), "#!/bin/sh\necho 'codex-cli 0.159.0'\n")?;
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755))?;
+    std::fs::write(
+        rig.root.join("codex/auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let peer = loopback_peer(&mut rig)?;
+    git(
+        &rig,
+        &rig.project,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    )?;
+    let remote = rig.root.join("remote.git");
+    git(
+        &rig,
+        &rig.root,
+        &["init", "-q", "--bare", remote.to_str().ok_or("remote")?],
+    )?;
+    git(
+        &rig,
+        &rig.project,
+        &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+    )?;
+    git(
+        &rig,
+        &rig.project,
+        &["push", "-q", "origin", "HEAD:refs/heads/main"],
+    )?;
+    let missing = rig
+        .root
+        .join("long-parent-".repeat(18))
+        .join("missing-helper-gh");
+    git(
+        &rig,
+        &rig.project,
+        &[
+            "config",
+            "credential.helper",
+            &format!("!{} auth git-credential", missing.display()),
+        ],
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "commit nothing")?;
+    let (_, placed) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "workshop",
+            "--mode",
+            "worktree-write",
+            "--branch",
+            "peer/prepare-failure",
+            "--base",
+            "origin/main",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "peer-prepare-failure",
+            "--deliver-remote",
+            "origin",
+            "--deliver-branch",
+            "published/peer",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ],
+    )?;
+    let lane = &placed["data"]["lanes"][0];
+    assert_eq!(lane["host"], peer.to_string(), "{placed}");
+    assert_eq!(lane["state"], "rejected", "{placed}");
+    let reason = lane["reason"].as_str().ok_or("peer refusal reason")?;
+    assert!(reason.contains("Prepare (credential helper)"), "{placed}");
+    assert!(reason.contains("missing-helper-gh"), "{placed}");
+    assert!(!reason.contains("receipt"), "{placed}");
+    assert_eq!(lane["delivery"], Value::Null, "{placed}");
+    let run = placed["data"]["run_id"].as_str().ok_or("run")?;
+    let (status, lanes) = json_command(&rig, &["lanes", "--id", run, "--json"])?;
+    assert_eq!(status, 0, "{lanes}");
+    assert_eq!(lanes["data"]["lanes"][0]["reason"], reason, "{lanes}");
+    let attempt = lane["attempt_id"].as_str().ok_or("attempt")?;
+    let directory = rig
+        .root
+        .join(format!("peer-state/runs/{run}/attempts/{attempt}"));
+    assert!(!directory.join("delivery.json").exists());
+    assert!(!directory.join("delivery-started.json").exists());
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 #[test]
