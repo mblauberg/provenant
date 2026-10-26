@@ -353,15 +353,17 @@ unchanged installer-owned feature value and preserves a user's own
 
 Editors preserve unrelated bytes. TOML uses `toml_edit` document mutation.
 JSON and JSONC use records' bounded span parser to splice owned leaves and
-reparse, keeping comments, trailing commas and array order. Malformed,
-duplicate or ambiguous containers are rejected unchanged, and the full user
-config is never serialised or logged. Config files must be regular; a
-symlinked config refuses with its path. `~/.claude.json` has a 16 MiB bound
-and other configs 1 MiB. Quit Claude Code before installing, because it
-rewrites its file while running. Identity and bytes are rechecked immediately
-before publication. A harness write between that recheck and publication is
-lost, so quit the harness before installing. Links are inspected with
-`readlink` and never opened through the old target.
+reparse, keeping comments, trailing commas and array order. A comment-free
+Claude `settings.json` is reformatted only when Provenant's hook edits change
+it, using its own two- or four-space indent; an unchanged file is never
+rewritten. Malformed, duplicate or ambiguous containers are rejected unchanged,
+and the full user config is never serialised or logged. Config files must be
+regular; a symlinked config refuses with its path. `~/.claude.json` has a 16
+MiB bound and other configs 1 MiB. Quit Claude Code before installing, because
+it rewrites its file while running. Identity and bytes are rechecked
+immediately before publication. A harness write between that recheck and
+publication is lost, so quit the harness before installing. Links are inspected
+with `readlink` and never opened through the old target.
 
 `--adopt-existing` covers only an occupied destination selector or the stable
 regular executable, pinning its identity and digest. It never authorises

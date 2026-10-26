@@ -1878,7 +1878,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
     clone_rust_toolchain(&rig, &home)?;
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
-    fs::copy(std::env::current_exe()?, &executable)?;
+    rig.copy_executable(&std::env::current_exe()?, &executable)?;
     // Production preparation needs registered, freshly observed accounts.
     let home = fs::canonicalize(&home)?;
     let executor = provenant_supervisor::exec::SystemExecutor::new(1)?;

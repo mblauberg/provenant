@@ -35,6 +35,7 @@ provenant-telemetry = { path = "crates/telemetry" }
 provenant-routing = { path = "crates/routing" }
 provenant-run = { path = "crates/run" }
 provenant-fabric-store = { path = "crates/fabric-store" }
+provenant-sqlite = { path = "crates/sqlite" }
 provenant-fabric-runtime = { path = "crates/fabric-runtime" }
 provenant-fabric-mcp = { path = "crates/fabric-mcp" }
 provenant-workflow = { path = "crates/workflow" }
@@ -133,4 +134,9 @@ harness = false
 [[test]]
 name = "dispatch_provider"
 path = "tests/dispatch_provider.rs"
+harness = false
+
+[[test]]
+name = "pr"
+path = "tests/pr.rs"
 harness = false

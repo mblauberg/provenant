@@ -247,6 +247,11 @@ home or tmp grants.
   and other modes keep their existing grants. Hard links remain denied and
   short Unix socket paths still require host tests. Private check homes use
   `std::env::temp_dir()`, honouring the lane's `TMPDIR`.
+- **Pseudo-terminals.** Only a profile that declares `allow_pseudo_tty`, today
+  Agy's, whose `run_command` tool needs a PTY, may open `/dev/ptmx` and the
+  `/dev/ttysN` terminals that its own sandbox allocates (the
+  `com.apple.sandbox.pty` extension). Other terminals and the rest of `/dev`
+  stay denied.
 - **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
   `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
   grants.
@@ -274,7 +279,12 @@ home or tmp grants.
   URLs with embedded credentials are refused. Cancelled, failed, stopped and
   recovered attempts never start delivery. A sealed start marker prevents
   repeating the external effect, and terminal publication keeps a typed
-  delivered, failed-stage or interrupted receipt.
+  delivered, failed-stage or interrupted receipt. A standard
+  `!<absolute-path> auth git-credential` helper is checked directly, without
+  requiring `gh` on PATH. The executable must exist outside the writer
+  worktree. Prepare failures name the failed step and include a bounded,
+  redacted diagnostic in the existing refusal reason, including on peer runs.
+  Prepare creates no delivery receipt.
 - **Profiles and backends.** The providers owner loads and verifies profile
   fixtures into typed data. Profiles allow only the selected account mechanism
   and the lane's own continuation transcript. Unsupported or nested

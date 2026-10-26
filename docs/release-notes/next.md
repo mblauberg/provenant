@@ -29,6 +29,18 @@ bundled assets. Edits under a member's `tests/`, `benches/` and other
   the primary checkout. Pruning or branch-settlement failures retain that
   entry and allow the sweep to continue.
 
+## Stability
+
+The v1.0.0 stability promise is withdrawn. Commands, flags, `--json` output,
+`config.toml` keys, the state layout and Fabric MCP tool names and schemas can
+change in any release, with no deprecation period or compatibility shims. Each
+release's notes list its breaking changes. Upgrade every host together, since
+peers on different versions are not supported.
+
+## Breaking changes
+
+None yet.
+
 ## Behaviour changes
 
 - `provenant output` on a terminal attempt that has no requested part now

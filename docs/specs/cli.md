@@ -72,6 +72,7 @@ provenant
   telemetry stats | trace
   quota show | display | tick
   worktree create | list | remove
+  pr watch NUMBER | merge NUMBER --head SHA
   disk report
   workflow review | receipt (show | save) | session (save | show | handoff)
   check config | install | harness | release | writing
@@ -85,7 +86,7 @@ Global options are accepted before or after the subcommand:
 | Option | Meaning |
 | --- | --- |
 | `--help`, `--version` | Pure output, exit 0, except that `--help` on a hidden command (`internal` and its subcommands, `fabric peer`, `fabric peer-agent`) exits 2 as an unknown command. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree`, `disk report` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `config show|set|unset` and `workflow` print pretty JSON; `hosts doctor` and the remaining leaves print their own text. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree`, `disk report`, `config show|set|unset`, `workflow` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `hosts doctor` and the remaining leaves print their own text. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 
@@ -105,6 +106,17 @@ on the CLI and 1 to 55 over MCP, below the client's tool timeout. Omitting
 flag. A wait ends successfully, exit 0, when its condition is met, including a
 lane that needs input; the observed outcome is in `data`. Expiry exits 124 and
 never cancels the underlying work. Cancelling a wait ends only that reader.
+
+`pr watch NUMBER` is an exception: it delegates waiting to
+`gh pr checks --watch`, with a 24-hour process limit and no `--wait` flag.
+It reports pass or fail with the captured head and fails closed on incomplete
+evidence. `pr merge NUMBER --head SHA` rechecks CI without waiting and guards
+the merge with that full Git object ID. Both require at least one passing check,
+with all others passing or skipped, and refuse a head change during verification.
+See the [GitHub workflow](../runbooks/github-workflow.md#merge)
+for the check and merge-author policy. Their JSON data contains `number`,
+`head` and `result` (`pass` or `fail`); failures exit non-zero. A successful
+merge also includes `merged: true` and reports `merged` in text output.
 
 ### Run verbs
 
@@ -222,12 +234,11 @@ mark eligible directories. `alerts[]` records low-disk alerts or failures.
 Configured `gc.alert_below` emits a Fabric note and gc log message once per
 observed dip; previews leave the persistent latch unchanged.
 
-`chair switch` quotes each handoff argument in single quotes and writes any
-apostrophe as a double-quoted `'`, which sh, bash, zsh and fish all read
-literally. It refuses a path containing a backslash (`\`), which fish treats as
-an escape inside single quotes. An executable path containing a single or
-double quote also refuses, because the hook command in the settings JSON would
-need a backslash escape.
+`chair switch` quotes each handoff argument in single quotes, and writes each
+apostrophe and backslash as a double-quoted character, which sh, bash, zsh and
+fish all read literally. The pane command is a `/bin/sh -c` script, so the
+login shell, which may be fish, parses only that one quoted argument. The hook
+command in the settings JSON uses the same quoting.
 
 `worktree remove` takes either a `NAME` or `--merged`, never both, and `--discard`
 only with a `NAME`. `--merged` requires `--integration` (a branch or remote-tracking

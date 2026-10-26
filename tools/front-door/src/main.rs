@@ -14,6 +14,7 @@ mod hosts;
 mod install;
 mod overflow;
 mod peer_agent;
+mod pr;
 mod quota_live;
 mod release_smoke;
 mod roots;
@@ -150,11 +151,11 @@ fn config_command(
         Ok(config)
     })();
     match result {
-        Ok(config) => match serde_json::to_string_pretty(&config) {
-            Ok(text) => emit(
+        Ok(config) => match serde_json::to_value(&config) {
+            Ok(value) => emit(
                 &CommandResult::new(command, Outcome::Ok, config),
                 globals,
-                &format!("{text}\n"),
+                &provenant_cli::terse(&value),
                 true,
             ),
             Err(_) => fail(
@@ -480,6 +481,7 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
             }
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals),
+        Command::Pr(command) => pr::run(command, globals),
         Command::Gc(command) => worktrees::run_gc(command, globals),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Bench(command) => bench::run(command, globals),
@@ -569,6 +571,9 @@ fn main() -> ExitCode {
     };
     let verb = verb.to_owned();
     let usage_roots = usage::selected_roots(globals);
+    let usage_project = usage_roots
+        .as_ref()
+        .and_then(|roots| usage::project_id(roots, globals));
     let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv),
         ParseOutcome::Invalid { error, globals } => fail(
@@ -631,6 +636,7 @@ fn main() -> ExitCode {
             &verb,
             status,
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            usage_project,
         );
     }
     ExitCode::from(status)

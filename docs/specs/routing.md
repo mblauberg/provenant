@@ -36,7 +36,7 @@ effect.
   bundled TOML row. Config validates policy; registration cannot bypass it.
 - Quota provider pools are measured allowance scopes, not routing pools.
 
-For 1.x compatibility, `route list --json` retains each pool member's
+`route list --json` still carries each pool member's
 `readiness` and `factor_basis_points` fields unchanged. These are placeholders
 until probing lands; human output omits them.
 
@@ -301,6 +301,9 @@ provider tests. Intent that the fixtures cannot show:
 | Cursor | `cursor-agent -p` in stream-json mode with the prompt on argv. Top-level prompts over 64 KiB spill to `prompt.md`; nested attempts refuse them. Only writers add `--force`. The launcher resolves to a shell script in the self-updated `~/.local/share/cursor-agent/versions/<version>/` payload, which runs its sibling `node`, so every lane may read and execute that one resolved version directory, `/bin` and `/usr/bin`. |
 | Agy | `agy --print` with the prompt on argv, a print timeout and no `--sandbox` (headless mode denies tools it cannot prompt for, so writers auto-approve inside the confinement profile). Top-level prompts over 64 KiB spill to `prompt.md`; nested attempts refuse them. HOME is a private directory holding only a link to the login keychain. A print-timeout diagnostic keeps answer text as partial. Agy runs without Fabric MCP, hooks or lane environment. |
 | OpenCode | `opencode run --standalone --format json` with the prompt on stdin. HOME is attempt-private. Inline config denies shell and web fetch, allows edit for writers only, and sets no MCP servers or plugins. |
+
+Claude's generated lane settings set `attribution.commit` and `attribution.pr`
+to empty strings, disabling Claude's commit and PR attribution.
 
 Provider endpoints are `*:443` because Seatbelt cannot filter by host name.
 

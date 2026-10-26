@@ -1169,6 +1169,38 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
     Ok(())
 }
 
+/// Gives the first task oversized tool grants and its sibling none.
+struct FirstOversized {
+    first: TaskId,
+    oversized: Confined,
+    ordinary: Confined,
+}
+impl Providers for FirstOversized {
+    fn prepare(
+        &self,
+        task: &TaskRequest,
+        prompt: &str,
+        paths: &LaunchPaths,
+        resume: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        let provider = if task.task_id == self.first {
+            &self.oversized
+        } else {
+            &self.ordinary
+        };
+        provider.prepare(task, prompt, paths, resume)
+    }
+    fn decode(
+        &self,
+        route: &RouteRecord,
+        output: &[u8],
+        exit: &ExitObservation,
+        path: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        self.ordinary.decode(route, output, exit, path)
+    }
+}
+
 #[test]
 fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -1176,22 +1208,42 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     let call = call(&clock, &cancel);
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
-    let prepared = input();
+    let prepared = two_tasks(2);
     store.create(&prepared, &call)?;
     let id = prepared.attempts[0].attempt_id;
-    let provider = Confined {
-        writer: false,
-        tool_writes: (0..128)
-            .map(|i| PathGrant {
-                path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
-                scope: PathScope::Subtree,
-            })
-            .collect(),
+    let sibling = prepared.attempts[1].attempt_id;
+    let provider = FirstOversized {
+        first: prepared.attempts[0].task_id,
+        oversized: Confined {
+            writer: false,
+            tool_writes: (0..128)
+                .map(|i| PathGrant {
+                    path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
+                    scope: PathScope::Subtree,
+                })
+                .collect(),
+        },
+        ordinary: Confined {
+            writer: false,
+            tool_writes: vec![],
+        },
     };
+    let held = RefCell::new(Vec::new());
+    let holder = |record: &AttemptRecord, _| {
+        held.borrow_mut().push(record.attempt_id);
+        Err(RunError::Validation("fixture holder"))
+    };
+    let started = store.start(prepared.run_id, &provider, &holder, &call)?;
     assert!(matches!(
-        store.start(prepared.run_id, &provider, &|_, _| unreachable!("oversized grants must be refused before handoff"), &call)?.as_slice(),
-        [Started::Refused { attempt, kind: RefusalKind::Preparation, .. }] if *attempt == id
+        started.as_slice(),
+        [
+            Started::Refused { attempt: first, kind: RefusalKind::Preparation, reason },
+            Started::Refused { attempt: second, reason: later, .. },
+        ] if *first == id && reason.contains("256 KiB")
+            && *second == sibling && later.contains("fixture holder")
     ));
+    // The oversized attempt never reached handoff; its sibling did.
+    assert_eq!(*held.borrow(), [sibling]);
     drop(store);
     let store = RunStore::open(&context, &call)?;
     let record = store.record(id, &call)?;
@@ -1203,6 +1255,12 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
         }
     ));
     assert!(record.write_grants.is_empty());
+    let attempt = store.attempt_dir(prepared.run_id, id, false)?;
+    assert!(
+        attempt
+            .metadata_at(std::ffi::OsStr::new("scratch"), false)
+            .is_err_and(|e| e.is_not_found())
+    );
     assert!(
         store
             .start(prepared.run_id, &provider, &|_, _| unreachable!(), &call)?
@@ -2317,6 +2375,83 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
             .is_empty()
     );
     Ok(())
+}
+
+/// Starts a one-task run after `damage` has altered its stored prompt, and
+/// asserts the attempt ends Rejected before preparation with `cause` recorded.
+fn assert_unreadable_prompt_rejected(
+    damage: impl FnOnce(&std::path::Path) -> TestResult,
+    cause: &str,
+) -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    let prompt = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/prompt.txt", run.run_id));
+    damage(&prompt)?;
+    let fake = Fake::default();
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    // Restore access so the tempdir can be removed whatever the outcome.
+    if prompt.exists() {
+        std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o600))?;
+    }
+    assert!(matches!(
+        &started[..],
+        [Started::Refused { attempt, reason, kind: RefusalKind::Preparation }]
+            if *attempt == id && reason.contains("stored prompt unreadable")
+    ));
+    assert_eq!(fake.prepared.get(), 0);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    let fact = store.attempt(id, &call)?;
+    assert_eq!(
+        fact.terminal_state,
+        provenant_records::AttemptOutcome::Rejected
+    );
+    assert!(fact.started_at.is_none());
+    assert!(
+        fact.reason.as_deref().is_some_and(
+            |reason| reason.starts_with("stored prompt unreadable") && reason.contains(cause)
+        ),
+        "{:?}",
+        fact.reason
+    );
+    assert!(
+        store
+            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
+    assert_unreadable_prompt_rejected(
+        |prompt| {
+            std::fs::remove_file(prompt)?;
+            Ok(())
+        },
+        "fstatat failed",
+    )
+}
+
+#[test]
+fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    assert_unreadable_prompt_rejected(
+        |prompt| {
+            std::fs::set_permissions(prompt, std::fs::Permissions::from_mode(0o000))?;
+            Ok(())
+        },
+        "openat read failed",
+    )
 }
 
 #[test]
