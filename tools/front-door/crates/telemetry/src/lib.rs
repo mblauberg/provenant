@@ -9,4 +9,4 @@ pub use prices::{
     PriceTable, Rates, validate_prices,
 };
 pub use reducer::*;
-pub use trace::trace;
+pub use trace::{Hosts, trace};

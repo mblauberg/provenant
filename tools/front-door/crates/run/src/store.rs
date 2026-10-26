@@ -4,7 +4,7 @@ use crate::{
     *,
 };
 use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime};
-use provenant_records::CanonicalV1;
+use provenant_records::{AttemptFile, CanonicalV1};
 use provenant_supervisor::{custody::ExitObservation, exec::Termination, fs::LockMode};
 use rusqlite::{OptionalExtension, params};
 use std::ffi::OsStr;
@@ -55,10 +55,11 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
         let dir = self.attempt_dir(old.run_id, id, false)?;
-        if read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?.is_some() {
+        if read_sealed(&dir, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?.is_some() {
             return Err(RunError::TerminalRecoveryRequired);
         }
-        let raw = read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or(RunError::Nonterminal)?;
+        let raw = read_sealed(&dir, AttemptFile::Result.name(), RESULT_LIMIT)?
+            .ok_or(RunError::Nonterminal)?;
         let text = std::str::from_utf8(&raw)
             .map_err(|_| RunError::Validation("sealed result is not UTF-8"))?;
         let publication = TerminalPublication {
@@ -77,7 +78,7 @@ impl RunStore {
         let old = self.record(id, call)?;
         let dir = self.attempt_dir(old.run_id, id, false)?;
         let pending: AttemptRecord = decode(
-            &read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?
+            &read_sealed(&dir, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?
                 .ok_or(RunError::TerminalRecoveryRequired)?,
         )?;
         super::reader::validate_attempt(&pending)?;
@@ -275,7 +276,7 @@ impl RunStore {
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, delivery: None, verified_owner: Some(context.actor_id), session: None,
                     queued_at: input.created_at, started_at: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
-                    prompt: ArtifactRecord { path: artifact_path(new.attempt_id, "prompt.txt")?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
+                    prompt: ArtifactRecord { path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                     trace: provenant_records::Trace {
                         host: self.host,
                         project: Some(run.project_id),
@@ -306,7 +307,7 @@ impl RunStore {
             }
             seal(
                 &self.attempt_dir(input.run_id, attempt.attempt_id, true)?,
-                "prompt.txt",
+                AttemptFile::Prompt.name(),
                 attempt.prompt.as_bytes(),
                 RECORD_LIMIT,
             )?;
@@ -417,35 +418,38 @@ impl RunStore {
         let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
-        let (outcome, finished_at, reason) =
-            match read_sealed(&attempt_dir, "terminal-pending.json", RECORD_LIMIT)? {
-                Some(raw) => {
-                    let saved: AttemptRecord = decode(&raw)?;
-                    super::reader::validate_attempt(&saved)?;
-                    match saved.state {
-                        AttemptState::Terminal {
-                            outcome: saved_outcome @ (Outcome::Rejected | Outcome::Cancelled),
-                            exit_code: None,
-                            finished_at,
-                            reason,
-                        } if saved.attempt_id == id
-                            && saved.run_id == old.run_id
-                            && saved.generation == old.generation
-                            && saved.exit_evidence.is_none()
-                            && saved.provider_launched == Some(false)
-                            && Some(saved.revision) == revision.checked_add(1) =>
-                        {
-                            (saved_outcome, finished_at, reason)
-                        }
-                        _ => return Err(RunError::TerminalRecoveryRequired),
+        let (outcome, finished_at, reason) = match read_sealed(
+            &attempt_dir,
+            AttemptFile::TerminalPending.name(),
+            RECORD_LIMIT,
+        )? {
+            Some(raw) => {
+                let saved: AttemptRecord = decode(&raw)?;
+                super::reader::validate_attempt(&saved)?;
+                match saved.state {
+                    AttemptState::Terminal {
+                        outcome: saved_outcome @ (Outcome::Rejected | Outcome::Cancelled),
+                        exit_code: None,
+                        finished_at,
+                        reason,
+                    } if saved.attempt_id == id
+                        && saved.run_id == old.run_id
+                        && saved.generation == old.generation
+                        && saved.exit_evidence.is_none()
+                        && saved.provider_launched == Some(false)
+                        && Some(saved.revision) == revision.checked_add(1) =>
+                    {
+                        (saved_outcome, finished_at, reason)
                     }
+                    _ => return Err(RunError::TerminalRecoveryRequired),
                 }
-                None => (
-                    outcome,
-                    finished_at,
-                    Some(reason.chars().take(256).collect()),
-                ),
-            };
+            }
+            None => (
+                outcome,
+                finished_at,
+                Some(reason.chars().take(256).collect()),
+            ),
+        };
         let publication = TerminalPublication {
             outcome,
             finished_at,
@@ -533,7 +537,7 @@ impl RunStore {
         next.usage = publication.usage.clone();
         next.session = publication.session.clone();
         next.result = Some(ArtifactRecord {
-            path: artifact_path(id, "result.md")?,
+            path: artifact_path(id, AttemptFile::Result.name())?,
             digest: CanonicalV1::file_digest(publication.result.as_bytes()),
             bytes: publication.result.len() as u64,
             complete: publication.complete,
@@ -593,19 +597,28 @@ impl RunStore {
         // Seal the result, then the exact terminal intent that names it. A
         // crash between them leaves a result-only orphan, which the edge
         // recovers with revalidated facts; intent never names missing bytes.
-        match read_sealed(&attempt_dir, "terminal-pending.json", RECORD_LIMIT)? {
+        match read_sealed(
+            &attempt_dir,
+            AttemptFile::TerminalPending.name(),
+            RECORD_LIMIT,
+        )? {
             Some(saved) if saved != intent => return Err(RunError::TerminalRecoveryRequired),
             Some(_) => {}
             None => {
                 seal(
                     &attempt_dir,
-                    "result.md",
+                    AttemptFile::Result.name(),
                     publication.result.as_bytes(),
                     RESULT_LIMIT,
                 )?;
                 #[cfg(test)]
                 crate::tests::crash_at("result");
-                seal(&attempt_dir, "terminal-pending.json", &intent, RECORD_LIMIT)?;
+                seal(
+                    &attempt_dir,
+                    AttemptFile::TerminalPending.name(),
+                    &intent,
+                    RECORD_LIMIT,
+                )?;
             }
         }
         #[cfg(test)]
@@ -766,7 +779,7 @@ fn sealed_exit(
             "supervisor exit publication is unresolved",
         ));
     }
-    let name = OsStr::new("process-exit.json");
+    let name = OsStr::new(AttemptFile::ProcessExit.name());
     let mut file = dir.open_read(name)?;
     let meta = file.metadata()?;
     if meta.kind != FileKind::Regular || meta.links != 1 || meta.mode & 0o077 != 0 {
@@ -788,7 +801,7 @@ fn sealed_exit(
     file.sync()?;
     dir.sync()?;
     Ok(ArtifactRecord {
-        path: artifact_path(exit.scope.attempt, "process-exit.json")?,
+        path: artifact_path(exit.scope.attempt, AttemptFile::ProcessExit.name())?,
         digest: CanonicalV1::file_digest(&raw),
         bytes: raw.len() as u64,
         complete: true,

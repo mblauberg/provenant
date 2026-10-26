@@ -821,6 +821,81 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
     out
 }
 
+/// What a trace export learned from peers. A peer that cannot be read is
+/// listed with its error, never fatal: the rest of the export still stands.
+pub(super) struct PeerFacts {
+    pub(super) local: HostId,
+    pub(super) names: BTreeMap<HostId, String>,
+    pub(super) facts: Vec<provenant_records::AttemptFact>,
+    pub(super) hosts: Vec<Value>,
+}
+
+/// The terminal attempts of this project's peer-placed runs, one batched
+/// status read per peer. `None` when no run was placed on a peer.
+pub(super) fn peer_facts(edge: &Edge<'_>, run: Option<RunId>) -> Result<Option<PeerFacts>, Fail> {
+    let dir = edge.roots.state.as_path().join(PLACEMENTS);
+    if std::fs::symlink_metadata(&dir).is_err() {
+        return Ok(None);
+    }
+    let directory = directory(edge.roots)?;
+    let mut placements = Vec::new();
+    for name in directory.entries().map_err(io_fail)? {
+        let name = name.map_err(io_fail)?;
+        let Some(id) = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(".json"))
+            .and_then(|n| n.parse::<RunId>().ok())
+        else {
+            continue;
+        };
+        if run.is_none_or(|run| run == id) {
+            placements.push(read(&directory, &name.to_string_lossy(), id)?);
+        }
+    }
+    if placements.is_empty() {
+        return Ok(None);
+    }
+    let peer = Peer::open(edge)?;
+    // Another project's placements are not this export's to read.
+    let Ok(project) = peer.project() else {
+        return Ok(None);
+    };
+    placements.retain(|p| p.project == project);
+    let mut by_host: BTreeMap<HostId, Vec<(HostId, AttemptId)>> = BTreeMap::new();
+    for placement in &placements {
+        by_host
+            .entry(placement.host)
+            .or_default()
+            .extend(placement.select(None, None)?);
+    }
+    let names: BTreeMap<HostId, String> = peer
+        .context
+        .config
+        .peers
+        .iter()
+        .map(|(name, p)| (p.host, name.clone()))
+        .collect();
+    let (mut facts, mut hosts) = (Vec::new(), Vec::new());
+    for (host, selected) in by_host {
+        let mut row = json!({ "host": host, "name": names.get(&host), "attempts": 0 });
+        match peer.records(&selected) {
+            Ok(records) => {
+                let before = facts.len();
+                facts.extend(records.into_iter().filter_map(|r| run::fact(r).ok()));
+                row["attempts"] = json!(facts.len() - before);
+            }
+            Err(fail) => row["error"] = json!(fail.message),
+        }
+        hosts.push(row);
+    }
+    Ok(Some(PeerFacts {
+        local: peer.context.identity.host,
+        names,
+        facts,
+        hosts,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
