@@ -385,10 +385,10 @@ values with the receipt and unlinks only unchanged owned entries, never
 recursively. ENOSPC, broken output and uncertain publication are typed
 failures, never silent success.
 
-Receipts carrying removed legacy fields fail to decode with a clear reinstall
-error. Move `<state>/install/receipt.json` aside and reapply `install`; use
-`--adopt-existing` for occupied managed selectors or a stable regular executable
-when needed. See the [install runbook](../runbooks/install.md#receipt-recovery).
+Receipts with a non-null `legacy` object fail to decode with a clear reinstall
+error. Current receipts with `"legacy":null` upgrade normally; newly written
+receipts omit the key. For reinstall steps and link conflicts, see the
+[install runbook](../runbooks/install.md#receipt-recovery).
 Obsolete pre-1.0 entries and Git launchers require manual cleanup and are not
 owned or audited by install, uninstall or `check install`.
 

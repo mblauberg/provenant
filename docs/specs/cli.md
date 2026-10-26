@@ -302,8 +302,6 @@ stderr, exit 1 refuses and exit 0 allows. It refuses on any inspection, read
 or size failure. It guards default-branch deletion, non-fast-forward updates,
 pushes from linked worktrees to the default branch and conflict markers,
 reading Git evidence with inherited redirects disabled and doing no fetch.
-Git launchers are quoted absolute `exec` commands, and foreign hooks are
-preserved or reported as conflicts.
 
 Installer leaves match hooks by exact event, matcher and command, keep array
 positions, and never rewrite foreign siblings. Only Claude registers harness

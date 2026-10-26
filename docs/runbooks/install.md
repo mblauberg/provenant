@@ -174,13 +174,16 @@ surface without resolving roots or creating state.
 
 ## Receipt recovery
 
-Receipts carrying removed legacy fields fail to decode with a reinstall error.
+Receipts with a non-null `legacy` object fail to decode with a reinstall error.
+Current receipts with `"legacy":null` upgrade normally and need no recovery.
 Move `<state>/install/receipt.json` aside, then preview and reapply `install`
 with the desired release and harnesses. Existing exact desired files and links
-remain no-ops. Use `--adopt-existing` for occupied managed MCP selectors or a
-stable regular executable that must be replaced, and inspect the preview before
-applying it. Remove obsolete entries manually; install, uninstall and
-`check install` no longer clean up or audit pre-1.0 entries or Git launchers.
+remain no-ops. Links into an older release conflict; remove those binary, skill
+and instruction links manually before reapplying install. Use `--adopt-existing`
+for occupied managed MCP selectors or a stable regular executable that must be
+replaced, and inspect the preview before applying it. Remove obsolete entries
+manually; install, uninstall and `check install` no longer clean up or audit
+pre-1.0 entries or Git launchers.
 
 ## Fabric MCP registration
 

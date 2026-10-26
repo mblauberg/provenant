@@ -4085,9 +4085,63 @@ fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
 }
 
 #[test]
+fn receipt_with_null_legacy_upgrades_cleanly() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    receipt["legacy"] = serde_json::Value::Null;
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let inspection = inspect_install(
+        &f.targets,
+        None,
+        "fixture-target",
+        &LocalFs,
+        &Smoke,
+        &cancel,
+    )
+    .unwrap();
+    assert!(inspection.error.is_none(), "{:?}", inspection.error);
+    assert!(inspection.findings.is_empty());
+
+    let release = f.release_variant("upgrade", &["example"]);
+    let plan = f.plan_for(release.clone());
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let root = release_root(
+        f.targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
+    assert_eq!(
+        fs::read_link(f.targets.bin_dir.join("provenant")).unwrap(),
+        root.join("bin/provenant")
+    );
+    assert_eq!(
+        fs::read_link(f.link()).unwrap(),
+        root.join("skills/example")
+    );
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    assert!(receipt.get("legacy").is_none());
+    assert_eq!(
+        receipt["source_digest"],
+        release.manifest.source_digest.to_string()
+    );
+    assert!(f.plan_for(release).actions().is_empty());
+
+    receipt["legacy"] = serde_json::Value::Null;
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(fs::symlink_metadata(f.link()).is_err());
+}
+
+#[test]
 fn receipt_legacy_fields_require_reinstall_without_mutation() {
     for legacy in [
-        serde_json::Value::Null,
+        serde_json::json!({}),
         serde_json::json!({"git_hooks_dir":"/old/hooks"}),
     ] {
         let f = Fixture::new();

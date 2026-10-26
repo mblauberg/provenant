@@ -1035,6 +1035,7 @@ pub fn plan_install(
         harnesses,
         harness_targets: resolved_targets.into_values().collect(),
         entries,
+        legacy: None,
     };
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
     let bytes = provenant_records::encode(&receipt)?;

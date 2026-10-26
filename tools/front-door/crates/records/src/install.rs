@@ -92,6 +92,8 @@ pub struct InstallReceipt {
     pub harnesses: Vec<Harness>,
     pub harness_targets: Vec<ResolvedHarnessTarget>,
     pub entries: Vec<OwnedEntry>,
+    #[serde(default, skip_serializing)]
+    pub legacy: Option<()>,
 }
 
 /// Build identity emitted at the binary edge without ambient source discovery.
