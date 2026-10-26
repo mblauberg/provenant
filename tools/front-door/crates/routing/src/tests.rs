@@ -179,10 +179,7 @@ fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
         .filter(|entry| entry.model.adapter() == "codex")
         .map(|entry| entry.model.model())
         .collect();
-    assert_eq!(
-        codex_models,
-        ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"]
-    );
+    assert_eq!(codex_models, ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"]);
     for (pool, model, weight, default_effort, allowed) in [
         ("junior", "gpt-6.1-terra", 2, "low", vec!["low", "medium"]),
         (
