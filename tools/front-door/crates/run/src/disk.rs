@@ -97,6 +97,11 @@ fn scan_runs(
     terminal: &BTreeMap<(String, String), bool>,
     report: &mut DiskReport,
 ) {
+    let mut provider_state = DiskEntry {
+        class: "provider_state".into(),
+        path: path.into(),
+        ..Default::default()
+    };
     for run_name in entries(runs, path, report) {
         let run_path = path.join(&run_name);
         let Some(run) = open(runs, &run_name, path, report) else {
@@ -136,14 +141,24 @@ fn scan_runs(
                 for part in entries(&attempt, &attempt_path, report) {
                     let class = match part.to_str() {
                         Some("tmp") => "attempt_tmp",
+                        Some("provider-state") => "provider_state",
                         Some(
-                            "scratch" | "provider-state" | "quarantine" | "logs" | "stdout.log"
+                            "scratch" | "provider-history" | "quarantine" | "logs" | "stdout.log"
                             | "stderr.log",
                         ) => "attempt_retained",
                         _ => "other_state",
                     };
                     let part_path = attempt_path.join(&part);
                     match class {
+                        "provider_state" => {
+                            report.measure_into_at(
+                                &mut provider_state,
+                                &attempt,
+                                &part,
+                                &part_path,
+                            );
+                            provider_state.count = Some(provider_state.count.unwrap_or(0) + 1);
+                        }
                         "attempt_tmp" => {
                             if let Some(index) =
                                 report.measure_at(class, &attempt, &part, &part_path)
@@ -169,6 +184,9 @@ fn scan_runs(
         if observed_retained {
             report.add_rollup(retained);
         }
+    }
+    if provider_state.count.is_some() {
+        report.add_rollup(provider_state);
     }
 }
 
@@ -251,6 +269,13 @@ mod tests {
         drop(reader);
         assert_unchanged_except_sqlite_companions(&before, &snapshot(state)?);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let provider = report
+            .entries
+            .iter()
+            .find(|entry| entry.class == "provider_state")
+            .ok_or("provider-state class missing")?;
+        assert!(provider.allocated_bytes > 0);
+        assert_eq!(provider.count, Some(1));
         assert!(
             report
                 .entries

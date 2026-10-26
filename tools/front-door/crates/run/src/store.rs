@@ -544,6 +544,12 @@ impl RunStore {
         if matches!(old.state, AttemptState::Terminal { .. }) {
             if old == next {
                 if let Ok(attempt_dir) = self.attempt_dir(old.run_id, id, false) {
+                    let _ = crate::retention::prune_caches(
+                        &attempt_dir,
+                        &old,
+                        false,
+                        &mut ProviderStateGc::default(),
+                    );
                     self.set_temporary_retained(id, true, call)?;
                     if remove_temporary_best_effort(&attempt_dir).is_ok() {
                         let _ = self.set_temporary_retained(id, false, call);
@@ -601,6 +607,12 @@ impl RunStore {
         })?;
         // Retained is committed with the terminal record, so a crash before
         // removal leaves discoverable work. Clearing the hint is best effort.
+        let _ = crate::retention::prune_caches(
+            &attempt_dir,
+            &next,
+            false,
+            &mut ProviderStateGc::default(),
+        );
         if remove_temporary_best_effort(&attempt_dir).is_ok() {
             let _ = self.set_temporary_retained(id, false, call);
         }

@@ -40,6 +40,7 @@ pub(crate) enum Error {
     CacheGc(
         Box<provenant_confinement::permissions::CacheGcError>,
         Vec<PathBuf>,
+        provenant_run::ProviderStateGc,
     ),
     #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
@@ -178,6 +179,7 @@ struct GcData {
     #[serde(flatten)]
     report: provenant_confinement::permissions::CacheGcReport,
     idle_days: u64,
+    provider_state: provenant_run::ProviderStateGc,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unobserved_projects: Vec<PathBuf>,
 }
@@ -187,15 +189,32 @@ struct GcData {
 pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
     match gc(&command, globals) {
         Ok(data) => {
-            let human = gc_summary(&data.report);
-            emit(
-                &CommandResult::new("gc", Outcome::Ok, data),
-                globals,
-                &human,
-                command.dry_run,
-            )
+            let mut human = gc_summary(&data.report);
+            human.push_str(&format!(
+                "{} provider-state removal(s), {} kept, {} error(s)\n",
+                data.provider_state.removed.len(),
+                data.provider_state.kept.len(),
+                data.provider_state.errors.len()
+            ));
+            let failed = !data.provider_state.errors.is_empty();
+            let mut result = CommandResult::new(
+                "gc",
+                if failed { Outcome::Error } else { Outcome::Ok },
+                data,
+            );
+            if failed {
+                result.error = Some(provenant_records::CommandError {
+                    code: "GC".into(),
+                    message:
+                        "provider-state retention incomplete; inspect data.provider_state.errors"
+                            .into(),
+                    cause: None,
+                    repair: None,
+                });
+            }
+            emit(&result, globals, &human, command.dry_run)
         }
-        Err(Error::CacheGc(error, unobserved_projects)) => {
+        Err(Error::CacheGc(error, unobserved_projects, provider_state)) => {
             let error = *error;
             let human = gc_summary(&error.report);
             let message = format!("{error}\n{human}");
@@ -205,6 +224,7 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
                 GcData {
                     report: error.report,
                     idle_days: command.idle_days,
+                    provider_state,
                     unobserved_projects,
                 },
             );
@@ -304,14 +324,11 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         roots::selected_project(globals.project.as_deref(), true)?
     };
     let roots = roots::roots(globals, &assets, &project)?;
+    let config =
+        provenant_config::read_with_domains(&roots, &LocalFs, &provenant_cli::domains::SECTIONS)?;
     let mut projects = Vec::new();
     let mut unobserved_projects = Vec::new();
     if command.scheduled {
-        let config = provenant_config::read_with_domains(
-            &roots,
-            &LocalFs,
-            &provenant_cli::domains::SECTIONS,
-        )?;
         if !config.gc.schedule {
             return Ok(GcData {
                 report: provenant_confinement::permissions::CacheGcReport {
@@ -319,6 +336,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                     ..Default::default()
                 },
                 idle_days: command.idle_days,
+                provider_state: Default::default(),
                 unobserved_projects,
             });
         }
@@ -337,6 +355,13 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
     } else {
         projects.push(gc_project(&roots, &project)?);
     }
+    let provider_state = crate::provider_retention::collect(
+        &roots,
+        &home,
+        &assets,
+        config.retention.provider_state_days,
+        command.dry_run,
+    );
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
         .wall_now()
@@ -367,11 +392,18 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         Err(WorkerState::Unknown)
     }) {
         Ok(report) => report,
-        Err(error) => return Err(Error::CacheGc(Box::new(error), unobserved_projects)),
+        Err(error) => {
+            return Err(Error::CacheGc(
+                Box::new(error),
+                unobserved_projects,
+                provider_state,
+            ));
+        }
     };
     Ok(GcData {
         report,
         idle_days: command.idle_days,
+        provider_state,
         unobserved_projects,
     })
 }

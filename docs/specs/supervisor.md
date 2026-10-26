@@ -401,7 +401,7 @@ runs/<RunId>/
     process-exit.json          # immutable exit and cleanup evidence
     stdout.log  stderr.log     # bounded, redacted captures
     reserve                    # 64 KiB publication headroom
-    provider-state/            # retained history, no credentials
+    provider-state/            # resumable private state; run owns retention
     quarantine/                # retained patches, blobs and manifest
     scratch/                   # disposable launch staging only
 worktrees/<ProjectId>/

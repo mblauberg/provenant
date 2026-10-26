@@ -94,7 +94,7 @@ pub enum Command {
     /// Watch pull request CI and merge a verified head
     #[command(subcommand)]
     Pr(Pr),
-    /// Remove orphaned and idle lane build caches
+    /// Remove lane caches and expired terminal provider state
     Gc(Gc),
     /// Inspect disk use without changing files
     #[command(subcommand)]

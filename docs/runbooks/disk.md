@@ -31,8 +31,9 @@ companions of an existing store while reading its live index.
    GC; existing project owners stay legacy and never become idle. Foreign,
    legacy, refused and unmarked caches require owner investigation.
    An `attempt_tmp` entry with `leak: true` belongs to an indexed
-   terminal attempt. Scratch, provider state, quarantine and logs are retained
-   output, so their presence alone is not a leak. Retained output and other run
+   terminal attempt. `provider_state` measures resumable provider state
+   separately; [GC](gc.md) applies its terminal retention policy. Scratch,
+   archived provider history, quarantine and logs remain retained output. Retained output and other run
    metadata and child stores are rolled up into one row per class. Each
    aggregate's `count` records the number of inventory rows it represents.
    Temporary directories, caches and worktrees keep their individual paths.

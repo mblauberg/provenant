@@ -46,6 +46,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
+            "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
             "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
@@ -86,6 +87,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
+                }
+                "provider_state_gc_sweeps_children_and_refuses_replaced_roots" => {
+                    crate::provider_retention::provider_state_gc_sweeps_children_and_refuses_replaced_roots()
                 }
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()

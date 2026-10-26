@@ -53,6 +53,8 @@ owns account eligibility, and run records the resolved account label.
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
 | Read-only write exceptions | `<state>/projects/<ProjectId>/read-only.json`; confinement-owned `readOnlyWritable` list, default empty. Not a config overlay. |
+| Provider resume state | `runs/<run>/attempts/<attempt>/provider-state/`; expires under `retention.provider_state_days` |
+| Provider history | Attempt `provider-history/`; transcripts retained after resume expiry |
 | Runs | `<state>/runs/<RunId>/` and run's top-level registry store |
 | Worktree custody | `<state>/worktrees/<ProjectId>/`; supervisor and confinement own locks, leases and reservations |
 | Fabric | `<state>/fabric/`; fabric-store owns its database |
@@ -177,6 +179,37 @@ The installer renders idle days and an optional floor into the macOS agent's
 arguments. Scheduled runs reread `schedule` before collection, so false
 prevents subsequent automatic collections. Reinstall updates the other agent
 arguments and removes the unchanged owned plist when scheduling is disabled.
+
+The root `[retention]` section sets `provider_state_days`, an integer from 1
+to 3650, default 7. GC rereads it for every sweep, independently of cache idle
+days and free-space pressure. Terminal `finished_at` starts the age.
+Known credential entries expire after 24 hours; resumable provider state
+expires after the configured days. The first sweep applies the policy to
+existing attempts without a migration.
+
+Run owns retention in a separate module. Terminal settlement prunes the
+provider's proven regenerable caches; the initial table contains Codex's
+`cache/`, `plugins/`, `skills/` and `models_cache.json`. Candidate
+`provider.txt` records the adapter. A single existing candidate can use its
+attempt's applied provider when the marker is absent.
+
+Before full expiry, GC archives Codex session directories, history files and
+versioned state and thread-history SQLite files, including WAL, SHM and journal
+companions, under `provider-history/candidate-N/`. Claude's private
+`claude-config/projects/` is also archived. Unclassified provider payloads
+are kept conservatively as history after known credential removal. Result,
+captures, exit evidence, records and digests stay unchanged. An expiry marker
+makes resume return `PROVIDER_STATE_EXPIRED` before spending a continuation.
+
+GC scans only indexed terminal attempts, including child stores. It checks
+held directory identities, takes publication and existing attempt writer
+locks without waiting, and spares retained or unreadable reservations.
+Resume holds shared publication exclusion through continuation acceptance;
+a nonterminal continuation protects its source. Whole-directory disposal
+uses an identity-bearing tombstone rename and `PayloadTree`; retries validate
+the original path and identity. Symlinks are unlinked without following their
+targets. Dry runs make no retention writes. See the [GC runbook](../runbooks/gc.md)
+and [ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md).
 
 The catalogue, adapter table and prices ship as TOML release assets and are
 never copied into mutable state. Routing, providers, quota and workflow

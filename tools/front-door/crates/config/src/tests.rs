@@ -26,6 +26,26 @@ fn explicit_profile_selects_the_compiled_preset() {
 }
 
 #[test]
+fn provider_state_retention_defaults_overrides_and_validation() {
+    let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
+    assert_eq!(defaults["retention"]["provider_state_days"], 7);
+    let config = load(
+        &roots(),
+        Some(&b"schema_version=1\n[retention]\nprovider_state_days=14"[..]),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&config).unwrap()["retention"]["provider_state_days"],
+        14
+    );
+    test_support::assert_leaf_origins(&config);
+    for value in ["0", "3651", "-1", "'seven'"] {
+        let text = format!("schema_version=1\n[retention]\nprovider_state_days={value}");
+        assert!(load(&roots(), Some(text.as_bytes())).is_err());
+    }
+}
+
+#[test]
 fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
     let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);

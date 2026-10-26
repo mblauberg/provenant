@@ -14,6 +14,7 @@ mod install;
 mod overflow;
 mod peer_agent;
 mod pr;
+mod provider_retention;
 mod quota_live;
 mod release_smoke;
 mod roots;

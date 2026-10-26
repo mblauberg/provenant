@@ -348,6 +348,16 @@ fn prepare_with(
             None => None,
         };
         let (scratch, private_state) = (scratch.as_path(), private_state.as_path());
+        Directory::open_anchor(private_state)
+            .and_then(|directory| {
+                directory.atomic_write(
+                    std::ffi::OsStr::new("provider.txt"),
+                    ".provider-",
+                    adapter.id().as_bytes(),
+                    provenant_supervisor::fs::PublishMode::Replace,
+                )
+            })
+            .map_err(|error| error.to_string())?;
         let text = match &git_context {
             Some(context) => {
                 let location = context
@@ -586,7 +596,7 @@ fn continuation_for(
         Ok(Some(retained)) => copy_state(&retained, private_state)?,
         // These adapters retain sessions in their existing user data stores.
         Ok(None) if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
-        Ok(None) => return Err("the prior attempt's retained provider state is missing".into()),
+        Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),
         // An unfinished search proves nothing missing, whatever the adapter.
         Err(SearchExhausted) => {
             return Err(format!(
@@ -2276,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn user_session_stores_resume_without_private_session_files()
+    fn user_sessions_and_pruned_codex_state_remain_resumable()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{AttemptId, Digest, RunId, TaskId};
         use provenant_records::{
@@ -2317,6 +2327,90 @@ mod tests {
             let result = continuation_for(&prior, &route, "fixture", state, state);
             if adapter == "codex" {
                 assert!(result.is_err(), "Codex still requires its retained state");
+                use provenant_core::{
+                    ActorId, CancelToken, MonoTime, RootInputs, TestClock, WaitBudget, WallTime,
+                };
+                use std::os::unix::fs::DirBuilderExt;
+                let temp = tempfile::tempdir()?;
+                let base = temp.path().canonicalize()?;
+                let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+                inputs.state_dir = Some(base.join("state"));
+                let roots = inputs.resolve(&provenant_supervisor::fs::LocalFs)?;
+                let context = run::ExecutionContext {
+                    state_root: roots.state,
+                    project_id: prior.project_id,
+                    actor_id: ActorId::from_bytes([5; 16]),
+                    read_prompts: true,
+                };
+                let clock = TestClock::new(WallTime::from_micros(100)?, MonoTime::from_micros(0));
+                let cancel = CancelToken::new();
+                let call = run::Request {
+                    clock: &clock,
+                    cancel: &cancel,
+                    budget: WaitBudget::cli(MonoTime::from_micros(0), 5)?,
+                };
+                let store = run::RunStore::open(&context, &call)?;
+                let request = run::PreparedRun {
+                    run_id: prior.run_id,
+                    operation_id: prior.operation_id.clone(),
+                    created_at: WallTime::from_micros(100)?,
+                    attempts: vec![run::NewAttempt {
+                        attempt_id: prior.attempt_id,
+                        task_id: prior.task_id,
+                        prompt: String::new(),
+                    }],
+                    request: serde_json::from_value(serde_json::json!({
+                        "schema_version": 1, "concurrency": 1, "parent": null,
+                        "tasks": [{ "task_id": prior.task_id, "prompt_digest": provenant_records::CanonicalV1::file_digest(b""),
+                            "route": prior.requested_route, "fallback": [], "authority_digest": prior.authority_digest,
+                            "provider_timeout_seconds": 20, "delivery_id": null }]
+                    }))?,
+                };
+                store.create(&request, &call)?;
+                let candidate = context.state_root.as_path().join(format!(
+                    "runs/{}/attempts/{}/provider-state/candidate-0",
+                    prior.run_id, prior.attempt_id
+                ));
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(candidate.join("sessions"))?;
+                std::fs::write(candidate.join("provider.txt"), "codex")?;
+                std::fs::write(
+                    candidate.join("sessions/fixture-session.jsonl"),
+                    "transcript",
+                )?;
+                for cache in ["cache", "plugins", "skills"] {
+                    std::fs::DirBuilder::new()
+                        .mode(0o700)
+                        .create(candidate.join(cache))?;
+                    std::fs::write(candidate.join(cache).join("payload"), "cache")?;
+                }
+                std::fs::write(candidate.join("models_cache.json"), "cache")?;
+                store.withdraw(
+                    prior.attempt_id,
+                    run::AttemptState::Queued,
+                    run::Outcome::Cancelled,
+                    "fixture",
+                    WallTime::from_micros(200)?,
+                    &call,
+                )?;
+                for cache in ["cache", "plugins", "skills", "models_cache.json"] {
+                    assert!(!candidate.join(cache).exists());
+                }
+                let copied = base.join("resumed-state");
+                let continuation = continuation_for(
+                    &prior,
+                    &route,
+                    "fixture",
+                    context.state_root.as_path(),
+                    &copied,
+                )?;
+                assert_eq!(continuation.session(), "fixture-session");
+                assert_eq!(
+                    std::fs::read_to_string(copied.join("sessions/fixture-session.jsonl"))?,
+                    "transcript"
+                );
             } else {
                 assert_eq!(result?.session(), "fixture-session");
                 prior.session = None;

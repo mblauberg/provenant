@@ -59,6 +59,9 @@ identity verification are quarantined under `.gc-refused-*` and kept for
 inspection. The owner marker is deleted last, and a failed sweep reports
 completed removals and bytes already freed alongside the error.
 
+GC also collects terminal provider state, preserving transcripts and evidence.
+See the [GC runbook](gc.md) for resume windows, credential expiry and dry runs.
+
 The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
 workspace's `target/release/provenant` without that variable. Pass
 `--binary PATH` to package another release build, for example one built with an

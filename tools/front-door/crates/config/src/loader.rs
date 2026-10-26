@@ -241,6 +241,31 @@ fn inspect<T: DeserializeOwned + Serialize>(
         crate::GcSettings::default()
     };
 
+    let retention_item = user.remove("retention");
+    let retention = if let Some(item) = &retention_item {
+        let mut table = Table::new();
+        table.insert("retention", item.clone());
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Settings {
+            retention: crate::RetentionSettings,
+        }
+        let settings: Settings = decode(table).map_err(|_| ConfigError::Schema {
+            location: site(&user_sites, "retention", &user_origin, false),
+            rule: "type",
+        })?;
+        settings
+            .retention
+            .validate()
+            .map_err(|rule| ConfigError::Schema {
+                location: site(&user_sites, "retention", &user_origin, false),
+                rule,
+            })?;
+        settings.retention
+    } else {
+        crate::RetentionSettings::default()
+    };
+
     let knobs_item = user.remove("knobs");
     apply_root_aliases(&mut user, sections, &mut user_sites, &user_origin)?;
     let version = user.get("schema_version");
@@ -339,6 +364,12 @@ fn inspect<T: DeserializeOwned + Serialize>(
         });
     }
     origins.insert("install.targets".into(), compiled.clone());
+    origins.insert("retention.provider_state_days".into(), compiled.clone());
+    if let Some(item) = &retention_item {
+        walk_item(item, "retention", None, &mut |key, _, _| {
+            origins.insert(key.into(), user_origin.clone());
+        });
+    }
     if let Some(item) = &install_item {
         walk_item(item, "install", None, &mut |key, _, _| {
             origins.insert(key.into(), user_origin.clone());
@@ -402,6 +433,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             domains,
             install,
             gc,
+            retention,
             knobs,
             origins,
         },
