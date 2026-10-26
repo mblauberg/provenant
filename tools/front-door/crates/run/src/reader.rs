@@ -416,21 +416,23 @@ impl RunStore {
             });
         }
         let record = self.record(id, call)?;
+        let missing_output = if matches!(record.state, AttemptState::Terminal { .. }) {
+            RunError::NotFound
+        } else {
+            RunError::Nonterminal
+        };
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
                 let dir = self.attempt_dir(record.run_id, id, false)?;
                 let bytes = crate::artifacts::read_sealed(&dir, "stderr.log", CAPTURE_LIMIT)?
-                    .ok_or(RunError::Nonterminal)?;
+                    .ok_or(missing_output)?;
                 let digest = provenant_records::CanonicalV1::file_digest(&bytes);
                 (bytes, true, digest)
             }
             ArtifactPart::Prompt | ArtifactPart::Result => {
                 let (artifact, limit) = match part {
                     ArtifactPart::Prompt => (&record.prompt, RECORD_LIMIT),
-                    _ => (
-                        record.result.as_ref().ok_or(RunError::Nonterminal)?,
-                        RESULT_LIMIT,
-                    ),
+                    _ => (record.result.as_ref().ok_or(missing_output)?, RESULT_LIMIT),
                 };
                 let bytes = self.artifact_bytes(record.run_id, artifact, limit)?;
                 if std::str::from_utf8(&bytes).is_err() {

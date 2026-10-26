@@ -308,7 +308,11 @@ impl run::Providers for Registry<'_> {
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
         }
-        if let Some(ProviderEvent::QuotaLimited { message, pool }) = events
+        if let Some(ProviderEvent::QuotaLimited {
+            message,
+            pool,
+            resets_in_seconds,
+        }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
         {
@@ -331,15 +335,21 @@ impl run::Providers for Registry<'_> {
             reason.truncate(end);
             // Routing reads the shared quota store, which a lane can neither
             // read nor write: a nested refusal stays in the attempt reason
-            // rather than landing in a child store nothing routes from.
+            // rather than landing in a child store nothing routes from. A
+            // refusal without a pool holds only this model on a known account.
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
-            if let Some(pool) = pool.as_deref().filter(|_| !lane) {
+            if !lane && (pool.is_some() || route.account_key.is_some()) {
                 if let Some(state_root) = provider_state.ancestors().nth(5) {
+                    let now = jiff::Timestamp::now().as_second();
+                    let resets = resets_in_seconds
+                        .and_then(|seconds| i64::try_from(seconds).ok())
+                        .and_then(|seconds| now.checked_add(seconds));
                     crate::quota::persist_provider_refusal(
                         state_root,
                         route,
-                        Some(pool),
-                        jiff::Timestamp::now().as_second(),
+                        pool.as_deref(),
+                        now,
+                        resets,
                     )
                     .map_err(|e| e.to_string())?;
                 } else if self.roots.is_some() {

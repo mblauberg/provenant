@@ -156,6 +156,65 @@ fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
+    let exit = ExitObservation {
+        code: Some(1),
+        ..EXIT
+    };
+    let result = |error: &str| {
+        serde_json::json!({"event":"result","result":{
+            "conversation_id":"","status":"ERROR","response":"","error":error,
+            "usage":{"input_tokens":0,"output_tokens":0}}})
+        .to_string()
+            + "\n"
+    };
+    for (message, resets_in_seconds) in [
+        (
+            "429: Individual quota reached for gemini-3.8-flash. Resets in 7h23m.",
+            Some(26_580),
+        ),
+        (
+            "Individual quota reached. Resets in 2d 5m 30s",
+            Some(173_130),
+        ),
+        ("Individual quota reached. Resets in 8d", None),
+        ("Individual quota reached. Resets in 0m", None),
+        ("INDIVIDUAL QUOTA REACHED", None),
+        // The wait comes only from the closing suffix.
+        ("Individual quota reached (Resets in 7d) for now", None),
+        ("Individual quota reached. Resets in 7h23m, try later", None),
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused, "{message}");
+        assert!(
+            events.contains(&ProviderEvent::QuotaLimited {
+                message: message.into(),
+                pool: None,
+                resets_in_seconds,
+            }),
+            "{message}"
+        );
+    }
+    // A bare 429 may be a per-minute rate limit, not a spent quota, and only an
+    // error that opens with the refusal is one.
+    for message in [
+        "429",
+        "429 Too Many Requests",
+        "RESOURCE_EXHAUSTED",
+        "429 RESOURCE_EXHAUSTED: Quota exceeded for requests per minute",
+        "upstream error",
+        r#"Invalid prompt: "quota reached. Resets in 7d""#,
+        r#"Invalid prompt: "Individual quota reached. Resets in 7d""#,
+        "tool failed: Individual quota reached while reading notes, Resets in 7d",
+        "4290: Individual quota reached. Resets in 7d",
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed, "{message}");
+        assert!(events.contains(&ProviderEvent::Error), "{message}");
+    }
+    Ok(())
+}
+#[test]
 fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dyn std::error::Error>>
 {
     let exit = ExitObservation {
@@ -1118,10 +1177,6 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
             );
             assert_eq!(spec.stdin, Stdin::Null);
             assert_eq!(spec.cwd, Path::new("/fixture/repo"));
-            assert_eq!(
-                spec.profile.spec.tool_exec_roots.is_empty(),
-                access == Access::ReadOnly
-            );
         }
     }
     let plan = read_only_plan("/fixture", Some("login"));
@@ -1155,6 +1210,37 @@ fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> 
         assert!(spec.argv.windows(2).any(|pair| {
             pair[0] == "--add-dir" && pair[1] == plan.permissions().scratch.path.as_os_str()
         }));
+    }
+    Ok(())
+}
+
+#[test]
+fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("cursor", "fixture-model");
+    let payload = Path::new("/fixture/home/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4");
+    let launcher = payload.join("cursor-agent");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.executable = &launcher;
+        let spec = cursor::Cursor.prepare(input)?.profile.spec;
+        assert_eq!(
+            spec.process_executables,
+            vec![crate::launch::exact(&launcher)]
+        );
+        assert!(
+            spec.runtime_reads
+                .contains(&crate::launch::subtree(payload))
+        );
+        assert_eq!(
+            spec.tool_exec_roots,
+            ["/bin", "/usr/bin"]
+                .map(crate::launch::subtree)
+                .into_iter()
+                .chain([crate::launch::subtree(payload)])
+                .collect::<Vec<_>>()
+        );
     }
     Ok(())
 }
@@ -2323,7 +2409,8 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
             assert_eq!(outcome.status(), OutcomeStatus::Refused);
             assert!(events.contains(&ProviderEvent::QuotaLimited {
                 message: message.into(),
-                pool: Some("opencode-free".into())
+                pool: Some("opencode-free".into()),
+                resets_in_seconds: None,
             }));
         }
     }
@@ -2336,7 +2423,8 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
         assert_eq!(outcome.status(), OutcomeStatus::Refused);
         assert!(events.contains(&ProviderEvent::QuotaLimited {
             message: "provider quota message".into(),
-            pool: None
+            pool: None,
+            resets_in_seconds: None,
         }));
     }
     Ok(())

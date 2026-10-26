@@ -1,7 +1,7 @@
 use crate::*;
 use provenant_core::{RelativePath, RunId};
 use provenant_records::{CanonicalV1, PathWire};
-use provenant_supervisor::fs::{Directory, FileKind, Publication, PublishMode};
+use provenant_supervisor::fs::{Directory, FileKind, PayloadTree, Publication, PublishMode};
 use std::{ffi::OsStr, path::Component};
 
 pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<Directory> {
@@ -20,7 +20,7 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 pub(crate) fn remove_temporary_best_effort(
     attempt: &Directory,
 ) -> provenant_supervisor::fs::Result<()> {
-    remove_entry_tree(attempt, OsStr::new("tmp"), TemporaryLocks::Protected)
+    remove_entry_tree(attempt, OsStr::new("tmp"))
 }
 
 /// Reconcile alone may dispose of lock-named payloads after proving the
@@ -31,30 +31,46 @@ pub(crate) fn remove_temporary_best_effort(
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,
 ) -> provenant_supervisor::fs::Result<()> {
-    remove_entry_tree(attempt, OsStr::new("tmp"), TemporaryLocks::Disposable)
+    let name = OsStr::new("tmp");
+    let metadata = match attempt.metadata_at(name, false) {
+        Ok(metadata) => metadata,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.kind != FileKind::Directory {
+        return attempt.unlink(name);
+    }
+    let tree = PayloadTree::claim(attempt, name, &metadata)?;
+    remove_payload_contents(&tree)?;
+    drop(tree);
+    // tmp itself is not lock-named, so ordinary removal suffices.
+    attempt.rmdir(name)
 }
 
-#[derive(Clone, Copy)]
-enum TemporaryLocks {
-    Protected,
-    Disposable,
+fn remove_payload_contents(directory: &PayloadTree) -> provenant_supervisor::fs::Result<()> {
+    directory.make_writable()?;
+    let entries = directory
+        .entries()?
+        .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
+    for entry in entries {
+        if directory.metadata_at(&entry)?.kind == FileKind::Directory {
+            remove_payload_contents(&directory.child(&entry)?)?;
+            directory.rmdir(&entry)?;
+        } else {
+            directory.unlink(&entry)?;
+        }
+    }
+    Ok(())
 }
 
-fn remove_entry_tree(
-    parent: &Directory,
-    name: &OsStr,
-    locks: TemporaryLocks,
-) -> provenant_supervisor::fs::Result<()> {
+fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_supervisor::fs::Result<()> {
     let metadata = match parent.metadata_at(name, false) {
         Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => return Ok(()),
         Err(error) => return Err(error),
     };
     if metadata.kind != FileKind::Directory {
-        return match locks {
-            TemporaryLocks::Protected => parent.unlink(name),
-            TemporaryLocks::Disposable => parent.unlink_payload(name),
-        };
+        return parent.unlink(name);
     }
     let directory = parent.open_verified_directory(name)?;
     directory.make_writable()?;
@@ -62,12 +78,9 @@ fn remove_entry_tree(
         .entries()?
         .collect::<provenant_supervisor::fs::Result<Vec<_>>>()?;
     for entry in entries {
-        remove_entry_tree(&directory, &entry, locks)?;
+        remove_entry_tree(&directory, &entry)?;
     }
-    match locks {
-        TemporaryLocks::Protected => parent.rmdir(name),
-        TemporaryLocks::Disposable => parent.rmdir_payload(name),
-    }
+    parent.rmdir(name)
 }
 
 impl RunStore {

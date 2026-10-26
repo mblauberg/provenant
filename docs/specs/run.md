@@ -57,6 +57,10 @@ and `provenant help <verb>` lists the flags.
 | `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
 | `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. It never replays an uncertain launch. |
 
+When a terminal attempt has no requested output, local and peer reads report
+`NOT_FOUND` (facade code `not_found`, exit 2). An active attempt still
+reports `NONTERMINAL`.
+
 Route and access inputs on `dispatch`:
 
 - Exactly one `--model ADAPTER/ID` or `--route NAME`, an optional `--effort`,

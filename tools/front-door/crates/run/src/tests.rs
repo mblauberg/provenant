@@ -307,6 +307,56 @@ fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     Ok(())
 }
 #[test]
+fn missing_output_is_not_found_only_after_terminal() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    for part in [ArtifactPart::Result, ArtifactPart::Stderr] {
+        assert!(matches!(
+            store.read_output(id, part, ByteRange::default(), &context, &call),
+            Err(RunError::Nonterminal)
+        ));
+    }
+    store.withdraw(
+        id,
+        AttemptState::Queued,
+        Outcome::Rejected,
+        "fixture rejection",
+        WallTime::from_micros(200)?,
+        &call,
+    )?;
+    assert!(matches!(
+        store.read_output(
+            id,
+            ArtifactPart::Stderr,
+            ByteRange::default(),
+            &context,
+            &call
+        ),
+        Err(RunError::NotFound)
+    ));
+    assert!(
+        store
+            .read_output(
+                id,
+                ArtifactPart::Result,
+                ByteRange::default(),
+                &context,
+                &call
+            )?
+            .bytes
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
 fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
