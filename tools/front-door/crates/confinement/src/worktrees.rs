@@ -2609,6 +2609,31 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn create_accepts_a_remote_tracking_revision_as_its_base() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let base = fixture.head()?;
+        let base_text = base.to_string();
+        fixture.run(&[
+            "update-ref",
+            "refs/remotes/origin/chore/cleanup-code-sweep",
+            &base_text,
+        ])?;
+        let test_context = TestContext::new(&fixture)?;
+
+        let created = create(
+            &test_context.context(),
+            WorktreeCreate {
+                branch: "chore/cleanup-code-sweep-2".to_owned(),
+                base: Some("origin/chore/cleanup-code-sweep".to_owned()),
+            },
+            &cancel(),
+        )?;
+
+        assert_eq!(created.head, base);
+        Ok(())
+    }
+
+    #[test]
     fn nested_worker_protects_all_containing_worktrees() {
         let mut states = BTreeMap::from([
             (PathBuf::from("/project/outer"), WorkerState::Free),
