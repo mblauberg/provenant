@@ -79,7 +79,7 @@ pub struct ResolvedHarnessTarget {
     pub hook_file: Option<AbsolutePath>,
     pub instruction: Option<AbsolutePath>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallReceipt {
     pub schema_version: u64,
@@ -93,7 +93,7 @@ pub struct InstallReceipt {
     pub harness_targets: Vec<ResolvedHarnessTarget>,
     pub entries: Vec<OwnedEntry>,
     #[serde(default, skip_serializing)]
-    pub legacy: Option<()>,
+    pub legacy: Option<serde::de::IgnoredAny>,
 }
 
 /// Build identity emitted at the binary edge without ambient source discovery.
