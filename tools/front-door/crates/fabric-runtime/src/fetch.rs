@@ -302,7 +302,10 @@ fn open_or_create_directory(parent: &Directory, name: &str) -> Result<Directory>
 
 fn create_stage(parent: &Directory) -> Result<(String, Directory)> {
     for _ in 0..32 {
-        let name = format!(".provenant-fetch-stage-{}", provenant_core::hex(&fs::entropy_128()?));
+        let name = format!(
+            ".provenant-fetch-stage-{}",
+            provenant_core::hex(&fs::entropy_128()?)
+        );
         match parent.mkdir(OsStr::new(&name), DIRECTORY_MODE) {
             Ok(()) => {
                 parent.sync()?;
