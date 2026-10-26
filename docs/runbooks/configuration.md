@@ -28,9 +28,8 @@ that validates the whole result before replacing it, and `config show` reports
 each value and its source. Dispatch accepts repeated `--knob NAME=VALUE`, and
 `fabric_run` (`op: submit`) accepts `knobs: ["NAME=VALUE"]`; these validated
 overrides win over configuration. Each sealed task and attempt records the
-profile name,
-effective knob values and exact dispatch overrides, and continuations keep
-that stamp.
+profile name, effective knob values and exact dispatch overrides, and
+continuations keep that stamp.
 
 Batch concurrency resolves `lanes.max_concurrency` from the profile. The
 registry default is 8, and an explicit `--concurrency N` or Fabric

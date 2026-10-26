@@ -962,7 +962,7 @@ mod tests {
                 base: "main".into(),
                 branch: "writer/change".into(),
             }),
-            60000,
+            600,
         );
         let actual = serde_json::to_value(SubmitInput::Submit {
             operation_id: OperationId::parse("peer-writer")?,
@@ -971,16 +971,22 @@ mod tests {
             knobs: vec![],
             host: None,
         })?;
-        let task = &actual["tasks"][0];
         assert_eq!(actual["op"], "submit");
-        assert!(task.get("base").is_none());
-        assert_eq!(task["access"], "worktree_write");
+        // The whole task, so a stray field or a rewritten prompt fails.
         assert_eq!(
-            task["new_worktree"],
-            json!({"base": "main", "branch": "writer/change"})
+            actual["tasks"][0],
+            json!({
+                "access": "worktree_write",
+                "account": null,
+                "deliver": null,
+                "delivery_id": null,
+                "new_worktree": {"base": "main", "branch": "writer/change"},
+                "prompt": "write the change",
+                "route": serde_json::to_value(route)?,
+                "timeout_seconds": 600,
+                "worktree": null
+            })
         );
-        assert_eq!(task["route"], serde_json::to_value(route)?);
-        assert_eq!(task["timeout_seconds"], 60000);
         Ok(())
     }
 
@@ -999,7 +1005,7 @@ mod tests {
                 deliver: None,
             },
             None,
-            60000,
+            600,
         );
         assert_eq!(task.base.as_deref(), Some("main"));
         assert_eq!(task.prompt, "review");
