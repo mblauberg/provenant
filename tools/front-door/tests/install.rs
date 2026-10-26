@@ -111,6 +111,140 @@ fn inspect_installed(rig: &TestRig, stage: &Path) -> Result<provenant_config::In
     )?)
 }
 #[test]
+fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
+    use provenant_records::{InstallReceipt, Limits};
+    use std::os::unix::fs::symlink;
+    enum Canary {
+        Link(PathBuf),
+        File(Vec<u8>, fs::Permissions),
+    }
+    // Staged smoke executables must live under a lane's executable build root.
+    let executable = std::env::current_exe()?;
+    let fixture_root = executable.parent().ok_or("test executable parent")?;
+    for bin_setting in ["flag-external", "flag-home", "config-home"] {
+        let mut rig = TestRig::in_directory(fixture_root)?;
+        rig.state = rig.home.join(".local/share/provenant/v1");
+        rig.env.retain(|(key, _)| {
+            !matches!(
+                key.to_str(),
+                Some("PROVENANT_STATE_DIR" | "CODEX_HOME" | "CLAUDE_CONFIG_DIR")
+            )
+        });
+        let bin_dir = match bin_setting {
+            "flag-external" => rig.root.join("global-bin"),
+            "flag-home" => rig.home.join("bin"),
+            _ => rig.home.join("tools/bin"),
+        };
+        let stage = staged(&rig)?;
+        let mut install_args = args(&stage, false);
+        if bin_setting == "config-home" {
+            fs::create_dir_all(&rig.state)?;
+            fs::write(
+                rig.state.join("config.toml"),
+                format!(
+                    "schema_version=1\n[install]\nbin_dir={}\n",
+                    toml_edit::Value::from(bin_dir.to_str().ok_or("bin dir")?)
+                ),
+            )?;
+        } else {
+            install_args.extend(["--bin-dir".into(), bin_dir.into_os_string()]);
+        }
+        let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
+        let installed = rig.execute_os(binary, &install_args, None)?;
+        assert_eq!(
+            code(&installed),
+            0,
+            "{bin_setting}: {}",
+            String::from_utf8_lossy(&installed.stdout.bytes)
+        );
+        let receipt: InstallReceipt = provenant_records::decode_v1(
+            fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
+            Limits::CONFIG,
+        )?;
+        assert!(receipt.legacy.is_none());
+        let mut canaries = Vec::new();
+        for entry in &receipt.entries {
+            let path = entry.path.to_path_buf()?;
+            if path.starts_with(&rig.home) {
+                let metadata = fs::symlink_metadata(&path)?;
+                let value = if metadata.file_type().is_symlink() {
+                    Canary::Link(fs::read_link(&path)?)
+                } else {
+                    Canary::File(fs::read(&path)?, metadata.permissions())
+                };
+                canaries.push((path, value));
+            }
+        }
+        let old_home = rig.home.clone();
+        let moved_home = rig.root.join("home-moved");
+        fs::rename(&old_home, &moved_home)?;
+        for (path, value) in &canaries {
+            fs::create_dir_all(path.parent().ok_or("canary parent")?)?;
+            match value {
+                Canary::Link(target) => symlink(target, path)?,
+                Canary::File(bytes, mode) => {
+                    fs::write(path, bytes)?;
+                    fs::set_permissions(path, mode.clone())?;
+                }
+            }
+        }
+        let old_release_binary = old_home
+            .join(".local/share/provenant/v1/releases")
+            .join(receipt.source_digest.to_string())
+            .join("bin/provenant");
+        fs::create_dir_all(old_release_binary.parent().ok_or("release parent")?)?;
+        fs::write(&old_release_binary, b"old release canary\n")?;
+        rig.home = moved_home.clone();
+        rig.state = moved_home.join(".local/share/provenant/v1");
+        // Doctor receives unresolved HOME and does not load install config.
+        let alias = rig.root.join("home-alias");
+        symlink(&moved_home, &alias)?;
+        for (key, value) in &mut rig.env {
+            if key == "HOME" {
+                *value = alias.clone().into_os_string();
+            }
+        }
+        let old_mcp = old_home.join(".codex/config.toml");
+        let mcp_bytes = fs::read(&old_mcp)?;
+        fs::write(&old_mcp, b"invalid TOML\0")?;
+        let checked = rig.execute(binary, &["check", "install", "--json"], None)?;
+        let checked: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+        assert!(checked["error"].is_null(), "{bin_setting}: {checked}");
+        assert!(
+            !checked["data"]["findings"]
+                .as_array()
+                .ok_or("check findings")?
+                .iter()
+                .any(|row| row["rule"] == "install.invalid"),
+            "{bin_setting}: {checked}"
+        );
+        fs::write(&old_mcp, mcp_bytes)?;
+        // Uninstall has no --bin-dir flag; the config path still names old HOME.
+        let removed = rig.execute(binary, &["uninstall", "--harness", "codex", "--json"], None)?;
+        assert_eq!(code(&removed), 0, "{bin_setting}: {removed:?}");
+        let removed: serde_json::Value = serde_json::from_slice(&removed.stdout.bytes)?;
+        assert!(
+            removed["data"]["outcome"]["findings"]
+                .as_array()
+                .ok_or("findings")?
+                .iter()
+                .any(|finding| finding["rule"] == "relocated_stale_entry")
+        );
+        for (path, value) in &canaries {
+            match value {
+                Canary::Link(target) => assert_eq!(fs::read_link(path)?, *target),
+                Canary::File(bytes, mode) => {
+                    assert_eq!(fs::read(path)?, *bytes);
+                    assert_eq!(fs::metadata(path)?.permissions().mode(), mode.mode());
+                }
+            }
+        }
+        assert_eq!(fs::read(old_release_binary)?, b"old release canary\n");
+    }
+    Ok(())
+}
+
+#[test]
 fn check_install_source_failures_keep_the_typed_outcome() -> Result {
     let rig = TestRig::new()?;
     let stage = staged(&rig)?;

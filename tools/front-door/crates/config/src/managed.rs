@@ -1894,26 +1894,58 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         .as_ref()
         .map(|legacy| legacy.home.to_path_buf())
         .transpose()?;
-    let old_home = targets
-        .bin_dir
-        .strip_prefix(&home)
-        .ok()
-        .filter(|tail| !tail.as_os_str().is_empty())
-        .and_then(|tail| {
-            bin_dir
-                .ancestors()
-                .nth(tail.components().count())
-                .filter(|old| old.join(tail) == bin_dir)
-        })
-        .filter(|old| *old != home && *old != targets.home)
-        .or_else(|| {
-            legacy_home
-                .as_deref()
-                .filter(|old| *old != home && *old != targets.home)
-        });
-    let stale_legacy = legacy_home
-        .as_ref()
-        .is_some_and(|old| old_home.is_some() || (*old != home && *old != targets.home));
+    let before_tail = |path: &Path, tail: &Path| {
+        path.ancestors()
+            .nth(tail.components().count())
+            .filter(|old| old.join(tail) == path)
+            .map(Path::to_path_buf)
+    };
+    // Current config may still name the old home, and uninstall cannot repeat
+    // an install's --bin-dir flag. Try recorded defaults independently too.
+    let mut old_homes = vec![
+        targets
+            .bin_dir
+            .strip_prefix(&home)
+            .ok()
+            .filter(|tail| !tail.as_os_str().is_empty())
+            .and_then(|tail| before_tail(&bin_dir, tail)),
+        before_tail(&bin_dir, Path::new(".local/bin")),
+        moved
+            .as_deref()
+            .and_then(|root| before_tail(root, Path::new(".local/share/provenant/v1"))),
+    ];
+    let defaults = Targets::new(targets.roots.clone(), &home, &receipt.harnesses);
+    for recorded in &receipt.harness_targets {
+        let Some(default) = defaults
+            .harnesses
+            .iter()
+            .find(|default| default.harness == recorded.harness)
+        else {
+            continue;
+        };
+        for (recorded, default) in [
+            (Some(&recorded.skills_dir), Some(&default.skills_dir)),
+            (Some(&recorded.mcp_file), Some(&default.mcp_file)),
+            (recorded.hook_file.as_ref(), default.hook_file.as_ref()),
+            (recorded.instruction.as_ref(), default.instruction.as_ref()),
+        ] {
+            if let (Some(recorded), Some(default)) = (recorded, default)
+                && let Ok(tail) = default.strip_prefix(&home)
+            {
+                old_homes.push(before_tail(&recorded.to_path_buf()?, tail));
+            }
+        }
+    }
+    old_homes.push(legacy_home.clone());
+    // A coincidental suffix match within HOME (or above it) is not a rename.
+    let separate_home = |old: &Path| {
+        !old.starts_with(&home)
+            && !home.starts_with(old)
+            && !old.starts_with(&targets.home)
+            && !targets.home.starts_with(old)
+    };
+    let old_home = old_homes.iter().flatten().find(|old| separate_home(old));
+    let stale_legacy = legacy_home.as_deref().is_some_and(separate_home);
     let mut stale_targets = BTreeSet::new();
     for target in &receipt.harness_targets {
         let target_paths = [

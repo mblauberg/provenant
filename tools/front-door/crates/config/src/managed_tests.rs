@@ -460,14 +460,12 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             } else {
                 f.base.join("state")
             });
-            let mut targets = Targets::new(
+            let targets = Targets::new(
                 inputs.resolve(&Resolver).unwrap(),
                 &moved_home,
                 &[Harness::Codex],
             );
-            if custom_bin {
-                targets.bin_dir = moved_home.join("tools/bin");
-            }
+            // A --bin-dir install flag is not available to uninstall.
             let inspection =
                 inspect_install(&targets, None, "fixture-target", &LocalFs, &Smoke, &cancel)
                     .unwrap();
@@ -509,6 +507,65 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             );
         }
     }
+}
+
+#[test]
+fn changing_bin_dir_without_moving_home_preserves_legacy_ownership() {
+    let mut f = Fixture::new();
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude, Harness::Codex],
+    )
+    .harnesses;
+    let checkout = f.base.join("legacy-checkout");
+    let hooks = checkout.join(".git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let launcher = hooks.join("pre-push");
+    symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
+    f.targets.legacy_checkout = Some(checkout);
+    f.targets.git_hooks_dir = Some(hooks);
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs.push(HookRegistration {
+        harness: None,
+        event: "pre-push",
+        matcher: None,
+        timeout: None,
+        command: &["hook", "git", "pre-push"],
+    });
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let original = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    // The tail "bin" also matches the old .local/bin, but .local is not an old home.
+    f.targets.bin_dir = f.home.join("bin");
+    f.targets.legacy_checkout = None;
+    f.targets.git_hooks_dir = None;
+    f.targets.hooks = false;
+    let outcome = install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(outcome.findings.is_empty(), "{:?}", outcome.findings);
+    let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.legacy, original.legacy);
+    assert!(receipt.entries.iter().any(|entry| {
+        entry.selector == "git-hook:pre-push" && entry.path.to_path_buf().unwrap() == launcher
+    }));
+    // The retained legacy record must still be audited.
+    fs::write(f.home.join(".claude.json"), b"invalid JSON\0").unwrap();
+    assert!(
+        inspect_install(
+            &f.targets,
+            None,
+            "fixture-target",
+            &LocalFs,
+            &Smoke,
+            &cancel
+        )
+        .unwrap()
+        .error
+        .is_some()
+    );
 }
 
 #[test]
