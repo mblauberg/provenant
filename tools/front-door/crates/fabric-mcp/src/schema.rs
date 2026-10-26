@@ -152,7 +152,7 @@ fn definitions() -> Value {
         "TaskProof":proof("task",false),"ClaimProof":proof("id",false),"LandingProof":proof("id",true),
         "MessageRef":message_ref,
         "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(MAX_ARTIFACT_PATH_BYTES)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
-        "Route":object(json!({"adapter?":nullable(text(MAX_ROUTE_BYTES)),"model?":nullable(text(MAX_ROUTE_BYTES)),"route?":nullable(text(MAX_ROUTE_BYTES)),"role?":nullable(text(MAX_ROUTE_BYTES)),"task_class?":nullable(text(MAX_ROUTE_BYTES)),"effort?":nullable(text(MAX_ROUTE_BYTES))})),
+        "Route":object(json!({"adapter?":nullable(text(MAX_ROUTE_BYTES)),"model?":nullable(text(MAX_ROUTE_BYTES)),"route?":nullable(text(MAX_ROUTE_BYTES)),"role?":nullable(text(MAX_ROUTE_BYTES)),"effort?":nullable(text(MAX_ROUTE_BYTES))})),
         "Scope":tagged("kind",json!({"issue":{"key":text(MAX_REFERENCE_BYTES)},"paths":{"paths":array(text(MAX_ARTIFACT_PATH_BYTES),1,100)},"worktree":{"path":text(MAX_ARTIFACT_PATH_BYTES)}}))
     })
 }

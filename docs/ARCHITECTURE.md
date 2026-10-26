@@ -330,7 +330,7 @@ not probe, and pacing and readiness apply at dispatch. `provenant route set`,
 a provider policy (`pace`, `spend`, or `max`). Ready candidates are selected
 using their configured weight and pacing factor. Availability and quota
 eligibility are checked before dispatch. Route names and model identifiers are
-explicit; the router does not infer a route from a task class or synonym.
+explicit; the router does not infer a route from a role or synonym.
 
 Run records retain requested and resolved model identity, effort, and any
 fallback substitution.

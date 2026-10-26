@@ -2043,23 +2043,13 @@ fn submitted_policy(
 fn submission_preserves_explicit_named_route_tier() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
-    let (request, _) = submitted_policy(
-        &rig,
-        "named-tier",
-        None,
-        &[],
-        json!({"route":"senior","task_class":"mechanical"}),
-    )?;
+    let (request, _) = submitted_policy(&rig, "named-tier", None, &[], json!({"route":"senior"}))?;
     assert_eq!(
         request.tasks[0].route,
         provenant_records::run::RequestedRoute::Named {
             name: "senior".into(),
             effort: None,
         }
-    );
-    assert_eq!(
-        request.tasks[0].profile.task_class.as_deref(),
-        Some("mechanical")
     );
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
@@ -2073,13 +2063,7 @@ fn mcp_submission_stamps_the_local_host_on_its_trace() -> Result {
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&identity), 0);
     let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-    let (_, attempt) = submitted_policy(
-        &rig,
-        "trace-host",
-        None,
-        &[],
-        json!({"route":"senior","task_class":"mechanical"}),
-    )?;
+    let (_, attempt) = submitted_policy(&rig, "trace-host", None, &[], json!({"route":"senior"}))?;
     assert_eq!(attempt["trace"]["host"], identity["data"]["host"]);
     assert_eq!(attempt["trace"]["attempt"], attempt["attempt_id"]);
     rig.assert_legacy_unchanged()?;
@@ -2105,6 +2089,7 @@ fn submission_does_not_advertise_unsupported_inputs() -> Result {
         .find(|tool| tool["name"] == "fabric_submit")
         .ok_or("fabric_submit")?;
     assert!(!submit["inputSchema"].to_string().contains("inputs"));
+    assert!(!submit["inputSchema"].to_string().contains("task_class"));
 
     let reply = mcp(
         &rig,
@@ -2113,6 +2098,16 @@ fn submission_does_not_advertise_unsupported_inputs() -> Result {
         ],
     )?;
     let call = reply.iter().find(|reply| reply["id"] == 2).ok_or("call")?;
+    assert_eq!(call["result"]["isError"], true, "{call}");
+    assert_eq!(text_error_code(&call["result"]), "invalid_input");
+
+    let reply = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_submit","arguments":{"op":"submission","operation_id":"no-task-class","tasks":[{"prompt":"fixture","route":{"route":"senior","task_class":"mechanical"},"timeout_ms":60000}]}}}),
+        ],
+    )?;
+    let call = reply.iter().find(|reply| reply["id"] == 3).ok_or("call")?;
     assert_eq!(call["result"]["isError"], true, "{call}");
     assert_eq!(text_error_code(&call["result"]), "invalid_input");
     rig.assert_legacy_unchanged()
@@ -2132,11 +2127,7 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
         (
             "dispatch-capacity",
             None,
-            vec![
-                "lanes.max_concurrency=2",
-                "effort.shift=-1",
-                "routing.pool_mode=rotate",
-            ],
+            vec!["lanes.max_concurrency=2", "review.extra_reviewers=2"],
             2,
         ),
         (
@@ -2151,19 +2142,18 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             operation,
             explicit,
             &knobs,
-            json!({"model":"codex/fixture","task_class":"mechanical"}),
+            json!({"model":"codex/fixture"}),
         )?;
         assert_eq!(request.concurrency, expected);
         let task = &request.tasks[0];
         assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
         assert_eq!(task.profile.overrides, knobs);
-        assert_eq!(task.profile.task_class.as_deref(), Some("mechanical"));
         assert_eq!(
-            task.profile.knobs["effort.shift"],
+            task.profile.knobs["review.extra_reviewers"],
             if operation == "dispatch-capacity" {
-                -1
+                2
             } else {
-                0
+                1
             }
         );
     }
@@ -2190,7 +2180,7 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
             operation,
             None,
             &knobs,
-            json!({"model":"codex/fixture","task_class":"mechanical"}),
+            json!({"model":"codex/fixture"}),
         )?;
         let plan = provenant_run::capture_plan(&request.tasks[0]);
         assert_eq!(plan.silence_ms, threshold);

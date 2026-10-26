@@ -29,7 +29,7 @@ pub mod test_support;
 mod tests;
 
 pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
-pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config, edit_config_document};
+pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{

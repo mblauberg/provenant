@@ -1553,15 +1553,10 @@ impl BinaryRunOwner<'_> {
             };
             let name = match model {
                 Some(_) => None,
-                None => route
-                    .route
-                    .as_deref()
-                    .or(route.role.as_deref())
-                    .or(route.task_class.as_deref()),
+                None => route.route.as_deref().or(route.role.as_deref()),
             };
             submitted.push(Submitted {
                 base: task.base,
-                task_class: route.task_class.clone(),
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 account: task.account,
@@ -2280,7 +2275,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         model: route.model.clone(),
                         route: route.alias.clone(),
                         role: None,
-                        task_class: None,
                         effort: route.effort.clone(),
                     },
                     timeout_ms: self.factory.context.config.limits.graph_timeout_ms,

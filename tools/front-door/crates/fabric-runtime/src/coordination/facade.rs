@@ -28,8 +28,6 @@ pub struct RoutePreference {
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
-    pub task_class: Option<String>,
-    #[serde(default)]
     pub effort: Option<String>,
 }
 

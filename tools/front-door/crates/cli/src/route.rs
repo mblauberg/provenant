@@ -470,12 +470,12 @@ fn write_pool(
     pool: &str,
     members: &[RoutePoolMember],
 ) -> Result<(), &'static str> {
-    let routing = root_routing_table(document)?;
+    let routing = routing_table(document)?;
     let pools = routing
         .entry("pools")
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .ok_or("routing.pools must be a table")?;
+        .ok_or("domains.routing.pools must be a table")?;
     let mut values = toml_edit::Array::new();
     for member in members {
         let mut row = toml_edit::InlineTable::new();
@@ -499,27 +499,33 @@ fn write_pool(
     Ok(())
 }
 
-fn root_routing_table(
+fn routing_table(
     document: &mut toml_edit::DocumentMut,
 ) -> Result<&mut toml_edit::Table, &'static str> {
-    if !document.contains_key("routing") {
-        document["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
     document
-        .get_mut("routing")
-        .and_then(toml_edit::Item::as_table_mut)
-        .ok_or("routing must be a TOML table")
+        .entry("domains")
+        .or_insert_with(|| {
+            let mut domains = toml_edit::Table::new();
+            domains.set_implicit(true);
+            toml_edit::Item::Table(domains)
+        })
+        .as_table_mut()
+        .ok_or("domains must be a TOML table")?
+        .entry("routing")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("domains.routing must be a TOML table")
 }
 
 fn edit_config(
     roots: &Roots,
     edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), &'static str>,
 ) -> Result<(), EdgeError> {
-    let _ = provenant_config::edit_config_document::<crate::domains::Domains>(
+    let _ = provenant_config::edit_config::<crate::domains::Domains>(
         roots,
         &LocalFs,
         &crate::domains::SECTIONS,
-        edit,
+        |document| edit(document).map_err(|reason| provenant_config::ConfigError::Edit { reason }),
     )?;
     Ok(())
 }
@@ -588,18 +594,6 @@ fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
         return Err(RoutingError::UnknownRoute.into());
     }
     edit_config(roots, |document| {
-        if let Some(routing) = document
-            .get_mut("routing")
-            .and_then(toml_edit::Item::as_table_mut)
-            && let Some(pools) = routing
-                .get_mut("pools")
-                .and_then(toml_edit::Item::as_table_mut)
-        {
-            pools.remove(&request.pool);
-            if pools.is_empty() {
-                routing.remove("pools");
-            }
-        }
         if let Some(domains) = document
             .get_mut("domains")
             .and_then(toml_edit::Item::as_table_mut)
@@ -627,12 +621,12 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
         return Err(RoutingError::UnknownAdapter.into());
     }
     edit_config(roots, |document| {
-        let routing = root_routing_table(document)?;
+        let routing = routing_table(document)?;
         let pacing = routing
             .entry("pacing")
             .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
             .as_table_mut()
-            .ok_or("routing.pacing must be a table")?;
+            .ok_or("domains.routing.pacing must be a table")?;
         pacing.insert(
             &request.provider,
             toml_edit::value(match request.policy {

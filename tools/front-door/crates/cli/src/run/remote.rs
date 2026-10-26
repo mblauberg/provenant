@@ -444,7 +444,6 @@ fn submitted_task(task: Task, new_worktree: Option<NewWorktree>, timeout_ms: u64
             model: task.route.model,
             route: task.route.route,
             role: None,
-            task_class: None,
             effort: task.route.effort,
         },
         timeout_ms,
@@ -864,7 +863,7 @@ mod tests {
             "new_worktree": {"base": "main", "branch": "writer/change"},
             "prompt": "write the change",
             "route": {"adapter": null, "model": "fixture/model", "route": null,
-                      "role": null, "task_class": null, "effort": null},
+                      "role": null, "effort": null},
             "timeout_ms": 60000, "delivery_id": null, "deliver": null
         });
         let previous = json!({

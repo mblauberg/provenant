@@ -1,6 +1,7 @@
 //! Harness knobs: the registry embedded from `config/harness-knobs.json`, the
 //! optional `[knobs]` override table and the edits `config set` and
-//! `config unset` make to the user's `config.toml`.
+//! `config unset` make to the user's `config.toml`, plus the one config editor
+//! that every command uses to rewrite that file.
 use crate::{ConfigError, Profile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,9 +9,6 @@ use std::{collections::BTreeMap, sync::OnceLock};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 const REGISTRY: &str = include_str!("../../../../../config/harness-knobs.json");
-/// TOML has no null, so an override that nulls a nullable knob is the string
-/// `"null"`, which no integer knob could otherwise hold.
-const NULL: &str = "null";
 
 #[derive(Deserialize)]
 struct Registry {
@@ -29,8 +27,6 @@ enum Kind {
 struct Spec {
     #[serde(rename = "type")]
     kind: Kind,
-    #[serde(default)]
-    nullable: bool,
     min: Option<i64>,
     max: Option<i64>,
     #[serde(default)]
@@ -39,13 +35,6 @@ struct Spec {
 }
 #[derive(Deserialize)]
 struct Preset {
-    #[serde(default)]
-    knobs: BTreeMap<String, Value>,
-    #[serde(default)]
-    task_classes: BTreeMap<String, ClassPreset>,
-}
-#[derive(Deserialize)]
-struct ClassPreset {
     #[serde(default)]
     knobs: BTreeMap<String, Value>,
 }
@@ -76,14 +65,10 @@ impl<D> crate::ResolvedConfig<D> {
     /// Resolve a task's final policy without changing the config file.
     pub fn dispatch_profile(
         &self,
-        class: Option<&str>,
         overrides: &[String],
     ) -> Result<provenant_records::run::HarnessProfile, ConfigError> {
         let registry = registry()?;
         let mut knobs = self.knobs.clone();
-        if let Some(class) = class {
-            apply_class(registry, self.profile, &mut knobs, class);
-        }
         for entry in overrides {
             let (name, text) = entry
                 .split_once('=')
@@ -101,41 +86,12 @@ impl<D> crate::ResolvedConfig<D> {
         }
         Ok(provenant_records::run::HarnessProfile {
             name: profile_name(self.profile).into(),
-            task_class: class.map(str::to_owned),
             knobs: knobs
                 .into_iter()
                 .map(|(name, knob)| (name, knob.value))
                 .collect(),
             overrides: overrides.to_vec(),
         })
-    }
-
-    /// Layer the profile preset's per-task-class knobs over the base preset.
-    /// A user `[knobs]` override still wins. An unlisted class changes nothing.
-    pub fn apply_task_class(&mut self, class: &str) -> Result<(), ConfigError> {
-        let registry = registry()?;
-        apply_class(registry, self.profile, &mut self.knobs, class);
-        Ok(())
-    }
-}
-
-fn apply_class(
-    registry: &Registry,
-    profile: Profile,
-    knobs: &mut BTreeMap<String, KnobValue>,
-    class: &str,
-) {
-    let preset = registry.presets.get(profile_name(profile));
-    let layer = preset.and_then(|p| p.task_classes.get(class));
-    for (name, value) in layer.into_iter().flat_map(|c| &c.knobs) {
-        if let Some(knob) = knobs.get_mut(name)
-            && knob.source != KnobSource::Override
-        {
-            *knob = KnobValue {
-                value: value.clone(),
-                source: KnobSource::Profile,
-            };
-        }
     }
 }
 
@@ -205,8 +161,6 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
                 Err("type")
             }
         }
-        Value::Null if spec.nullable => Ok(()),
-        Value::Null => Err("not_nullable"),
         Value::String(text) if spec.kind == Kind::Enum => spec
             .values
             .contains(text)
@@ -232,15 +186,11 @@ fn from_toml(item: &Item) -> Option<Value> {
             .collect::<Option<Vec<_>>>()
             .map(Value::Array),
         toml_edit::Value::Integer(n) => Some(Value::from(*n.value())),
-        toml_edit::Value::String(s) if s.value() == NULL => Some(Value::Null),
         toml_edit::Value::String(s) => Some(Value::from(s.value().as_str())),
         _ => None,
     }
 }
 fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
-    if text == NULL {
-        return Ok(Value::Null);
-    }
     if matches!(spec.kind, Kind::Bool | Kind::StringList) {
         return serde_json::from_str(text).map_err(|_| "type");
     }
@@ -294,14 +244,15 @@ pub(crate) fn resolve(
     Ok(knobs)
 }
 
-/// Apply `edit` to the config text, keeping every other byte, comment and
-/// key order. An absent file starts from the minimal valid header.
-fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
+impl KnobEdit<'_> {
+    /// Apply the edit to the config document, keeping every other byte,
+    /// comment and key order.
+    pub fn apply(self, doc: &mut DocumentMut) -> Result<(), ConfigError> {
+        apply(doc, self)
+    }
+}
+fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
     let registry = registry()?;
-    let mut doc: DocumentMut = text
-        .unwrap_or("schema_version = 1\n")
-        .parse()
-        .map_err(|_| ConfigError::KnobRegistry)?;
     match edit {
         KnobEdit::Profile(name) => {
             if !registry.presets.contains_key(name) {
@@ -314,7 +265,6 @@ fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
             let value = parse_cli(spec, value).map_err(|rule| invalid(name, rule))?;
             check(spec, &value).map_err(|rule| invalid(name, rule))?;
             let item = match &value {
-                Value::Null => toml_edit::value(NULL),
                 Value::Bool(b) => toml_edit::value(*b),
                 Value::Array(items) => {
                     let mut array = toml_edit::Array::new();
@@ -325,7 +275,7 @@ fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
                 }
                 Value::Number(n) => toml_edit::value(n.as_i64().unwrap_or_default()),
                 Value::String(s) => toml_edit::value(s.as_str()),
-                Value::Object(_) => return Err(invalid(name, "type")),
+                Value::Null | Value::Object(_) => return Err(invalid(name, "type")),
             };
             let knobs = doc
                 .entry("knobs")
@@ -356,61 +306,18 @@ fn apply(text: Option<&str>, edit: KnobEdit) -> Result<String, ConfigError> {
             }
         }
     }
-    Ok(doc.to_string())
+    Ok(())
 }
 
-/// Read, edit and atomically replace `<state>/config.toml` (mode 0600). The
-/// result is validated by the caller re-reading the file through `config_show`.
-pub fn edit_config(
-    roots: &provenant_core::Roots,
-    fs: &impl provenant_supervisor::fs::SafeFs,
-    edit: KnobEdit,
-) -> Result<(), ConfigError> {
-    let path = roots.state.as_path().join("config.toml");
-    let text = crate::loader::open(roots, fs)?
-        .map(|reader| crate::loader::bounded_text(reader, &path))
-        .transpose()?;
-    let updated = apply(text.as_deref(), edit)?;
-    let state = match fs.open_anchor(roots.state.as_path()) {
-        Ok(state) => state,
-        Err(error) if error.is_not_found() => {
-            // Create only the state directory itself, private. Its parent must
-            // exist; a symlinked final component is refused by the anchor.
-            let target = roots.state.as_path();
-            let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
-                return Err(error.into());
-            };
-            let parent = fs.open_anchor(parent)?;
-            match parent.mkdir(name, 0o700) {
-                Ok(()) => parent.sync()?,
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error.into()),
-            }
-            fs.open_anchor(target)?
-        }
-        Err(error) => return Err(error.into()),
-    };
-    match state.atomic_write(
-        std::ffi::OsStr::new("config.toml"),
-        ".config-",
-        updated.as_bytes(),
-        0o600,
-        provenant_supervisor::fs::PublishMode::Replace,
-    )? {
-        provenant_supervisor::fs::Publication::Durable => Ok(()),
-        provenant_supervisor::fs::Publication::VisibleDurabilityUnconfirmed { sync_error } => {
-            Err(sync_error.into())
-        }
-    }
-}
-
-/// Edit the owned TOML document, validate the complete configuration, publish
-/// it atomically, then read it back through the same registered domains.
-pub fn edit_config_document<T>(
+/// The one config editor: edit the owned TOML document, validate the complete
+/// configuration, publish `<state>/config.toml` atomically (mode 0600), then
+/// read it back through the same registered domains. An absent file starts
+/// from the minimal valid header.
+pub fn edit_config<T>(
     roots: &provenant_core::Roots,
     fs: &impl provenant_supervisor::fs::SafeFs,
     sections: &crate::DomainSections<T>,
-    edit: impl FnOnce(&mut DocumentMut) -> Result<(), &'static str>,
+    edit: impl FnOnce(&mut DocumentMut) -> Result<(), ConfigError>,
 ) -> Result<crate::ResolvedConfig<T>, ConfigError>
 where
     T: serde::de::DeserializeOwned + Serialize,
@@ -434,13 +341,15 @@ where
         .map_err(|_| ConfigError::Edit {
             reason: "invalid TOML",
         })?;
-    edit(&mut document).map_err(|reason| ConfigError::Edit { reason })?;
+    edit(&mut document)?;
     let updated = document.to_string();
     crate::loader::load_with_domains(roots, Some(Cursor::new(updated.as_bytes())), sections)?;
 
     let state = match fs.open_anchor(roots.state.as_path()) {
         Ok(state) => state,
         Err(error) if error.is_not_found() => {
+            // Create only the state directory itself, private. Its parent must
+            // exist; a symlinked final component is refused by the anchor.
             let target = roots.state.as_path();
             let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
                 return Err(error.into());
@@ -474,27 +383,23 @@ mod chair_tests {
     use super::*;
     #[test]
     fn chair_string_list_preserves_order_and_rejects_non_strings() {
-        let text = apply(
-            None,
-            KnobEdit::Set {
-                name: "chair.switch_accounts",
-                value: "[\"second\",\"first\"]",
-            },
-        )
+        let mut doc = DocumentMut::new();
+        KnobEdit::Set {
+            name: "chair.switch_accounts",
+            value: "[\"second\",\"first\"]",
+        }
+        .apply(&mut doc)
         .unwrap();
-        let doc: DocumentMut = text.parse().unwrap();
         assert_eq!(
             from_toml(&doc["knobs"]["chair.switch_accounts"]),
             Some(serde_json::json!(["second", "first"]))
         );
         assert!(
-            apply(
-                None,
-                KnobEdit::Set {
-                    name: "chair.switch_accounts",
-                    value: "[42]"
-                }
-            )
+            KnobEdit::Set {
+                name: "chair.switch_accounts",
+                value: "[42]"
+            }
+            .apply(&mut DocumentMut::new())
             .is_err()
         );
     }

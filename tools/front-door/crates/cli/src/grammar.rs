@@ -168,17 +168,13 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 #[derive(Debug, Subcommand)]
 pub enum Config {
     /// Print the effective configuration and knobs with their source layer.
-    Show {
-        /// Apply this task class's preset overrides (for example `mechanical`).
-        #[arg(long)]
-        task_class: Option<String>,
-    },
+    Show,
     /// Set `profile` (balanced, economy or rigorous) or a registry knob such
-    /// as `lanes.max_concurrency`; `null` clears a nullable knob.
+    /// as `lanes.max_concurrency`.
     Set {
         /// Setting name, such as `profile`
         name: String,
-        /// New value, or `null` to clear a nullable knob
+        /// New value
         #[arg(allow_negative_numbers = true)]
         value: String,
     },

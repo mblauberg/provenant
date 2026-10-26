@@ -169,7 +169,6 @@ fn route(route: &RoutePreference, path: &str) -> Result<(), InputError> {
         ("model", route.model.as_deref()),
         ("route", route.route.as_deref()),
         ("role", route.role.as_deref()),
-        ("task_class", route.task_class.as_deref()),
         ("effort", route.effort.as_deref()),
     ] {
         optional_text(value, &format!("{path}.{name}"), MAX_ROUTE_BYTES)?;
@@ -515,7 +514,7 @@ mod tests {
             json!({"op":"submission","operation_id":"work-1","tasks":vec![task; 65]}),
             "tasks",
         );
-        for name in ["adapter", "model", "route", "role", "task_class", "effort"] {
+        for name in ["adapter", "model", "route", "role", "effort"] {
             let mut route = json!({});
             route[name] = json!("m".repeat(129));
             rejects::<SubmitInput>(

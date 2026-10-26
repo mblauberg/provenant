@@ -703,8 +703,6 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
-    /// Fabric's route.task_class, retained separately from the resolved route.
-    pub task_class: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
@@ -765,12 +763,10 @@ pub fn submit_with_host(
         &crate::domains::SECTIONS,
     )
     .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
-    let profile = |class: Option<&str>| {
-        config
-            .dispatch_profile(class, &submission.knobs)
-            .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))
-    };
-    let concurrency = run::concurrency(submission.concurrency, &profile(None)?);
+    let profile = config
+        .dispatch_profile(&submission.knobs)
+        .map_err(|error| Fail::new(Status::Invalid, "CONFIG", error.to_string()))?;
+    let concurrency = run::concurrency(submission.concurrency, &profile);
     for task in submission.tasks {
         scan(&task.prompt)?;
         // A lane's child launches outside the lane's sandbox, so it may not
@@ -861,7 +857,7 @@ pub fn submit_with_host(
         .map_err(|error| Fail::new(Status::Error, "IO", error.to_string()))?;
 
         requests.push(run::TaskRequest {
-            profile: profile(task.task_class.as_deref())?,
+            profile: profile.clone(),
             task_id: task.task_id,
             prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
             base_ref,
@@ -1129,7 +1125,6 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         .map(
             |(task_id, prompt, route, _, fallback, delivery_id, account, deliver, base)| {
                 Submitted {
-                    task_class: None,
                     base,
                     task_id,
                     prompt,
@@ -2662,7 +2657,6 @@ mod tests {
         let submission = |base: &str| Submission {
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
-                task_class: None,
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "review".into(),
                 base: Some(base.into()),

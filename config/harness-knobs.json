@@ -31,13 +31,6 @@
       "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",
       "trade_off": "An explicit list controls which signed-in accounts may receive the chair."
     },
-    "effort.shift": {
-      "type": "int", "min": -1, "max": 1, "default": 0, "status": "advisory",
-      "reason": "No evidenced effort controls or task-class floor policy exist in the Rust routing catalogue.",
-      "effect": "Moves a task-class route's effort one step along the effort ladder, never below the task class's policy minimum and only to an effort every configured model takes.",
-      "trade_off": "-1 saves reasoning tokens where a route sits above its minimum; +1 buys depth at roughly proportional token cost.",
-      "floor": {"crucial": 0}
-    },
     "lanes.silence_seconds": {
       "type": "int", "min": 1, "max": 3600, "default": 300, "status": "wired",
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/custody.rs, tools/front-door/crates/supervisor/src/guardian.rs",
@@ -47,19 +40,13 @@
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/run/src/admission.rs",
-      "effect": "Default number of lanes one batch runs at once, resolved from the base profile only; task-class values do not apply. An explicit dispatch concurrency wins.",
+      "effect": "Default number of lanes one batch runs at once, resolved from the profile. An explicit dispatch concurrency wins.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged."
     },
     "lanes.max_depth": {
       "type": "int", "min": 1, "default": 2, "status": "wired",
       "effect": "Maximum nested lane depth, including the first dispatched lane.",
       "trade_off": "Lower limits delegation chains; higher permits deeper nested work."
-    },
-    "context.ceiling_tokens": {
-      "type": "int", "min": 100000, "max": 1000000, "nullable": true, "default": null, "status": "advisory",
-      "reason": "Rust dispatch has no context-compaction path to consume a token ceiling.",
-      "effect": "Auto-compaction ceiling for a dispatch that names none; null keeps the catalogue's context.ceiling_tokens.",
-      "trade_off": "Lower compacts sooner, so each turn re-reads fewer tokens, at more risk that a long lane loses detail."
     },
     "review.extra_reviewers": {
       "project": "strengthen",
@@ -87,42 +74,6 @@
       "reader": "skills/implement/SKILL.md",
       "effect": "auto: one behaviour-preserving polish lane before review when the diff exceeds about 300 lines or touches more than one crate or package. always: every change. off: never.",
       "trade_off": "Polish costs one writer lane per qualifying change for a simpler diff and shorter review."
-    },
-    "repair.max_cycles": {
-      "type": "int", "min": 1, "max": 5, "nullable": true, "default": null, "status": "advisory",
-      "reader": "skills/deliver/references/contract.md (2/4/5/5, fixed)",
-      "effect": "The chair's stopping point for repair cycles; null uses the risk-tier budget. It can only lower the fixed ceiling.",
-      "trade_off": "Lower returns to the user sooner and spends less on repairs, at the cost of the user's attention."
-    },
-    "council.junior_size": {
-      "type": "int", "min": 1, "max": 8, "default": 3, "status": "advisory",
-      "reader": "skills/orchestrate/references/tiered-council.md (council: 3 per part)",
-      "effect": "Junior council members per part in a bottom-up tiered council.",
-      "trade_off": "Fewer juniors cut lens passes and tokens; more widen family spread on blind spots."
-    },
-    "routing.pool_mode": {
-      "type": "enum", "values": ["top", "rotate"], "default": "top", "status": "advisory",
-      "reason": "Rust routing resolves exact routes and explicit fallbacks; it has no weighted model-pool owner.",
-      "effect": "top always takes the highest-weight available model; rotate spreads picks by weight across the pool.",
-      "trade_off": "rotate spreads quota and families across models at some cost in consistency between lanes."
-    },
-    "writing.final_polish": {
-      "type": "enum", "values": ["off", "optional"], "default": "optional", "status": "advisory",
-      "reader": "skills/engineering-writing/SKILL.md step 6",
-      "effect": "Whether reader-facing prose may take a final voice pass by the dossier's polish model.",
-      "trade_off": "off saves one writing lane per document; optional improves voice at some risk of drift the chair must diff."
-    },
-    "context.summary_tokens": {
-      "type": "int", "min": 500, "max": 8000, "default": 2000, "status": "advisory",
-      "reader": "skills/orchestrate/references/layering-and-context.md (roughly 1-2k tokens)",
-      "effect": "Cap on a worker's returned summary; the file stays the record.",
-      "trade_off": "Smaller keeps the chair's context lean; larger carries more detail inline."
-    },
-    "quota.pace_tolerance": {
-      "type": "int", "min": 0, "max": 20, "default": 4, "status": "advisory",
-      "reason": "Rust quota computes availability and admission, not pace against a tolerance.",
-      "effect": "Percentage points either side of even use before a quota window reads as ahead of pace or reserve.",
-      "trade_off": "Lower flags pacing pressure earlier (fewer limit hits, more rerouting); higher tolerates bursts."
     }
   },
   "presets": {
@@ -131,30 +82,19 @@
       "knobs": {}
     },
     "economy": {
-      "description": "Less usage per task, accepting slower runs and slightly thinner passes.",
+      "description": "Less usage per task, accepting slower runs and no polish lane.",
       "knobs": {
         "lanes.max_concurrency": 4,
-        "context.ceiling_tokens": 200000,
-        "council.junior_size": 2,
-        "routing.pool_mode": "rotate",
-        "writing.final_polish": "off",
-        "review.polish": "off",
-        "context.summary_tokens": 1000
+        "review.polish": "off"
       }
     },
     "rigorous": {
-      "description": "Correctness first: deeper effort, more independent review, full re-review.",
+      "description": "Correctness first: more independent review, full re-review.",
       "knobs": {
-        "effort.shift": 1,
         "review.extra_reviewers": 1,
         "review.cross_family": "require",
         "review.rereview_scope": "full",
-        "review.polish": "always",
-        "council.junior_size": 4
-      },
-      "task_classes": {
-        "mechanical": {"knobs": {"effort.shift": 0}},
-        "bulk": {"knobs": {"effort.shift": 0}}
+        "review.polish": "always"
       }
     }
   }

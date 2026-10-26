@@ -180,8 +180,8 @@ final head and open a pull request after verifying it.
 | `root` | no flags | Reports the asset root, state directory, selected project and installation identity. Human output is the newline-terminated asset path that scripts read. Read-only; an explicit `--project` verifies the checkout with the supervisor's bounded Git runner. |
 | `hosts` | no flags | Lists the local host and configured peers with peer and adapter readiness observations. Read-only. |
 | `hosts doctor` | `[SSH_ALIAS]` | Probes sign-in on one host, or every configured host, with no inference and no credential access. |
-| `config show` | `[--task-class NAME]` | The resolved config with secrets redacted and each knob's source (default, profile or override). |
-| `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. `null` clears a nullable knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |
+| `config show` | no flags | The resolved config with secrets redacted and each knob's source (default, profile or override). |
+| `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |
 | `config unset` | `NAME` | Removes a knob override. |
 | `install` | `--source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--dry-run]` | Harnesses are claude, codex, cursor, agy and opencode. Omitting `--hooks` refreshes unchanged owned hooks and relinquishes edited entries; a first install leaves them disabled. Explicit `off` removes unchanged owned hooks. `--source` is a staged release. `--dry-run` writes nothing. See [state](state.md) for the layout and recovery. |
 | `uninstall` | `--harness NAME…` | Removes only still-owned entries. |

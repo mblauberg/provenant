@@ -28,15 +28,20 @@ pub struct CanonicalRequest {
 }
 impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
-        CanonicalV1::record_digest("run-request", 1, self)
+        Self::sealed_digest(self)
+    }
+    /// The request digest of sealed bytes as decoded, so a field removed from
+    /// the record type since sealing still counts.
+    pub fn sealed_digest(sealed: &impl Serialize) -> Result<Digest, CanonicalError> {
+        CanonicalV1::record_digest("run-request", 1, sealed)
     }
 }
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
+/// Unknown fields are ignored: terminal attempts are immutable, and those
+/// sealed before task classes were removed still carry `task_class`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HarnessProfile {
     pub name: String,
-    pub task_class: Option<String>,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
     pub overrides: Vec<String>,
 }
@@ -548,6 +553,51 @@ mod tests {
         let request: CanonicalRequest = serde_json::from_value(original.clone())?;
         assert_eq!(request.digest()?, digest);
         assert_eq!(serde_json::to_value(request)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn request_sealed_with_a_task_class_decodes_and_keeps_its_sealed_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = CanonicalRequest {
+            schema_version: 1,
+            tasks: vec![TaskRequest {
+                profile: HarnessProfile {
+                    name: "rigorous".into(),
+                    ..HarnessProfile::default()
+                },
+                task_id: TaskId::from_bytes([3; 16]),
+                prompt_digest: CanonicalV1::file_digest(b"prompt"),
+                base: None,
+                base_ref: None,
+                route: RequestedRoute::Named {
+                    name: "senior".into(),
+                    effort: None,
+                },
+                account: None,
+                fallback: Vec::new(),
+                authority_digest: Digest::from_bytes([5; 32]),
+                writer: None,
+                deliver: None,
+                provider_timeout_seconds: 60,
+                delivery_id: None,
+                access: LaneAccess::default(),
+            }],
+            concurrency: 1,
+            parent: None,
+            lane_depth: None,
+            parent_attempt: None,
+        };
+        let mut sealed = serde_json::to_value(&request)?;
+        sealed["tasks"][0]["profile"]["task_class"] = serde_json::json!("mechanical");
+        let decoded: CanonicalRequest = serde_json::from_value(sealed.clone())?;
+        assert_eq!(decoded, request);
+        // The re-encoding drops the field, so only the sealed bytes match.
+        assert_ne!(decoded.digest()?, CanonicalRequest::sealed_digest(&sealed)?);
+        assert_eq!(
+            CanonicalRequest::sealed_digest(&serde_json::to_value(&request)?)?,
+            request.digest()?
+        );
         Ok(())
     }
 }
