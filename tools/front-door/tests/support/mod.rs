@@ -84,7 +84,7 @@ pub struct TestRig {
     executor: SystemExecutor,
 }
 impl TestRig {
-    /// Serialize process creation with executable copies in this test binary.
+    /// Serialise process creation with executable copies in this test binary.
     pub fn with_process_spawn_lock<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let _guard = PROCESS_SPAWN_LOCK
             .lock()
