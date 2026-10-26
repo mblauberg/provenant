@@ -100,9 +100,10 @@ Route and access inputs on `dispatch`:
   These files cover committed changes only and share
   the attempt's temporary cleanup. No history files are generated without a
   base.
-  Every adapter's OS profile grants access to attempt scratch. Claude and Agy
-  also add scratch to their tool workspace; OpenCode explicitly permits reads
-  and external-directory access to scratch. Codex bypasses its inner sandbox
+  Every adapter's OS profile grants access to attempt scratch. When a lane
+  receives Git context, Claude and Agy also add scratch to their tool
+  workspace, and OpenCode explicitly permits reads and external-directory
+  access to scratch. Codex bypasses its inner sandbox
   and approvals, and Cursor disables its inner sandbox, so their tools use
   the OS grant directly. Context files are published through the directory
   handle retained when scratch was created.
