@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "target_skill": "tanstack-query",
+  "target_skill": "tanstack",
   "cases": [
     {
       "id": "q253",
@@ -10,7 +10,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -22,7 +22,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -34,7 +34,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tanstack-query",
+        "primary_skill": "tanstack",
         "companion_skills": []
       }
     },
@@ -84,7 +84,7 @@
       "expected": {
         "primary_skill": "implement",
         "companion_skills": [
-          "tanstack-query",
+          "tanstack",
           "tdd"
         ]
       }
@@ -99,7 +99,7 @@
       "expected": {
         "primary_skill": "code-review",
         "companion_skills": [
-          "tanstack-query"
+          "tanstack"
         ]
       }
     },
@@ -113,8 +113,68 @@
       "expected": {
         "primary_skill": "react-performance",
         "companion_skills": [
-          "tanstack-query"
+          "tanstack"
         ]
+      }
+    },
+    {
+      "id": "q262",
+      "relation": "positive",
+      "prompt": "Wire server-side sorting and keyset pagination into a TanStack Table v9 useTable with manual options.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "tanstack",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q263",
+      "relation": "positive",
+      "prompt": "Migrate this useReactTable v8 code to TanStack Table v9 tableFeatures.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "tanstack",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q264",
+      "relation": "positive",
+      "prompt": "Virtualise a large TanStack Table with react-virtual and a sticky header.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "tanstack",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q265",
+      "relation": "negative",
+      "prompt": "Why does this React component re-render on every keystroke? Profile it.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "react-performance",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q266",
+      "relation": "negative",
+      "prompt": "Memoise this data grid's cell renderers so scrolling stops dropping frames.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "react-performance",
+        "companion_skills": []
       }
     }
   ]
