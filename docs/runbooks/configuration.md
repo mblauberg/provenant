@@ -56,6 +56,38 @@ to see each knob's status and source. Preview install registrations with
 `provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 
+## Lane cache collection
+
+The optional `[gc]` section controls the macOS per-user schedule:
+
+```toml
+[gc]
+schedule = true
+idle_days = 7
+# free_floor = "20G"
+```
+
+`gc.schedule` defaults to true. Setting it to false prevents subsequent
+scheduled collections; rerun `install` to boot out the agent and remove its
+unchanged receipt-owned plist. `gc.idle_days` accepts 1 to 3650 (default 7).
+`gc.free_floor` is unset by default. When set, it requests additional cache
+collection until available disk space reaches that size, after the usual
+orphaned, tombstoned and idle pass. Sizes are whole binary units: `B`, `K`,
+`M`, `G`, `T`, or `KiB` through `TiB`; plain numbers mean GiB.
+On APFS, local snapshots can keep deletions from increasing available space, so
+a floor may remove every eligible cache on each run.
+Rerun `install` after changing the idle threshold or floor to update the
+agent's arguments. Edit these keys in `config.toml`; they are separate from
+the harness knob registry.
+
+The schedule runs every six hours, only for installations in the account's
+default state root. Logs are `<state>/gc/stdout.log` and
+`<state>/gc/stderr.log`. It discovers registered projects without requiring a
+checkout as its working directory. Unobservable projects keep their caches.
+Manual `provenant gc --dry-run --free-floor 20G` previews the selected
+project's cleanup, including oldest-first pressure removals. Live writers and
+reservations remain protected.
+
 ## Writer extra write paths
 
 Some projects keep shared run state outside the worktree. Writer lanes can

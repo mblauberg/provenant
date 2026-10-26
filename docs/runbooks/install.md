@@ -36,12 +36,20 @@ Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry
 `~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
 a lane cache for a host build. `provenant worktree remove` deletes only the
 removed worktree's own cache while holding its writer lock. Other orphaned
-caches remain until `provenant gc [--dry-run] [--idle-days N]`, which also
+caches remain until `provenant gc [--dry-run] [--idle-days N]
+[--free-floor SIZE]`, which also
 removes caches idle for N days (default 7) for the selected project's
 worktrees, sparing live or unobservable writers. Idle removal takes the existing
 writer lock without waiting and releases it immediately after the tombstone
 rename. A held lock keeps the cache as live; a missing or unsafe lock, a
 reservation, or unverifiable registration keeps it as unobservable.
+If `--free-floor 20G` (or plain GiB) is set and space on the cache volume
+remains below that floor after the usual pass, GC removes further eligible
+caches oldest-first by their newest recursive write. It rechecks writer
+exclusion and reservations before detachment, and stops at the floor or when
+candidates run out. JSON adds `free_floor` removal reasons,
+`free_bytes_before` and `free_bytes_after`. Dry-run predictions include
+estimated reclaimable bytes and set `free_bytes_estimated` to true.
 V1 owner markers support orphan cleanup and foreign-owner reporting, but never
 idle cleanup because they lack device and inode identity. Existing owners
 outside that project are reported as kept (foreign). Before deletion, GC
@@ -129,16 +137,24 @@ uninstall using its recorded binary path and state root. Modified or unknown
 plists are preserved and block install. To recover, move the named plist
 aside, run `launchctl bootout gui/$UID/dev.provenant.peer`, then rerun install.
 
+The same macOS default-state install also manages
+`~/Library/LaunchAgents/dev.provenant.gc.plist`, with `StartInterval = 21600`
+(six hours). It runs `provenant gc` for registered projects, protecting live
+writers and reservations. Its stdout and stderr go to `<state>/gc/`.
+`[gc] schedule = false` disables scheduled deletion; rerun install to remove
+the owned agent. The optional `idle_days` and `free_floor` keys become agent
+arguments on install. See [configuration](configuration.md#lane-cache-collection).
+
 To remove an installation, run
 `provenant --state-dir "$STATE" uninstall --harness claude`. It removes only
 unchanged owned entries and keeps the state and release assets. It never
 recursively deletes a checkout, state root or release. With `CLAUDE_CONFIG_DIR`
 or `CODEX_HOME` set, uninstall removes only that directory's target; without
 it, every recorded target of the harness.
-Removing the last recorded target also boots out the peer LaunchAgent and
-removes its unchanged plist. A modified plist is kept and reported; its
+Removing the last recorded target also boots out the peer and GC LaunchAgents
+and removes their unchanged plists. A modified plist is kept and reported; its
 service is left running. A failed bootout keeps the plist for a retry.
-A missing peer plist is stopped by its service label.
+A missing recorded plist is stopped by its service label.
 
 If your home directory or state root has moved since install, uninstall reports
 one `relocated_stale_entry` per entry it will not touch, plus `state_root_moved`

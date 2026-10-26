@@ -159,6 +159,7 @@ fn classify_lane_cache(
     {
         Some(CacheGcReason::Orphaned) => "orphaned",
         Some(CacheGcReason::Idle) => "idle",
+        Some(CacheGcReason::FreeFloor) => "free_floor",
         Some(CacheGcReason::Tombstone) => "tombstone",
         Some(CacheGcReason::Foreign) => "foreign",
         Some(CacheGcReason::Live) => "live",

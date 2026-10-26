@@ -72,6 +72,12 @@ derived from its verified identity before Git removes it. Cache cleanup holds
 the writer lock and uses verified detachment before deletion. A cleanup failure
 emits a warning; the worktree stays removed. Other orphaned caches and
 interrupted cleanup tombstones remain for `provenant gc`.
+GC collects idle caches (default seven days); `--free-floor SIZE` additionally
+collects eligible caches oldest-first by last write to reach a free-space
+floor. Both paths protect live writers and reservations. macOS default-state
+installs schedule cache GC every six hours; the `[gc]` configuration can
+disable or adjust it. See the
+[configuration runbook](runbooks/configuration.md#lane-cache-collection).
 Cleanup recognises v1 owner markers for missing owners; existing v1 owners
 are kept and never collected as idle.
 

@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 
 mod domains;
+mod gc;
+pub use gc::{GcSettings, parse_cache_size};
 mod harness;
 mod hooks;
 pub use harness::mcp_entry;
@@ -155,6 +157,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub profile: Profile,
     pub domains: D,
     pub install: InstallSettings,
+    pub gc: GcSettings,
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,
     pub origins: BTreeMap<String, Origin>,
@@ -183,9 +186,9 @@ pub struct ConfigInspection {
 pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
-    ReleaseSmoke, SelectorChange, Snapshots, Targets, inspect_install, install, installed_binary,
-    peer_agent_plist, plan_and_install, plan_install, private_directory, recorded_hook_checkout,
-    uninstall,
+    ReleaseSmoke, SelectorChange, Snapshots, Targets, gc_agent_plist, inspect_install, install,
+    installed_binary, peer_agent_plist, plan_and_install, plan_install, private_directory,
+    recorded_hook_checkout, uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

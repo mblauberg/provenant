@@ -219,6 +219,28 @@ fn inspect<T: DeserializeOwned + Serialize>(
         crate::InstallSettings::default()
     };
 
+    let gc_item = user.remove("gc");
+    let gc = if let Some(item) = &gc_item {
+        let mut table = Table::new();
+        table.insert("gc", item.clone());
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Settings {
+            gc: crate::GcSettings,
+        }
+        let settings: Settings = decode(table).map_err(|_| ConfigError::Schema {
+            location: site(&user_sites, "gc", &user_origin, false),
+            rule: "type",
+        })?;
+        settings.gc.validate().map_err(|rule| ConfigError::Schema {
+            location: site(&user_sites, "gc", &user_origin, false),
+            rule,
+        })?;
+        settings.gc
+    } else {
+        crate::GcSettings::default()
+    };
+
     let knobs_item = user.remove("knobs");
     apply_root_aliases(&mut user, sections, &mut user_sites, &user_origin)?;
     let version = user.get("schema_version");
@@ -308,6 +330,14 @@ fn inspect<T: DeserializeOwned + Serialize>(
     walk_table(&defaults, "", &mut |key, _, _| {
         origins.insert(key.into(), compiled.clone());
     });
+    for key in ["gc.schedule", "gc.idle_days", "gc.free_floor"] {
+        origins.insert(key.into(), compiled.clone());
+    }
+    if let Some(item) = &gc_item {
+        walk_item(item, "gc", None, &mut |key, _, _| {
+            origins.insert(key.into(), user_origin.clone());
+        });
+    }
     origins.insert("install.targets".into(), compiled.clone());
     if let Some(item) = &install_item {
         walk_item(item, "install", None, &mut |key, _, _| {
@@ -371,6 +401,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             profile: header.profile,
             domains,
             install,
+            gc,
             knobs,
             origins,
         },

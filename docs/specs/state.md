@@ -49,6 +49,7 @@ owns account eligibility, and run records the resolved account label.
 | Host identity | `<state>/host-id` |
 | Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/install.lock` |
 | Immutable release | `<state>/releases/<SourceDigest>/` holding `bin/provenant`, `release.json` and the bundled asset directories (`skills`, `library`, `config`, `instructions`, `scripts`) |
+| Scheduled GC logs | `<state>/gc/stdout.log`, `<state>/gc/stderr.log` (macOS default-state installation) |
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
 | Read-only write exceptions | `<state>/projects/<ProjectId>/read-only.json`; confinement-owned `readOnlyWritable` list, default empty. Not a config overlay. |
@@ -167,6 +168,15 @@ exit 1. Malformed TOML is a distinct syntax error mapped to exit 2. Diagnostics
 keep one-based line and column, the dotted key and an origin; an invalid
 compiled asset is attributed to the compiled origin, never the user's file.
 `Redacted<T>` serialises as `[redacted]` for secret-bearing leaves.
+
+The root `[gc]` section configures lane cache collection: `schedule` is a
+boolean (default true), `idle_days` is 1 to 3650 (default 7), and `free_floor`
+is an optional size string (default unset). Whole binary sizes accept `B`,
+`K`, `M`, `G`, `T` and `KiB` through `TiB`; plain numbers mean GiB.
+The installer renders idle days and an optional floor into the macOS agent's
+arguments. Scheduled runs reread `schedule` before collection, so false
+prevents subsequent automatic collections. Reinstall updates the other agent
+arguments and removes the unchanged owned plist when scheduling is disabled.
 
 The catalogue, adapter table and prices ship as TOML release assets and are
 never copied into mutable state. Routing, providers, quota and workflow
@@ -305,6 +315,16 @@ bytes match the historical template for the validated receipt's binary path
 and state root, with mode 0600 or 0644. Upgrade replaces it with the sanitised
 rendering and records ownership; uninstall can remove it directly. Unknown
 or modified historical plists are preserved.
+
+The same macOS default-state installation owns
+`~/Library/LaunchAgents/dev.provenant.gc.plist` with selector `gc-agent` and
+mode 0600. It uses the same preview, receipt, symlink refusal and exact-match
+removal rules as the peer agent, and is removed only with the last harness
+target or when scheduling is disabled on reinstall. `StartInterval = 21600`
+runs cache GC every six hours, without `KeepAlive` or an immediate install-time
+collection. The agent passes `--scheduled` to discover registered projects
+without a checkout as its working directory. Stdout and stderr are under
+`<state>/gc/`. Custom-state and non-macOS installs leave this agent alone.
 
 ### Harness registry
 

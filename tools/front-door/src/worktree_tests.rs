@@ -45,6 +45,7 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
+            "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
             "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
@@ -85,6 +86,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
+                }
+                "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
+                    scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()
                 }
                 "remove_a_managed_worktree_deletes_its_legacy_lane_cache" => {
                     remove_a_managed_worktree_deletes_its_legacy_lane_cache()
@@ -1100,6 +1104,89 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let cache = authority.cargo_cache().path.clone();
     fs::write(cache.join("artifact"), b"lane build output")?;
     Ok(cache)
+}
+
+fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> Result {
+    let mut rig = repository()?;
+    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let worktree = rig.project.join(".worktrees/idle");
+    let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
+    fn age(path: &Path) -> Result {
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                age(&entry?.path())?;
+            }
+        }
+        fs::File::open(path)?.set_modified(std::time::UNIX_EPOCH)?;
+        Ok(())
+    }
+    age(&cache)?;
+    let project = fs::read_dir(rig.state.join("worktrees"))?
+        .next()
+        .ok_or("project")??
+        .path();
+    let registration = fs::read_dir(project)?
+        .find_map(|entry| {
+            let path = entry.ok()?.path();
+            path.join("identity.json").is_file().then_some(path)
+        })
+        .ok_or("registration")?;
+    // launchd starts without a checkout as its working directory.
+    rig.project = rig.home.clone();
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nschedule=false\n",
+    )?;
+    let disabled = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
+    assert!(
+        disabled["data"]["removed"]
+            .as_array()
+            .ok_or("removed")?
+            .is_empty()
+    );
+    assert!(cache.is_dir());
+    fs::write(rig.state.join("config.toml"), b"schema_version=1\n")?;
+    fs::write(registration.join("reservation.json"), b"reserved")?;
+    let reserved = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
+    assert!(
+        reserved["data"]["removed"]
+            .as_array()
+            .ok_or("removed")?
+            .is_empty()
+    );
+    assert!(cache.is_dir());
+    fs::remove_file(registration.join("reservation.json"))?;
+    let dry = ok(
+        &rig,
+        &[
+            "gc",
+            "--scheduled",
+            "--idle-days",
+            "1",
+            "--dry-run",
+            "--json",
+        ],
+    )?;
+    assert_eq!(dry["data"]["removed"][0]["reason"], "idle");
+    assert!(cache.is_dir());
+    fs::write(cache.join("artifact"), b"recent build")?;
+    let removed = ok(
+        &rig,
+        &[
+            "gc",
+            "--scheduled",
+            "--idle-days",
+            "1",
+            "--free-floor",
+            "18446744073709551615B",
+            "--json",
+        ],
+    )?;
+    assert_eq!(removed["data"]["removed"][0]["reason"], "free_floor");
+    assert!(removed["data"]["free_bytes_before"].is_u64());
+    assert!(removed["data"]["free_bytes_after"].is_u64());
+    assert!(!cache.exists());
+    Ok(())
 }
 
 fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Result {

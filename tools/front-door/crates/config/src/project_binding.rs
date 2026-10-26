@@ -529,6 +529,85 @@ mod tests {
         .unwrap();
 
         assert_ne!(first.project, second.project);
+        fs::set_permissions(roots.state.as_path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let listed = registered_projects(&roots, &LocalFs).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.contains(&first));
+        assert!(listed.contains(&second));
+    }
+
+    #[test]
+    fn unrelated_duplicate_binding_does_not_block_lookup_or_bind() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+        let target_dir = base.join("target/.git");
+        let duplicated_dir = base.join("duplicated/.git");
+        let new_dir = base.join("new/.git");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&duplicated_dir).unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+
+        let target =
+            bind_project(&roots, ProjectLocation::new(&target_dir).unwrap(), &LocalFs).unwrap();
+        let duplicated = bind_project(
+            &roots,
+            ProjectLocation::new(&duplicated_dir).unwrap(),
+            &LocalFs,
+        )
+        .unwrap();
+        fs::set_permissions(roots.state.as_path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let projects = roots.state.as_path().join(PROJECTS_DIR);
+        let duplicate_id = ProjectId::from_bytes([11; 16]);
+        let duplicate = projects.join(duplicate_id.to_string());
+        fs::create_dir(&duplicate).unwrap();
+        fs::set_permissions(&duplicate, fs::Permissions::from_mode(0o700)).unwrap();
+        let record = ProjectBindingRecord {
+            schema_version: 1,
+            project: duplicate_id,
+            canonical_common_dir: encode_location(&duplicated_dir),
+        };
+        fs::write(duplicate.join(RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::set_permissions(duplicate.join(RECORD), fs::Permissions::from_mode(0o600)).unwrap();
+        assert_ne!(target.project_id(), duplicate_id);
+        assert_ne!(duplicated.project_id(), duplicate_id);
+        assert_eq!(registered_projects(&roots, &LocalFs).unwrap().len(), 3);
+
+        assert_eq!(
+            lookup_project(
+                &roots,
+                &ProjectLocation::new(&target_dir).unwrap(),
+                &LocalFs
+            )
+            .unwrap(),
+            Some(target)
+        );
+        let new = bind_project(&roots, ProjectLocation::new(&new_dir).unwrap(), &LocalFs).unwrap();
+        assert_eq!(new.common_dir(), new_dir);
+        assert_ne!(duplicated.project_id(), duplicate_id);
+
+        let duplicate_target_id = ProjectId::from_bytes([12; 16]);
+        let duplicate_target = projects.join(duplicate_target_id.to_string());
+        fs::create_dir(&duplicate_target).unwrap();
+        fs::set_permissions(&duplicate_target, fs::Permissions::from_mode(0o700)).unwrap();
+        let record = ProjectBindingRecord {
+            schema_version: 1,
+            project: duplicate_target_id,
+            canonical_common_dir: encode_location(&target_dir),
+        };
+        fs::write(
+            duplicate_target.join(RECORD),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(
+            duplicate_target.join(RECORD),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let target_location = ProjectLocation::new(&target_dir).unwrap();
+        assert!(lookup_project(&roots, &target_location, &LocalFs).is_err());
+        assert!(bind_project(&roots, target_location, &LocalFs).is_err());
     }
 
     #[test]

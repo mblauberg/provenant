@@ -392,11 +392,11 @@ pub fn serve(globals: &provenant_cli::Globals) -> u8 {
     }
 }
 
-fn utf8(path: &Path) -> Result<&str, AgentError> {
+pub(super) fn utf8(path: &Path) -> Result<&str, AgentError> {
     path.to_str().ok_or_else(|| AgentError::Path(path.into()))
 }
 
-fn xml(text: &str) -> String {
+pub(super) fn xml(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -448,7 +448,7 @@ pub fn plist(home: &Path) -> PathBuf {
         .join(format!("{LABEL}.plist"))
 }
 
-fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError> {
+pub(super) fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError> {
     let mut argv: Vec<OsString> = vec!["/bin/launchctl".into()];
     argv.extend(args.iter().map(|arg| arg.to_os_string()));
     let env: [(OsString, OsString); 2] = [

@@ -6,6 +6,7 @@ mod checks;
 mod compose_tests;
 mod disk;
 mod fabric;
+mod gc_agent;
 mod handoff;
 mod hooks;
 mod hosts;
