@@ -120,6 +120,32 @@
           "scope"
         ]
       }
+    },
+    {
+      "id": "q17620",
+      "relation": "negative",
+      "prompt": "Implement the approved UI change that displays source:agent and the Filed-by trailer on issue cards.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q17621",
+      "relation": "negative",
+      "prompt": "Lease and dispatch the next Ready task to a writer lane and manage its run; leave the issue and board unchanged.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "orchestrate",
+        "companion_skills": []
+      }
     }
   ]
 }

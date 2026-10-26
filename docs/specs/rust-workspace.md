@@ -4,9 +4,9 @@ Owner: the chairs; manifests in `tools/front-door/Cargo.toml`
 Anchor: `tools/front-door/tests/workspace_policy.rs`
 
 Durable engineering rules for the Rust workspace under `tools/front-door/`.
-[ADR 0028](../adr/0028-rust-port-dependencies.md) sets the dependency list and
-[ADR 0029](../adr/0029-rust-rewrite-in-one-pass.md) records the rewrite. Paths
-are relative to `tools/front-door/`.
+[ADR 0028](../adr/0028-rust-port-dependencies.md) decision 3 sets the direct
+dependency list and [ADR 0027](../adr/0027-rust-front-door.md) records the sole
+Rust runtime. Paths are relative to `tools/front-door/`.
 
 ## Crate layering
 

@@ -1,4 +1,6 @@
 # Model routing
+Owner: provenant-routing
+Anchor: tools/front-door/crates/routing/src
 
 Run `provenant route list` to inspect the catalogue, configured pool weights
 and pacing policy; pacing and readiness apply at dispatch. Use

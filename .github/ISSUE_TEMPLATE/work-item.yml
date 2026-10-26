@@ -6,6 +6,9 @@ body:
       value: >-
         Users and agents use the same evidence and authority gates. Do not put
         secrets, personal data or private project material in this issue.
+        Agent filings cite an event that already happened, carry `source:agent`
+        and end with `Filed-by: <PROVENANT_AGENT_LABEL> <run>`. Never cite session
+        scratch. This issue body is the change spec; keep no delta archive.
 
   - type: textarea
     id: problem-evidence
@@ -36,13 +39,13 @@ body:
       required: false
 
   - type: input
-    id: durable-owner
+    id: post-delivery-fate
     attributes:
-      label: Durable owner
+      label: Post-delivery fate
       description: >-
-        Link the specification, ADR, invariant or other project document that
-        remains authoritative after this issue's delivery state changes.
-      placeholder: https://github.com/owner/repository/blob/main/docs/specs/topic.md
+        State the spec's post-delivery fate: None, or name the surviving invariant
+        and the durable document it moves to. The change spec expires with the PR.
+      placeholder: None, or invariant name and durable document link
     validations:
       required: false
 
@@ -58,7 +61,10 @@ body:
     id: acceptance
     attributes:
       label: Acceptance evidence
-      description: List the checks or observations that prove the outcome.
+      description: >-
+        For a small change, list two to five criteria. Tag each with [test],
+        [command output], [review] or [observation]. Risky work keeps a reviewer
+        check outside the writer's context; do not publish that check here.
     validations:
       required: true
 

@@ -1,6 +1,8 @@
 # ADR 0031: Retain provider history and expire resume state
 
-**Status:** Accepted 2026-10-26, owner-approved in #1570
+**Status:** Accepted
+
+Changed: 2026-10-26, #1754.
 
 ## Context
 
@@ -10,14 +12,14 @@ attempt-private provider state. Codex caches and plugins accounted for about
 Only continuation reads the private provider state. Telemetry reads the
 attempt records and `usage.jsonl`.
 
-ADR 0007 deferred durable-run retention until a concrete requirement
-established deletion protections. This inventory supplies that requirement.
+The inventory establishes a concrete retention requirement for private
+provider state, separate from durable run results.
 
 ## Decision
 
-Replace ADR 0007's deferral for attempt-private provider state with automatic
-retention. Keep its decision against universal retention classes and general
-state deletion.
+Apply automatic retention to attempt-private provider state.
+[ADR 0007](0007-defer-universal-retention-and-deletion.md) owns disposal
+custody; it grants no general state-deletion authority.
 
 At terminal settlement, prune only provider cache paths known to be
 regenerable. Codex's initial entry is `cache/`, `plugins/`, `skills/` and

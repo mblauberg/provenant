@@ -255,7 +255,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let out = rig.execute(binary, &resume, Some(b"more"))?;
     assert_eq!(code(&out), 1);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "UNSUPPORTED");
+    assert_eq!(value["error"]["code"], "CONTINUATION_UNSUPPORTED");
     let reconcile = rig.command(&["reconcile", "--json"])?;
     assert_eq!(code(&reconcile), 0);
     let value: serde_json::Value = serde_json::from_slice(&reconcile.stdout.bytes)?;

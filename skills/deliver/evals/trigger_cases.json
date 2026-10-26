@@ -115,6 +115,32 @@
           "deliver"
         ]
       }
+    },
+    {
+      "id": "q176106",
+      "relation": "negative",
+      "prompt": "Deliver the already accepted report by publishing it to the approved destination.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "release",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176107",
+      "relation": "negative",
+      "prompt": "Deliver this approved software change through implementation, verification and review.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
     }
   ]
 }

@@ -11,39 +11,32 @@ Produce testable scope.
 
 Read the repository's `Repository process` declaration. If absent or ambiguous,
 use an unambiguous existing owner or return proposed content in chat; never
-invent an owner. Define the decision, users and done in the declared parent
-issue or project-docs home. Emit the minimum tier from the compiled factor
-floors in `HARNESS.md`,
-path/write/resource limits, prohibited actions, external effects, expiry and
-approver. Credentials, secrets, unrelated paths, denials and project bans stay
-outside authority. Execution permission is not assurance. Ordinary authorised
-workspace content proceeds without a
-family-separation gate. Only a user may downgrade risk. Judgement-bearing AI
-requires `evaluate`.
+invent an owner. Define the decision, users and done there. Emit the minimum
+tier from `HARNESS.md`, path/write/resource limits, prohibited actions,
+external effects, disclosure, expiry and approver. Credentials, secrets,
+unrelated paths, denials and project bans stay outside authority. Execution
+permission is not assurance. Ordinary authorised workspace content proceeds
+without a family-separation gate. Only a user may downgrade risk.
+Judgement-bearing AI requires `evaluate`.
 
 Writing a tracker needs explicit external-write authority; project-write
 authority alone does not grant it.
 
-Scope owns accepted content and decision register: intake, goals,
-constraints, alternatives and decided/parked branches. Record disclosure in
+Scope owns accepted content and the decision register. Record disclosure in
 the authority envelope, never private memory.
 
 ## Grill
 
-Load `grill-me` only when the user explicitly asks to be grilled or dependent owner decisions remain
-materially unresolved. Then work purpose -> users ->
-constraints -> edge cases -> failure modes -> success -> exclusions. Otherwise
-present a compact decision packet with 2–3
-choices, a recommendation and parked calls.
+Load `grill-me` when requested or dependent owner decisions remain materially
+unresolved. Otherwise present two or three choices, a recommendation and parked
+calls.
 
 Agents decide engineering calls. Business, legal or financial owner calls stay
-parked as open-decision rows; never guess. Where the owner has explicitly
-authorised assume-and-record in project instructions, an agent may instead take
-the recommended answer on a reversible call, record it for owner confirmation
-and proceed. A blocking one-way door may go to an owner-authorised decision
-process only when its answer is recorded, kept cheap to reverse until
-confirmed, and owed owner confirmation before activation. Irreversible actions,
-promotion and live activation stay gated. Put every unresolved branch in scope.
+parked as open-decision rows, never guessed, unless the owner explicitly authorises assume-and-record for reversible
+calls; record those for confirmation. A blocking one-way door may use an
+owner-authorised decision process only with a recorded answer, cheap reversal
+until confirmed and owner confirmation before activation. Irreversible actions,
+promotion and live activation stay gated. Record every unresolved branch.
 
 ## Resolve uncertainty
 
@@ -51,34 +44,50 @@ Research surviving questions through `orchestrate`; use `prototype` only for a
 timeboxed feasibility answer, then harvest it and clean only manifest-owned
 scratch.
 
-Compare viable options through correctness, cost and operations. Put
-costly-to-reverse choices and rejected alternatives in an ADR; keep reversible
-detail in the spec/story. In paired-primary mode one chair asks; the peer audits.
-Record authorship.
+Compare correctness, cost and operations. Put costly-to-reverse choices and
+rejected alternatives in an ADR; reversible detail stays in the spec. In
+paired-primary mode one chair asks; the peer audits. Record authorship.
 
 ## Land outputs
 
-Resolve artifact authority. In advisory/read-only
-mode, return proposed scope and open decisions in chat; do not change
-project files. In project-write mode, land only approved artifacts:
+In read-only mode, return proposals in chat without changing project files.
+Otherwise land only approved content with its declared owner: change scope,
+stories, criteria and user gates in the issue body or project-docs home,
+one-way decisions in ADRs, work items in the tracker, surviving invariants and
+context in project docs via `engineering-docs`. Run state stays run-local.
 
-| Output | Owner |
-|---|---|
-| Durable requirements and normative acceptance criteria | project docs via `engineering-docs` |
-| One-way decisions | project ADR process |
-| User gates | declared scope/story owner; project-docs may name a register |
-| Change scope, stories and delivery acceptance | declared issue tracker or project-docs home |
-| Work items | declared project tracker |
-| Durable context | declared project-docs owner; run state stays run-local |
+For an issue-tracker repository, the change spec lives in the issue body and
+expires with the delivering PR. Keep no delta archive. Size it to the change:
+a small change needs a goal, two to five observable criteria and non-goals.
+Tag each criterion `[test]`, `[command output]`, `[review]` or `[observation]`.
+Name must-not-change behaviour. For risky work, a reviewer retains one held-back
+check outside the writer's context. State the post-delivery fate: nothing, or a
+named invariant and the durable document it moves to.
 
-Write observable acceptance criteria. Name the objective checks, tier-required
-review and any project landing gate that meet acceptance. Record any scoped
-requirement for explicit user acceptance; it is otherwise required only for
-`terminal` work. The chair reports the outcome and the user may still reject it.
-Preserve project schemas; pin only
-decision-critical interfaces with native locks/constraints. Link or cache
-authority with its source and relevant date/version; vendor only with
-redistribution permission.
+Preserve project schemas; pin only decision-critical interfaces with native
+locks/constraints. Link or cache authority with its source and date or
+version; vendor only with redistribution permission. Name the objective
+checks, tier-required review and any project landing gate.
+Spec drift is a reviewer check at acceptance, never an automatic gate. Explicit
+user acceptance is required only for `terminal` work or when scoped; the chair
+reports the outcome and the user may still reject it.
+
+Tracked artifacts, including issues, PRs, docs and code comments, never cite
+session scratch: run files, plan codes or local scratch paths. Put the relevant
+evidence in the artifact or cite a resolvable project source instead.
+
+Never leave a "Spec gap:" line. Give the gap a scope or research lane that
+decides and records it in the body ("Decided (date): rationale"). Only an
+owner-only question becomes a Decision issue with options and a recommendation.
+For new scoping, later epics hold a `## Backlog` checklist and write decisions,
+not leaf briefs; a leaf gets a full brief when leased or Ready. Keep existing
+well-scoped leaves, even under Next or Later epics.
+
+Before approval, consider an advisory fresh-reader check; skip trivial items.
+A zero-context sub-agent reads only the spec and returns the goal, likely files,
+test plan and every open decision. Answer its substantive questions in the spec
+before approval; dismiss noise explicitly. This advice cannot automatically fail
+readiness. Use the [dispatch recipe](references/fresh-reader.md).
 
 Before handoff, record decided/parked branches, exclusions, risk/authority and
 anchored evidence, with user approval of the spec and one-way doors. The
@@ -86,6 +95,10 @@ execution handoff is digest-bound; any change creates a new revision and gate.
 
 ## Portable artifact
 
-Keep the criteria, evidence and outcome in the existing project document or PR.
+Keep criteria, evidence and outcome in the declared issue body or project-docs
+home; a PR links that owner. Delivery ends the change spec's authority. Promote
+only its named surviving invariant; do not copy the spec into a durable archive.
 
 Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).
+Behaviour fixtures: [spec cases](evals/spec_cases.yaml) and
+[fresh-reader evaluation](evals/fresh-reader/README.md).
