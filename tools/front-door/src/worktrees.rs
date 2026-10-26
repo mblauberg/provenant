@@ -39,7 +39,7 @@ pub(crate) enum Error {
     Permissions(#[from] provenant_confinement::permissions::PermissionError),
     #[error("{0}")]
     CacheGc(
-        Box<provenant_confinement::permissions::CacheGcError>,
+        Box<provenant_confinement::cache::CacheGcError>,
         Vec<PathBuf>,
         Box<provenant_run::ProviderStateGc>,
         Vec<worktrees::WorktreeGcReport>,
@@ -208,7 +208,7 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
 #[derive(Serialize, Default)]
 struct GcData {
     #[serde(flatten)]
-    report: provenant_confinement::permissions::CacheGcReport,
+    report: provenant_confinement::cache::CacheGcReport,
     idle_days: u64,
     provider_state: provenant_run::ProviderStateGc,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
@@ -305,7 +305,7 @@ fn gc_data_summary(data: &GcData) -> String {
     human
 }
 
-fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> String {
+fn gc_summary(report: &provenant_confinement::cache::CacheGcReport) -> String {
     let mut human = String::new();
     let verb = if report.dry_run {
         "would remove"
@@ -340,8 +340,8 @@ fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> Str
     human
 }
 
-fn gc_reason(reason: provenant_confinement::permissions::CacheGcReason) -> &'static str {
-    use provenant_confinement::permissions::CacheGcReason;
+fn gc_reason(reason: provenant_confinement::cache::CacheGcReason) -> &'static str {
+    use provenant_confinement::cache::CacheGcReason;
     match reason {
         CacheGcReason::Orphaned => "orphaned",
         CacheGcReason::Idle => "idle",
@@ -378,9 +378,7 @@ fn gc_project(roots: &provenant_core::Roots, project: &Path) -> Result<GcProject
 }
 
 fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
-    use provenant_confinement::permissions::{
-        CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard,
-    };
+    use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
     use provenant_confinement::worktrees::{WorkerState, WriterState};
 
     let assets = roots::product_root()?;
@@ -399,7 +397,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
     if command.scheduled {
         if !config.gc.schedule {
             return Ok(GcData {
-                report: provenant_confinement::permissions::CacheGcReport {
+                report: provenant_confinement::cache::CacheGcReport {
                     dry_run: command.dry_run,
                     ..Default::default()
                 },
