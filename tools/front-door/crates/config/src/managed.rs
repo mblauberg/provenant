@@ -375,6 +375,8 @@ pub struct Snapshots {
     entries: BTreeMap<PathBuf, Option<Snapshot>>,
     receipt: Option<InstallReceipt>,
     harness: crate::harness::HarnessPlan,
+    stale_targets: BTreeSet<TargetId>,
+    stale_legacy: bool,
 }
 #[derive(Debug)]
 pub struct InstallPlan {
@@ -496,6 +498,11 @@ impl Snapshots {
             .map(Decoded::findings)
             .transpose()?
             .unwrap_or_default();
+        let stale_targets = receipt
+            .as_ref()
+            .map(|decoded| decoded.stale_targets.clone())
+            .unwrap_or_default();
+        let stale_legacy = receipt.as_ref().is_some_and(|decoded| decoded.stale_legacy);
         let receipt = receipt.map(|decoded| decoded.receipt);
         let selected: BTreeSet<_> = targets.harnesses.iter().map(HarnessTarget::id).collect();
         let mut paths: BTreeSet<_> = desired.keys().cloned().collect();
@@ -531,6 +538,8 @@ impl Snapshots {
             entries,
             receipt,
             harness,
+            stale_targets,
+            stale_legacy,
         })
     }
 }
@@ -983,6 +992,12 @@ pub fn plan_install(
     if let Some(previous) = &snapshots.receipt {
         for entry in &previous.entries {
             let owner = entry_owner(entry, previous, state_root)?;
+            if owner
+                .as_ref()
+                .is_some_and(|id| snapshots.stale_targets.contains(id))
+            {
+                continue;
+            }
             if matches!(entry.expected, OwnedValue::Selector { .. }) {
                 if !owner.is_some_and(|id| selected.contains(&id)) {
                     entries.push(entry.clone());
@@ -1103,7 +1118,7 @@ pub fn plan_install(
     if let Some(previous) = &snapshots.receipt {
         for target in &previous.harness_targets {
             let id = recorded_id(target)?;
-            if !selected.contains(&id) {
+            if !selected.contains(&id) && !snapshots.stale_targets.contains(&id) {
                 resolved_targets.insert(id, target.clone());
             }
         }
@@ -1147,7 +1162,10 @@ pub fn plan_install(
                 .transpose()?,
             relinquished_hooks: Vec::new(),
         }),
-        None => snapshots.receipt.as_ref().and_then(|r| r.legacy.clone()),
+        None if !snapshots.stale_legacy => {
+            snapshots.receipt.as_ref().and_then(|r| r.legacy.clone())
+        }
+        None => None,
     };
     if let Some(legacy) = &mut legacy
         && let Some(previous) = &snapshots.receipt
@@ -1166,6 +1184,11 @@ pub fn plan_install(
                 legacy.relinquished_hooks.push(name.to_owned());
             }
         }
+    }
+    if legacy.is_none() {
+        // Outside-home hooks keep their existing actions, but ownership needs
+        // the legacy record that validates their directory.
+        entries.retain(|entry| entry.selector != "git-hook:pre-push");
     }
     let receipt = InstallReceipt {
         schema_version: 1,
@@ -1750,7 +1773,7 @@ pub fn installed_binary(
     fs: &dyn SafeFs,
 ) -> Result<Option<PathBuf>, InstallError> {
     read_receipt_inspected(targets, fs, None)?
-        .filter(|decoded| decoded.moved.is_none())
+        .filter(|decoded| !decoded.stale.iter().any(|entry| entry.selector == "binary"))
         .map(|decoded| Ok(decoded.receipt.bin_dir.to_path_buf()?.join("provenant")))
         .transpose()
 }
@@ -1774,6 +1797,8 @@ struct Decoded {
     receipt: InstallReceipt,
     moved: Option<PathBuf>,
     stale: Vec<OwnedEntry>,
+    stale_legacy: bool,
+    stale_targets: BTreeSet<TargetId>,
 }
 impl Decoded {
     fn findings(&self) -> Result<Vec<InstallFinding>, InstallError> {
@@ -1861,11 +1886,50 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         }
     };
     let moved = (old_state != state_root).then_some(old_state);
-    let old_home = moved.as_deref().and_then(|root| {
-        root.ancestors()
-            .nth(4)
-            .filter(|home| root == home.join(".local/share/provenant/v1"))
-    });
+    let home = provenant_supervisor::fs::canonicalize(&targets.home)
+        .unwrap_or_else(|_| targets.home.clone());
+    let bin_dir = receipt.bin_dir.to_path_buf()?;
+    let legacy_home = receipt
+        .legacy
+        .as_ref()
+        .map(|legacy| legacy.home.to_path_buf())
+        .transpose()?;
+    let old_home = targets
+        .bin_dir
+        .strip_prefix(&home)
+        .ok()
+        .filter(|tail| !tail.as_os_str().is_empty())
+        .and_then(|tail| {
+            bin_dir
+                .ancestors()
+                .nth(tail.components().count())
+                .filter(|old| old.join(tail) == bin_dir)
+        })
+        .filter(|old| *old != home && *old != targets.home)
+        .or_else(|| {
+            legacy_home
+                .as_deref()
+                .filter(|old| *old != home && *old != targets.home)
+        });
+    let stale_legacy = legacy_home
+        .as_ref()
+        .is_some_and(|old| old_home.is_some() || (*old != home && *old != targets.home));
+    let mut stale_targets = BTreeSet::new();
+    for target in &receipt.harness_targets {
+        let target_paths = [
+            Some(&target.skills_dir),
+            Some(&target.mcp_file),
+            target.hook_file.as_ref(),
+            target.instruction.as_ref(),
+        ];
+        for path in target_paths.into_iter().flatten() {
+            let path = path.to_path_buf()?;
+            if old_home.is_some_and(|old| path.starts_with(old) && !path.starts_with(&home)) {
+                stale_targets.insert(recorded_id(target)?);
+                break;
+            }
+        }
+    }
     let mut paths = BTreeSet::new();
     let mut entries = Vec::new();
     let mut stale = Vec::new();
@@ -1887,8 +1951,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             ));
         }
         if !permitted
-            || old_home
-                .is_some_and(|home| path.starts_with(home) && !path.starts_with(&targets.home))
+            || old_home.is_some_and(|old| path.starts_with(old) && !path.starts_with(&home))
         {
             stale.push(entry.clone());
         } else {
@@ -1900,6 +1963,8 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         receipt,
         moved,
         stale,
+        stale_legacy,
+        stale_targets,
     })
 }
 /// Recorded targets never share a destination, so each entry has one owner.
@@ -2135,6 +2200,7 @@ fn check_install_inspected(
         }]);
     };
     let mut findings = decoded.findings()?;
+    let stale_binary = decoded.stale.iter().any(|entry| entry.selector == "binary");
     let receipt = decoded.receipt;
     let release_path = release_root(state_root, receipt.source_digest);
     match Release::read_scoped_inspected(&release_path, target, fs, state_root, Some(evidence)) {
@@ -2149,7 +2215,7 @@ fn check_install_inspected(
                 let expected = OwnedValue::Link {
                     target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
                 };
-                if decoded.moved.is_none()
+                if !stale_binary
                     && !receipt.entries.iter().any(|entry| {
                         entry.selector == "binary"
                             && entry.harness.is_none()
@@ -2214,6 +2280,7 @@ fn check_install_inspected(
     }
     // Legacy audits also inspect recorded home and target paths.
     if decoded.moved.is_none()
+        && !decoded.stale_legacy
         && let Some(legacy) = &receipt.legacy
     {
         crate::harness::check_legacy(&receipt, legacy, &mut findings, evidence, fs)?;
@@ -2228,13 +2295,17 @@ fn check_install_inspected(
 /// command remain installed.
 fn not_installed(
     receipt_path: &Path,
+    mut findings: Vec<InstallFinding>,
     reporter: &mut dyn InstallReporter,
 ) -> Result<InstallOutcome, InstallError> {
     reporter.preview(&[]).map_err(InstallError::Preview)?;
-    let findings = vec![InstallFinding {
-        rule: "not_installed".into(),
-        path: AbsolutePath::new(receipt_path)?,
-    }];
+    findings.insert(
+        0,
+        InstallFinding {
+            rule: "not_installed".into(),
+            path: AbsolutePath::new(receipt_path)?,
+        },
+    );
     reporter
         .findings(&findings)
         .map_err(InstallError::Preview)?;
@@ -2259,13 +2330,15 @@ pub fn uninstall(
     let receipt_path = state_root.join("install/receipt.json");
     let before_receipt = snapshot(&receipt_path, fs)?;
     let Some(decoded) = read_receipt_inspected(targets, fs, None)? else {
-        return not_installed(&receipt_path, reporter);
+        return not_installed(&receipt_path, Vec::new(), reporter);
     };
     let mut findings = decoded.findings()?;
     let Decoded {
         mut receipt,
         moved,
         stale,
+        stale_legacy: _,
+        stale_targets: _,
     } = decoded;
     let mut registered = BTreeSet::new();
     let mut selected = BTreeSet::new();
@@ -2280,7 +2353,7 @@ pub fn uninstall(
         registered.insert(id);
     }
     if selected.is_empty() {
-        return not_installed(&receipt_path, reporter);
+        return not_installed(&receipt_path, findings, reporter);
     }
     // Older installers wrote this fixed plist without recording it. The
     // process edge recognises its exact historical rendering, never its label

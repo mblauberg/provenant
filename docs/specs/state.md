@@ -235,10 +235,18 @@ matching the environment's home, or else every recorded target of the harness.
 No cross-file or cross-host atomicity is claimed.
 
 After a home or state-root move, the recorded binary link identifies the old
-root. Stale entries produce `state_root_moved` and `relocated_stale_entry`
-findings without inspecting or changing their paths. Uninstall forgets selected
-stale ownership and retains unselected entries and the binary record. Reinstall
-writes a fresh receipt and requires manual cleanup of dangling links; see the
+state root. The recorded bin directory or legacy home identifies the old home,
+independently of the state layout. Stale entries produce `relocated_stale_entry`
+findings without inspecting or changing their paths; a moved state root also
+produces `state_root_moved`. These findings remain visible when no target is
+selected. Uninstall forgets selected stale ownership and retains unselected
+entries and the binary record. A stale `git-hook:pre-push` entry and its legacy
+record also remain in the receipt after a full uninstall; its old path stays
+untouched. Selectors and Git hooks outside the old home retain their existing
+behaviour. Reinstall drops stale targets and an old-home legacy record from
+the fresh receipt. A Git hook outside the old home may still be refreshed, but
+its ownership is omitted when that legacy record is dropped. Reinstall
+requires manual cleanup of dangling links; see the
 [install runbook](../runbooks/install.md).
 
 Omitting `--hooks` on re-install retains and refreshes the selected target's

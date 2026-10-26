@@ -134,12 +134,17 @@ service is left running. A failed bootout keeps the plist for a retry.
 A missing peer plist is stopped by its service label.
 
 If your home directory or state root has moved since install, uninstall reports
-`state_root_moved` and one `relocated_stale_entry` per entry it will not touch,
-then forgets the removed targets. It never acts on the old paths. To finish,
+one `relocated_stale_entry` per entry it will not touch, plus `state_root_moved`
+if the state root moved, then forgets the removed targets. This also applies
+with a custom `PROVENANT_STATE_DIR` or state outside the home. It never acts on
+the old paths. To finish,
 run `launchctl bootout gui/$UID/dev.provenant.peer`, move
 `~/Library/LaunchAgents/dev.provenant.peer.plist` aside, and delete links under
-`~/.local/bin` and the harness skills directories that point into the old state
-root. Then reinstall.
+`~/.local/bin` and the harness skills directories, plus harness instruction
+links such as `AGENTS.md` and `HARNESS.md`, that point into the old state root.
+Then rerun install with `--adopt-existing` to replace managed MCP entries that
+still name the old binary and state. Stopping the agent and removing these
+links remain manual steps.
 
 `build.rs` stamps the source and asset digests, and the packaging example
 produces the typed `release.json`. The CLI grammar is described in
