@@ -536,7 +536,13 @@ fn cold_open_race_serialises_schema_setup() {
             let f = &f;
             scope.spawn(move || {
                 barrier.wait();
-                let store = f.open();
+                // The other opener can hold the write lock for seconds under
+                // CI load. This test checks serialisation, not latency.
+                let request = Request {
+                    budget: WaitBudget::cli(f.clock.mono_now(), 30).unwrap(),
+                    ..f.request()
+                };
+                let store = Store::open(&f.root, &request).unwrap();
                 assert_eq!(
                     store
                         .db
