@@ -143,6 +143,18 @@ fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targ
         None,
     )
     .map_err(EdgeError::Install)?;
+    // Re-derive the legacy hooks directory rather than trust the receipt's
+    // copy. A checkout that is gone yields none, so uninstall reports its
+    // launcher instead of removing it.
+    targets.git_hooks_dir = match provenant_config::recorded_hook_checkout(&targets, &LocalFs)
+        .map_err(EdgeError::Install)?
+    {
+        Some(checkout) => match std::fs::metadata(&checkout) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            _ => Some(git_hooks_dir(&checkout)?),
+        },
+        None => None,
+    };
     targets
         .resolve_destinations(&LocalFs)
         .map_err(EdgeError::Install)?;

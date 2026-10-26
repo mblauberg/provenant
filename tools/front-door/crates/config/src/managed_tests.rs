@@ -504,6 +504,56 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
 }
 
 #[test]
+fn uninstall_trusts_only_the_rederived_legacy_hooks_directory() {
+    for checkout_present in [true, false] {
+        let mut f = Fixture::new();
+        f.targets.harnesses =
+            Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+        f.targets.hooks = true;
+        f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        f.targets.hook_specs.push(HookRegistration {
+            harness: None,
+            event: "pre-push",
+            matcher: None,
+            timeout: None,
+            command: &["hook", "git", "pre-push"],
+        });
+        // The receipt records a hooks directory outside its checkout, as an
+        // edited receipt would.
+        let checkout = f.home.join("old-checkout");
+        let derived = checkout.join(".git/hooks");
+        let recorded = f.home.join("elsewhere/hooks");
+        fs::create_dir_all(&derived).unwrap();
+        fs::create_dir_all(&recorded).unwrap();
+        let launcher = recorded.join("pre-push");
+        symlink(checkout.join("scripts/hooks/pre-push"), &launcher).unwrap();
+        f.targets.legacy_checkout = Some(checkout.clone());
+        f.targets.git_hooks_dir = Some(recorded);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let ctx = context(&clock, &cancel);
+        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        assert!(launcher.is_file());
+        assert_eq!(
+            recorded_hook_checkout(&f.targets, &LocalFs).unwrap(),
+            Some(checkout)
+        );
+        f.targets.legacy_checkout = None;
+        f.targets.git_hooks_dir = checkout_present.then_some(derived);
+        let result = uninstall(&f.targets, &ctx, &mut Reporter::default());
+        if checkout_present {
+            assert!(matches!(result, Err(InstallError::Conflict(path)) if path == launcher));
+        } else {
+            assert!(result.unwrap().findings.iter().any(|finding| {
+                finding.rule == "legacy_checkout_unavailable"
+                    && finding.path.to_path_buf().unwrap() == launcher
+            }));
+        }
+        assert!(launcher.is_file());
+    }
+}
+
+#[test]
 fn inherited_launcher_relinquishes_modified_or_missing_entries_and_allows_migration() {
     for missing in [false, true] {
         let mut f = Fixture::new();

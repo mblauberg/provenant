@@ -1745,6 +1745,24 @@ pub fn installed_binary(
         .map(|receipt| Ok(receipt.bin_dir.to_path_buf()?.join("provenant")))
         .transpose()
 }
+/// Recorded legacy checkout when the receipt owns its Git pre-push launcher.
+/// The edge re-derives the hooks directory for uninstall instead of trusting
+/// the receipt's copy.
+pub fn recorded_hook_checkout(
+    targets: &Targets,
+    fs: &dyn SafeFs,
+) -> Result<Option<PathBuf>, InstallError> {
+    read_receipt(targets, fs)?
+        .filter(|receipt| {
+            receipt
+                .entries
+                .iter()
+                .any(|entry| entry.selector == "git-hook:pre-push")
+        })
+        .and_then(|receipt| receipt.legacy)
+        .map(|legacy| Ok(legacy.checkout.to_path_buf()?))
+        .transpose()
+}
 pub(crate) fn read_receipt_inspected(
     targets: &Targets,
     fs: &dyn SafeFs,
@@ -2241,6 +2259,21 @@ pub fn uninstall(
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
+        if entry.selector == "git-hook:pre-push" {
+            // The receipt's hooks directory is user-editable evidence. The edge
+            // re-derives it from the recorded checkout; a gone checkout leaves
+            // the launcher and reports it, and any other directory refuses.
+            let Some(directory) = &targets.git_hooks_dir else {
+                findings.push(InstallFinding {
+                    rule: "legacy_checkout_unavailable".into(),
+                    path: entry.path.clone(),
+                });
+                continue;
+            };
+            if path != directory.join("pre-push") {
+                return Err(InstallError::Conflict(path));
+            }
+        }
         if matches!(entry.expected, OwnedValue::Selector { .. }) {
             let before = snapshot(&path, fs)?;
             if let Some(before) = before {
