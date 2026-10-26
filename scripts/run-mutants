@@ -51,6 +51,7 @@ fi
 shards=$(( (total + cap - 1) / cap ))
 out=$ws/target/mutants-report
 rm -rf "$out"
+mkdir -p "$out"
 status=0
 # shellcheck disable=SC2086
 cargo mutants $common "$@" --shard "0/$shards" --output "$out" || status=$?
