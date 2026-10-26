@@ -254,16 +254,15 @@ pub(crate) fn read_cache(roots: &Roots) -> Result<Vec<AccountRecord>, EdgeError>
 }
 
 /// Persist only typed quota scope from a provider event; its message stays in
-/// the redacted attempt reason and is never copied into quota state.
+/// the redacted attempt reason and is never copied into quota state. Without a
+/// pool the refusal holds only the route's model.
 pub(crate) fn persist_provider_refusal(
     state_root: &Path,
     route: &provenant_records::run::RouteRecord,
     pool: Option<&str>,
     now_unix_seconds: i64,
+    resets_unix_seconds: Option<i64>,
 ) -> Result<(), EdgeError> {
-    let Some(pool) = pool else {
-        return Ok(());
-    };
     let adapter = route
         .provider
         .as_deref()
@@ -306,8 +305,14 @@ pub(crate) fn persist_provider_refusal(
         })
         .cloned();
     let account = current.as_ref().map_or(&account, |record| &record.account);
-    let intent =
-        provenant_quota::record_refusal(current.as_ref(), account, model, pool, now_unix_seconds)?;
+    let intent = provenant_quota::record_refusal(
+        current.as_ref(),
+        account,
+        model,
+        pool,
+        now_unix_seconds,
+        resets_unix_seconds,
+    )?;
     write_intent(&directory, &intent, &mut records)
 }
 

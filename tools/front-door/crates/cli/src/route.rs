@@ -753,12 +753,10 @@ pub fn run(
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} weight={} factor={:.2} pacing={:?} readiness={:?}{}",
+                                "{} weight={} pacing={:?}{}",
                                 member.model.as_str(),
                                 member.weight,
-                                f64::from(member.factor_basis_points) / 10_000.0,
                                 member.pacing,
-                                member.readiness,
                                 member
                                     .effort
                                     .as_ref()

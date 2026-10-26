@@ -26,32 +26,89 @@ fn entry_snapshot_refuses_over_budget_without_mutation() {
     assert_eq!(entry_names(&dir, 3).unwrap().len(), 3);
 }
 
+fn payload_root(temp: &Path, mode: u32) -> (Directory, Metadata) {
+    let parent = Directory::open_anchor(temp).unwrap();
+    parent.mkdir(OsStr::new("payload"), 0o700).unwrap();
+    std::fs::set_permissions(temp.join("payload"), std::fs::Permissions::from_mode(mode)).unwrap();
+    let expected = parent.metadata_at(OsStr::new("payload"), false).unwrap();
+    (parent, expected)
+}
+
 #[test]
 fn payload_disposal_allows_lock_names_without_following_links() {
     let temp = tempfile::tempdir().unwrap();
-    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let (parent, expected) = payload_root(temp.path(), 0o700);
+    let tree = PayloadTree::claim(&parent, OsStr::new("payload"), &expected).unwrap();
+    let dir = tree.directory();
+    let root = temp.path().join("payload");
     dir.create_new(OsStr::new("Cargo.lock")).unwrap();
     assert!(matches!(
         dir.unlink(OsStr::new("Cargo.lock")),
         Err(FsError::ReservedLockName { .. })
     ));
-    dir.unlink_payload(OsStr::new("Cargo.lock")).unwrap();
-    dir.mkdir(OsStr::new("directory.lock"), 0o700).unwrap();
-    dir.rmdir_payload(OsStr::new("directory.lock")).unwrap();
+    tree.unlink(OsStr::new("Cargo.lock")).unwrap();
+    dir.mkdir(OsStr::new("directory.lock"), 0o755).unwrap();
+    let child = tree.child(OsStr::new("directory.lock")).unwrap();
+    child
+        .directory()
+        .create_new(OsStr::new("s-1.lock"))
+        .unwrap();
+    child.unlink(OsStr::new("s-1.lock")).unwrap();
+    drop(child);
+    tree.rmdir(OsStr::new("directory.lock")).unwrap();
     dir.create_new(OsStr::new("keep")).unwrap();
-    symlink("keep", temp.path().join("link.lock")).unwrap();
-    dir.unlink_payload(OsStr::new("link.lock")).unwrap();
+    symlink("keep", root.join("link.lock")).unwrap();
+    tree.unlink(OsStr::new("link.lock")).unwrap();
     assert!(dir.metadata_at(OsStr::new("keep"), false).is_ok());
     for name in ["..", "a/b", "/absolute"] {
         assert!(matches!(
-            dir.unlink_payload(OsStr::new(name)),
+            tree.unlink(OsStr::new(name)),
             Err(FsError::InvalidComponent { .. })
         ));
         assert!(matches!(
-            dir.rmdir_payload(OsStr::new(name)),
+            tree.rmdir(OsStr::new(name)),
             Err(FsError::InvalidComponent { .. })
         ));
     }
+}
+
+#[test]
+fn payload_tree_claim_refuses_identity_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let (parent, stale) = payload_root(temp.path(), 0o700);
+    let root = temp.path().join("payload");
+    std::fs::rename(&root, temp.path().join("moved")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(root.join("Cargo.lock"), b"live").unwrap();
+    assert!(matches!(
+        PayloadTree::claim(&parent, OsStr::new("payload"), &stale),
+        Err(FsError::PayloadMismatch { .. })
+    ));
+    assert!(root.join("Cargo.lock").is_file());
+}
+
+#[test]
+fn payload_tree_claim_refuses_non_private() {
+    let temp = tempfile::tempdir().unwrap();
+    for mode in [0o755, 0o750, 0o705, 0o770] {
+        let (parent, expected) = payload_root(temp.path(), mode);
+        assert!(matches!(
+            PayloadTree::claim(&parent, OsStr::new("payload"), &expected),
+            Err(FsError::NotPrivate { .. })
+        ));
+        std::fs::remove_dir(temp.path().join("payload")).unwrap();
+    }
+    // Narrow owner bits stay private; walkers widen them before removal.
+    for mode in [0o700, 0o500] {
+        let (parent, expected) = payload_root(temp.path(), mode);
+        PayloadTree::claim(&parent, OsStr::new("payload"), &expected).unwrap();
+        std::fs::remove_dir(temp.path().join("payload")).unwrap();
+    }
+    std::fs::write(temp.path().join("file"), b"").unwrap();
+    let parent = Directory::open_anchor(temp.path()).unwrap();
+    let expected = parent.metadata_at(OsStr::new("file"), false).unwrap();
+    assert!(PayloadTree::claim(&parent, OsStr::new("file"), &expected).is_err());
 }
 
 #[test]

@@ -93,11 +93,10 @@ fn prepare(
                     in_place_writes: Vec::new(),
                 }],
                 state_writes: vec![subtree(chats)],
-                tool_exec_roots: if access == Access::WorktreeWrite {
-                    vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
-                } else {
-                    Vec::new()
-                },
+                // The resolved launcher is a shell script in the self-updated
+                // `versions/<version>/` payload that execs its sibling `node`,
+                // so every lane needs a shell and that one payload directory.
+                tool_exec_roots: vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)],
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,
