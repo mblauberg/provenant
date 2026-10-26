@@ -1,502 +1,266 @@
 # Routing, providers and quota
 
-## Purpose and ownership
+Owner: `crates/routing` (catalogue, resolve), `crates/providers` (adapters,
+accounts, decoding), `crates/quota` (windows, refusals, scheduling)
+Anchor: `crates/routing/src/tests.rs`, `crates/providers/src/tests.rs`,
+`crates/quota/src/admission.rs`, `crates/run/src/dispatch_tests.rs`
 
-This spec owns how a dispatch becomes one exact provider model: route
-resolution, the provider adapters that build and decode launches, and the
-quota reads and refusals that decide whether a model is ready. The
-[cross-cutting decisions](README.md#cross-cutting-decisions) bind it.
+This spec owns how a dispatch becomes one exact provider model, how adapters
+build and decode launches, and how quota decides readiness. Run owns
+admission and publication ([run](run.md)); supervisor and confinement own
+custody and grants ([supervisor](supervisor.md)). Grammar is in the
+generated [CLI reference](../reference/cli.md), keys in the [config
+reference](../reference/config-keys.md), and bundled pools in
+`provenant route list`. Paths are relative to `tools/front-door/`.
 
-| Crate | Owns |
-| --- | --- |
-| `routing` | The catalogue, pools, request validation and `resolve`. |
-| `providers` | One module per adapter: account detection, launch preparation, stream decoding, continuation and verified lineage. |
-| `quota` | Refresh scheduling, persisted windows and refusals, and the admission check. |
+## Resolution
 
-Run owns the registry, admission, attempts, retries and publication
-([run](run.md)). Supervisor owns process custody and signalling, and
-confinement owns disclosure and access grants ([supervisor](supervisor.md)).
-These crates add no daemon, no second execution registry and no process
-spawning of their own: supervisor executes provider launches; os executes
-utility preflight and quota effects.
+### Exact selection, seeded pools
 
-## Boundaries
+A request names exactly one `--model ADAPTER/ID` or `--route NAME`. No
+adapter, upgrade, effort default or downgrade is inferred, and an unknown
+explicit ID runs only if availability, disclosure and confinement are
+independently established. A pool draws among ready members, weighted by
+the provider's pacing factor (0.25 to 2.0) and seeded from the operation ID
+and task index; the receipt records each weight, the random roll and the chosen member.
+- Why: retries pick the same model without stored state, and the receipt
+  names what ran.
+- Test: `crates/routing/src/tests.rs::exact_unknown_is_retained_but_never_upgraded_or_activated`;
+  `::table_driven_weighted_pools_record_effort_readiness_roll_and_seed`
+- Owner: `crates/routing/src/`
 
-- Routing never starts a process. `route list` reads the bundled catalogue
-  and `[domains.routing]` config; `route resolve` also reads cached quota
-  snapshots.
-- Providers never signal a process or publish run completion. Terminal answer
-  and process exit are separate facts.
-- Quota never imports providers. The binary injects the providers' registry of
-  quota sources into quota.
-- Telemetry reads run's terminal facts; quota neither reads nor imports
-  telemetry.
-- Workflow receives family and availability facts through the composition
-  edge, never from caller claims.
-- Adding an adapter changes one provider module, one registry entry and one
-  bundled TOML row. Config validates policy; registration cannot bypass it.
-- Quota provider pools are measured allowance scopes, not routing pools.
-
-## Contract
-
-### Route request and resolution
-
-A request names exactly one `--model ADAPTER/ID` or `--route NAME`, with an
-optional effort and an optional fallback of at most two explicit models
-(default none). IDs keep the full provider path after the first adapter
-separator. No adapter, model upgrade, effort default or downgrade is inferred.
-An unknown explicit ID is unverified: it runs only if executable availability,
-disclosure and confinement are independently established.
-
-Named routes come from the bundled catalogue or `config.toml`
-`[domains.routing]`:
-
-- A personal route maps a name to one exact model and optional effort.
-- A pool route draws among ready members that allow the effective effort. The
-  weight of a member is multiplied by its provider's pacing factor, and the
-  draw is seeded from the operation ID and task index, so a retry picks the
-  same model without stored rotation state. Weight 0 marks a member that is
-  fallback only, tried in list order.
-- Pacing is per provider: `pace` scales quota headroom against the remaining
-  window and clamps the factor to 0.25 to 2.0; `spend` and `max` stay at 1.0.
-  Free-tier providers use `max`.
-- The bundled pools are `utility`, `junior`, `senior`, `principal`, `writing`
-  and `design`. Their members, weights and efforts are catalogue data; read them
-  with `provenant route list`. The names are exact route names, not aliases.
-- The receipt records each candidate's weight, factor, readiness, the roll and
-  the pick. When no member is ready, resolve reports the first eligible
-  candidate with its readiness blocker.
+### One resolution, bounded alternatives
 
 Resolution runs once against immutable catalogue, availability and quota
-snapshots: validate the executable and access, filter on confidentiality and
-eligibility, apply recorded effort support, then return one resolved route with
-at most two ordered alternatives and exclusion reasons. Run never rebuilds
-candidates.
+snapshots and returns one route with at most two ordered alternatives, each
+passing the same checks; Run never rebuilds candidates. Fallback is
+read-only and opt-in. Unsupported effort fails; where clamping is permitted, the requested,
+applied and observed values are recorded. `route list` and `resolve` start no
+process and mutate nothing.
+- Why: the fallback plan is decided once and visible.
+- Test: `crates/routing/src/tests.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
+  `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
+- Owner: `crates/routing/src/`
 
-- Fallback is read-only only. It needs explicit opt-in and a typed transient
-  failure within run's retry budget, and every alternative passes the same
-  checks. Writers never replay automatically.
-- Unknown quota is not exhausted, and stale data cannot create a fresh refusal.
-- Unsupported effort fails explicitly. A permitted clamp records the requested,
-  applied and observed values separately. OpenCode carries effort as
-  `model#variant`.
-- Confidentiality: a confidential request admits only models whose catalogue row
-  says they do not train on prompts. The test is training, not price. Free-tier
-  models are excluded unless the request sets `--allow-free`.
-- Fast or priority service is never enabled. Codex sends
-  `service_tier="default"` and rejects conflicting inherited overrides.
-- There is no native-seat or host avoidance. A council is the caller
-  submitting distinct exact-model tasks and synthesising in the chair. Distinct
-  model IDs alone prove no cross-family diversity; workflow decides that from
-  verified family facts.
+### Confidentiality
 
-### Tier policy
+A confidential request admits only models whose catalogue row says they do
+not train on prompts; the test is training, not price. Free-tier models need
+`--allow-free`. Fast or priority service is never enabled.
+- Why: prompts carry private code; cost is not a privacy signal.
+- Test: `crates/routing/src/tests.rs::free_pool_members_require_opt_in_and_confidential_models_are_excluded`
+- Owner: `crates/routing/src/`
 
-This is routing preference, not authority:
+### Families come from evidence
 
-- Bounded work with an objective gate goes first to a free non-training model,
-  then to subscription juniors, with paid pools last. Multi-file or ambiguous
-  work goes to senior; cross-cutting, crucial or terminal work to principal;
-  scouting and mechanical edits to junior.
-- A failed gate escalates one tier after at most one repair attempt.
-- The resolved model is always recorded in the receipt. A departure from tier
-  preference never waives authority, confinement, confidentiality or assurance
-  gates.
+A model family is established only by provider protocol evidence verified
+against the catalogue revision, never inferred from spelling, a broker name or the
+requested ID. Decoders read documented event positions and never search
+tool or subagent output for the answering identity.
+- Why: cross-family review is an assurance claim and must not be forgeable
+  by output text.
+- Test: `crates/routing/src/tests.rs::family_requires_provider_answer_evidence_at_the_same_revision`;
+  `crates/providers/src/tests.rs::synthetic_and_api_error_messages_cannot_change_answering_identity`
+- Owner: `crates/providers/src/`
 
-The orchestrate skill's routing references own the working guidance.
+### Closed adapter table
 
-### Commands
+`records::ADAPTER_SPECS` is the closed adapter table that config, CLI and
+`providers::REGISTRY` share. Dispatch probes only the adapters that its route, pool
+and fallbacks name. Tier preference is guidance owned by the orchestrate
+skill; it never waives authority, confinement or assurance gates.
+- Why: one closed list keeps every surface agreeing; routing grants no
+  authority.
+- Test: `crates/cli/src/install.rs::adapter_specs_cover_config_routing_and_cli_names`;
+  `crates/routing/src/tests.rs::probe_adapters_include_only_requested_routes_pools_and_fallbacks`
+- Owner: `crates/records/src/adapters.rs`
 
-All commands accept `--json`, use the envelope, 1 MiB cap and exit codes in
-[cli](cli.md), and write redacted diagnostics to stderr. No library chooses
-exits or renders JSON. `provenant help route` and `provenant help quota` own
-the flag lists.
+## Providers
 
-| Command | Behaviour |
-| --- | --- |
-| `route list` | Catalogue revision, exact models and efforts, pools with configured weight and pacing policy. No probe; dispatch applies pacing and decides readiness. |
-| `route resolve` | Pure preview of one `--model` or `--route`, with `--effort`, `--fallback`, `--confidential` and `--allow-free`. No admission or state mutation. Dispatch uses the same fields. |
-| `route set`, `remove`, `reset`, `pacing` | Edit user pool overrides in `config.toml`: add or update a member (weight 0 to 100, effort), remove one, restore a bundled pool, set a provider's pacing policy. |
-| `quota show` | Cached windows, reset, source, age and coverage. No refresh. |
-| `quota display` | Set the menu bar headline window and icon account, then show quota. With no options nothing changes. |
-| `quota tick` | Refresh due sources, publish the report, return per-source results and next due without sleeping. `--trigger timer\|panel\|manual\|wake\|power`, `--power ac\|battery\|low`, optional `--adapter`. |
-| `accounts register`, `list`, `set` | Register a provider account directory after validating sign-in; list non-secret records; set how an account appears in the menu bar. |
+### Answer and exit are separate facts
 
-The quota-menubar LaunchAgent calls `quota tick` and reads the published
-report ([app README](../../apps/quota-menubar/README.md)). Tick reports partial
-stale or unknown coverage in `data` and exits 0 for a completed partial report;
-a wholly failed refresh uses the typed failure mapping. No MCP tool is owned
-here: Fabric dispatch and status call the same APIs, with the bounded waits in
-the cross-cutting table.
+Providers never signal a process or publish completion. Structured errors
+outrank claimed success, provider prose about quota asserts nothing, and
+malformed or oversized frames fail closed. Session continuation binds the exact
+adapter, session, account, host, model and controls.
+- Why: a provider's text must not decide an outcome or switch identity.
+- Test: `crates/providers/src/tests.rs::terminal_answer_and_nonzero_exit_remain_separate_facts`;
+  `::continuation_preserves_session_and_rejects_changed_identity_and_grants`
+- Owner: `crates/providers/src/`
 
-### Records and state
+### Launch specs and adapter isolation
 
-Config owns one user `config.toml` under the state root; the catalogue and
-adapter data are bundled TOML assets. Unknown owned fields or versions fail
-closed. Every adapter with a launch form is enabled by default.
+`providers::prepare` builds the exact argv, environment and profile in
+memory; only a redacted summary persists, and there is no raw caller argv.
+Each adapter is subordinate to the outer profile: Codex's own sandbox is
+off; Claude gets its token on a descriptor closed before spawn, never in the
+environment; Agy's private home links only the login keychain; Cursor
+executes only its resolved version; OpenCode denies shell and web fetch.
+Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
+- Why: the launch spec carries credentials and authority.
+- Test: `crates/providers/src/tests.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`;
+  `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`
+- Owner: `crates/providers/src/`
 
-| Path under the state root | Contents |
-| --- | --- |
-| `quota/<account-key>/<adapter>.json` | Last good windows, source and observation time, scoped refusals, refresh revision, claim and deadline, backoff. Account keys are opaque and host-local. |
-| `quota/report.json` | Current account rows, coverage, generated time, refreshing IDs, next due. No ledger or history. |
+### Claude token refresh
 
-Stored snapshots are typed, versioned serde records. Facts built only at the
-edge (verified lineage, review availability) are `Serialize` only. Persist
-a separate family-evidence projection and revalidate it on recovery; stored
-bytes never assert fresh availability or admission.
-Percentages are basis points, money is checked scaled integers, and no integer
-passes through `f64`. Clocks are injected; reset times use `jiff`, and
-ambiguous local times are rejected.
+The sandbox never refreshes or writes the keychain. The host refreshes a
+token with under 15 minutes left, using one unconfined CLI run with every
+customisation off, in a fresh private directory removed afterwards, and
+never copies credentials between identities. Shell-capable Claude lanes
+scrub child environments and deny keychain reads. Claude still holds the
+token and has outbound HTTPS, so isolation is incomplete.
+- Why: credential writes belong to the user's own sign-in flow.
+- Test: `crates/providers/src/tests.rs::claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token`;
+  `::claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools`
+- Owner: `crates/providers/src/claude.rs`, `crates/providers/src/host.rs`
 
-Writes are typed update intents applied through the OS crate's concrete filesystem
-API: bounded lock, re-read revision, atomic replace, file and parent fsync,
-0700 directories and 0600 files. A refresh reserves a claim with a token and
-deadline, releases the lock, runs, then commits only against the matching
-revision. No lock spans a provider wait. Expired claims cannot leave a
-permanent refreshing row, stale completion cannot overwrite newer data, and
-failed writes are typed errors that never stop a provider.
+## Accounts
 
-### Accounts
+### Identity is detected, never guessed
 
-Providers own account identity. Labels are non-secret and never emails, token
-fragments or raw auth paths; an undetectable identity is `unknown`, never
-guessed. Routing owns eligibility and run records the resolved label.
+Labels are non-secret and never contain emails, token fragments or auth paths. Keys
+fingerprint identity fields only, and an undetectable identity is `unknown`.
+Quota capture checks identity before and after a probe and refuses a changed
+attribution. Probes run in a fresh 0700 directory under the host state root;
+failing to create one is a host fault, not an identity change.
+- Why: misattribution would spend or expose the wrong account.
+- Test: `crates/providers/src/quota_live/claude.rs::fixed_directory_rejects_changed_account_fingerprint`;
+  `crates/providers/src/host.rs::start_up_sweeps_crashed_probes_but_never_a_live_one`
+- Owner: `crates/providers/src/identity.rs`, `crates/providers/src/host.rs`
 
-Registration and quota probes run in a fresh 0700 `probe-<id>` directory under
-the host state root; directories left by owners that died are swept.
-A probe directory that cannot be created is reported as a host state fault,
-not an identity change.
+### Pins filter, credentials stay put
 
-- Claude: the first 16 hex digits of SHA-256 over the trimmed, lowercase email.
-  A rotating `~/.claude` is identified by that fingerprint, not its directory.
-- Codex hashes `tokens.account_id`; Cursor hashes the subject claim of its
-  access token. Neither fingerprints token text. Keys carry `codex-` and
-  `cursor-` prefixes.
-- Agy fingerprints the signed-in Google email from its probe log, with an
-  `agy-google-` prefix. An undetectable identity stays unavailable rather than
-  inheriting a shared `default` cooldown.
-- Quota capture checks identity before and after the probe and refuses a
-  changed attribution.
-- Registrations live in `config.toml` under
-  `[domains.accounts.entries.<adapter>-<label>]` (adapter, display label,
-  detected key, canonical directory). `accounts register LABEL --adapter
-  claude|codex --directory PATH` validates sign-in first. A Claude label binds
-  exactly to `~/.claude-<label>`. A Claude registration also stores an
-  organisation fingerprint and refuses with "changed identity; re-register it"
-  when stored and probed organisations are both present and differ; an absent
-  probe organisation never refuses. Codex with no registration uses its
-  effective `CODEX_HOME`, otherwise `~/.codex`.
-- A per-task `account` field in a dispatch manifest or Fabric submission, or
-  the single-lane `dispatch --account` flag, filters the requested adapter's
-  accounts before quota and readiness. It is not a route pin and never
-  switches accounts on quota.
-- Each account is signed in by the user through the provider's own flow.
-  Credentials are never copied between identity directories. A switch moves
-  work to an account with its own headroom and never suppresses a limit signal.
-  Accounts are added or retired by configuration only.
-- Lane rows show the applied account label, or `unknown`.
+An account pin filters eligibility; it never switches accounts when quota runs out.
+Credentials are never copied between identity directories. Quota
+credentials stay in memory and are never logged, written, put on argv or
+passed in a child environment; linked credential files are rejected, and usage calls pass the
+header to `curl --config -` on stdin.
+- Why: the user decides which account pays, and a probe must not leak.
+- Test: `crates/routing/src/tests.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`;
+  `tests/quota.rs::disabled_modes_never_read_auth_or_invoke_external_tools`.
+  No test asserts tokens are absent from curl argv and environment, or that
+  credentials are never copied between directories (gaps).
+- Owner: `crates/routing/src/`, `crates/providers/src/quota_live.rs`
 
-### Quota
+### Credential reads record authority first
 
-Statuses are available, credit-only, exhausted, stale, unknown, auth-required
-and unsupported.
+A quota credential read records the actor, the exact credential source, the
+purpose and the expiry before it reads, and retains only the non-secret
+authority reference.
+- Why: a read of a credential must be attributable without keeping the secret.
+- Test: none (gap); `CredentialAuthority` covers lane dispatch only.
+- Owner: `crates/providers/src/quota_live.rs`
 
-- Each reading records used share, reset time, source and observation time.
-  Admission treats a reading as fresh only while its age is under the
-  adapter's timer interval; older readings never drive placement.
-- A failed refresh marks the retained snapshot stale at once. Human output
-  prints each account with `STALE`, `last known`, age, window percentages and a
-  sanitised failure code. JSON keeps the original snapshot and exposes current
-  freshness on the account row. A recorded plan name is not evidence of the
-  current subscription.
-- Refusals are model- and account-scoped unless wire evidence proves wider
-  scope, and independent allowance pools never exhaust each other. A newer
-  comparable observation, or the reset time, expires only that scoped refusal;
-  unknown data preserves it. An unknown reset backs off for one hour.
-- Only a quota-limited outcome cools an account, keyed on provider, account and
-  model. A rate limit is a short per-model cooldown and retry, not a failure.
-  Authentication failures and policy refusals never trigger an account switch.
-- OpenCode decodes its structured `provider.quota` body. A free-usage limit
-  names the shared `opencode-free` pool and blocks other free models on the
-  same account key until reset or the one-hour backoff.
-- Agy decodes a result error that opens with `Individual quota reached`,
-  optionally behind its 429 status, as quota limiting. Text quoting the phrase
-  elsewhere, such as an echoed prompt, stays a failure. A closing `Resets in`
-  wait (such as `7h23m`, at most seven days) sets the reset; otherwise the
-  one-hour backoff applies. The refusal names no
-  pool, so it holds only that model on that account. A bare 429 or
-  `RESOURCE_EXHAUSTED` may be a per-minute limit and stays a failure.
-- The host persists a quota refusal that names a pool, and one without a pool
-  only when the route names an account. A nested lane's refusal stays in its
-  attempt reason.
-- Codex decodes an `error` event reporting `429 Too Many Requests` (retries
-  exhausted) as a rate limit, never a quota refusal; a `Reconnecting` message
-  stays transient.
-- Claude `api_error_status = 401` is `AuthRequired`. Provider prose that
-  mentions expiry or quota is ordinary text and asserts nothing.
-- Tick TTLs (timer and panel seconds): Claude 300 and 120, Codex 900 and 300,
-  Cursor 1800 and 600, Agy 1200 and 900. Manual has a 30 s floor and respects
-  backoff. Battery doubles intervals; low power quadruples them and skips Agy.
-  Network and 429 backoff is 120 to 3600 s, auth 3600 s and a missing CLI
-  86400 s, with `Retry-After` as a lower bound capped at 86400 s. At most three
-  cheap probes run concurrently, Agy alone, each with a deadline and a 1 MiB
-  response bound. A tick's wall budget is at most 55 s.
-- Between like accounts, spend the one whose weekly reset is sooner. Paid pools
-  are used last and paced to the remaining days.
+## Quota
 
-### Provider launches
+### Unknown is not exhausted; refusals are scoped
 
-`providers::prepare` returns a launch spec: exact argv with the canonical
-executable first, the complete child environment, stdin, cwd, setup steps and
-the confinement profile. It is held in memory; only a redacted summary persists.
-Launch prompts, including the preamble, are bounded to 1 MiB. Stdin adapters
-receive the full text. Argv adapters pass up to 64 KiB directly; larger
-top-level prompts use a pointer to an attempt-owned file, while nested attempts
-refuse them ([run](run.md#records-layout-and-publication)). Continuation binds
-the exact adapter, session, account, host, model and sent controls, and rejects
-incompatible grants or identity changes. Run owns custody handoff, retries,
-home finalisation and publication.
+Unknown or stale quota never causes a refusal. Refusals are model- and
+account-scoped unless wire evidence proves a wider pool, and independent
+pools never exhaust each other. A newer comparable observation or the reset
+clears only that refusal. Only a quota-limited outcome cools an account;
+rate limits are short per-model waits and auth failures never switch
+accounts.
+- Why: one probe outage or model limit must not take a provider offline.
+- Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
+  `::independent_pool_reset_and_refusal_scope`
+- Owner: `crates/quota/src/admission.rs`
 
-Decoders use documented event positions and never search tool or subagent
-output for the answering identity. They emit assistant text, usage,
-session and model evidence, refusal and reset, and terminal or malformed
-facts. Structured errors outrank claimed success, and recovered transport
-retries clear transient evidence. A family is established only by provider
-protocol evidence verified against the catalogue revision; never from model
-spelling, a broker name or the requested ID. Absent or mismatched evidence is
-unknown and cannot satisfy cross-family review.
+### Revisioned, bounded refresh
 
-## External contracts
+A quota write re-reads the revision under a bounded lock and replaces the record atomically.
+A refresh reserves a claim, releases the lock, runs, then commits only
+against the matching revision, so stale completions are discarded. A tick never
+sleeps, runs at most three probes, each with a deadline and a 1 MiB bound, within a
+55 s budget, and config cannot raise those limits.
+- Why: the menu bar ticks unattended and concurrently.
+- Test: `crates/quota/src/schedule.rs::competing_claims_and_stale_completions_cannot_overwrite`;
+  `tests/quota.rs::configuration_cannot_raise_probe_limits_and_publication_failure_is_io`
+- Owner: `crates/quota/src/schedule.rs`
 
-### Credentials
+## Nested lanes, MCP and hooks
 
-Quota credentials are held in memory only. They are never logged, written,
-placed on argv or in a child environment, and buffers are dropped after the
-probe. Runtime access records actor, exact source, purpose and expiry before
-reading; only the non-secret authority reference is kept.
+Every lane except Agy's can use Fabric and the utility models through a
+generated MCP entry; the user's hook and MCP configuration is excluded.
 
-| Source | Rule |
-| --- | --- |
-| Claude `.credentials.json` in the selected config directory, otherwise the macOS Keychain item `Claude Code-credentials` (suffix from the config path hash for other directories) | Read through os with memory-only capture that bypasses attempt spooling, even on error, overflow or cancel. Linked credential files are rejected. |
-| Cursor `state.vscdb`, key `cursorAuth/accessToken` | Read-only query into memory. No copy, export or raw row in diagnostics. |
+### Lane identity and refusals
 
-Codex and Agy quota use their own CLI protocols, not auth-store reads. Claude
-and Cursor usage calls use system `curl --config -` with the header on stdin
-only, fixed allowlisted URLs, no redirects or verbose output, bounded time and
-body, and system trust and proxy settings (ADR 0028).
+Each lane's provider environment and MCP entry pin
+`PROVENANT_LANE_DEPTH`, `PROVENANT_PARENT_ATTEMPT_ID`,
+`PROVENANT_RUN_STATE_DIR` and `PROVENANT_AGENT_LABEL=lane-<AttemptId>`.
+In that environment Fabric refuses coordination mutations
+(`lane_coordination_refused`) and local resume (`continuation_unsupported`);
+reads, and submit, cancel and output on the child store, remain.
+- Why: a lane must not move shared tasks, claims or leases.
+- Test: `tests/fabric_transport.rs::lane_mcp_refuses_coordination_but_allows_reads_and_child_submission`;
+  `crates/providers/src/lane.rs::lane_mcp_entries_have_attempt_unique_agent_labels`
+- Owner: `crates/providers/src/lane.rs`
 
-### Adapter launch forms
+### Child stores
 
-Confinement adds only verified permission and config arguments; there is no raw
-caller argv. Each adapter's exact argv and environment are recorded in
-`tools/front-door/tests/fixtures/providers/<adapter>/recordings.json` and the
-provider tests. Intent that the fixtures cannot show:
+Each attempt's child run store is `RUN_STATE/children/<AttemptId>/`; the
+launch grants only that subtree, never `STATE/runs/` or the parent
+database. Submission refuses a child above `lanes.max_depth` (default 2); the limit
+bounds recursion and grants no authority.
+- Why: a lane must not read or forge other runs' records.
+- Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`;
+  `crates/run/src/dispatch_tests.rs::nested_lane_depth_stops_at_the_configured_maximum`
+- Owner: `crates/run/src/plan.rs`
 
-| Adapter | Notes |
-| --- | --- |
-| Codex | `codex exec` with `--json` and the prompt on stdin. `CODEX_HOME` is attempt-private, with `auth.json` linked to the selected registration. Codex's own seatbelt is off because it cannot nest; the outer profile is the boundary. Continuation pins the same `-m`. |
-| Claude | `claude -p` with strict MCP config, Provenant-only settings, no slash commands and an explicit tool list. The host passes the OAuth token through an inherited pipe named by `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, bounded to 512 bytes and closed before spawn; no token appears in the start environment. `CLAUDE_CONFIG_DIR` is set when an account is selected. Read-only lanes add the host-bound Git common directory with `--add-dir`; the outer profile keeps it unwritable. |
-| Cursor | `cursor-agent -p` in stream-json mode with the prompt on argv. Top-level prompts over 64 KiB spill to `prompt.md`; nested attempts refuse them. Only writers add `--force`. The launcher resolves to a shell script in the self-updated `~/.local/share/cursor-agent/versions/<version>/` payload, which runs its sibling `node`, so every lane may read and execute that one resolved version directory, `/bin` and `/usr/bin`. |
-| Agy | `agy --print` with the prompt on argv, `--print-timeout 0s` and no `--sandbox` (headless mode denies tools it cannot prompt for, so writers auto-approve inside the confinement profile). Top-level prompts over 64 KiB spill to `prompt.md`; nested attempts refuse them. HOME is a private directory holding only a link to the login keychain. `SHELL` is pinned to `/bin/zsh`, through which `run_command` runs; writers get the same system program, Rust, Git and Node exec grants as Codex and Claude writers. Read-only launches add each read root outside the working directory to the agy workspace with `--add-dir`, because headless mode auto-denies reads outside it. Agy runs without Fabric MCP, hooks or lane environment. |
-| OpenCode | `opencode run --standalone --format json` with the prompt on stdin. HOME is attempt-private. Inline config denies shell and web fetch, allows edit for writers only, and sets no MCP servers or plugins. |
+### The host validates and launches children
 
-Claude's generated lane settings set `attribution.commit` and `attribution.pr`
-to empty strings, disabling Claude's commit and PR attribution.
+A lane's submission only seals queued child records; the host validates and
+launches them. No lane may propose a writer or delivering child. A child's
+network and roots must stay within the parent's, and it cannot continue an
+attempt. The host launches only the request it validated, refuses one whose
+digest changed, and launches at most one attempt per child task.
+- Why: a writer child could leave scripts that run unconfined, and child
+  storage is lane-writable, so only the host's sealed view counts.
+- Test: `crates/run/src/dispatch_tests.rs::host_refuses_writer_child_after_request_rewrite`;
+  `::host_refuses_child_access_beyond_its_parent_task`
+- Owner: `crates/cli/src/run/children.rs`, `crates/run/src/admission.rs`
 
-Provider endpoints are `*:443` because Seatbelt cannot filter by host name.
+### Children run as the parent's requester
 
-### Claude token and refresh
+A child launches for its parent's requester, sealed in the host-built holder
+context, never the actor its record names. The host refuses an attempt it
+launched once its record names another owner. A child may name another
+adapter or account and gets that adapter's login grant. This is intended, for
+cross-family review; the host limits reach, not credentials.
+- Why: a lane must not launch work under someone else's authority.
+- Test: `crates/run/src/dispatch_tests.rs::child_launches_for_its_parent_requester_not_its_store_record`;
+  `::host_view_refuses_a_launched_child_renamed_after_start`
+- Owner: `crates/run/src/admission.rs`
 
-Every unconfined provider command during attempt preparation, including
-account status, provider version, keychain reads and token refresh, runs in its
-own fresh, empty private directory under the host configuration root. Creation
-is exclusive and the directory is removed after the command, including on
-error. Attempt scratch, temporary directories and nested child stores never
-supply the host command's working directory.
+### Stopping children
 
-The sandbox never refreshes or writes the keychain. Before launch the host
-refreshes a token with under 15 minutes left by running the CLI once outside
-the sandbox with a model name the API rejects, so no usage is spent, then
-rereads and accepts at least a minute of life. That unconfined run disables
-every customisation (safe mode, strict MCP config, hooks off, no slash
-commands, no session persistence). It never copies credentials between
-identities. Claude still holds the token in memory and has outbound HTTPS, so
-this is not perfect isolation from a compromised provider. Shell-capable Claude
-lanes set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, pass the shell tool list
-explicitly, and deny `/usr/bin/security`, `securityd` and keychain reads.
+A parent cancellation, deadline or signal stops only that worker's children,
+through the directory handle, scope and requester held at hand-off and never
+the child's record. Normal completion leaves children running. At most 64
+handles are held, a lock probe on the captured inode frees one, and the
+final scan refuses still-queued children. The stop is written to a lane-writable
+directory, so a lane can undo it (an accepted residual risk).
+- Why: renaming a directory must not redirect a stop, and descriptors stay
+  below macOS's soft limit.
+- Test: `crates/run/src/dispatch_tests.rs::host_stops_a_launched_child_from_held_scope_not_its_records`;
+  `crates/cli/src/run/children.rs::final_scan_refuses_deferred_children_after_normal_parent_completion`
+- Owner: `crates/cli/src/run/children.rs`
 
-### Nested lanes, MCP and hooks
+### Host-pinned Git and writer grants
 
-Every lane at every tier can use Fabric and the utility models, except Agy.
+Git is resolved once on the host, canonicalised and pinned in provider and
+MCP environments as the only Git lanes may execute. Writer-only grants come
+from confinement's writer profile, and each attempt records its write
+allowances and Git grants digest. Remote-tracking refs and shared config
+stay read-only.
+- Why: a lane-chosen Git or helper would run with host authority.
+- Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`;
+  `crates/cli/src/run/provider.rs::host_write_paths_reach_writers_only`
+- Owner: `crates/os/src/git.rs`
 
-- The installer owns the stdio MCP generator; adapters reuse it. Claude writes
-  two private JSON files in attempt `tmp/candidate-N` and loads only those;
-  terminal cleanup removes them. Codex injects the same entry with `-c`.
-  Hooks are the installer's shared registrations. User hook and MCP
-  configuration is excluded.
-- Each attempt gets a child run store at `RUN_STATE/children/<AttemptId>/`. The
-  launch layer creates it and grants only that subtree, never `STATE/runs/` or
-  the parent database. `PROVENANT_RUN_STATE_DIR` selects it for CLI run commands
-  and the MCP; the original `--state-dir` still selects shared Fabric identity
-  and config.
-- Run supplies the attempt ID and depth. The adapter sets
-  `PROVENANT_LANE_DEPTH` (root lanes are 1), `PROVENANT_PARENT_ATTEMPT_ID` and
-  `PROVENANT_RUN_STATE_DIR` in both the provider environment and the MCP entry.
-  Both also pin `PROVENANT_AGENT_LABEL=lane-<AttemptId>`, so the lane has
-  its own actor and inbox. Under the host-set lane environment, Fabric
-  refuses coordination mutations with `lane_coordination_refused`; reads and
-  child-store run submit, cancel and output remain available. Local resume is
-  refused with `continuation_unsupported` because the host never launches a
-  child continuation; the CLI returns `UNSUPPORTED` for every in-lane resume. The shared SQLite write grant
-  remains pending [lane store isolation](fabric.md#follow-up-lane-store-isolation).
-  Submission refuses a child above `lanes.max_depth` (default 2), and a state
-  path that is not `children/<AttemptId>` pairs below the original root. The
-  limit is recursion control, not an authority boundary.
-- `fabric_run` (`op: submit`) from a lane only seals queued child records. A
-  host-side worker
-  in the parent guardian prepares and launches them, rechecks the parent
-  attempt and depth, and bounds each child by the parent's sealed task. In v1
-  no lane may propose a writer or delivering child: the host holds no sealed
-  list of worktrees a lane may delegate, and a writer child could leave build
-  scripts or tests that later run outside a sandbox. A child's network reach and
-  read and write roots must sit within the parent's after canonicalisation, and
-  a child cannot continue an attempt. The host launches only the request it
-  validated and refuses one whose digest changed after validation or whose
-  re-read request no longer matches the digest sealed at hand-off. Invalid
-  proposals terminate as rejected before provider preparation. The host launches
-  at most one attempt per child task and refuses extra attempt rows. A child
-  launches for its parent's requester, sealed in the host-built holder context,
-  never the actor its run record names. On start the host records that
-  requester as the run's actor, the attempt's verified owner and its admission
-  holder. The lane's operation keeps the lane's actor, which scopes its replay
-  and listing. Child storage is writable by the submitting lane, so it is not
-  independent evidence against that lane: the host's view refuses a run or
-  attempt it launched once its record names another owner.
-- A child may name a different adapter or account from its parent, in its own
-  `route` and `account`. That crossing is intended: a lane may hand work to
-  another provider family, such as a cross-family reviewer or a cheap utility
-  model, and the host does not bind a child to its parent's route. The child
-  gets the authentication grant of the adapter it names (Codex `login`, Cursor
-  `login` or Agy `keychain`), so a lane can reach any registered adapter's
-  login through a child's result. The host's checks above limit the child's
-  network and folder reach. They do not limit which credential it is given.
-- The guardian stops its worker on observed provider exit. Parent cancellation,
-  deadline or supervisor signal cancels only this worker's children; normal
-  parent completion leaves launched children's custody intact. The host first
-  stops every child it handed to a guardian, including one launched after its
-  last scan, through the attempt-directory descriptor, scope and requester it
-  held at hand-off, so renaming the attempt directory cannot redirect the stop.
-  The child's record and launch summary do not decide the stop. Superseded
-  generations retain their scopes for owner checks but drop their handles.
-  At the cap of 64 held child handles, the host probes each custody lock
-  through its held directory. An exclusive non-blocking lock on the same
-  device and inode captured from the publication reservation proves guardian
-  exit and releases the handle, retaining its scope for owner checks. Busy,
-  missing, replaced or unobservable locks retain their handles. If none can
-  be released, the host defers further child launches: the attempt stays Queued,
-  unmarked and without a launch claim. The host skips the rest of that scan
-  and retries on the next scan. The final scan after parent completion or
-  cancellation refuses every still-Queued child, since no later scan will
-  launch them.
-  The cap leaves descriptor headroom below macOS's common 256 soft limit;
-  lane-writable terminal records cannot authorise release. The host then stops
-  accepted children that never reached a guardian, from their records. A failed
-  scan read does not end the worker before that stop. The stop request itself
-  still lands in the attempt directory, which the lane can write, so the lane
-  can pre-empt it (for example with a directory named `cancel.json`) or undo it
-  after the host writes it, and keep its child running.
-- Git is resolved once on the host (`PROVENANT_GIT` override, otherwise the
-  fixed list preferring package-manager Git), canonicalised, pinned in provider
-  and MCP environments, and the only Git path lanes may execute.
-- Writer-only grants, such as configured `[domains.run] writer_writes`
-  directories, a per-worktree Cargo cache with a private `CARGO_HOME`, linked
-  worktree commit files and Git helper execution, come from confinement's
-  writer profile ([supervisor](supervisor.md)). Each attempt records its applied
-  write allowances and, for writers, the Git grants digest. Concrete Git paths
-  stay out of the record. Remote-tracking refs and shared Git config stay
-  host-owned and read-only.
-- Host-side delivery for a task with `deliver` is run's: fetch before launch,
-  push the final commit only on verified writer success, compare the remote ref,
-  set upstream, and keep a typed receipt. The host credential environment never
-  reaches the provider or a record. Recovery never repeats delivery.
+## Not provided
 
-### Recordings
-
-`cargo run -p provenant-providers --features recording --example record --
-ADAPTER read_only|worktree_write --model M --root EMPTY_DIR [--write]` runs the
-CLI fresh then resumed under the compiled profile and probes every claimed
-observation: declared and undeclared reads and writes, secret and protected
-paths, endpoint versus other network, exec and fork, state writes and, for
-writers, worktree, index, HEAD, objects and ref writes. Output is redacted
-before storage. Recordings and probes are replay and confinement evidence only;
-they never gate execution. Manifests record CLI version, platform, redacted
-argv, access and session mode, and must show the exact selector, effort and
-service controls being enabled. Efforts without a recorded control stay unset.
-Listing seeds in `tests/fixtures/model-listings/` support listing only.
-
-## Failure and recovery
-
-- A provider failure decodes to a typed outcome. A token the API still rejects is
-  `Refused` with an authentication-required reason; the user signs in again
-  outside the sandbox. A sandboxed 401 routes around through a permitted
-  cross-adapter retry rather than widening keychain or auth-write access.
-- Route health comes from receipts. Rate-limited and quota-limited outcomes are
-  kept apart from real failures.
-- Unknown or stale quota never refuses. A failed refresh keeps the last good
-  data, labelled with its age.
-- Bookkeeping failure cannot signal a healthy provider or lose terminal
-  evidence. Claims expire; completions against a stale revision are dropped.
-- A failed resolve reports exclusion reasons per candidate, and each alternative
-  is revalidated before use.
-- Agy runs with `--print-timeout 0s`, so only the supervisor's deadline ends a
-  turn; a timeout is never inferred from exit status alone.
-- Claude resume is refused until a provider session exists. The private
-  `CLAUDE_CONFIG_DIR` is writable provider state and not an immutable trust
-  boundary.
-
-## Deliberate cuts
-
-| Feature | Reason |
-| --- | --- |
-| Rotating pools, a selection store, `--commit-selection`, preferences, inferred class or size routing | Weighted, paced selection seeded by the operation gives retry stability without stored state. |
-| `--pool` and `--council` flags, council selectors | Pools are route names; a council is distinct exact-model tasks synthesised in the chair. |
-| Public capability, cooldown and probe verbs, canary inference, endpoint profiles | Preflight and quota reads are internal effects; observed use was zero. |
-| Account pins on routes, native-seat inference, host avoidance | Accounts are filtered by an optional per-task field; Fabric supplies placement. |
-| Old tier names (`strong`, `bulk`), typo guessing, hidden model classification, shadow stages, the routing-context hook | Historical names and heuristics; exact names are validated. |
-| Manual credit, history and forecast commands, OpenCode spend estimator | Speculative or unused. |
-| Kiro, Copilot, Pi and Herdr execution | No dispatches and no recordings. |
-| Reads of old transcripts for quota or identity, home mirroring, a shim | Transcripts are research input, never runtime state. |
-| Agy identity inferred from logs | No signed-in identity source exists; attribution would be guessed. |
-| Concurrent writer batches, a scheduler, daemon or recursive swarm manager | No workflow has shown a need that serial or isolated writers cannot meet. |
-| Universal hashes, environment fingerprints, version locks, a catalogue registry | Account keys hash identity fields only. |
-| Soft gate bouncing spawns that name no tier, with a logged override | Not built; tier policy is guidance recorded in the receipt. |
-| Route-health demotion | Not built; outcomes are recorded and telemetry reads them. |
-
-## Verification
-
-- Unit tests in `tools/front-door/crates/routing/src/tests.rs` cover exact
-  selectors, pool expansion and weighting, pacing clamps, bounded fallbacks,
-  confidentiality, effort support and revision mismatches.
-- Quota tests (`crates/quota/src/admission.rs`, `schedule.rs`) cover unknown,
-  zero and stale readings, independent pools, reset and DST handling,
-  `Retry-After`, revision and claim expiry, and clearing a refusal on a newer
-  observation.
-- Provider tests (`crates/providers/src/tests.rs`) replay recordings through the
-  real decoders for nested identity, recovered retries, terminal and exit
-  combinations and bounded malformed input, and check that each adapter
-  prepares a launch without a recording.
-- CLI integration tests under `tools/front-door/tests` drive real rendering: no
-  process on help, list, show or resolve; envelope, exits and size cap; tick
-  partial coverage and revision races. Fake `curl`, `security` and provider CLIs
-  assert tokens are absent from argv, environment, files and diagnostics,
-  including on overflow and cancel.
-- Every process test points `HOME`, state, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and
-  XDG variables at temporary directories, with no real keychain or old-root
-  access.
-- Handshake and FIFO fixtures, with no sleeps, cover late probe completion,
-  competing refresh writers, ENOSPC and copy-back races. macOS CI compiles the
-  real plan and profile with a fake provider and probes custody denial and
-  nested host-supervised children below the depth limit.
-- Supervisor proves custody and cancellation; run proves one writer, atomic
-  admission and terminal publication. These crates prove routing policy and wire
-  decoding. Live provider acceptance stays a chair gate, not a CI check.
+- Rotating pools, a selection store and inferred class or size routing.
+- Native-seat inference, host avoidance and account pins on routes.
+- Concurrent writer batches or a recursive swarm manager.

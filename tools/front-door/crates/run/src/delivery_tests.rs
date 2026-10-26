@@ -338,6 +338,35 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
 }
 
 #[test]
+fn prepare_refuses_remote_urls_with_embedded_credentials()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    for url in [
+        "https://user:hunter2@example.invalid/repo.git",
+        "https://hunter2@example.invalid/repo.git",
+        "ssh://user:hunter2@example.invalid/repo.git",
+        "https://example.invalid/repo.git?token=hunter2",
+        "https://example.invalid/repo.git#hunter2",
+    ] {
+        fixture.git(&["remote", "set-url", "origin", url])?;
+        let error = fixture.prepare().expect_err("credential-bearing URL");
+        assert!(
+            matches!(
+                error,
+                RunError::DeliveryPrepare {
+                    step: "remote URL",
+                    ..
+                }
+            ),
+            "{url}"
+        );
+        assert!(!format!("{error:?}").contains("hunter2"), "{url}");
+        assert!(!error.to_string().contains("hunter2"), "{url}");
+    }
+    Ok(())
+}
+
+#[test]
 fn prepare_labels_environment_path_failures() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
     let mut fixture = PrepareFixture::new()?;

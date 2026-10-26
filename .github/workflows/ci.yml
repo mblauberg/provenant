@@ -96,7 +96,9 @@ jobs:
       - name: Check generated contract reference
         run: scripts/generate-reference --check --binary "$CARGO_TARGET_DIR/debug/provenant"
       # Advisory: continue-on-error keeps this outside the ci-status gate.
-      - name: Report unresolved documentation references and missing headers
+      - name: Require Owner and Anchor headers on specs and runbooks
+        run: scripts/check-doc-truth --inventory-only --strict-inventory
+      - name: Report unresolved documentation references
         continue-on-error: true
         run: |
           scripts/check-doc-truth --binary "$CARGO_TARGET_DIR/debug/provenant" > "$RUNNER_TEMP/doc-truth.txt"

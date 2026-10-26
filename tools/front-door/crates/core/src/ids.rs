@@ -76,7 +76,8 @@ impl AttemptId {
     }
 }
 
-/// Caller-selected idempotency key, as specified by execution-run.
+/// Caller-selected idempotency key; run scopes it by caller and project
+/// (docs/specs/run.md#operation-ids).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct OperationId(String);

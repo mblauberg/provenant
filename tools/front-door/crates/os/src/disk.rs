@@ -37,12 +37,17 @@ impl WalkBudget {
     }
 }
 
+/// The existing state directory, or its nearest existing ancestor. Other
+/// inventoried roots may sit on different volumes.
 #[derive(Debug, Serialize)]
 pub struct DiskVolume {
     pub path: PathBuf,
+    /// Unprivileged available space on that filesystem.
     pub available_bytes: u64,
 }
 
+/// A lane cache's immediate children: `target`, `cargo-home` and the rest.
+/// The parts use unshared bytes and sum to the lane's unshared total.
 #[derive(Debug, Default, Serialize)]
 pub struct DiskParts {
     pub target: u64,
@@ -50,30 +55,48 @@ pub struct DiskParts {
     pub other: u64,
 }
 
+/// One inventory row. Optional class facts are omitted when unknown or
+/// inapplicable, and none of them grants removal authority.
 #[derive(Debug, Default, Serialize)]
 pub struct DiskEntry {
+    /// `lane_cache`, `worktree`, `host_target`, `attempt_tmp`,
+    /// `provider_state`, `attempt_retained`, `child_store` or `other_state`.
+    /// The last four are folded into one aggregate per class.
     pub class: String,
+    /// For an aggregate, the common ancestor of the folded paths.
     pub path: PathBuf,
     /// Number of inventory rows represented by a class aggregate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<u64>,
+    /// Lane state: `live`, `idle`, `orphaned`, `foreign`, `legacy`,
+    /// `tombstone`, `refused` or `unmarked`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Worktree writer: `live`, `free` or `unknown`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writer: Option<String>,
+    /// Containment in the main worktree's observed HEAD; the main worktree
+    /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged: Option<bool>,
+    /// For `attempt_tmp`: true when the indexed attempt is terminal, false
+    /// while it runs, omitted when the index is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leak: Option<bool>,
+    /// Allocated blocks (`st_blocks * 512`).
     pub allocated_bytes: u64,
+    /// APFS private bytes where available, otherwise allocated blocks. Not a
+    /// promise of bytes recoverable by deletion.
     pub unshared_bytes: u64,
+    /// Newest observed mtime, in nanoseconds since the Unix epoch.
     pub newest_write_ns: i128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parts: Option<DiskParts>,
+    /// `gc` when GC may reclaim the cache; a hint that GC revalidates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim: Option<String>,
 }
@@ -99,9 +122,14 @@ pub struct DiskError {
     pub reason: String,
 }
 
+/// The `data` of `provenant disk report`: a sequence of read-only
+/// observations, not an atomic filesystem snapshot. Per-path errors
+/// accompany a successful partial report.
 #[derive(Debug, Serialize)]
 pub struct DiskReport {
     pub schema_version: u32,
+    /// `apfs_private_size` when every observation had a private size,
+    /// otherwise `allocated_fallback`.
     pub method: String,
     pub volume: DiskVolume,
     pub entries: Vec<DiskEntry>,

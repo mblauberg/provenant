@@ -121,7 +121,7 @@ def path_reference(word):
             or "://" in word or re.search(r"[<>={}()\"' ]", word)
             or "..." in word.split("/")):
         return None
-    word = word.split("#", 1)[0].rstrip(":")
+    word = word.split("#", 1)[0].split("::", 1)[0].rstrip(":")
     if not word or re.search(r"\b[A-Z][A-Z_]+\b", word.replace(".md", "")):
         # Uppercase Markdown filenames (AGENTS.md, HARNESS.md) are literal.
         if "/" in word or not word.endswith(".md"):
@@ -176,13 +176,21 @@ def check_references(root, document, commands, adrs, gone):
 
 
 def inventory(root, document):
+    """Owner: and Anchor: open the first paragraph below the title; values may wrap."""
     lines = document.read_text().splitlines()
     title = next((index for index, line in enumerate(lines) if line.startswith("# ")), None)
-    headers = lines[title + 1:title + 3] if title is not None else []
+    start = title + 1 if title is not None else 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    end = start
+    while end < len(lines) and lines[end].strip():
+        end += 1
+    block = lines[start:end]
     missing = 0
-    for index, name in enumerate(("Owner", "Anchor")):
-        if len(headers) <= index or not re.fullmatch(name + r":\s*\S.*", headers[index]):
-            warn(document.relative_to(root), (title or 0) + 2, "inventory", f"{name}: immediately below title")
+    for name, first in (("Owner", True), ("Anchor", False)):
+        found = [line for line in block if re.fullmatch(name + r":\s*\S.*", line)]
+        if not found or (first and not block[0].startswith("Owner:")):
+            warn(document.relative_to(root), start + 1, "inventory", f"{name}: in the paragraph below the title")
             missing += 1
     return missing
 
