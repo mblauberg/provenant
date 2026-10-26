@@ -1518,19 +1518,16 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
         },
         &call,
     )?;
-    assert!(
-        matches!(started.as_slice(), [Started::Refused { attempt, reason, .. }]
-        if *attempt == id && reason.contains("held child custody limit reached; earlier children are still running"))
-    );
     let record = store.record(id, &call)?;
-    assert!(matches!(
-        record.state,
-        AttemptState::Terminal {
-            outcome: Outcome::Rejected,
-            ..
-        }
-    ));
-    assert_eq!(record.provider_launched, Some(false));
+    assert_eq!(record.state, AttemptState::Queued);
+    assert_eq!(record.generation, 0);
+    assert!(
+        !store
+            .launched_tasks
+            .borrow()
+            .contains(&(run.run_id, record.task_id))
+    );
+    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == id));
     assert!(!store.held_attempts().contains(&id));
     assert!(artifacts::read_sealed(&directory, "launch.json", RECORD_LIMIT)?.is_none());
     // Superseded scopes still prevent an owner forged in the run record.
@@ -1544,6 +1541,138 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
         store.run(run.run_id, &call),
         Err(RunError::Validation("child record names another owner"))
     ));
+    Ok(())
+}
+
+#[test]
+fn deferred_child_launches_once_capacity_frees() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([2; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let parent = AttemptId::from_bytes([9; 16]);
+    let mut run = input();
+    run.request.lane_depth = Some(2);
+    run.request.parent_attempt = Some(parent);
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let validated =
+        store.validate_child(run.run_id, parent, &input().request.tasks[0], 1, 2, &call)?;
+    let directory = store.attempt_dir(run.run_id, id, false)?;
+    for index in 0..crate::db::HELD_CHILD_LIMIT {
+        hold_child_fixture(
+            &store,
+            directory.try_clone()?,
+            provenant_supervisor::custody::Scope {
+                run: run.run_id,
+                attempt: AttemptId::from_bytes([u8::try_from(index + 32)?; 16]),
+                generation: 1,
+            },
+            sealed,
+        )?;
+    }
+    // The fixture handles share one directory. Keep its custody guard busy
+    // until simulating the guardian's exit, rather than changing any row.
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+    )?;
+    let fake = Fake::default();
+    for _ in 0..2 {
+        let started =
+            store.start_child(run.run_id, &validated, &fake, &|_, _| unreachable!(), &call)?;
+        assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == id));
+        assert_eq!(store.record(id, &call)?.state, AttemptState::Queued);
+        assert_eq!(store.record(id, &call)?.generation, 0);
+        assert_eq!(store.queued_runs(&call)?, vec![run.run_id]);
+    }
+    assert_eq!(fake.prepared.get(), 0);
+    assert!(
+        !store
+            .launched_tasks
+            .borrow()
+            .contains(&(run.run_id, run.request.tasks[0].task_id))
+    );
+    drop(custody);
+    let validated =
+        store.validate_child(run.run_id, parent, &input().request.tasks[0], 1, 2, &call)?;
+    let started = store.start_child(
+        run.run_id,
+        &validated,
+        &Ready,
+        &|_, _| Err(RunError::Validation("fixture observed handoff")),
+        &call,
+    )?;
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { attempt, reason, .. }]
+        if *attempt == id && reason.contains("fixture observed handoff"))
+    );
+    assert_eq!(store.record(id, &call)?.generation, 1);
+    assert!(
+        store
+            .launched_tasks
+            .borrow()
+            .contains(&(run.run_id, run.request.tasks[0].task_id))
+    );
+    assert!(
+        store
+            .launched
+            .borrow()
+            .iter()
+            .all(|held| held.handle.is_none())
+    );
+    Ok(())
+}
+
+#[test]
+fn deferral_stops_the_scan_after_the_first_attempt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([2; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let run = two_tasks(2);
+    store.create(&run, &call)?;
+    let directory = store.attempt_dir(run.run_id, run.attempts[0].attempt_id, false)?;
+    for index in 0..crate::db::HELD_CHILD_LIMIT {
+        hold_child_fixture(
+            &store,
+            directory.try_clone()?,
+            provenant_supervisor::custody::Scope {
+                run: run.run_id,
+                attempt: AttemptId::from_bytes([u8::try_from(index + 32)?; 16]),
+                generation: 1,
+            },
+            sealed,
+        )?;
+    }
+    let _custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+    )?;
+    let fake = Fake::default();
+    let started = store.start_child(
+        run.run_id,
+        &run.request,
+        &fake,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)]
+        if *attempt == run.attempts[0].attempt_id));
+    assert_eq!(fake.prepared.get(), 0);
+    for attempt in &run.attempts {
+        let record = store.record(attempt.attempt_id, &call)?;
+        assert_eq!(record.state, AttemptState::Queued);
+        assert_eq!(record.generation, 0);
+        assert!(
+            !store
+                .launched_tasks
+                .borrow()
+                .contains(&(run.run_id, record.task_id))
+        );
+    }
     Ok(())
 }
 

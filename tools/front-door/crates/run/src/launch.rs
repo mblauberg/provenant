@@ -99,6 +99,8 @@ enum HandOff {
 #[derive(Debug)]
 pub enum Started {
     Launched(AttemptId),
+    /// Held child custody is full; the attempt stays Queued for a later scan.
+    Deferred(AttemptId),
     Refused {
         attempt: AttemptId,
         reason: String,
@@ -553,6 +555,12 @@ impl RunStore {
                 });
                 continue;
             }
+            // At the cap the attempt stays Queued: a terminal refusal would spend
+            // the task's only child attempt. Later attempts meet the same cap.
+            if self.sealed_requester.is_some() && self.check_held_capacity(id).is_err() {
+                started.push(Started::Deferred(id));
+                break;
+            }
             let (task_index, task) = request
                 .tasks
                 .iter()
@@ -762,9 +770,6 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
-        if self.sealed_requester.is_some() {
-            self.check_held_capacity(id).map_err(|e| local(&e))?;
-        }
         let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
