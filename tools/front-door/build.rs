@@ -15,6 +15,7 @@ type BuildResult<T> = Result<T, Box<dyn Error>>;
 const MAX_SOURCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SOURCE_FILES: usize = 100_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const SHIPPED_MEMBER_DIRS: [&str; 2] = ["src", "assets"];
 
 struct InputFile {
     source: PathBuf,
@@ -217,7 +218,7 @@ fn main() -> BuildResult<()> {
             &mut inputs,
         )?;
 
-        for source_directory in ["src", "tests", "examples", "benches", "assets"] {
+        for source_directory in SHIPPED_MEMBER_DIRS {
             let directory = member.directory.join(source_directory);
             watch(&mut watched, directory.clone())?;
             collect_workspace_tree(
@@ -823,8 +824,11 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildResult, Inputs, TrackedFiles, collect_external_tree, invalid, source_digest};
-    use provenant_records::SourceInput;
+    use super::{
+        BuildResult, Inputs, SHIPPED_MEMBER_DIRS, TrackedFiles, collect_external_tree,
+        collect_workspace_tree, invalid, source_digest,
+    };
+    use provenant_records::{SourceDigest, SourceInput};
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -866,11 +870,66 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn member_test_edits_do_not_change_the_source_digest() -> BuildResult<()> {
+        let (initial, after_edit) = digests_after_member_edit("tests/integration.rs")?;
+        assert_eq!(initial, after_edit);
+        Ok(())
+    }
+
+    #[test]
+    fn member_source_edits_change_the_source_digest() -> BuildResult<()> {
+        let (initial, after_edit) = digests_after_member_edit("src/lib.rs")?;
+        assert_ne!(initial, after_edit);
+        Ok(())
+    }
+
+    fn digests_after_member_edit(relative: &str) -> BuildResult<(SourceDigest, SourceDigest)> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        let workspace = repository.join("tools/front-door");
+        let member = workspace.join("crates/member");
+        fs::create_dir_all(member.join("src"))?;
+        fs::create_dir_all(member.join("tests"))?;
+        fs::write(member.join("src/lib.rs"), b"// source\n")?;
+        fs::write(member.join("tests/integration.rs"), b"// test\n")?;
+        run_git(&repository, &["init", "--quiet"])?;
+        run_git(&repository, &["add", "tools/front-door/crates/member"])?;
+
+        let initial = digest_member_sources(&workspace, &repository, &member)?;
+        fs::write(member.join(relative), b"// edited\n")?;
+        let after_edit = digest_member_sources(&workspace, &repository, &member)?;
+        Ok((initial, after_edit))
+    }
+
+    fn digest_member_sources(
+        workspace: &Path,
+        repository: &Path,
+        member: &Path,
+    ) -> BuildResult<SourceDigest> {
+        let tracked = TrackedFiles::load(workspace, repository)?;
+        let mut inputs = Inputs::default();
+        for source_directory in SHIPPED_MEMBER_DIRS {
+            collect_workspace_tree(
+                workspace,
+                &member.join(source_directory),
+                &mut inputs,
+                source_directory == "src",
+                &tracked,
+            )?;
+        }
+        let borrowed: Vec<SourceInput<'_>> = inputs
+            .iter()
+            .map(|(name, bytes, _)| SourceInput { name, bytes })
+            .collect();
+        Ok(source_digest(&borrowed)?)
+    }
+
     fn digest_assets(
         workspace: &Path,
         repository: &Path,
         assets: &Path,
-    ) -> BuildResult<provenant_records::SourceDigest> {
+    ) -> BuildResult<SourceDigest> {
         let tracked = TrackedFiles::load(workspace, repository)?;
         let mut inputs = Inputs::default();
         collect_external_tree(assets, "assets", &mut inputs, true, &tracked)?;

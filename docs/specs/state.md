@@ -196,12 +196,12 @@ re-apply instruction. Harness changes are printed before they are applied
 
 `cargo build --release --locked` in `tools/front-door` runs a workspace
 `build.rs` that computes a source digest with records' pure digest module. It
-covers workspace and member manifests, the lockfile, toolchain files, every
-member's source and build scripts, and the bundled assets. Names are sorted
-workspace-relative POSIX paths, framed by lengths, under the prefix
-`provenant-source-v1`. Duplicate, missing, symlinked or escaping inputs are
-rejected, and there is no digest environment override. Release builds trim
-source paths so checkout paths do not affect binary bytes.
+covers shipped workspace source (each member's `src/`, `assets/` and `build.rs`),
+manifests, the lockfile, the toolchain and Cargo configuration. It also covers
+the bundled assets. Names are sorted workspace-relative POSIX paths, framed by
+lengths, under the prefix `provenant-source-v1`. Duplicate, missing, symlinked or
+escaping inputs are rejected, and there is no digest environment override.
+Release builds trim source paths so checkout paths do not affect binary bytes.
 
 Packaging emits a typed `release.json` beside `bin/provenant` with the source
 digest, target triple, toolchain and a bounded file inventory with digests.
