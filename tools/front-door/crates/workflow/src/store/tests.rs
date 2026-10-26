@@ -295,6 +295,9 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
             self.0.set(call + 1);
             MonoTime::from_micros(if call < 2 { 999_999 } else { 1_000_000 })
         }
+        fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+            Ok(())
+        }
     }
     assert!(matches!(
         store.save(
@@ -446,6 +449,9 @@ fn time_is_read_under_lock_and_cancellation_before_staging_has_no_effect() {
             }
             self.cancel.cancel();
             Ok(time(30))
+        }
+        fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+            Ok(())
         }
     }
     let (_temp, store, r) = setup();

@@ -1,3 +1,6 @@
+// Integration tests use real time to bound process and filesystem coordination.
+#![allow(clippy::disallowed_methods)]
+
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
 use provenant_supervisor::{
     ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,

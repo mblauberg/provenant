@@ -173,6 +173,8 @@ impl RunStore {
         }
         errors
     }
+    // Cancellation coordinates with a real guardian handoff under a hard cap.
+    #[allow(clippy::disallowed_methods)]
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         // Half the budget for waiting on the handoff; the rest for the store.
         let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();

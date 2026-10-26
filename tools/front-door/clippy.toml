@@ -3,6 +3,9 @@ allow-expect-in-tests = true
 allow-panic-in-tests = true
 
 disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "Sample wall time only at the production clock boundary." },
+  { path = "std::time::Instant::now", reason = "Sample monotonic time only at explicit real-time boundaries." },
+  { path = "std::thread::park_timeout", reason = "Wait only at an explicit real-time boundary." },
   { path = "std::thread::sleep", reason = "Use an injected clock or the supervisor wait boundary so cancellation remains observable." },
   { path = "std::process::Command::new", reason = "Process creation belongs in supervisor, which owns process custody." },
   { path = "std::env::remove_var", reason = "Pass environment explicitly to functions and child commands; process-wide mutation races with threads." },

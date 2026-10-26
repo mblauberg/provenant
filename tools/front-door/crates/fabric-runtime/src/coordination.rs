@@ -1147,6 +1147,9 @@ mod tests {
         fn mono_now(&self) -> MonoTime {
             MonoTime::from_micros(0)
         }
+        fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1241,6 +1244,16 @@ mod tests {
         }
         fn mono_now(&self) -> MonoTime {
             MonoTime::from_micros(self.mono.get())
+        }
+        fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+            let now = self.mono_now();
+            if deadline > now {
+                let duration = DurationMicros::from_micros(deadline.as_micros() - now.as_micros());
+                let wall = WallTime::from_micros(self.wall.get())?.checked_add(duration)?;
+                self.wall.set(wall.as_micros());
+                self.mono.set(deadline.as_micros());
+            }
+            Ok(())
         }
     }
     impl RetryWait for AdvancingClock {
@@ -1566,6 +1579,10 @@ mod tests {
         }
         fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
             WallTime::from_micros(2_000_000_000_000_000)
+        }
+        fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+            self.0.set(self.0.get().max(deadline.as_micros()));
+            Ok(())
         }
     }
     impl RetryWait for SimulatedClock {

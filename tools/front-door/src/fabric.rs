@@ -340,6 +340,8 @@ impl Stdin {
     }
 }
 impl stdio::Input for Stdin {
+    // The stdin bridge waits against the transport's real-time deadline.
+    #[allow(clippy::disallowed_methods)]
     fn read(&mut self, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
         if self.eof {
             return Ok(0);
@@ -473,6 +475,8 @@ pub fn hosts(globals: &provenant_cli::Globals) -> u8 {
         ),
     }
 }
+// Peer frames use bounded real-time stdin and stdout transport deadlines.
+#[allow(clippy::disallowed_methods)]
 pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         // A request names its own agent, so a lane could act as any actor.

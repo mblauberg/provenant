@@ -499,6 +499,8 @@ fn run(inv: provenant_cli::Invocation) -> u8 {
         Command::Hook(hook) => hooks::run(hook, globals),
     }
 }
+// CLI reporting measures real elapsed time for operational diagnostics.
+#[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
     // Fake provider identity probes for production account observation.
     #[cfg(test)]

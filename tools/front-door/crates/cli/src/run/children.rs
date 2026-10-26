@@ -164,6 +164,8 @@ impl Holder for HostHolder<'_> {
     }
 }
 
+// Child launcher polling is a real-time pause between bounded store scans.
+#[allow(clippy::disallowed_methods)]
 fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Result<(), String> {
     let launch = context
         .launch

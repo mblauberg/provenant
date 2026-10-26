@@ -550,6 +550,8 @@ impl Directory {
         }
     }
 
+    // File lock acquisition is bounded by a real-time deadline.
+    #[allow(clippy::disallowed_methods)]
     fn lock_with_timeout(
         &self,
         name: &OsStr,
@@ -1073,6 +1075,8 @@ pub fn temporary_name() -> Result<OsString> {
 }
 
 #[cfg(test)]
+// OS lock tests use real time to bound interprocess coordination.
+#[allow(clippy::disallowed_methods)]
 mod tests;
 
 fn staging_name(prefix: &str) -> Result<OsString> {

@@ -42,6 +42,8 @@ struct AdvisoryInput {
     source: Option<String>,
 }
 
+// Hook I/O and local work are constrained by real monotonic deadlines.
+#[allow(clippy::disallowed_methods)]
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let deadline = Instant::now() + LOCAL_BUDGET;
     match hook.spec().handler {
@@ -71,6 +73,8 @@ fn diagnostic(message: &str) {
         message.chars().take(1024).collect::<String>()
     );
 }
+// Denial output must obey the hook's real-time protocol budget.
+#[allow(clippy::disallowed_methods)]
 fn deny(reason: &str) -> u8 {
     let response = serde_json::json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}});
     let mut bytes = response.to_string().into_bytes();
@@ -82,6 +86,8 @@ fn deny(reason: &str) -> u8 {
         2
     }
 }
+// The hook policy deadline comes from the host's real-time input budget.
+#[allow(clippy::disallowed_methods)]
 fn guard(globals: &Globals, deadline: Instant) -> u8 {
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
@@ -141,6 +147,8 @@ fn guard_config(globals: &Globals, cwd: &Path) -> provenant_confinement::guard::
     };
     read().unwrap_or_default()
 }
+// Advisory work is abandoned when its real-time host deadline expires.
+#[allow(clippy::disallowed_methods)]
 fn advisory(event: HookEvent, globals: &Globals, deadline: Instant) -> u8 {
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,

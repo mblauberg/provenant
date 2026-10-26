@@ -60,6 +60,8 @@ fn read(path: &Path) -> Result<Vec<u8>, ProbeFailure> {
 fn value(path: &Path) -> Result<Value, ProbeFailure> {
     serde_json::from_slice(&read(path)?).map_err(|_| ProbeFailure::Malformed)
 }
+// Provider quota snapshots need the current UTC wall time.
+#[allow(clippy::disallowed_methods)]
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

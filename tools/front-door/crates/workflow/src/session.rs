@@ -369,6 +369,9 @@ mod tests {
                 // Call 0 is the uncontended lock poll; call 1 is the post-lock check.
                 MonoTime::from_micros(if call < 1 { 0 } else { 1_000_000 })
             }
+            fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+                Ok(())
+            }
         }
         let (_temp, root, project) = setup();
         let selected = store(&root, project, "host-1");

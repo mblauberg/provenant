@@ -16,6 +16,8 @@ impl Default for SystemClock {
     }
 }
 impl Clock for SystemClock {
+    // Wall-clock sampling is the production clock boundary.
+    #[allow(clippy::disallowed_methods)]
     fn wall_now(&self) -> Result<WallTime, TimeError> {
         let timestamp =
             jiff::Timestamp::try_from(SystemTime::now()).map_err(|_| TimeError::WallRange)?;
@@ -24,6 +26,21 @@ impl Clock for SystemClock {
 
     fn mono_now(&self) -> MonoTime {
         crate::sys::monotonic_now()
+    }
+
+    // Waiting uses the same real monotonic coordinate sampled by this clock.
+    // It ignores unpark notifications and returns only at the deadline.
+    #[allow(clippy::disallowed_methods)]
+    fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError> {
+        loop {
+            let remaining = deadline
+                .as_micros()
+                .saturating_sub(self.mono_now().as_micros());
+            if remaining == 0 {
+                return Ok(());
+            }
+            std::thread::park_timeout(std::time::Duration::from_micros(remaining));
+        }
     }
 }
 

@@ -1662,6 +1662,8 @@ fn selection_key(targets: &[Target]) -> String {
 /// reader deadline expires. Expiry never stops a provider. A default or `Any`
 /// wait skips terminal lanes the actor has already seen and acknowledges the
 /// ones it returns, so repeated waits neither miss nor replay a completion.
+// A CLI wait deadline is a real transport boundary independent of store progress.
+#[allow(clippy::disallowed_methods)]
 fn wait_lanes(
     session: &Session,
     targets: &[Target],

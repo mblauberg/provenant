@@ -72,6 +72,8 @@ impl Context {
         }
     }
 }
+// Chair records need current UTC wall time at this production edge.
+#[allow(clippy::disallowed_methods)]
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -161,6 +163,8 @@ fn fixed_target(context: &Context, target: &RegisteredAccount) -> Result<(), Err
     }
     Ok(())
 }
+// Hook deadlines must be checked against the real monotonic clock.
+#[allow(clippy::disallowed_methods)]
 fn check_time(deadline: Option<Instant>) -> Result<(), Error> {
     if deadline
         .is_some_and(|d| d.saturating_duration_since(Instant::now()) < Duration::from_secs(3))
@@ -524,6 +528,8 @@ fn message(value: &Value) -> String {
         value["command"].as_str().unwrap_or("")
     )
 }
+// The hook protocol imposes real wall-time input and execution caps.
+#[allow(clippy::disallowed_methods)]
 pub fn hook(start: bool, globals: &Globals) -> u8 {
     // Stay inside the registered 5s SessionStart and 10s prompt timeouts.
     let deadline = Instant::now() + Duration::from_secs(if start { 4 } else { 8 });
@@ -597,6 +603,9 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    // The hook timing test measures real monotonic time.
+    #![allow(clippy::disallowed_methods)]
+
     #[test]
     fn chair_command_and_hook_run_the_same_in_every_shell() -> Result<(), super::Error> {
         use super::*;

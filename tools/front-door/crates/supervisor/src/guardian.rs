@@ -21,6 +21,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+// Guardian records use UTC wall time at the production boundary.
+#[allow(clippy::disallowed_methods)]
 fn wall_now() -> Option<WallTime> {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -483,6 +485,8 @@ impl crate::capture::DecodedEventSink for Events {
     }
 }
 impl Driver<'_> {
+    // The guardian owns process lifecycle and its elapsed-time budgets.
+    #[allow(clippy::disallowed_methods)]
     fn run(
         &mut self,
         argv: &[OsString],

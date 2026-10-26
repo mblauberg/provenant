@@ -489,6 +489,9 @@ impl Clock for AdvancingClock {
     fn mono_now(&self) -> MonoTime {
         self.0.borrow().mono_now()
     }
+    fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), TimeError> {
+        self.0.borrow().wait_until(deadline)
+    }
 }
 impl RetryWait for AdvancingClock {
     fn wait(&self, _: DurationMicros, _: &CancelToken) {
