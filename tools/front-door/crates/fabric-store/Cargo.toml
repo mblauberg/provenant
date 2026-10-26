@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 provenant-supervisor = { workspace = true }
+provenant-sqlite = { workspace = true }
 
 [dev-dependencies]
 provenant-supervisor = { workspace = true, features = ["fixture"] }

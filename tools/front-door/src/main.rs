@@ -150,11 +150,11 @@ fn config_command(
         Ok(config)
     })();
     match result {
-        Ok(config) => match serde_json::to_string_pretty(&config) {
-            Ok(text) => emit(
+        Ok(config) => match serde_json::to_value(&config) {
+            Ok(value) => emit(
                 &CommandResult::new(command, Outcome::Ok, config),
                 globals,
-                &format!("{text}\n"),
+                &provenant_cli::terse(&value),
                 true,
             ),
             Err(_) => fail(

@@ -28,7 +28,7 @@ security-evidence.json
 skills/_shared'
 hits=$(printf '%s\n' "$names" | git grep -n -I -F -f - -- . \
   ':(exclude)docs/adr' \
-  ':(exclude)docs/research' ':(exclude)assets/install/legacy.toml' \
+  ':(exclude)docs/research' \
   ':(exclude)scripts' \
   ':(exclude)tools/front-door/crates/config/src/managed_tests.rs' || true)
 if [ -n "$hits" ]; then

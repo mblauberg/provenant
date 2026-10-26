@@ -86,7 +86,7 @@ Global options are accepted before or after the subcommand:
 | Option | Meaning |
 | --- | --- |
 | `--help`, `--version` | Pure output, exit 0, except that `--help` on a hidden command (`internal` and its subcommands, `fabric peer`, `fabric peer-agent`) exits 2 as an unknown command. |
-| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree`, `disk report` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `config show|set|unset` and `workflow` print pretty JSON; `hosts doctor` and the remaining leaves print their own text. |
+| `--json` | One versioned result, including errors. Refused before stdin for hooks and `fabric mcp`. Without it, `hosts`, `worktree`, `disk report`, `config show|set|unset`, `workflow` and the `fabric` leaves other than `mcp`, `peer` and `peer-agent` print terse text: one `key=value` line per record. `hosts doctor` and the remaining leaves print their own text. |
 | `--state-dir ABS` | State root, overriding `PROVENANT_STATE_DIR`, then the default in [state](state.md). |
 | `--project PATH` | The verified project to act on instead of the working directory. The process never changes directory. |
 
@@ -183,7 +183,7 @@ final head and open a pull request after verifying it.
 | `config show` | `[--task-class NAME]` | The resolved config with secrets redacted and each knob's source (default, profile or override). |
 | `config set` | `NAME VALUE` | `NAME` is `profile` (balanced, economy or rigorous) or a registry knob. `null` clears a nullable knob. Validates against `config/harness-knobs.json` and rewrites `config.toml` atomically. |
 | `config unset` | `NAME` | Removes a knob override. |
-| `install` | `--source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--legacy-checkout ABS] [--dry-run]` | Harnesses are claude, codex, cursor, agy and opencode. Omitting `--hooks` refreshes unchanged owned hooks and relinquishes edited entries; a first install leaves them disabled. Explicit `off` removes unchanged owned hooks. `--source` is a staged release. `--dry-run` writes nothing. See [state](state.md) for the layout and migration. |
+| `install` | `--source ABS --harness NAME… [--bin-dir ABS] [--hooks on\|off] [--adopt-existing] [--dry-run]` | Harnesses are claude, codex, cursor, agy and opencode. Omitting `--hooks` refreshes unchanged owned hooks and relinquishes edited entries; a first install leaves them disabled. Explicit `off` removes unchanged owned hooks. `--source` is a staged release. `--dry-run` writes nothing. See [state](state.md) for the layout and recovery. |
 | `uninstall` | `--harness NAME…` | Removes only still-owned entries. |
 | `accounts` | `list`; `register LABEL --adapter A --directory DIR [--plan] [--priority] [--billing-anchor]`; `set ACCOUNT [--display-name] [--hidden true\|false] [--order N] [--headline auto\|5h\|weekly\|default]` | Semantics in [routing](routing.md). `set` needs at least one option; an empty name, `--order 0` and `--headline default` clear a field. |
 | `route` | `list [--adapter] [--pool]`; `resolve` with route flags; `set POOL MODEL [--weight 0..100] [--effort] [--efforts]`; `remove POOL MODEL`; `reset POOL`; `pacing PROVIDER pace\|spend\|max` | `list` and `resolve` are pure previews. The others edit pool overrides in `config.toml`. |
@@ -302,8 +302,6 @@ stderr, exit 1 refuses and exit 0 allows. It refuses on any inspection, read
 or size failure. It guards default-branch deletion, non-fast-forward updates,
 pushes from linked worktrees to the default branch and conflict markers,
 reading Git evidence with inherited redirects disabled and doing no fetch.
-Git launchers are quoted absolute `exec` commands, and foreign hooks are
-preserved or reported as conflicts.
 
 Installer leaves match hooks by exact event, matcher and command, keep array
 positions, and never rewrite foreign siblings. Only Claude registers harness

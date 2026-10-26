@@ -307,10 +307,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     let mut rig = TestRig::new()?;
     let release = rig.root.join("rélease");
     fs::create_dir_all(release.join("bin"))?;
-    fs::copy(
-        env!("CARGO_BIN_EXE_provenant"),
-        release.join("bin/provenant"),
-    )?;
+    let executable = release.join("bin/provenant");
     fs::write(release.join("release.json"), "{}")?;
     rig.env
         .push(("PROVENANT_ROOT".into(), "/intentionally/missing".into()));
@@ -324,7 +321,10 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
         "root".into(),
         "--json".into(),
     ];
-    let out = rig.execute_os(&release.join("bin/provenant"), &args, None)?;
+    let out = rig.with_process_spawn_lock(|| {
+        fs::copy(env!("CARGO_BIN_EXE_provenant"), &executable)?;
+        rig.execute_os_locked(&executable, &args, None)
+    })?;
     assert_eq!(
         code(&out),
         0,
@@ -339,7 +339,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     assert_eq!(assets.to_path_buf()?, fs::canonicalize(&release)?);
     assert_eq!(selected.to_path_buf()?, state);
     assert!(!state.exists());
-    let human = rig.execute(&release.join("bin/provenant"), &["root"], None)?;
+    let human = rig.execute(&executable, &["root"], None)?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         human.stdout.bytes,
@@ -523,6 +523,14 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     let value: serde_json::Value = serde_json::from_slice(&defaults.stdout.bytes)?;
     assert_eq!(value["data"]["profile"], "balanced");
     assert!(value["data"]["domains"]["quota"].is_object());
+    let human = rig.command(&["config", "show"])?;
+    assert_eq!(code(&human), 0);
+    let text = String::from_utf8_lossy(&human.stdout.bytes);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(
+        text.ends_with(" profile=balanced schema_version=1\n"),
+        "{text}"
+    );
     assert!(!rig.state.exists());
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(

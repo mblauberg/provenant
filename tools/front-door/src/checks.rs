@@ -269,7 +269,6 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     .as_deref()
                     .map(Path::new),
                 std::env::var_os("CODEX_HOME").as_deref().map(Path::new),
-                None,
             )?;
             targets.resolve_destinations(&LocalFs)?;
             let skill_roots: Vec<_> = targets

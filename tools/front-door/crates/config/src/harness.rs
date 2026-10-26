@@ -12,6 +12,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const OPENCODE_INSTRUCTION_ASSETS: [&str; 2] =
+    ["instructions/AGENTS.md", "instructions/HARNESS.md"];
+
 pub(crate) const CLAUDE_CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
 
 fn limits(harness: Harness) -> Limits {
@@ -342,11 +345,9 @@ fn file_with_limits(
 #[derive(Debug, Default)]
 pub(crate) struct HarnessPlan {
     pub files: BTreeMap<PathBuf, Value>,
-    pub removals: BTreeSet<PathBuf>,
     pub owned: Vec<OwnedEntry>,
     pub changes: BTreeMap<PathBuf, Vec<SelectorChange>>,
     pub findings: Vec<managed::InstallFinding>,
-    pub authorised: BTreeSet<PathBuf>,
 }
 fn capture_one(
     path: &Path,
@@ -386,7 +387,6 @@ pub(crate) fn capture(
     fs: &dyn SafeFs,
 ) -> Result<HarnessPlan, InstallError> {
     let mut plan = HarnessPlan::default();
-    let checkout = &targets.legacy_checkout;
     let root = managed::release_root(
         targets.roots.state.as_path(),
         release.manifest().source_digest,
@@ -403,16 +403,11 @@ pub(crate) fn capture(
         let want = mcp(target.harness, targets)?;
         let wire = AbsolutePath::new(path)?;
         if before.as_ref() != Some(&want) {
-            if let Some(current) = &before {
-                let legacy = checkout.as_ref().is_some_and(|_| {
-                    crate::legacy::mcp_matches(current, target.harness, &targets.home)
-                });
-                if !legacy
-                    && !expected_previous(previous, &wire, sel, current)
-                    && (!targets.adopt_existing || !safe_adoption(current))
-                {
-                    return Err(InstallError::Conflict(path.clone()));
-                }
+            if let Some(current) = &before
+                && !expected_previous(previous, &wire, sel, current)
+                && (!targets.adopt_existing || !safe_adoption(current))
+            {
+                return Err(InstallError::Conflict(path.clone()));
             }
             bytes = set_for(&bytes, sel, Some(&want), target.harness)?;
             plan.changes
@@ -442,8 +437,8 @@ pub(crate) fn capture(
             });
         let hooks = targets.hooks || inherited_hooks;
         if let Some(hook) = &target.hook_file
-            && (checkout.is_some()
-                || ((hooks || targets.remove_hooks) && target.harness == Harness::Claude))
+            && (hooks || targets.remove_hooks)
+            && target.harness == Harness::Claude
         {
             let hook_snapshot = capture_one(hook, entries, fs)?;
             let (old, hook_mode) = file(&hook_snapshot, hook)?;
@@ -506,19 +501,6 @@ pub(crate) fn capture(
                 (base, Vec::new(), Vec::new())
             };
             changes.extend(removed_changes);
-            if let Some(checkout) = checkout.as_deref() {
-                let (cleaned, removals, unresolved) = crate::legacy::clean_hooks_at_home(
-                    &updated,
-                    target.harness,
-                    checkout,
-                    Some(&targets.home),
-                )?;
-                updated = cleaned;
-                changes.extend(removals);
-                if !unresolved.is_empty() {
-                    add_finding(&mut plan.findings, "legacy_entry", hook)?;
-                }
-            }
             for (selector, value) in owned {
                 plan.owned.push(OwnedEntry {
                     path: AbsolutePath::new(hook)?,
@@ -548,7 +530,7 @@ pub(crate) fn capture(
                 let array = array
                     .as_array()
                     .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-                for asset in crate::legacy::instruction_assets(target.harness)? {
+                for asset in OPENCODE_INSTRUCTION_ASSETS.map(PathBuf::from) {
                     let path_value = root.join(&asset);
                     let text = path_value.to_str().ok_or(InstallError::InvalidConfig(
                         "instruction path requires UTF-8",
@@ -579,55 +561,6 @@ pub(crate) fn capture(
                 }
         }) {
             plan.files.insert(path.clone(), Value::File { bytes, mode });
-        }
-    }
-    if let Some(checkout) = checkout.as_deref() {
-        legacy_links(release, targets, checkout, previous, entries, &mut plan, fs)?;
-        instruction_rewrite(release, targets, checkout, previous, entries, &mut plan, fs)?;
-    }
-    if let Some(previous) = previous {
-        for entry in &previous.entries {
-            if entry.selector != "git-hook:pre-push"
-                || plan.owned.iter().any(|current| current.path == entry.path)
-            {
-                continue;
-            }
-            let path = entry.path.to_path_buf()?;
-            let snap = capture_one(&path, entries, fs)?;
-            if targets.remove_hooks {
-                if snap
-                    .as_ref()
-                    .is_some_and(|current| !managed::matches_owned(&current.value, &entry.expected))
-                {
-                    add_finding(&mut plan.findings, "relinquished_modified_entry", &path)?;
-                }
-                continue;
-            }
-            if let Some(current) = snap {
-                if managed::matches_owned(&current.value, &entry.expected) {
-                    let spec = targets
-                        .hook_specs
-                        .iter()
-                        .find(|spec| spec.harness.is_none() && spec.event == "pre-push")
-                        .ok_or(InstallError::HooksUnavailable)?;
-                    let value = Value::File {
-                        bytes: format!(
-                            "#!/bin/sh\nexec {} \"$@\"\n",
-                            crate::hooks::command(spec, targets)?
-                        )
-                        .into_bytes(),
-                        mode: 0o755,
-                    };
-                    let mut owned = entry.clone();
-                    owned.expected = managed::owned(&value)?;
-                    plan.owned.push(owned);
-                    if current.value != value {
-                        plan.files.insert(path, value);
-                    }
-                } else {
-                    add_finding(&mut plan.findings, "relinquished_modified_entry", &path)?;
-                }
-            }
         }
     }
     Ok(plan)
@@ -705,44 +638,6 @@ pub(crate) fn remove_selector(
         }],
     )))
 }
-// Further cut-over helpers below keep matching finite and never traverse old links.
-
-// A whole skills/workflows link is compared before any child snapshot. Returning
-// absence here is safe only for the exact compiled whole-directory target.
-pub(crate) fn snapshot_target(
-    path: &Path,
-    targets: &Targets,
-    fs: &dyn SafeFs,
-) -> Result<Option<Snapshot>, InstallError> {
-    if let Some(checkout) = &targets.legacy_checkout {
-        for target in &targets.harnesses {
-            for link in crate::legacy::legacy_links(&targets.home, checkout, target)? {
-                use crate::legacy::LegacyArea;
-                let directory = match (link.area, link.name.is_empty()) {
-                    (LegacyArea::Skills, true) => Some(target.skills_dir.clone()),
-                    (LegacyArea::Workflows, true) => {
-                        Some(target.skills_dir.with_file_name("workflows"))
-                    }
-                    _ => None,
-                };
-                if let Some(directory) = directory
-                    && path != directory
-                    && path.starts_with(&directory)
-                    && let Some(Snapshot {
-                        value: Value::Link(actual),
-                        ..
-                    }) = managed::snapshot(&directory, fs)?
-                {
-                    if managed::same_link_target(&actual, &link.target) {
-                        return Ok(None);
-                    }
-                    return Err(InstallError::Conflict(directory));
-                }
-            }
-        }
-    }
-    managed::snapshot_scoped(path, targets.roots.state.as_path(), fs)
-}
 fn rewrite_instruction_array(
     bytes: &[u8],
     release: &Release,
@@ -761,46 +656,13 @@ fn rewrite_instruction_array(
     let array = array
         .as_array()
         .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-    let target = targets
-        .harnesses
-        .iter()
-        .find(|target| target.harness == Harness::Opencode)
-        .ok_or(InstallError::HarnessSelection)?;
-    let legacy = if let Some(checkout) = targets.legacy_checkout.as_deref() {
-        crate::legacy::legacy_links(&targets.home, checkout, target)?
-    } else {
-        Vec::new()
-    };
-    // The receipt can identify prior managed release paths without authorising
-    // writes to a legacy checkout. Asset names come from the manifest itself.
-    let assets = crate::legacy::instruction_assets(Harness::Opencode)?;
+    let assets = OPENCODE_INSTRUCTION_ASSETS.map(PathBuf::from);
     let old_root = previous
         .map(|receipt| managed::release_root(targets.roots.state.as_path(), receipt.source_digest));
     let mut out = bytes.to_vec();
     // Reverse order keeps recorded array indices valid for removals.
     for (i, value) in array.iter().enumerate().rev() {
         let mut asset = None;
-        let mut matched_legacy = false;
-        let mut matched_receipt = false;
-        if let Some(link) = legacy.iter().find(|link| {
-            link.area == crate::legacy::LegacyArea::OpenCodeInstruction
-                && value.as_str() == link.target.to_str()
-        }) {
-            matched_legacy = true;
-            if !link.retained {
-                out = crate::splice::set(&out, &["instructions", &i.to_string()], None)?;
-                plan.changes
-                    .entry(path.into())
-                    .or_default()
-                    .push(SelectorChange {
-                        selector: format!("json:/instructions/{i}"),
-                        before: Some(value.clone()),
-                        after: None,
-                    });
-                continue;
-            }
-            asset = link.replacement_asset.clone();
-        }
         if let (Some(receipt), Some(old_root), Some(text)) =
             (previous, old_root.as_ref(), value.as_str())
             && receipt.entries.iter().any(|entry| {
@@ -822,7 +684,6 @@ fn rewrite_instruction_array(
             for candidate in &assets {
                 if Path::new(text) == old_root.join(candidate) {
                     asset = Some(candidate.clone());
-                    matched_receipt = true;
                 }
             }
         }
@@ -839,7 +700,7 @@ fn rewrite_instruction_array(
                 .enumerate()
                 .any(|(index, candidate)| index != i && candidate.as_str() == Some(new_text));
             let index = i.to_string();
-            if duplicate_new && (matched_receipt || matched_legacy) {
+            if duplicate_new {
                 out = crate::splice::set(&out, &["instructions", &index], None)?;
                 plan.changes
                     .entry(path.into())
@@ -866,98 +727,6 @@ fn rewrite_instruction_array(
         }
     }
     Ok(out)
-}
-
-fn rewrite_legacy_variable_lines(text: &str) -> (String, Vec<SelectorChange>) {
-    let mut updated = String::with_capacity(text.len());
-    let mut changes = Vec::new();
-    for (index, line) in text.split_inclusive('\n').enumerate() {
-        let rewritten = line.replace("AGENT_FABRIC_LABEL", "PROVENANT_AGENT_LABEL");
-        if rewritten != line {
-            changes.push(SelectorChange {
-                selector: format!("line {}", index + 1),
-                before: Some(json!(line)),
-                after: Some(json!(rewritten)),
-            });
-        }
-        updated.push_str(&rewritten);
-    }
-    (updated, changes)
-}
-
-fn instruction_rewrite(
-    release: &Release,
-    targets: &Targets,
-    checkout: &Path,
-    previous: Option<&InstallReceipt>,
-    entries: &mut BTreeMap<PathBuf, Option<Snapshot>>,
-    plan: &mut HarnessPlan,
-    fs: &dyn SafeFs,
-) -> Result<(), InstallError> {
-    for (path, (bytes, _)) in &release.files {
-        if path.starts_with("instructions")
-            && bytes
-                .windows(b"AGENT_FABRIC_LABEL".len())
-                .any(|s| s == b"AGENT_FABRIC_LABEL")
-        {
-            return Err(InstallError::Manifest(
-                "release instruction contains legacy variable",
-            ));
-        }
-    }
-    let global = targets.home.join(".agents/AGENTS.md");
-    if let Some(s) = capture_one(&global, entries, fs)? {
-        match s.value {
-            Value::File { bytes, mode } => {
-                let text = std::str::from_utf8(&bytes)
-                    .map_err(|_| InstallError::InvalidConfig("instruction is not UTF-8"))?;
-                let (updated, changes) = rewrite_legacy_variable_lines(text);
-                if !changes.is_empty() {
-                    plan.files.insert(
-                        global.clone(),
-                        Value::File {
-                            bytes: updated.into_bytes(),
-                            mode,
-                        },
-                    );
-                    plan.changes
-                        .entry(global.clone())
-                        .or_default()
-                        .extend(changes);
-                }
-            }
-            Value::Link(link) if link == checkout.join("AGENTS.md") => {
-                let root = managed::release_root(
-                    targets.roots.state.as_path(),
-                    release.manifest().source_digest,
-                );
-                if !release
-                    .files
-                    .contains_key(Path::new("instructions/AGENTS.md"))
-                {
-                    return Err(InstallError::Manifest("missing instruction asset"));
-                }
-                plan.files
-                    .insert(global, Value::Link(root.join("instructions/AGENTS.md")));
-            }
-            Value::Link(link)
-                if link
-                    == managed::release_root(
-                        targets.roots.state.as_path(),
-                        release.manifest().source_digest,
-                    )
-                    .join("instructions/AGENTS.md")
-                    || previous.is_some_and(|p| {
-                        link == managed::release_root(
-                            targets.roots.state.as_path(),
-                            p.source_digest,
-                        )
-                        .join("instructions/AGENTS.md")
-                    }) => {}
-            _ => return Err(InstallError::Conflict(global)),
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,30 +842,6 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
     Ok(())
 }
 
-fn legacy_destination(
-    target: &managed::HarnessTarget,
-    link: &crate::legacy::LegacyLink,
-    git_hooks_dir: Option<&Path>,
-) -> Option<PathBuf> {
-    use crate::legacy::LegacyArea;
-    match link.area {
-        LegacyArea::Skills => Some(target.skills_dir.join(&link.name)),
-        LegacyArea::Workflows => Some(
-            target
-                .skills_dir
-                .with_file_name("workflows")
-                .join(&link.name),
-        ),
-        LegacyArea::Instruction | LegacyArea::GlobalInstruction => target.instruction.clone(),
-        LegacyArea::Companion => target
-            .instruction
-            .as_ref()
-            .map(|path| path.with_file_name(&link.name)),
-        LegacyArea::GitHook => git_hooks_dir.map(|path| path.join(&link.name)),
-        LegacyArea::OpenCodeInstruction => None,
-    }
-}
-
 fn add_finding(
     findings: &mut Vec<managed::InstallFinding>,
     rule: &str,
@@ -1115,315 +860,9 @@ fn add_finding(
     Ok(())
 }
 
-fn legacy_links(
-    release: &Release,
-    targets: &Targets,
-    checkout: &Path,
-    previous: Option<&InstallReceipt>,
-    entries: &mut BTreeMap<PathBuf, Option<Snapshot>>,
-    plan: &mut HarnessPlan,
-    fs: &dyn SafeFs,
-) -> Result<(), InstallError> {
-    for target in &targets.harnesses {
-        for link in crate::legacy::legacy_links(&targets.home, checkout, target)? {
-            use crate::legacy::LegacyArea;
-            let Some(path) = legacy_destination(target, &link, targets.git_hooks_dir.as_deref())
-            else {
-                continue;
-            };
-            let snap = if let Some(s) = entries.get(&path) {
-                s.clone()
-            } else {
-                let s = snapshot_target(&path, targets, fs)?;
-                entries.insert(path.clone(), s.clone());
-                s
-            };
-            if link.area == LegacyArea::GitHook {
-                // Receipt ownership supersedes the one-time link migration.
-                // Refresh and explicit removal are reconciled by capture.
-                if previous.is_some_and(|receipt| {
-                    receipt.entries.iter().any(|entry| {
-                        entry.selector == "git-hook:pre-push"
-                            && entry.path.to_path_buf().is_ok_and(|owned| owned == path)
-                    })
-                }) {
-                    continue;
-                }
-                match snap {
-                    Some(Snapshot {
-                        value: Value::Link(actual),
-                        ..
-                    }) if managed::same_link_target(&actual, &link.target) => {
-                        if link.retained {
-                            if targets.hooks {
-                                if let Some(spec) = targets
-                                    .hook_specs
-                                    .iter()
-                                    .find(|spec| spec.harness.is_none() && spec.event == link.name)
-                                {
-                                    if !plan.files.contains_key(&path) {
-                                        let bytes = format!(
-                                            "#!/bin/sh\nexec {} \"$@\"\n",
-                                            crate::hooks::command(spec, targets)?
-                                        )
-                                        .into_bytes();
-                                        let value = Value::File { bytes, mode: 0o755 };
-                                        plan.owned.push(OwnedEntry {
-                                            path: AbsolutePath::new(&path)?,
-                                            harness: None,
-                                            selector: format!("git-hook:{}", link.name),
-                                            expected: managed::owned(&value)?,
-                                        });
-                                        plan.authorised.insert(path.clone());
-                                        plan.files.insert(path.clone(), value);
-                                    }
-                                } else {
-                                    return Err(InstallError::HooksUnavailable);
-                                }
-                            } else {
-                                add_finding(&mut plan.findings, "legacy_entry", &path)?;
-                            }
-                        } else {
-                            plan.authorised.insert(path.clone());
-                            plan.removals.insert(path);
-                        }
-                    }
-                    Some(snapshot) => {
-                        if targets.hooks && link.retained {
-                            let spec = targets
-                                .hook_specs
-                                .iter()
-                                .find(|spec| spec.harness.is_none() && spec.event == link.name)
-                                .ok_or(InstallError::HooksUnavailable)?;
-                            let desired = Value::File {
-                                bytes: format!(
-                                    "#!/bin/sh\nexec {} \"$@\"\n",
-                                    crate::hooks::command(spec, targets)?
-                                )
-                                .into_bytes(),
-                                mode: 0o755,
-                            };
-                            if snapshot.value == desired {
-                                plan.owned.push(OwnedEntry {
-                                    path: AbsolutePath::new(&path)?,
-                                    harness: None,
-                                    selector: format!("git-hook:{}", link.name),
-                                    expected: managed::owned(&desired)?,
-                                });
-                            } else {
-                                add_finding(&mut plan.findings, "legacy_hook_conflict", &path)?;
-                            }
-                        } else {
-                            add_finding(&mut plan.findings, "legacy_hook_conflict", &path)?;
-                        }
-                    }
-                    None => {}
-                }
-                continue;
-            }
-            if let Some(Snapshot {
-                value: Value::Link(actual),
-                ..
-            }) = snap
-                && managed::same_link_target(&actual, &link.target)
-            {
-                plan.authorised.insert(path.clone());
-                if !link.retained {
-                    plan.removals.insert(path);
-                } else {
-                    let replacement = match link.area {
-                        LegacyArea::Skills if link.name.is_empty() => {
-                            // Replace the link itself with a managed directory.
-                            if !release.files.keys().any(|p| {
-                                (p.starts_with("skills") || p.starts_with("library"))
-                                    && p.ends_with("SKILL.md")
-                            }) {
-                                return Err(InstallError::Manifest(
-                                    "missing legacy replacement asset",
-                                ));
-                            }
-                            plan.removals.insert(path);
-                            None
-                        }
-                        LegacyArea::Skills => {
-                            let skill = Path::new("skills").join(&link.name).join("SKILL.md");
-                            let library = Path::new("library").join(&link.name).join("SKILL.md");
-                            if release.files.contains_key(&skill) {
-                                Some(skill)
-                            } else {
-                                Some(library)
-                            }
-                        }
-                        LegacyArea::Instruction
-                        | LegacyArea::GlobalInstruction
-                        | LegacyArea::Companion => link.replacement_asset.clone(),
-                        _ => return Err(InstallError::Manifest("unsupported legacy replacement")),
-                    };
-                    if replacement.is_some_and(|asset| !release.files.contains_key(&asset)) {
-                        return Err(InstallError::Manifest("missing legacy replacement asset"));
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn check_legacy(
-    receipt: &InstallReceipt,
-    legacy: &provenant_records::LegacyInstall,
-    findings: &mut Vec<managed::InstallFinding>,
-    evidence: &mut crate::inspection::InspectionEvidence,
-    fs: &dyn SafeFs,
-) -> Result<(), InstallError> {
-    if legacy.manifest_digest != crate::legacy::manifest_digest() {
-        return Err(InstallError::Manifest("legacy manifest digest differs"));
-    }
-    let home = legacy.home.to_path_buf()?;
-    let checkout = legacy.checkout.to_path_buf()?;
-    for resolved in &receipt.harness_targets {
-        let target = managed::HarnessTarget {
-            harness: resolved.harness,
-            skills_dir: resolved.skills_dir.to_path_buf()?,
-            instruction: resolved
-                .instruction
-                .as_ref()
-                .map(AbsolutePath::to_path_buf)
-                .transpose()?,
-            mcp_file: resolved.mcp_file.to_path_buf()?,
-            hook_file: resolved
-                .hook_file
-                .as_ref()
-                .map(AbsolutePath::to_path_buf)
-                .transpose()?,
-        };
-        let mut blocked = Vec::new();
-        let links = crate::legacy::legacy_links(&home, &checkout, &target)?;
-        for link in &links {
-            use crate::legacy::LegacyArea;
-            if matches!(
-                link.area,
-                LegacyArea::GitHook | LegacyArea::OpenCodeInstruction
-            ) {
-                continue;
-            }
-            let Some(path) = legacy_destination(&target, link, None) else {
-                continue;
-            };
-            if blocked
-                .iter()
-                .any(|p: &PathBuf| path != *p && path.starts_with(p))
-            {
-                continue;
-            }
-            let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
-            if let Some(Snapshot {
-                value: Value::Link(actual),
-                ..
-            }) = current
-            {
-                if link.name.is_empty() {
-                    blocked.push(path.clone());
-                }
-                if managed::same_link_target(&actual, &link.target) {
-                    add_finding(findings, "legacy_entry", &path)?;
-                }
-            }
-        }
-        let config = managed::snapshot_inspected(&target.mcp_file, fs, Some(evidence))?;
-        if config.is_some() {
-            let (bytes, _) = file_for(&config, &target.mcp_file, target.harness)?;
-            let old_mcp = get_for(&bytes, selector(target.harness), target.harness)?
-                .is_some_and(|v| crate::legacy::mcp_matches(&v, target.harness, &home));
-            let old_array = if target.harness == Harness::Opencode {
-                crate::splice::get(&bytes, &["instructions"])?
-                    .and_then(|v| v.as_array().cloned())
-                    .is_some_and(|array| {
-                        array.iter().any(|value| {
-                            links.iter().any(|link| {
-                                link.area == crate::legacy::LegacyArea::OpenCodeInstruction
-                                    && value.as_str() == link.target.to_str()
-                            })
-                        })
-                    })
-            } else {
-                false
-            };
-            if old_mcp || old_array {
-                add_finding(findings, "legacy_entry", &target.mcp_file)?;
-            }
-        }
-        for path in target.hook_file.iter() {
-            let current = managed::snapshot_inspected(path, fs, Some(evidence))?;
-            if current.is_some() {
-                let (bytes, _) = file(&current, path)?;
-                match crate::legacy::clean_hooks_at_home(
-                    &bytes,
-                    target.harness,
-                    &checkout,
-                    Some(&home),
-                ) {
-                    Ok((new, _, unresolved)) if new != bytes || !unresolved.is_empty() => {
-                        add_finding(findings, "legacy_entry", path)?;
-                    }
-                    Ok(_) => {}
-                    Err(InstallError::LegacyUnresolved(_)) => {
-                        add_finding(findings, "legacy_entry", path)?;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-    }
-    if let Some(directory) = &legacy.git_hooks_dir {
-        let directory = directory.to_path_buf()?;
-        managed::normal_absolute(&directory)?;
-        for link in crate::legacy::git_hook_links(&checkout)? {
-            let path = directory.join(&link.name);
-            let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
-            match current {
-                Some(Snapshot {
-                    value: Value::Link(actual),
-                    ..
-                }) if managed::same_link_target(&actual, &link.target) => {
-                    add_finding(findings, "legacy_entry", &path)?;
-                }
-                Some(current)
-                    if !legacy.relinquished_hooks.contains(&link.name)
-                        && !receipt.entries.iter().any(|entry| {
-                            entry.path.to_path_buf().is_ok_and(|p| p == path)
-                                && managed::matches_owned(&current.value, &entry.expected)
-                        }) =>
-                {
-                    add_finding(findings, "legacy_hook_conflict", &path)?;
-                }
-                _ => {}
-            }
-        }
-    }
-    let path = home.join(".agents/AGENTS.md");
-    let current = managed::snapshot_inspected(&path, fs, Some(evidence))?;
-    if matches!(&current,Some(Snapshot{value:Value::Link(link),..}) if managed::same_link_target(link, &checkout.join("AGENTS.md")))
-    {
-        add_finding(findings, "legacy_entry", &path)?;
-    }
-    if let Some(Snapshot {
-        value: Value::File { bytes, .. },
-        ..
-    }) = current
-        && bytes
-            .windows(b"AGENT_FABRIC_LABEL".len())
-            .any(|s| s == b"AGENT_FABRIC_LABEL")
-    {
-        add_finding(findings, "legacy_instruction_variable", &path)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{rewrite_legacy_variable_lines, set_with_limits};
-    use crate::managed::SelectorChange;
+    use super::set_with_limits;
     use provenant_records::Limits;
     use serde_json::json;
 
@@ -1451,30 +890,5 @@ mod tests {
         assert!(removed.contains("[mcp_servers.other]"));
         assert!(!removed.contains("[mcp_servers.fabric"));
         assert!(!removed.contains("[mcp_servers]"));
-    }
-
-    #[test]
-    fn instruction_preview_records_each_changed_line_exactly() {
-        let before = "first AGENT_FABRIC_LABEL\r\nAGENT_FABRIC_LABEL and again\nunchanged";
-        let (after, changes) = rewrite_legacy_variable_lines(before);
-        assert_eq!(
-            after,
-            "first PROVENANT_AGENT_LABEL\r\nPROVENANT_AGENT_LABEL and again\nunchanged"
-        );
-        assert_eq!(
-            changes,
-            vec![
-                SelectorChange {
-                    selector: "line 1".into(),
-                    before: Some(json!("first AGENT_FABRIC_LABEL\r\n")),
-                    after: Some(json!("first PROVENANT_AGENT_LABEL\r\n")),
-                },
-                SelectorChange {
-                    selector: "line 2".into(),
-                    before: Some(json!("AGENT_FABRIC_LABEL and again\n")),
-                    after: Some(json!("PROVENANT_AGENT_LABEL and again\n")),
-                },
-            ]
-        );
     }
 }
