@@ -2,7 +2,7 @@
 //!
 //! Compiled only with the `snapshot` feature, on any platform. It renders what
 //! `compile_sbpl` would for a plan and profile, without anchoring or reading
-//! the filesystem, and gathers grants through the same `extend_read_grants`.
+//! the filesystem, and gathers grants through the same `GrantSet::build`.
 //! On macOS it also compiles against held anchors without the sandbox probe.
 
 use super::*;

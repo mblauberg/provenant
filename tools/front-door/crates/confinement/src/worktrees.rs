@@ -1999,7 +1999,7 @@ pub fn remove(
     drop(repository);
     for removed in detached {
         if let Some(cache) = removed.lane_cache.as_deref()
-            && let Err(error) = crate::permissions::prune_worktree_cargo_cache(context.home, cache)
+            && let Err(error) = crate::cache::prune_worktree_cargo_cache(context.home, cache)
         {
             warn_cache_removal(&error);
         }
