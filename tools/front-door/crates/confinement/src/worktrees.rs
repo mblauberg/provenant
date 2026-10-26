@@ -643,7 +643,9 @@ fn canonical_worktree_paths(
 ) -> Result<Vec<(PathBuf, &GitWorktree)>, WorktreeError> {
     entries
         .iter()
-        .filter(|entry| !entry.bare)
+        // A prunable registration names a path that Git has already observed
+        // as missing. It has no canonical filesystem path to protect here.
+        .filter(|entry| !entry.bare && !entry.prunable)
         .map(|entry| Ok((canonicalize(&entry.path)?, entry)))
         .collect()
 }
@@ -2630,6 +2632,37 @@ mod lifecycle_tests {
         )?;
 
         assert_eq!(created.head, base);
+        Ok(())
+    }
+
+    #[test]
+    fn create_skips_prunable_worktree_registrations() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let stale = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::remove_dir_all(&stale.path)?;
+        let listing = fixture.run(&["worktree", "list", "--porcelain"])?;
+        assert!(String::from_utf8_lossy(&listing.stdout.bytes).contains("prunable"));
+
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/after-prunable".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+
+        assert!(created.path.is_dir());
+        assert!(!stale.path.exists());
         Ok(())
     }
 
