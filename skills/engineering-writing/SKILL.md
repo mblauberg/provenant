@@ -46,6 +46,9 @@ thesis AI tells stay with the hub's academic prose reference.
    under human-facing final polish in the advisory model dossier. Never
    required; the chair owns substance, so diff the return for changed facts.
 
+When updating a living doc, edit or delete the stale text instead of
+appending dated entries; see the engineering-docs binding rules.
+
 Preserve technical meaning and evidence altitude. Distinguish observation from
 interpretation; attach numbers to comparatives. Verify every package, API,
 version, flag and URL against code or documentation, otherwise mark
