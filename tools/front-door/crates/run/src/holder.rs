@@ -328,7 +328,11 @@ impl RunStore {
             && let Some(route) = &record.applied_route
             && let Some(note) = providers.failure_diagnostic(
                 route,
-                &read_sealed(attempt, "stderr.log", CAPTURE_LIMIT)?.unwrap_or_default(),
+                // A diagnostic is best effort: an unreadable stderr must not stop sealing.
+                &read_sealed(attempt, "stderr.log", CAPTURE_LIMIT)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
             )
         {
             if !decoded.result.is_empty() {
