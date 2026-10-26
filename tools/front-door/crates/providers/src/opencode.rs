@@ -67,9 +67,30 @@ fn prepare(
         Access::ReadOnly => "deny",
         Access::WorktreeWrite => "allow",
     };
-    let config = format!(
-        r#"{{"autoupdate":false,"share":"disabled","mcp":{{}},"plugin":[],"permission":{{"edit":"{edit}","bash":"{edit}","webfetch":"deny"}}}}"#
+    // Scratch is outside the workspace; headless runs cannot answer the
+    // external-directory prompt. Keep the exception inside its existing grant.
+    // https://opencode.ai/docs/permissions/#external-directories
+    let scratch = format!(
+        "{}/**",
+        plan.scratch
+            .path
+            .to_str()
+            .ok_or(ProviderError::InvalidPath)?
     );
+    let config = serde_json::json!({
+        "autoupdate": false,
+        "share": "disabled",
+        "mcp": {},
+        "plugin": [],
+        "permission": {
+            "edit": edit,
+            "bash": edit,
+            "webfetch": "deny",
+            "external_directory": {scratch.clone(): "allow"},
+            "read": {scratch: "allow"},
+        },
+    })
+    .to_string();
     let package = package_root(input.executable)?;
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     let xdg = |key, fallback| {
