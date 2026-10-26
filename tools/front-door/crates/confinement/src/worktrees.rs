@@ -51,6 +51,8 @@ pub enum WorktreeError {
     NotFound,
     #[error("base {base} did not resolve to a commit")]
     BaseNotFound { base: String },
+    #[error("worktree registration is stale; git worktree prune clears it")]
+    StaleRegistration,
     #[error("worktree is dirty")]
     Dirty,
     #[error("worktree has an in-progress Git operation")]
@@ -1494,7 +1496,7 @@ fn matching_worktree<'a>(
     let mut found = None;
     for entry in entries
         .iter()
-        .filter(|entry| entry.branch.as_ref() == Some(branch))
+        .filter(|entry| !entry.prunable && entry.branch.as_ref() == Some(branch))
     {
         let path = canonicalize(&entry.path)?;
         if path == repo_root {
@@ -1516,7 +1518,7 @@ fn checked_out_elsewhere(
     let allowed = allowed_path.map(canonicalize).transpose()?;
     for entry in entries
         .iter()
-        .filter(|entry| entry.branch.as_ref() == Some(branch))
+        .filter(|entry| !entry.prunable && entry.branch.as_ref() == Some(branch))
     {
         if allowed.is_none() {
             return Ok(true);
@@ -1677,7 +1679,19 @@ fn named_worktree<'a>(
             _ => found = Some(entry),
         }
     }
-    found.ok_or(WorktreeError::NotFound)
+    if let Some(entry) = found {
+        return Ok(entry);
+    }
+    if entries.iter().any(|entry| {
+        entry.prunable
+            && (branch
+                .as_ref()
+                .is_some_and(|branch| entry.branch.as_ref() == Some(branch))
+                || entry.path.file_name() == Some(OsStr::new(name)))
+    }) {
+        return Err(WorktreeError::StaleRegistration);
+    }
+    Err(WorktreeError::NotFound)
 }
 
 fn pin_branch_ref(
@@ -2792,6 +2806,101 @@ mod lifecycle_tests {
 
         assert!(created.path.is_dir());
         assert!(!stale.path.exists());
+        assert!(
+            read_worktrees(&context, &cancel())?
+                .iter()
+                .any(|entry| entry.path == stale.path && entry.prunable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_reports_stale_registration_by_branch_and_directory() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let stale = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::remove_dir_all(&stale.path)?;
+        for name in ["scratch/stale", "scratch-stale"] {
+            let error = remove(
+                &context,
+                WorktreeRemove::Name {
+                    name: name.to_owned(),
+                    discard: false,
+                    integration: None,
+                },
+                &cancel(),
+            )
+            .expect_err("stale registration must be reported");
+            assert!(
+                error.to_string().contains("registration is stale"),
+                "{error}"
+            );
+            assert!(error.to_string().contains("git worktree prune"), "{error}");
+        }
+        assert!(branch_exists(&fixture, "scratch/stale"));
+        assert!(
+            read_worktrees(&context, &cancel())?
+                .iter()
+                .any(|entry| entry.path == stale.path && entry.prunable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let stale = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        run_in_worktree(
+            &fixture,
+            &stale.path,
+            &["commit", "--allow-empty", "-m", "stale work"],
+        )?;
+        fixture.run(&[
+            "merge",
+            "--no-ff",
+            "scratch/stale",
+            "-m",
+            "merge stale work",
+        ])?;
+        fs::remove_dir_all(&stale.path)?;
+        let entries = read_worktrees(&context, &cancel())?;
+        let branch = GitRefName::branch("scratch/stale")?;
+        assert!(matching_worktree(&entries, &branch, &fixture.root)?.is_none());
+        assert!(!checked_out_elsewhere(&entries, &branch, None)?);
+        assert!(!checked_out_elsewhere(
+            &entries,
+            &branch,
+            Some(&fixture.root)
+        )?);
+        let integration = primary_integration(&context, &cancel())?.0;
+        let result = remove(
+            &context,
+            WorktreeRemove::Merged {
+                integration: integration.as_str().to_owned(),
+                scope: PruneScope::Branches(vec!["scratch/stale".to_owned()]),
+            },
+            &cancel(),
+        )?;
+        assert_eq!(result.pruned_refs, vec!["scratch/stale"]);
+        assert!(result.retained.is_empty());
+        assert!(!branch_exists(&fixture, "scratch/stale"));
         Ok(())
     }
 
