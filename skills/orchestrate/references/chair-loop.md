@@ -29,6 +29,20 @@ landing, a new blocker, a due decision or an owner question still gets one.
 
 Keep a wake short. Anything longer than a few commands goes to a lane.
 
+## Verdicts and delivery hygiene
+
+- A review that returns MERGE with only P3s lands as is; file the P3s as one
+  follow-up issue. Take a fix round first only when a P3 touches deletion,
+  credentials or existing on-disk state.
+- After any lane merges the default branch, diff the branch against it and
+  confirm only in-scope files differ; a merge must not restore deleted files or
+  revert landed edits.
+- Lanes run the fast checks before delivery (spelling, formatting, the
+  dependency allowlist when a crate is added), so CI is not the first to catch
+  them.
+- Before accepting a change that refuses existing state (receipts, stores,
+  config), inspect that state on a real host.
+
 ## Frontier hook
 
 The project declares one command or query that returns ready work not already
