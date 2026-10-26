@@ -232,7 +232,9 @@ impl PreviewReporter {
                 .as_deref()
                 .ok_or_else(|| io::Error::other("missing agent home"))?;
             let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-            if action.path.to_path_buf().ok().as_ref() != Some(&super::peer_agent::plist(&home)) {
+            if action.before.is_some()
+                && action.path.to_path_buf().ok().as_ref() != Some(&super::peer_agent::plist(&home))
+            {
                 return Err(io::Error::other("unexpected agent plist path"));
             }
             stop(&home)?;
@@ -701,6 +703,16 @@ mod tests {
         })?;
         assert_eq!(stops, 1);
         action.path = AbsolutePath::new(&home.join("foreign.plist"))?;
+        reporter.before_remove_with(&action, |cwd| {
+            assert_eq!(cwd, home);
+            stops += 1;
+            Ok(())
+        })?;
+        assert_eq!(stops, 2);
+        action.before = Some(provenant_records::OwnedValue::File {
+            digest: provenant_records::CanonicalV1::file_digest(b"rendered plist\n"),
+            mode: 0o600,
+        });
         assert!(
             reporter
                 .before_remove_with(&action, |_| {
@@ -709,7 +721,7 @@ mod tests {
                 })
                 .is_err()
         );
-        assert_eq!(stops, 1);
+        assert_eq!(stops, 2);
         Ok(())
     }
 }

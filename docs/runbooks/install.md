@@ -131,6 +131,7 @@ it, every recorded target of the harness.
 Removing the last recorded target also boots out the peer LaunchAgent and
 removes its unchanged plist. A modified plist is kept and reported; its
 service is left running. A failed bootout keeps the plist for a retry.
+A missing peer plist is stopped by its service label.
 
 `build.rs` stamps the source and asset digests, and the packaging example
 produces the typed `release.json`. The CLI grammar is described in
