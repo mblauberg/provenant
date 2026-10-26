@@ -111,6 +111,8 @@ fn prepare(
                 // The keyring library reads its token through Apple's `security`.
                 process_executables: vec![exact(input.executable), exact(SECURITY)],
                 allow_process_fork: true,
+                // Its `run_command` tool fails unless it can allocate a PTY.
+                allow_pseudo_tty: true,
                 authentication: vec![AuthenticationProfile {
                     mechanism: "keychain".into(),
                     roots: vec![exact(&keychain)],

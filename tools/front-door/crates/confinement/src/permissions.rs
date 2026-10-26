@@ -136,6 +136,13 @@ const LOCAL_SERVICE_RULES: &str = r##"(allow network-bind (local ip "localhost:*
 (allow network-outbound (remote ip "localhost:*"))
 (allow network-outbound (remote unix-socket (path-regex #"^/private/tmp/\.s\.PGSQL\.[0-9]+$")))
 "##;
+/// `openpty` through the multiplexer. The kernel issues the pty extension only
+/// for a terminal this sandbox allocates, so the user's own `ttys` stay denied.
+#[cfg(target_os = "macos")]
+const PSEUDO_TTY_RULES: &str = r##"(allow pseudo-tty)
+(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+(allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
+"##;
 #[cfg(target_os = "macos")]
 const PROFILE_LIMIT: usize = 64 * 1024;
 #[cfg(target_os = "macos")]
@@ -271,6 +278,9 @@ pub struct ProviderProfileSpec {
     pub allow_process_fork: bool,
     /// Deny keychain IPC and its CLI even when a tool can execute system programs.
     pub deny_keychain_access: bool,
+    /// The CLI runs its tools' commands on a pseudo-terminal: open `/dev/ptmx`
+    /// and only the terminals this sandbox allocates, never another `ttys`.
+    pub allow_pseudo_tty: bool,
     pub runtime_reads: Vec<PathGrant>,
     /// Literal directory discovery; never the contents of provider config.
     pub discovery_reads: Vec<PathGrant>,
@@ -2426,6 +2436,9 @@ fn render_profile(
     }
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
+    }
+    if profile.spec.allow_pseudo_tty {
+        source.push_str(PSEUDO_TTY_RULES);
     }
     if profile.spec.deny_keychain_access {
         source.push_str(concat!(
@@ -4858,9 +4871,11 @@ mod tests {
         assert!(rendered.contains("(allow process-exec (literal \"/usr/bin/true\"))"));
         assert!(rendered.contains("(allow process-fork)"));
         assert!(!rendered.contains("localhost"));
+        assert!(!rendered.contains("pseudo-tty") && !rendered.contains("/dev/ttys"));
 
         spec.allow_process_fork = false;
         spec.loopback_server = true;
+        spec.allow_pseudo_tty = true;
         let profile = ProviderProfile {
             spec,
             observations: BTreeMap::new(),
@@ -4875,6 +4890,13 @@ mod tests {
         assert!(rendered.contains("(allow network-bind (local ip \"localhost:*\"))"));
         assert!(rendered.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
         assert!(!rendered.contains("\"*:*\""));
+        // A pseudo-terminal opens the multiplexer and only its own allocations.
+        assert!(rendered.contains("(allow pseudo-tty)"));
+        assert!(rendered.contains("(literal \"/dev/ptmx\")"));
+        assert!(rendered.contains(
+            "(require-all (regex #\"^/dev/ttys[0-9]+$\") (extension \"com.apple.sandbox.pty\"))"
+        ));
+        assert!(!rendered.contains("(subpath \"/dev\")"));
     }
 
     #[cfg(target_os = "macos")]
