@@ -1968,6 +1968,27 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
 }
 
 #[test]
+fn mcp_submission_stamps_the_local_host_on_its_trace() -> Result {
+    let rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let (_, attempt) = submitted_policy(
+        &rig,
+        "trace-host",
+        None,
+        &[],
+        json!({"route":"senior","task_class":"mechanical"}),
+    )?;
+    assert_eq!(attempt["trace"]["host"], identity["data"]["host"]);
+    assert_eq!(attempt["trace"]["attempt"], attempt["attempt_id"]);
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn submission_does_not_advertise_unsupported_inputs() -> Result {
     let rig = TestRig::new()?;
     let replies = mcp(
