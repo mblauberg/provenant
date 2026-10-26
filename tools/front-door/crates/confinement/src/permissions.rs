@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::repo::{GitRefName, VerifiedWorktree};
-use crate::worktrees::WorkerState;
+use crate::worktrees::{WorkerState, WriterState};
 pub use provenant_records::run::{NetworkAccess, PathScope, WriteSource};
 
 const MAX_PATH_BYTES: usize = 4096;
@@ -394,8 +394,9 @@ pub struct CacheGcPolicy {
     pub dry_run: bool,
     /// Canonical worktrees listed by the selected project.
     pub project_owners: BTreeSet<PathBuf>,
-    /// Canonical owner worktrees with a live or unobservable writer; never removed.
-    pub protected_owners: std::collections::BTreeSet<PathBuf>,
+    /// Listing observations for canonical owners with live or unknown writers;
+    /// never removed or re-probed during the sweep.
+    pub protected_owners: BTreeMap<PathBuf, WriterState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -640,12 +641,12 @@ fn prune_worktree_cache(
             return Ok(());
         };
         let Some(reason) = cache_gc_reason(cache.as_ref(), Path::new(name), owner, policy)? else {
-            if policy.protected_owners.contains(&owner.path) {
+            if let Some(state) = policy.protected_owners.get(&owner.path) {
                 report.kept.push(CacheGcEntry {
                     path: cache_root.join(name),
                     bytes: 0,
-                    reason: match writer_guard(&owner.path) {
-                        Err(WorkerState::Live) => CacheGcReason::Live,
+                    reason: match state {
+                        WriterState::Live => CacheGcReason::Live,
                         _ => CacheGcReason::Unobservable,
                     },
                 });
@@ -950,7 +951,7 @@ pub(crate) fn cache_gc_reason_with_newest(
 
     let reason = match std::fs::symlink_metadata(&owner.path) {
         Ok(_) if !policy.project_owners.contains(&owner.path) => CacheGcReason::Foreign,
-        Ok(_) if policy.protected_owners.contains(&owner.path) => return Ok(None),
+        Ok(_) if policy.protected_owners.contains_key(&owner.path) => return Ok(None),
         Ok(metadata) if owner.identity == Some((metadata.dev(), metadata.ino())) => {
             let Some(threshold) = policy.idle_before_ns else {
                 return Ok(None);
@@ -5415,6 +5416,40 @@ mod tests {
         }
 
         #[test]
+        fn gc_reports_protected_owner_without_probing_writer()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let owner = home.join("owner");
+            std::fs::create_dir(&owner)?;
+            let path = cache(home, &"a".repeat(64), &owner)?;
+            for (state, reason) in [
+                (WriterState::Live, CacheGcReason::Live),
+                (WriterState::Unknown, CacheGcReason::Unobservable),
+            ] {
+                for dry_run in [true, false] {
+                    let policy = CacheGcPolicy {
+                        idle_before_ns: Some(i128::MAX),
+                        dry_run,
+                        project_owners: [owner.clone()].into(),
+                        protected_owners: [(owner.clone(), state)].into(),
+                    };
+                    let mut probes = 0;
+                    let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, |_| {
+                        probes += 1;
+                        Err(WorkerState::Unknown)
+                    })?;
+                    assert_eq!(probes, 0, "the listing already protects this owner");
+                    assert!(report.removed.is_empty());
+                    assert_eq!(report.kept.len(), 1);
+                    assert_eq!(report.kept[0].reason, reason);
+                    assert!(path.join("artifact").is_file());
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
         fn gc_idle_refuses_writers_that_became_live_or_unobservable()
         -> Result<(), Box<dyn std::error::Error>> {
             for live in [true, false] {
@@ -6027,7 +6062,7 @@ mod tests {
             idle_before_ns: Some(i128::MAX),
             dry_run: true,
             project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
-            protected_owners: [caches[2].1.clone()].into(),
+            protected_owners: [(caches[2].1.clone(), WriterState::Live)].into(),
         };
 
         let dry = gc_worktree_cargo_caches_with_writer_guard(home, &policy, &mut writer_guard)?;

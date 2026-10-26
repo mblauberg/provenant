@@ -386,7 +386,9 @@ mod tests {
             classify_lane_cache(&directory, relative, &policy, 100)?.0,
             "live"
         );
-        policy.protected_owners.insert(owner.clone());
+        policy
+            .protected_owners
+            .insert(owner.clone(), crate::worktrees::WriterState::Live);
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
             "live"

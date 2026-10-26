@@ -1161,6 +1161,23 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
             _ => None,
         };
         make_idle(&cache)?;
+        let listed = ok(&rig, &["worktree", "list", "--json"])?;
+        let listed_writer = listed["data"]
+            .as_array()
+            .ok_or("worktrees")?
+            .iter()
+            .find(|info| info["branch"] == "refs/heads/idle")
+            .ok_or("idle worktree")?["writer"]
+            .as_str()
+            .ok_or("writer state")?;
+        assert_eq!(
+            listed_writer,
+            match writer {
+                "live" => "live",
+                "free" => "free",
+                _ => "unknown",
+            }
+        );
         for dry_run in [true, false] {
             let mut args = vec!["gc", "--idle-days", "1", "--json"];
             if dry_run {
@@ -1179,7 +1196,9 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
                 );
                 assert_eq!(
                     result["data"]["kept"][0]["reason"],
-                    if writer.starts_with("live") {
+                    // A reservation makes the listing unknown even when the
+                    // kernel lock is held; GC preserves that observation.
+                    if writer == "live" {
                         "live"
                     } else {
                         "unobservable"

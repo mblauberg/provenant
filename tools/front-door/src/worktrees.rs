@@ -275,7 +275,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         let protected_owners = listed
             .iter()
             .filter(|info| info.writer != WriterState::Free)
-            .map(|info| info.path.clone())
+            .map(|info| (info.path.clone(), info.writer))
             .collect();
         let now_ns = SystemClock
             .wall_now()
