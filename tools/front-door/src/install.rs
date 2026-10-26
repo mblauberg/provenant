@@ -646,7 +646,6 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
     };
     let state = targets.roots.state.as_path().to_path_buf();
     let home = targets.home.clone();
-    targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
     if let Err(error) = prepare_agents(&mut targets) {
         return edge_error("install", error, globals);
     }

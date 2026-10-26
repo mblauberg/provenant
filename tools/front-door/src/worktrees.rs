@@ -36,8 +36,11 @@ pub(crate) enum Error {
     Worktree(#[from] WorktreeError),
     #[error(transparent)]
     Permissions(#[from] provenant_confinement::permissions::PermissionError),
-    #[error(transparent)]
-    CacheGc(#[from] provenant_confinement::permissions::CacheGcError),
+    #[error("{0}")]
+    CacheGc(
+        provenant_confinement::permissions::CacheGcError,
+        Vec<PathBuf>,
+    ),
     #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
     #[error(transparent)]
@@ -192,7 +195,7 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
                 command.dry_run,
             )
         }
-        Err(Error::CacheGc(error)) => {
+        Err(Error::CacheGc(error, unobserved_projects)) => {
             let human = gc_summary(&error.report);
             let message = format!("{error}\n{human}");
             let mut result = CommandResult::new(
@@ -201,7 +204,7 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
                 GcData {
                     report: error.report,
                     idle_days: command.idle_days,
-                    unobserved_projects: Vec::new(),
+                    unobserved_projects,
                 },
             );
             result.error = Some(provenant_records::CommandError {
@@ -349,7 +352,7 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             .collect(),
         project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
     };
-    let report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
+    let report = match gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
         for project in &projects {
             if let Some(lane) = project.lanes.iter().find(|lane| lane.path == path) {
                 return worktrees::cache_writer_guard(
@@ -361,7 +364,10 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             }
         }
         Err(WorkerState::Unknown)
-    })?;
+    }) {
+        Ok(report) => report,
+        Err(error) => return Err(Error::CacheGc(error, unobserved_projects)),
+    };
     Ok(GcData {
         report,
         idle_days: command.idle_days,

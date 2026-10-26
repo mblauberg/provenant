@@ -74,6 +74,8 @@ unchanged receipt-owned plist. `gc.idle_days` accepts 1 to 3650 (default 7).
 collection until available disk space reaches that size, after the usual
 orphaned, tombstoned and idle pass. Sizes are whole binary units: `B`, `K`,
 `M`, `G`, `T`, or `KiB` through `TiB`; plain numbers mean GiB.
+On APFS, local snapshots can keep deletions from increasing available space, so
+a floor may remove every eligible cache on each run.
 Rerun `install` after changing the idle threshold or floor to update the
 agent's arguments. Edit these keys in `config.toml`; they are separate from
 the harness knob registry.
