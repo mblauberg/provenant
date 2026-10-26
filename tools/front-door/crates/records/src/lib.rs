@@ -1,6 +1,8 @@
 //! Bounded record codecs, canonical digest bytes, and shared serialized facts.
 #![forbid(unsafe_code)]
 
+mod adapters;
+pub use adapters::{ADAPTER_SPECS, AdapterSpec, QuotaProbeKind};
 mod artifact_ref;
 mod attempt_fact;
 mod canonical;

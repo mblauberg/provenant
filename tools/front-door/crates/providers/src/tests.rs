@@ -697,6 +697,13 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
 fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn std::error::Error>> {
     let ids: std::collections::BTreeSet<_> = REGISTRY.iter().map(|r| r.adapter.id()).collect();
     assert_eq!(ids.len(), REGISTRY.len(), "duplicate adapter id");
+    assert_eq!(
+        ids,
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.name)
+            .collect()
+    );
     for entry in REGISTRY {
         if let Some(source) = entry.quota_source {
             assert_eq!(source.adapter_id(), entry.adapter.id());

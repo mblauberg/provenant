@@ -278,7 +278,8 @@ impl QuotaEffects for LiveQuota {
             .ok_or(ProbeFailure::Auth)?;
         let deadline = plan.input.deadline_unix_seconds;
         let check_identity = || {
-            if matches!(account.scope.adapter.as_str(), "codex" | "cursor")
+            if provenant_records::AdapterSpec::get(&account.scope.adapter)
+                .is_some_and(|spec| spec.quota_identity_check)
                 && signin_key(&account.scope.adapter, &account.identity_dir)
                     .as_deref()
                     .unwrap_or("unknown")

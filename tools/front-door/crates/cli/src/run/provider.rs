@@ -6,6 +6,7 @@ use provenant_confinement::permissions::{
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
+use provenant_records::{ADAPTER_SPECS, AdapterSpec};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use provenant_supervisor::fs::{
@@ -109,10 +110,15 @@ fn prepare_with(
         &crate::domains::SECTIONS,
     )
     .map_err(|e| e.to_string())?;
+    let request = route_request(task)?;
+    let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
+    let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
+        .map_err(|e| e.to_string())?;
+    let eligible = |name: &str| eligible.iter().any(|spec| spec.name == name);
     let settings = config.domains.accounts;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
-    if !entries.iter().any(|e| e.adapter == "codex") {
+    if eligible("codex") && !entries.iter().any(|e| e.adapter == "codex") {
         let directory = registry
             .host
             .and_then(|host| host.codex_home.clone())
@@ -148,7 +154,12 @@ fn prepare_with(
         }
     }
     // These adapters use the CLI's existing local login and configuration.
-    for adapter in ["opencode", "cursor", "agy"] {
+    let mut local: Vec<_> = ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.local_discovery_order.is_some() && eligible(spec.name))
+        .collect();
+    local.sort_by_key(|spec| spec.local_discovery_order);
+    for adapter in local.into_iter().map(|spec| spec.name) {
         if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
@@ -168,7 +179,6 @@ fn prepare_with(
         }
     }
     let timestamp = jiff::Timestamp::now().as_second();
-    let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let probe = Probe {
@@ -178,7 +188,7 @@ fn prepare_with(
         user: &user,
         scratch: &paths.scratch,
     };
-    for entry in &entries {
+    for entry in entries.iter().filter(|entry| eligible(&entry.adapter)) {
         match locate(&entry.adapter).and_then(|executable| {
             observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
         }) {
@@ -192,7 +202,11 @@ fn prepare_with(
     }
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
-    for adapter in REGISTRY.iter().map(|entry| entry.adapter.id()) {
+    for adapter in REGISTRY
+        .iter()
+        .map(|entry| entry.adapter.id())
+        .filter(|adapter| eligible(adapter))
+    {
         // Repository-bound read-only grants are checked per candidate below.
         if confinement_request(
             project_id,
@@ -254,7 +268,7 @@ fn prepare_with(
         .map_err(|e| e.to_string())?
         .to_string();
     let resolved = crate::route::resolve_dispatch(
-        &route_request(task)?,
+        &request,
         roots,
         selected,
         (paths.operation_id.as_str(), paths.task_index),
@@ -284,7 +298,9 @@ fn prepare_with(
             .iter()
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
         let account = match entry
-            .filter(|entry| matches!(entry.adapter.as_str(), "claude" | "codex"))
+            .filter(|entry| {
+                AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.registered_account)
+            })
             .map(|entry| entry.registered())
             .transpose()
         {
@@ -294,7 +310,9 @@ fn prepare_with(
                 continue;
             }
         };
-        if matches!(adapter.id(), "codex" | "claude") && account.is_none() {
+        if AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.registered_account)
+            && account.is_none()
+        {
             reasons.push(skip(
                 &label,
                 SkipKind::Account,
@@ -596,7 +614,7 @@ fn continuation_for(
     match find_session_state(&prior_state, session) {
         Ok(Some(retained)) => copy_state(&retained, private_state)?,
         // These adapters retain sessions in their existing user data stores.
-        Ok(None) if matches!(route.adapter.as_str(), "claude" | "cursor" | "opencode") => {}
+        Ok(None) if AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.user_sessions) => {}
         Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),
         // An unfinished search proves nothing missing, whatever the adapter.
         Err(SearchExhausted) => {
@@ -1047,20 +1065,21 @@ fn observe_account(
             entry.adapter, entry.label
         ));
     }
-    let (detected, org) = if !matches!(entry.adapter.as_str(), "claude" | "codex") {
-        (entry.key.clone(), None)
-    } else {
-        provenant_providers::accounts::detect_with_org(
-            executor,
-            &entry.adapter,
-            executable,
-            home,
-            user,
-            &directory,
-            executor.root(),
-        )
-        .map_err(|error| detect_failure(entry, &error))?
-    };
+    let (detected, org) =
+        if !AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.registered_account) {
+            (entry.key.clone(), None)
+        } else {
+            provenant_providers::accounts::detect_with_org(
+                executor,
+                &entry.adapter,
+                executable,
+                home,
+                user,
+                &directory,
+                executor.root(),
+            )
+            .map_err(|error| detect_failure(entry, &error))?
+        };
     if detected != entry.key {
         return Err(format!(
             "{} account {} changed identity; re-register it",
@@ -1214,7 +1233,9 @@ fn check_launch_prompt(
         );
     }
     if paths.lane_depth > 1
-        && matches!(adapter, Some("cursor" | "agy"))
+        && adapter
+            .and_then(AdapterSpec::get)
+            .is_some_and(|spec| spec.argv_prompt)
         && Prompt::new(text.to_owned()).check_argv().is_err()
     {
         return Err("invalid input: nested argv launch prompt including the preamble exceeds 64 KiB; route the child to a stdin adapter (claude, codex or opencode), or shorten the prompt".into());
@@ -1230,7 +1251,9 @@ fn launch_prompt(
 ) -> Result<Prompt, String> {
     check_launch_prompt(text, paths, Some(adapter))?;
     let prompt = Prompt::new(text.to_owned());
-    if !matches!(adapter, "cursor" | "agy") || prompt.check_argv().is_ok() {
+    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
+        || prompt.check_argv().is_ok()
+    {
         return Ok(prompt);
     }
     let attempt = paths
@@ -1347,11 +1370,9 @@ fn confinement_request(
                 scope: PathScope::Exact,
             }],
             secret_roots: Vec::new(),
-            selected_authentication: match adapter {
-                "codex" | "cursor" => Some("login".into()),
-                "agy" => Some("keychain".into()),
-                _ => None,
-            },
+            selected_authentication: AdapterSpec::get(adapter)
+                .and_then(|spec| spec.authentication)
+                .map(Into::into),
             include_continuation: false,
             write_roots: write_roots(access, host_writes, writer.is_some()),
             network: access.network(writer.is_some()),
@@ -1447,11 +1468,7 @@ fn read_only_plan(
 }
 
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
-    let name = if name == "cursor" {
-        "cursor-agent"
-    } else {
-        name
-    };
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
     for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
         let candidate = directory.join(name);
@@ -2063,6 +2080,13 @@ mod tests {
             },
             &call,
         )?;
+        std::fs::write(
+            state.join("config.toml"),
+            format!(
+                "schema_version = 1\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
+                home.join(".claude-other").display(),
+            ),
+        )?;
         let full = format!("Durable output instructions\n\n{prompt}");
         let launch = prepare_with(
             &registry,
@@ -2071,11 +2095,8 @@ mod tests {
             &paths,
             None,
             |adapter| {
-                if adapter == "cursor" {
-                    Ok(executable.clone())
-                } else {
-                    Err("unavailable".into())
-                }
+                assert_eq!(adapter, "cursor", "unrelated adapter was probed");
+                Ok(executable.clone())
             },
             None,
         )?;

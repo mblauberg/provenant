@@ -198,6 +198,43 @@ fn effective_pool<'a>(
         .get(name)
         .or_else(|| context.catalogue.pools.get(name))
 }
+/// Providers named by the primary route or pool and its explicit fallbacks.
+/// Discovery must not run commands for unrelated installed providers.
+pub fn probe_adapters(
+    request: &RouteRequest,
+    catalogue: &Catalogue,
+    config: &RoutingConfig,
+) -> Result<Vec<&'static provenant_records::AdapterSpec>, RoutingError> {
+    let mut adapters = BTreeSet::new();
+    match &request.choice {
+        RouteChoice::Model(model) => {
+            adapters.insert(model.adapter());
+        }
+        RouteChoice::NamedRoute(name) => {
+            if let Some(pool) = config
+                .pools
+                .get(name.as_str())
+                .or_else(|| catalogue.pools.get(name.as_str()))
+            {
+                adapters.extend(pool.iter().map(|member| member.model.adapter()));
+            } else {
+                let route = config
+                    .routes
+                    .get(name.as_str())
+                    .ok_or(RoutingError::UnknownRoute)?;
+                adapters.insert(route.model.adapter());
+            }
+        }
+    }
+    if let Fallback::Models(models) = &request.fallback {
+        adapters.extend(models.as_slice().iter().map(ModelId::adapter));
+    }
+    Ok(provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| adapters.contains(spec.name))
+        .collect())
+}
+
 fn effective_pacing(
     catalogue: &Catalogue,
     config: &RoutingConfig,
@@ -215,15 +252,15 @@ fn pacing_policy(catalogue: &Catalogue, config: &RoutingConfig, model: &ModelId)
     if let Some(policy) = config.pacing.get(model.adapter()) {
         return *policy;
     }
-    let key = if model.adapter() == "opencode" {
-        if catalogue.is_free_model(model) {
-            "opencode_free"
-        } else {
-            "opencode_paid"
-        }
-    } else {
-        model.adapter()
-    };
+    let key = provenant_records::AdapterSpec::get(model.adapter())
+        .and_then(|spec| spec.pacing_keys)
+        .map_or(model.adapter(), |(free, paid)| {
+            if catalogue.is_free_model(model) {
+                free
+            } else {
+                paid
+            }
+        });
     catalogue
         .pacing
         .get(key)
