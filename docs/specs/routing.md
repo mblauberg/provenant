@@ -36,10 +36,6 @@ effect.
   bundled TOML row. Config validates policy; registration cannot bypass it.
 - Quota provider pools are measured allowance scopes, not routing pools.
 
-`route list --json` still carries each pool member's
-`readiness` and `factor_basis_points` fields unchanged. These are placeholders
-until probing lands; human output omits them.
-
 ## Contract
 
 ### Route request and resolution
