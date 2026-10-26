@@ -143,6 +143,15 @@ header to `curl --config -` on stdin.
   credentials are never copied between directories (gaps).
 - Owner: `crates/routing/src/`, `crates/providers/src/quota_live.rs`
 
+### Credential reads record authority first
+
+A quota credential read records the actor, the exact credential source, the
+purpose and the expiry before it reads, and retains only the non-secret
+authority reference.
+- Why: a read of a credential must be attributable without keeping the secret.
+- Test: none (gap); `CredentialAuthority` covers lane dispatch only.
+- Owner: `crates/providers/src/quota_live.rs`
+
 ## Quota
 
 ### Unknown is not exhausted; refusals are scoped

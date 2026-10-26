@@ -105,6 +105,15 @@ authority may, and it permits no signal.
   `crates/supervisor/src/custody_tests.rs::reconcile_requires_matching_authority_and_records_before_release`
 - Owner: `crates/supervisor/src/custody/orphans.rs`
 
+### Escalation to the user
+
+Signalling a healthy process, weakened confinement and lost publication
+escalate to the user; no environment guess or uncertain signal compensates.
+- Why: these outcomes cannot be repaired safely by the supervisor alone.
+- Test: none (review gate); the blocking tests in this section stop the
+  signal but do not notify the user.
+- Owner: `crates/supervisor/src/custody/orphans.rs`
+
 ### Durable exit publication
 
 The exit record is published no-replace after the files it references are
@@ -168,6 +177,16 @@ not `timed_out`. Utility execution reserves its reaper slot before spawn.
 - Test: `crates/os/src/capture.rs::oversized_frames_are_counted_and_never_decoded_as_terminal`;
   `crates/os/src/exec/tests.rs::reaper_reserves_before_spawn_and_releases_unused_admission`
 - Owner: `crates/os/src/capture.rs`, `crates/os/src/exec/`
+
+### Real profiles need native recordings
+
+Fake providers cannot certify a real sandbox profile, and a missing native
+recording of the platform, backend and allowed or denied operations blocks
+that profile's support.
+- Why: snapshot equality does not prove confinement behaviour.
+- Test: none (review gate); acceptance evidence is the native recordings under
+  `crates/confinement/tests/fixtures/external`.
+- Owner: `crates/confinement/src/permissions.rs`
 
 ## Permission policy
 

@@ -266,6 +266,13 @@ keychains across hosts; sandbox policy applies on the executing host.
 - Test: none (gap); peer request types carry no credential fields.
 - Owner: `crates/fabric-runtime/src/hosts.rs`
 
+### Peer changes need real-host acceptance
+
+Peer changes need exact-head CI and a chair-run smoke between two real hosts.
+- Why: fake SSH tests do not establish two-host behaviour.
+- Test: none (review gate); the chair's smoke result is the evidence.
+- Owner: the chair
+
 ## Not provided
 
 - Named sessions, teams, mail acknowledgement and a task dependency API.

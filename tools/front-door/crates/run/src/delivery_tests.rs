@@ -349,15 +349,19 @@ fn prepare_refuses_remote_urls_with_embedded_credentials()
         "https://example.invalid/repo.git#hunter2",
     ] {
         fixture.git(&["remote", "set-url", "origin", url])?;
-        let reason = fixture
-            .prepare()
-            .expect_err("credential-bearing URL")
-            .to_string();
-        assert_eq!(
-            reason,
-            "host writer delivery failed at Prepare (remote URL): embedded credentials, query or fragment refused",
+        let error = fixture.prepare().expect_err("credential-bearing URL");
+        assert!(
+            matches!(
+                error,
+                RunError::DeliveryPrepare {
+                    step: "remote URL",
+                    ..
+                }
+            ),
             "{url}"
         );
+        assert!(!format!("{error:?}").contains("hunter2"), "{url}");
+        assert!(!error.to_string().contains("hunter2"), "{url}");
     }
     Ok(())
 }

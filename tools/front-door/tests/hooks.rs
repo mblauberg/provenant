@@ -136,11 +136,20 @@ fn unreadable_guard_config_keeps_the_default_rules_on() -> Result {
     input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
     input["tool_input"]["command"] = "git stash".into();
     fs::create_dir_all(&rig.state)?;
+    // A directory at `config.toml` is a deterministic read failure.
     for config in [
-        "schema_version = 1\n[domains.guard]\ndeny = 'sleep-poll'\n",
-        "schema_version = 1\n[domains.guard\n",
+        Some("schema_version = 1\n[domains.guard]\ndeny = 'sleep-poll'\n"),
+        Some("schema_version = 1\n[domains.guard\n"),
+        None,
     ] {
-        fs::write(rig.state.join("config.toml"), config)?;
+        let path = rig.state.join("config.toml");
+        match config {
+            Some(text) => fs::write(&path, text)?,
+            None => {
+                fs::remove_file(&path)?;
+                fs::create_dir(&path)?;
+            }
+        }
         let output = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
             &["hook", "claude", "pre-tool-use"],
@@ -150,7 +159,7 @@ fn unreadable_guard_config_keeps_the_default_rules_on() -> Result {
         let deny: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(
             deny["hookSpecificOutput"]["permissionDecision"], "deny",
-            "{config}"
+            "{config:?}"
         );
     }
     Ok(())
