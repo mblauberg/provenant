@@ -2,12 +2,9 @@
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Pr};
 use provenant_core::GitOid;
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::ExecOutcome;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
+use provenant_os::exec::{
+    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+};
 use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};

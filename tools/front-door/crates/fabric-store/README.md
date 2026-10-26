@@ -71,7 +71,7 @@ If the filesystem preserves different spellings through canonicalisation, both
 advisory claims can succeed. No case folding is applied: filesystem case and
 Unicode rules vary by volume. Run's writer lock remains the writing authority.
 
-`lock_landing` returns a non-cloneable `LandingGuard` backed by supervisor's safe
+`lock_landing` returns a non-cloneable `LandingGuard` backed by OS crate's safe
 exclusive OS lock in `fabric/locks/`. It binds database directory identity,
 project and fully-qualified branch ref. Validation checks the lock directory's
 identity, not the identity of the locked file; F7 must re-verify that binding.

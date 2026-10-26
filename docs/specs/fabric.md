@@ -44,7 +44,7 @@ federation and the MCP surface. It delegates the rest.
   the typed result and never invents a route receipt. A receipt is copied from
   run exactly as `adapter/model@effort`.
 - **Supervisor and confinement** own process custody, the writer lock, worktrees
-  and safe Git ([supervisor](supervisor.md)). A Fabric work claim is advisory
+  and safe Git ([OS boundary](rust-workspace.md#crate-layering)). A Fabric work claim is advisory
   and never authority to write a worktree.
 - **Config and install** own `config.toml` edits and harness registration.
   `fabric-mcp` owns the registration arguments:

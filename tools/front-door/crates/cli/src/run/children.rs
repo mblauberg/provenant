@@ -1,9 +1,7 @@
 //! The parent guardian's host-side consumer of lane child submissions.
 use super::*;
 use provenant_os::fs::Directory;
-use provenant_supervisor::Holder;
-use provenant_supervisor::custody;
-use provenant_supervisor::machine::StopReason;
+use provenant_supervisor::{Holder, custody, machine::StopReason};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;

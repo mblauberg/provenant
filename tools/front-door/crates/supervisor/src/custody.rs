@@ -2,9 +2,9 @@
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::machine::StopReason;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, RunId, WaitBudget};
-use provenant_os::exec::{CapturedStream, Termination};
-use provenant_os::fs::{
-    Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode,
+use provenant_os::{
+    exec::{CapturedStream, Termination},
+    fs::{Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode},
 };
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};

@@ -4,18 +4,18 @@
 //! overlap is refused before any traversal; every candidate is then scanned
 //! through held `Directory`/`FileHandle` capabilities with strict file and byte
 //! budgets. Secret-pattern matches and incomplete observations refuse.
+use crate::permissions::{PathGrant, PathScope, PermissionError, validate_noncredential_grant};
+use crate::redact::{Redactor, RedactorError};
+use provenant_os::{
+    exec::CaptureFilter,
+    fs::{Directory, FileKind, Metadata},
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::Path;
-
-use provenant_os::exec::CaptureFilter;
-use provenant_os::fs::{Directory, FileKind, Metadata};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use crate::permissions::{PathGrant, PathScope, PermissionError, validate_noncredential_grant};
-use crate::redact::{Redactor, RedactorError};
 
 pub const MAX_DISCLOSURE_FILES: u64 = 10_000;
 pub const MAX_DISCLOSURE_BYTES: u64 = 64 * 1024 * 1024;

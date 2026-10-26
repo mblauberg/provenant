@@ -13,8 +13,7 @@ use provenant_fabric_runtime::{
     hosts::*,
     identity::Identity,
 };
-use provenant_os::clock::SystemClock;
-use provenant_os::exec::SystemExecutor;
+use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},

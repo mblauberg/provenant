@@ -1,6 +1,5 @@
 use super::*;
-use provenant_os::fs::Directory;
-use provenant_os::fs::PublishMode;
+use provenant_os::fs::{Directory, PublishMode};
 use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
 // No Debug/Serialize: an identity can carry an access token only in memory.

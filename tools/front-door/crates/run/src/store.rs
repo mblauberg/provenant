@@ -4,8 +4,7 @@ use crate::{
     *,
 };
 use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime};
-use provenant_os::exec::Termination;
-use provenant_os::fs::LockMode;
+use provenant_os::{exec::Termination, fs::LockMode};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::custody::ExitObservation;
 use rusqlite::{OptionalExtension, params};

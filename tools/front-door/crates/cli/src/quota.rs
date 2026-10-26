@@ -1,12 +1,10 @@
-//! Quota arguments, composition through supervisor's safe filesystem, and render.
+//! Quota arguments, composition through OS crate's safe filesystem, and render.
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
-use provenant_os::clock::SystemClock;
-use provenant_os::fs::Directory;
-use provenant_os::fs::FsError;
-use provenant_os::fs::LockMode;
-use provenant_os::fs::Publication;
-use provenant_os::fs::PublishMode;
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, FsError, LockMode, Publication, PublishMode},
+};
 use provenant_quota::{
     schedule::{self, Detection, QuotaQuery, QuotaTick},
     *,

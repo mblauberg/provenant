@@ -1565,6 +1565,25 @@ impl Drop for FaultInjection {
 thread_local! {
     static ACTIVE_FAULT: std::cell::RefCell<Option<Arc<FaultState>>> = const { std::cell::RefCell::new(None) };
 }
+pub(super) fn filesystem_operation<T>(
+    directory: &Directory,
+    name: &OsStr,
+    bytes: Option<&[u8]>,
+    kind: FilesystemOperation,
+    operation: impl FnOnce() -> TestFsResult<T>,
+) -> TestFsResult<T> {
+    match kind {
+        FilesystemOperation::Open => fault_directory(name)?,
+        FilesystemOperation::Publish => fault_publish(directory, name, bytes.unwrap())?,
+        FilesystemOperation::SyncLink => fault_link_sync(directory, name)?,
+    }
+    let result = operation()?;
+    if matches!(kind, FilesystemOperation::Publish) {
+        fault_after_publish();
+    }
+    Ok(result)
+}
+
 pub(crate) fn fault_directory(name: &OsStr) -> TestFsResult<()> {
     ACTIVE_FAULT.with(|active| {
         if let Some(state) = active.borrow().as_ref() {

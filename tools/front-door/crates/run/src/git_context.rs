@@ -1,12 +1,9 @@
 //! Bounded host-side history for lanes whose tools cannot execute Git.
 use crate::{Result, RunError, artifacts::seal};
-use provenant_os::exec::CapturedStream;
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
-use provenant_os::fs::Directory;
+use provenant_os::{
+    exec::{CapturedStream, ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+    fs::Directory,
+};
 use std::{ffi::OsString, path::Path, time::Duration};
 
 const CONTEXT_LIMIT: usize = 1024 * 1024;

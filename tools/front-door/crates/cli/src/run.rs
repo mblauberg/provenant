@@ -10,8 +10,7 @@ use provenant_core::{
     WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
-use provenant_os::clock::SystemClock;
-use provenant_os::fs::entropy_128;
+use provenant_os::{clock::SystemClock, fs::entropy_128};
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};

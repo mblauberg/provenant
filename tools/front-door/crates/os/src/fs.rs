@@ -28,6 +28,12 @@ pub enum FsError {
         #[source]
         source: io::Error,
     },
+    #[error("filesystem read file failed for {path:?}: {source} ({kind:?})", kind = .source.kind())]
+    ReadIo {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("filesystem rename failed from {from_path:?} to {to_path:?}: {source} ({kind:?})", kind = .source.kind())]
     Rename {
         from_path: PathBuf,
@@ -201,6 +207,7 @@ impl FsError {
     pub fn raw_os_error(&self) -> Option<i32> {
         match self {
             Self::Io { source, .. }
+            | Self::ReadIo { source, .. }
             | Self::Symlink { source, .. }
             | Self::Rename { source, .. } => source.raw_os_error(),
             Self::CrossDevice { .. } => Some(errno::EXDEV),
@@ -249,6 +256,7 @@ impl From<FsError> for io::Error {
     fn from(error: FsError) -> Self {
         match error {
             FsError::Io { source, .. }
+            | FsError::ReadIo { source, .. }
             | FsError::Symlink { source, .. }
             | FsError::Rename { source, .. } => source,
             FsError::CrossDevice { .. } => Self::from_raw_os_error(errno::EXDEV),
@@ -340,7 +348,8 @@ pub struct Metadata {
     pub mode: u32,
 }
 impl Metadata {
-    fn unchanged(&self, other: &Self) -> bool {
+    /// Compare identity and read-relevant metadata, excluding allocated bytes.
+    pub fn unchanged(&self, other: &Self) -> bool {
         self.same_identity(other)
             && self.kind == other.kind
             && self.links == other.links
@@ -1088,7 +1097,10 @@ impl FileHandle {
         (&mut self.file)
             .take(limit.saturating_add(1))
             .read_to_end(&mut bytes)
-            .map_err(error("read file", &self.path))?;
+            .map_err(|source| FsError::ReadIo {
+                path: self.path.clone(),
+                source,
+            })?;
         if bytes.len() as u64 > limit {
             return Err(FsError::TooLarge { limit });
         }

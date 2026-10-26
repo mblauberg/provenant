@@ -2,6 +2,20 @@
 //!
 //! Provider-owned profile data bounds every requested permission.
 //! Linux deliberately exposes an unavailable backend.
+use crate::cache::{CARGO_CACHE_OWNER, CARGO_CACHE_OWNER_PREFIX, verify_cache_metadata};
+use crate::repo::{GitRefName, VerifiedWorktree};
+use provenant_core::CancelToken;
+#[cfg(target_os = "macos")]
+use provenant_os::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
+#[cfg(target_os = "macos")]
+use provenant_os::fs::Metadata;
+use provenant_os::{
+    exec::Executor,
+    fs::{Directory, FileKind, FsError, PublishMode},
+};
+pub use provenant_records::run::{NetworkAccess, PathScope, WriteSource};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -10,22 +24,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
-
-use provenant_core::CancelToken;
-use provenant_os::exec::Executor;
-#[cfg(target_os = "macos")]
-use provenant_os::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
-use provenant_os::fs::Directory;
-#[cfg(target_os = "macos")]
-use provenant_os::fs::Metadata;
-use provenant_os::fs::{FileKind, FsError, PublishMode};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use crate::cache::{CARGO_CACHE_OWNER, CARGO_CACHE_OWNER_PREFIX, verify_cache_metadata};
-use crate::repo::{GitRefName, VerifiedWorktree};
-pub use provenant_records::run::{NetworkAccess, PathScope, WriteSource};
 
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_GRANTS: usize = 128;
@@ -1624,7 +1623,7 @@ fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), Permis
         .metadata()
         .map_err(PermissionError::Filesystem)?;
     root.verify()?;
-    if !crate::stable_read::same_metadata(&identity, &after) || after.kind != FileKind::Directory {
+    if !identity.unchanged(&after) || after.kind != FileKind::Directory {
         return Err(PermissionError::AnchorMismatch);
     }
     Ok(())
@@ -1656,23 +1655,21 @@ fn inspect_writable_directory(
                 .open_verified_directory(&name)
                 .map_err(PermissionError::Filesystem)?;
             let opened = child.metadata().map_err(PermissionError::Filesystem)?;
-            if !crate::stable_read::same_metadata(&before, &opened) {
+            if !before.unchanged(&opened) {
                 return Err(PermissionError::AnchorMismatch);
             }
             inspect_writable_directory(&child, depth + 1, count)?;
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
-            if after.kind != FileKind::Directory
-                || !crate::stable_read::same_metadata(&opened, &after)
-            {
+            if after.kind != FileKind::Directory || !opened.unchanged(&after) {
                 return Err(PermissionError::AnchorMismatch);
             }
         } else {
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
-            if !crate::stable_read::same_metadata(&before, &after) {
+            if !before.unchanged(&after) {
                 return Err(PermissionError::AnchorMismatch);
             }
             if after.kind == FileKind::Regular && after.links != 1 {

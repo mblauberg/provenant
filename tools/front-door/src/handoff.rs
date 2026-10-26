@@ -19,12 +19,10 @@ use provenant_fabric_runtime::{
     },
     hosts::{PeerAction, PeerResult, plain_text},
 };
-use provenant_os::clock::SystemClock;
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
+use provenant_os::{
+    clock::SystemClock,
+    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+};
 use provenant_records::{CommandResult, Outcome};
 use provenant_workflow::session::{HostSessionId, SessionStore};
 use serde::{Deserialize, Serialize};

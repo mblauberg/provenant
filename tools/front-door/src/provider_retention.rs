@@ -1,9 +1,7 @@
 //! GC composition for terminal provider state, including nested run stores.
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, RootInputs, Roots, WaitBudget};
-use provenant_os::clock::SystemClock;
-use provenant_os::fs::Directory;
+use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
-
 use std::{ffi::OsStr, path::Path};
 
 pub(crate) fn collect(

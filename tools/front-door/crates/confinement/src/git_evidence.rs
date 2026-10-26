@@ -4,8 +4,10 @@ use crate::status::{StatusError, StatusKind, parse_index_entries, parse_porcelai
 use crate::utility::{GitRead, UtilityBudget, UtilityError, UtilityRuntime, run_utility};
 use provenant_core::CancelToken;
 use provenant_core::{GitOid, RelativePath};
-use provenant_os::exec::{ExecOutcome, Executor, Termination};
-use provenant_os::fs::{Directory, FsError, Metadata};
+use provenant_os::{
+    exec::{ExecOutcome, Executor, Termination},
+    fs::{Directory, FsError, Metadata},
+};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -472,7 +474,7 @@ pub(crate) fn read_protected_entry(
         return Err(GitEvidenceError::TooLarge);
     }
     let after = parent.metadata_at(&leaf, false)?;
-    if !crate::stable_read::same_metadata(&before, &after) {
+    if !before.unchanged(&after) {
         return Err(GitEvidenceError::ConcurrentChange);
     }
     let fingerprint = fingerprint(path, &bytes, after)?;

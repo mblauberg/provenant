@@ -8,12 +8,11 @@ use provenant_confinement::{
     },
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_os::clock::SystemClock;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::fs::Directory;
-use provenant_os::fs::FileKind;
-use provenant_os::fs::FsError;
-use provenant_os::fs::canonicalize;
+use provenant_os::{
+    clock::SystemClock,
+    exec::SystemExecutor,
+    fs::{Directory, FileKind, FsError, canonicalize},
+};
 use provenant_records::{CommandResult, Outcome};
 use serde::Serialize;
 use std::{

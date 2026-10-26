@@ -6,8 +6,7 @@ use provenant_cli::{
 };
 use provenant_config::{Release, Targets};
 use provenant_core::CancelToken;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::fs;
+use provenant_os::{exec::SystemExecutor, fs};
 use provenant_records::{CommandResult, Outcome};
 use std::{
     io::{self, Write},

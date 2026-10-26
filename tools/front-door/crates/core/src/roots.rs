@@ -1,5 +1,5 @@
 //! Root selection consumes one captured environment/home snapshot. Alias binding
-//! is supplied by supervisor's safe filesystem boundary, never performed here.
+//! is supplied by OS crate's safe filesystem boundary, never performed here.
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;

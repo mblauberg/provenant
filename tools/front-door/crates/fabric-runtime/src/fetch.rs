@@ -185,7 +185,7 @@ fn validate_relative_file(path: &str) -> Result<()> {
 
 /// Verify the complete bounded transfer, then publish it beneath `fetch_root`
 /// as `fetch_root/<host>/<run>`. `fetch_root` must be a private directory
-/// opened through supervisor's safe filesystem API.
+/// opened through OS crate's safe filesystem API.
 pub fn publish_fetch(
     fetch_root: &Directory,
     host: HostId,

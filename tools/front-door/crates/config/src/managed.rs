@@ -1261,17 +1261,21 @@ pub(crate) fn publish(
             bytes,
             mode: permissions,
         } => {
-            #[cfg(test)]
-            crate::managed::tests::fault_publish(&dir, name, bytes)?;
-            durable(dir.atomic_write_with_permissions(
+            durable(filesystem_operation(
+                &dir,
                 name,
-                ".provenant-staging.",
-                bytes,
-                *permissions as u32,
-                mode,
+                Some(bytes),
+                FilesystemOperation::Publish,
+                || {
+                    dir.atomic_write_with_permissions(
+                        name,
+                        ".provenant-staging.",
+                        bytes,
+                        *permissions as u32,
+                        mode,
+                    )
+                },
             )?)?;
-            #[cfg(test)]
-            crate::managed::tests::fault_after_publish();
             Ok(())
         }
         Value::Link(target) => {
@@ -1286,9 +1290,9 @@ pub(crate) fn publish(
                 let _ = dir.unlink(&temporary);
                 return Err(error.into());
             }
-            #[cfg(test)]
-            crate::managed::tests::fault_link_sync(&dir, name)?;
-            dir.sync()?;
+            filesystem_operation(&dir, name, None, FilesystemOperation::SyncLink, || {
+                dir.sync()
+            })?;
             Ok(())
         }
         Value::Other => Err(InstallError::Conflict(path.into())),
@@ -1326,22 +1330,52 @@ pub(crate) fn path_wire(path: &Path) -> Result<PathWire, InstallError> {
         &RelativePath::parse(path).map_err(provenant_records::PathWireError::from)?,
     )?)
 }
+#[derive(Clone, Copy)]
+enum FilesystemOperation {
+    Open,
+    Publish,
+    SyncLink,
+}
+
+// The callback surrounds one OS operation; callers retain the same traversal
+// and publication path when tests inject a failure.
+fn filesystem_operation<T>(
+    directory: &Directory,
+    name: &OsStr,
+    bytes: Option<&[u8]>,
+    kind: FilesystemOperation,
+    operation: impl FnOnce() -> Result<T, FsError>,
+) -> Result<T, FsError> {
+    #[cfg(test)]
+    return tests::filesystem_operation(directory, name, bytes, kind, operation);
+    #[cfg(not(test))]
+    {
+        let _ = (directory, name, bytes, kind);
+        operation()
+    }
+}
+
+pub(crate) fn open_verified_directory(
+    directory: &Directory,
+    name: &OsStr,
+) -> Result<Directory, FsError> {
+    filesystem_operation(directory, name, None, FilesystemOperation::Open, || {
+        directory.open_verified_directory(name)
+    })
+}
+
 pub(crate) fn directory(path: &Path, create: bool) -> Result<Directory, InstallError> {
     normal_absolute(path)?;
-    #[cfg(test)]
-    tests::fault_directory(OsStr::new(""))?;
     // Bootstrap absolute destinations without following any path component.
     // A selected path may have mount ancestors (e.g. a separately mounted
     // HOME or temporary release root). Re-anchor only a held, identity-checked
     // no-follow mount handle; never reopen an absolute path through aliases.
-    let mut dir = provenant_os::fs::Directory::root(true)?;
+    let mut dir = Directory::root(true)?;
     for component in path.components() {
         let Component::Normal(name) = component else {
             continue;
         };
-        #[cfg(test)]
-        crate::managed::tests::fault_directory(name)?;
-        dir = match dir.open_verified_directory(name) {
+        dir = match open_verified_directory(&dir, name) {
             Ok(next) => next,
             Err(error) if error.is_cross_device() => {
                 let before = dir.metadata_at(name, false)?;
@@ -1391,9 +1425,7 @@ pub(crate) fn directory_scoped(
         let Component::Normal(name) = part else {
             return Err(InstallError::Path(path.into()));
         };
-        #[cfg(test)]
-        crate::managed::tests::fault_directory(name)?;
-        dir = match dir.open_verified_directory(name) {
+        dir = match open_verified_directory(&dir, name) {
             Ok(next) => next,
             Err(error) if create && error.is_not_found() => {
                 match dir.mkdir(name, 0o700) {
@@ -1522,11 +1554,7 @@ fn snapshot_at_inspected(
         FileKind::Regular => {
             let bytes = dir.read_stable(name, limit).map_err(|error| match error {
                 FsError::RaceRefused { .. } => InstallError::Drift(path.into()),
-                FsError::Io {
-                    operation: "read file",
-                    source,
-                    ..
-                } => InstallError::Fs(FsError::Io {
+                FsError::ReadIo { source, .. } => InstallError::Fs(FsError::Io {
                     operation: "read snapshot",
                     path: path.into(),
                     source,

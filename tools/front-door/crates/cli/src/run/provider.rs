@@ -5,12 +5,7 @@ use provenant_confinement::permissions::{
 };
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
-use provenant_os::fs::Directory;
-use provenant_os::fs::FileKind;
-use provenant_os::fs::FsError;
-use provenant_os::fs::PayloadTree;
-use provenant_os::fs::PublishMode;
-use provenant_os::fs::entropy_128;
+use provenant_os::fs::{Directory, FileKind, FsError, PayloadTree, PublishMode, entropy_128};
 use provenant_providers::{LaneRuntime, PrepareInput, Prompt, REGISTRY, SetupStep, Stdin};
 use provenant_records::{ADAPTER_SPECS, AdapterSpec};
 use provenant_records::{ResolvedRoute, RouteAlternative};

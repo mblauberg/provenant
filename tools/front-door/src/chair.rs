@@ -1,20 +1,17 @@
 //! Opt-in chair handoff composition. Hooks read cached quota, never probe it.
 use provenant_cli::{Chair, Globals};
 use provenant_core::Roots;
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
-use provenant_os::fs::Directory;
+use provenant_os::{
+    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+    fs::Directory,
+    sys::hook_io,
+};
 use provenant_providers::identity::RegisteredAccount;
 use provenant_quota::{
     AccountRecord, QuotaSnapshot,
     chair::{SwitchDecision, decide_switch},
 };
 use provenant_records::{CommandResult, Outcome};
-
-use provenant_os::sys::hook_io;
 use provenant_workflow::{
     chair::{Handoff, HandoffStore},
     session::{HostSessionId, SessionStore},

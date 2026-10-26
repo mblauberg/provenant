@@ -12,9 +12,11 @@ use crate::worktrees::{
     WorktreeInfo, WriterState, combine_worker_state, disk_writer_state, parse_worktree_list,
 };
 use provenant_core::CancelToken;
-use provenant_os::disk::DiskReport;
-use provenant_os::exec::{Executor, Termination};
-use provenant_os::fs::{Directory, FileKind, effective_uid, entry_names};
+use provenant_os::{
+    disk::DiskReport,
+    exec::{Executor, Termination},
+    fs::{Directory, FileKind, effective_uid, entry_names},
+};
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};

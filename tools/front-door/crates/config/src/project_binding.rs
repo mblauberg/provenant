@@ -1,9 +1,9 @@
 //! Host-local project identity indexed by the canonical Git common directory.
 use crate::ConfigError;
 use provenant_core::{CancelToken, Clock, ProjectId, Roots, WaitBudget};
-use provenant_os::clock::SystemClock;
-use provenant_os::fs::{
-    Directory, FileKind, LockMode, Metadata, PublishMode, effective_uid, entry_names,
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, FileKind, LockMode, Metadata, PublishMode, effective_uid, entry_names},
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -339,27 +339,13 @@ fn read_record(
         .map_err(|error| match error {
             provenant_os::fs::FsError::RaceRefused { .. }
             | provenant_os::fs::FsError::TooLarge { .. }
-            | provenant_os::fs::FsError::Io {
-                operation: "read file",
-                ..
-            } => ConfigError::InvalidProjectBinding,
+            | provenant_os::fs::FsError::ReadIo { .. } => ConfigError::InvalidProjectBinding,
             other => other.into(),
         })?;
-    if !same_metadata(entry, &directory.metadata_at(name, false)?) {
+    if !entry.unchanged(&directory.metadata_at(name, false)?) {
         return Err(ConfigError::InvalidProjectBinding);
     }
     Ok(bytes)
-}
-
-fn same_metadata(left: &Metadata, right: &Metadata) -> bool {
-    left.kind == right.kind
-        && left.device == right.device
-        && left.inode == right.inode
-        && left.links == right.links
-        && left.size == right.size
-        && left.modified_ns == right.modified_ns
-        && left.mode == right.mode
-        && left.uid == right.uid
 }
 
 fn validate_location(path: &Path) -> Result<(), ConfigError> {

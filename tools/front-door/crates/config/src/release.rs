@@ -486,13 +486,11 @@ pub(crate) fn inventory_held_inspected(
             }
             match metadata.kind {
                 FileKind::Directory if allowed_directory(&path) => {
-                    #[cfg(test)]
-                    crate::managed::tests::fault_directory(&name)?;
                     walk(
                         root,
                         &path,
                         depth + 1,
-                        &dir.open_verified_directory(&name)?,
+                        &crate::managed::open_verified_directory(dir, &name)?,
                         output,
                         scan,
                         remove_staging,

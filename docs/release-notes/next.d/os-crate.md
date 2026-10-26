@@ -6,3 +6,5 @@
   `FileHandle` operations. Stable bounded reads and publication durability
   checks share one implementation. On-disk formats and command behaviour
   are unchanged.
+- Stable file reads expose typed read-I/O errors. Callers share
+  `Metadata::unchanged` when comparing read-relevant metadata.

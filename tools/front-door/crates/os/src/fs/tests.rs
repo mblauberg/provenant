@@ -60,6 +60,20 @@ fn stable_read_metadata_refuses_identity_content_and_permission_changes() {
 }
 
 #[test]
+fn bounded_read_preserves_typed_io_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("write-only");
+    let file = File::create(&path).unwrap();
+    let mut handle = FileHandle::regular(file, &path).unwrap();
+    let error = handle.read_bounded(16).unwrap_err();
+    let errno = error.raw_os_error();
+    assert!(matches!(&error, FsError::ReadIo { path: failed, .. } if failed == &path));
+    assert!(errno.is_some());
+    let source = io::Error::from(error);
+    assert_eq!(source.raw_os_error(), errno);
+}
+
+#[test]
 fn require_durable_preserves_the_original_sync_error() {
     Publication::Durable.require_durable().unwrap();
     let sync_error =

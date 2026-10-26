@@ -1,10 +1,6 @@
 //! Read-only edge resolution. No provider, database, or legacy-content reads.
 use provenant_core::{PathResolver, RootInputs, Roots};
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
     fs, io,

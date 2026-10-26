@@ -3,18 +3,11 @@ use provenant_core::{
     ActorId, AttemptId, CancelToken, Digest, MonoTime, OperationId, ProjectId, RootInputs, RunId,
     TaskId, TestClock, WaitBudget, WallTime,
 };
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
-use provenant_supervisor::custody::CaptureTotals;
-use provenant_supervisor::custody::ExitObservation;
-use provenant_supervisor::custody::PublicationState;
-use provenant_supervisor::custody::Scope;
-use provenant_supervisor::custody::SettlementEvidence;
-
+use provenant_supervisor::custody::{
+    CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence,
+};
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 pub(super) fn context(

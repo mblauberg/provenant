@@ -2,8 +2,7 @@
 //! SQLite transactions never span that transport or lock acquisition.
 use crate::{claims::*, *};
 use provenant_core::{ClaimId, Digest, DurationMicros, GitOid, OperationId};
-use provenant_os::fs::LockGuard;
-use provenant_os::fs::LockMode;
+use provenant_os::fs::{LockGuard, LockMode};
 use provenant_records::RecordHeader;
 use std::ffi::OsStr;
 

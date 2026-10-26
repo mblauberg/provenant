@@ -9,7 +9,6 @@ use provenant_routing::{
     AccessContext, BoundedModels, Catalogue, Fallback, ModelId, PacingPolicy, QuotaObservation,
     RouteChoice, RouteName, RoutePoolMember, RoutingContext, RoutingError,
 };
-
 use serde::Serialize;
 use std::{collections::BTreeSet, io, str::FromStr};
 

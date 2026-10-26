@@ -6,12 +6,10 @@ use provenant_confinement::{
     GitRead, ReadOnlyRepo, UtilityBudget, UtilityRuntime, run_read_utility,
 };
 use provenant_core::{CancelToken, GitOid, RelativePath};
-use provenant_os::exec::ExecOutcome;
-use provenant_os::exec::Executor;
-use provenant_os::exec::Termination;
-use provenant_os::fs::FileKind;
-use provenant_os::fs::FsError;
-use provenant_os::fs::Metadata;
+use provenant_os::{
+    exec::{ExecOutcome, Executor, Termination},
+    fs::{FileKind, FsError, Metadata},
+};
 use provenant_records::{CanonicalV1, FileDigest, Finding, Outcome, PathWire};
 use serde::{Deserialize, Serialize};
 use std::{

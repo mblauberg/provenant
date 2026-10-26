@@ -1,7 +1,6 @@
 //! Per-user scheduled lane cache collection, published by the install receipt.
 use crate::peer_agent::{self, AgentError, launchctl, utf8, xml};
 use provenant_config::GcSettings;
-
 use serde::Serialize;
 use std::{
     ffi::OsStr,

@@ -4,8 +4,7 @@
 #[path = "../tests/support/mod.rs"]
 pub(super) mod support;
 use provenant_core::Clock;
-use provenant_os::exec::ExecOutcome;
-use provenant_os::exec::Executor;
+use provenant_os::exec::{ExecOutcome, Executor};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -372,7 +371,7 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
         let (roots, context) = writer_context(&rig)?;
         let cleanup = writer_process_cleanup(&context);
         let store = open_writer_store(&context)?;
-        let clock = provenant_supervisor::clock::SystemClock::new();
+        let clock = provenant_os::clock::SystemClock::new();
         let cancel = provenant_core::CancelToken::new();
         let call = writer_call(&clock, &cancel)?;
         let writer =

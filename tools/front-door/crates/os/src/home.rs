@@ -264,16 +264,6 @@ fn durable(publication: Publication) -> Result<(), HomeError> {
         .map_err(HomeError::DurabilityUnconfirmed)
 }
 
-fn unchanged(a: &Metadata, b: &Metadata) -> bool {
-    a.same_identity(b)
-        && a.kind == b.kind
-        && a.links == b.links
-        && a.size == b.size
-        && a.modified_ns == b.modified_ns
-        && a.mode == b.mode
-        && a.uid == b.uid
-}
-
 fn read_optional(
     dir: &Directory,
     name: &OsStr,
@@ -295,14 +285,10 @@ fn read_optional(
         .map_err(|error| match error {
             FsError::TooLarge { .. } => HomeError::TooLarge,
             FsError::RaceRefused { .. } => HomeError::UnsafeEntry,
-            FsError::Io {
-                operation: "read file",
-                source,
-                ..
-            } => HomeError::Read(source),
+            FsError::ReadIo { source, .. } => HomeError::Read(source),
             error => HomeError::Filesystem(error),
         })?;
-    if bytes.len() as u64 != entry.size || !unchanged(&entry, &dir.metadata_at(name, false)?) {
+    if bytes.len() as u64 != entry.size || !entry.unchanged(&dir.metadata_at(name, false)?) {
         return Err(HomeError::UnsafeEntry);
     }
     *remaining -= bytes.len() as u64;

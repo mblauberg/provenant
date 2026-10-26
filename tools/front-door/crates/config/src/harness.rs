@@ -4,7 +4,6 @@ use crate::{Harness, Release};
 use provenant_records::{
     AbsolutePath, InstallReceipt, Limits, OwnedEntry, OwnedValue, ResolvedHarnessTarget,
 };
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::{

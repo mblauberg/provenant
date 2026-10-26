@@ -8,12 +8,7 @@
 //! the request itself otherwise.
 use provenant_core::Roots;
 use provenant_fabric_runtime::hosts::MAX_FRAME;
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
-
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},

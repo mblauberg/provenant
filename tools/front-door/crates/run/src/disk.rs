@@ -1,8 +1,9 @@
 //! Read-only classification of physical run-store contents.
 use crate::{Result, RunStore};
-use provenant_os::disk::DiskEntry;
-use provenant_os::disk::DiskReport;
-use provenant_os::fs::Directory;
+use provenant_os::{
+    disk::{DiskEntry, DiskReport},
+    fs::Directory,
+};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},

@@ -26,10 +26,10 @@ use provenant_confinement::{
     verify_worktree,
 };
 use provenant_core::{CancelToken, ProjectId, WorkScope};
-use provenant_os::exec::{
-    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+use provenant_os::{
+    exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination},
+    fs::Directory,
 };
-use provenant_os::fs::Directory;
 use provenant_providers::claude::{Login, refresh_for_account};
 use provenant_providers::{
     Adapter, ExitObservation, LaunchSpec, OutcomeStatus, PrepareInput, Prompt, REGISTRY, SetupStep,

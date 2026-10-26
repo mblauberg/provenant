@@ -4,9 +4,7 @@ use super::tests::{call, clock, context, exit, input, route};
 use super::*;
 use provenant_confinement::permissions::{PathGrant, PathScope};
 use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, WallTime};
-use provenant_os::exec::Termination;
-use provenant_os::fs::Directory;
-use provenant_os::sys::resources::MemorySample;
+use provenant_os::{exec::Termination, fs::Directory, sys::resources::MemorySample};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::custody::ExitObservation;
 use std::{

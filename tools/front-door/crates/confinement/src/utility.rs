@@ -4,10 +4,10 @@ use crate::repo::{
     RepoProbeData, VerifiedRepo,
 };
 use provenant_core::{CancelToken, GitOid};
-use provenant_os::exec::{
-    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination,
+use provenant_os::{
+    exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
+    fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid},
 };
-use provenant_os::fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;

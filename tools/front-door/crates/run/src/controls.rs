@@ -2,13 +2,10 @@
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, OperationId, RunId, WallTime};
-use provenant_supervisor::custody;
-use provenant_supervisor::custody::CustodyError;
-use provenant_supervisor::custody::Observation;
-use provenant_supervisor::custody::RecoveryState;
-use provenant_supervisor::custody::Scope;
-use provenant_supervisor::custody::StopReceipt;
-use provenant_supervisor::machine::StopReason;
+use provenant_supervisor::{
+    custody::{self, CustodyError, Observation, RecoveryState, Scope, StopReceipt},
+    machine::StopReason,
+};
 use rusqlite::params;
 use serde::Serialize;
 

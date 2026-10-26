@@ -1,11 +1,11 @@
 //! Account registration at the CLI edge. No credentials enter config or output.
 use clap::{Subcommand, ValueEnum};
 use provenant_core::Roots;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::fs::Directory;
+use provenant_os::{
+    exec::SystemExecutor,
+    fs::{Directory, PublishMode},
+};
 use provenant_providers::accounts::{Registration, Settings};
-
-use provenant_os::fs::PublishMode;
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},

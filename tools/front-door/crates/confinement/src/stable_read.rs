@@ -17,17 +17,6 @@ pub(crate) enum ReadError {
     Io(#[from] std::io::Error),
 }
 
-pub(crate) fn same_metadata(left: &Metadata, right: &Metadata) -> bool {
-    left.kind == right.kind
-        && left.device == right.device
-        && left.inode == right.inode
-        && left.links == right.links
-        && left.size == right.size
-        && left.modified_ns == right.modified_ns
-        && left.mode == right.mode
-        && left.uid == right.uid
-}
-
 pub(crate) fn read_regular(
     parent: &Directory,
     name: &OsStr,
@@ -45,15 +34,11 @@ pub(crate) fn read_regular(
         .map_err(|error| match error {
             FsError::TooLarge { .. } => ReadError::TooLarge,
             FsError::RaceRefused { .. } => ReadError::Changed,
-            FsError::Io {
-                operation: "read file",
-                source,
-                ..
-            } => ReadError::Io(source),
+            FsError::ReadIo { source, .. } => ReadError::Io(source),
             error => ReadError::Filesystem(error),
         })?;
     let after = parent.metadata_at(name, false)?;
-    if !same_metadata(&entry, &after) || after.size != bytes.len() as u64 {
+    if !entry.unchanged(&after) || after.size != bytes.len() as u64 {
         return Err(ReadError::Changed);
     }
     Ok((bytes, after))

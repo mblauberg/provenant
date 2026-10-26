@@ -122,10 +122,12 @@ All first-party `unsafe` lives in `os::sys` and supervisor's private
 `process_os` custody boundary behind safe wrappers with documented invariants.
 Every other crate, the binary included, has `#![forbid(unsafe_code)]`.
 A workspace `clippy.toml` entry restricts `std::process::Command::new` to
-these boundaries. Do not export
-raw owning descriptors or process handles that bypass custody. Each unsafe
-block states validity, ownership, lifetime, concurrency and error conditions,
-and a second reviewer checks it. Secret environment values stay off disk and
+these boundaries. Raw owning descriptors and process handles are reserved for
+supervisor custody. `workspace_policy` restricts consumers of OS `sys::{fs,
+child,raw_exec,reaper}`, `handoff_file` and `from_handoff` to supervisor, and
+requires explicit imports rather than broad OS or `sys` namespace aliases.
+Each unsafe block states validity, ownership, lifetime, concurrency and error
+conditions, and a second reviewer checks it. Secret environment values stay off disk and
 out of logs.
 
 ## Diagnostics

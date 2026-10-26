@@ -10,11 +10,11 @@ use provenant_confinement::{
     worktrees,
 };
 use provenant_core::{CancelToken, GitOid, ProjectId};
-use provenant_os::exec::SystemExecutor;
-use provenant_os::fs::Directory;
+use provenant_os::{
+    exec::SystemExecutor,
+    fs::{Directory, canonicalize},
+};
 use provenant_supervisor::custody::WriterBinding;
-
-use provenant_os::fs::canonicalize;
 use std::io::Read;
 use std::{
     ffi::{OsStr, OsString},

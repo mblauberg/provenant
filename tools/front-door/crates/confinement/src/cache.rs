@@ -1,19 +1,17 @@
 //! Lane cache collection.
 
+use crate::permissions::{PermissionError, validate_absolute};
+use crate::worktrees::{WorkerState, WriterState};
+use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-
-use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
-use serde::Serialize;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use crate::permissions::{PermissionError, validate_absolute};
-use crate::worktrees::{WorkerState, WriterState};
 
 pub(crate) const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
 pub(crate) const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
@@ -291,92 +289,29 @@ fn open_cache_root(
     Ok(Some(root))
 }
 
-#[cfg(test)]
-type CacheGcCallback = std::sync::Arc<dyn Fn(&str, &Path) -> std::io::Result<()> + Send + Sync>;
-
-#[cfg(test)]
-thread_local! {
-    static CACHE_GC_EVENT: std::cell::RefCell<Option<(PathBuf, CacheGcCallback)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-struct CacheGcEvent;
-#[cfg(test)]
-impl CacheGcEvent {
-    fn install(root: PathBuf, event: CacheGcCallback) -> Self {
-        CACHE_GC_EVENT.with(|slot| *slot.borrow_mut() = Some((root, event)));
-        Self
-    }
-}
-#[cfg(test)]
-impl Drop for CacheGcEvent {
-    fn drop(&mut self) {
-        CACHE_GC_EVENT.with(|slot| *slot.borrow_mut() = None);
-    }
-}
-
 fn cache_gc_operation<T>(
     event: &str,
     relative: &Path,
     operation: impl FnOnce() -> Result<T, FsError>,
 ) -> Result<T, FsError> {
     #[cfg(test)]
-    cache_gc_event(event, relative)?;
+    return tests::gc_faults::operation(event, relative, operation);
     #[cfg(not(test))]
-    let _ = (event, relative);
-    let result = operation()?;
-    #[cfg(test)]
-    if event == "before rename" {
-        cache_gc_event("after rename", relative)?;
+    {
+        let _ = (event, relative);
+        operation()
     }
-    Ok(result)
-}
-
-#[cfg(test)]
-fn cache_gc_event(event: &str, relative: &Path) -> Result<(), FsError> {
-    CACHE_GC_EVENT.with(|slot| {
-        let slot = slot.borrow();
-        let Some((root, callback)) = slot.as_ref() else {
-            return Ok(());
-        };
-        let path = root.join(relative);
-        callback(event, &path).map_err(|source| {
-            if event == "open verified" {
-                FsError::RaceRefused {
-                    name: relative.into(),
-                }
-            } else {
-                FsError::Io {
-                    operation: "GC test event",
-                    path,
-                    source,
-                }
-            }
-        })
-    })
 }
 
 fn cache_gc_entries(
     directory: &Directory,
     relative: &Path,
 ) -> Result<Box<dyn Iterator<Item = Result<OsString, FsError>>>, FsError> {
-    #[cfg(not(test))]
-    {
-        let _ = relative;
-        Ok(Box::new(directory.entries()?))
-    }
-    #[cfg(test)]
-    {
-        let mut entries: Vec<_> = directory.entries()?.collect();
-        entries.sort_by(|left, right| left.as_ref().ok().cmp(&right.as_ref().ok()));
-        let relative = relative.to_owned();
-        Ok(Box::new(entries.into_iter().map(move |entry| {
-            let name = entry?;
-            cache_gc_event("readdir", &relative.join(&name))?;
-            Ok(name)
-        })))
-    }
+    let relative = relative.to_owned();
+    Ok(Box::new(directory.entries()?.map(move |entry| {
+        let name = entry?;
+        cache_gc_operation("readdir", &relative.join(&name), || Ok(name))
+    })))
 }
 
 fn sweep_cache_root(
@@ -1110,11 +1045,68 @@ mod tests {
     }
 
     // Exercise races and I/O failures at GC operations without timing-dependent threads.
-    mod gc_faults {
+    pub(super) mod gc_faults {
         use super::*;
         use provenant_core::{Clock, WaitBudget};
         use provenant_os::fs::LockMode;
         use std::{io, os::unix::fs::PermissionsExt, sync::Arc};
+
+        type CacheGcCallback =
+            std::sync::Arc<dyn Fn(&str, &Path) -> std::io::Result<()> + Send + Sync>;
+
+        thread_local! {
+            static CACHE_GC_EVENT: std::cell::RefCell<Option<(PathBuf, CacheGcCallback)>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        struct CacheGcEvent;
+        impl CacheGcEvent {
+            fn install(root: PathBuf, event: CacheGcCallback) -> Self {
+                CACHE_GC_EVENT.with(|slot| *slot.borrow_mut() = Some((root, event)));
+                Self
+            }
+        }
+        impl Drop for CacheGcEvent {
+            fn drop(&mut self) {
+                CACHE_GC_EVENT.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+
+        pub(crate) fn operation<T>(
+            event: &str,
+            relative: &Path,
+            operation: impl FnOnce() -> Result<T, FsError>,
+        ) -> Result<T, FsError> {
+            cache_gc_event(event, relative)?;
+            let result = operation()?;
+            if event == "before rename" {
+                cache_gc_event("after rename", relative)?;
+            }
+            Ok(result)
+        }
+
+        fn cache_gc_event(event: &str, relative: &Path) -> Result<(), FsError> {
+            CACHE_GC_EVENT.with(|slot| {
+                let slot = slot.borrow();
+                let Some((root, callback)) = slot.as_ref() else {
+                    return Ok(());
+                };
+                let path = root.join(relative);
+                callback(event, &path).map_err(|source| {
+                    if event == "open verified" {
+                        FsError::RaceRefused {
+                            name: relative.into(),
+                        }
+                    } else {
+                        FsError::Io {
+                            operation: "GC test event",
+                            path,
+                            source,
+                        }
+                    }
+                })
+            })
+        }
 
         type Event = Arc<dyn Fn(&str, &Path) -> io::Result<()> + Send + Sync>;
 
@@ -1553,8 +1545,8 @@ mod tests {
                 }
             }
 
-            // Use through the public GC entry point: EventDir snapshots
-            // its entries and would hide a lazy readdir deletion failure.
+            // Exercise the public GC entry point, including its root snapshot
+            // and descriptor-relative payload removal.
             let result = gc_worktree_cargo_caches(home, &CacheGcPolicy::default());
             assert!(result.is_ok(), "large cache removal failed: {result:#?}");
             assert_eq!(result?.removed.len(), 1);
@@ -2013,14 +2005,21 @@ mod tests {
             );
             assert_eq!(error.report.removed.len(), 1);
             assert!(!ordinary.exists());
-            assert_eq!(
-                error.report.bytes_freed,
-                bytes + error.report.removed[0].bytes
-            );
             let root = path.parent().ok_or("cache parent")?;
             let tombstone = std::fs::read_dir(root)?.next().ok_or("tombstone")??.path();
             assert!(tombstone.join(CARGO_CACHE_OWNER).is_file());
-            assert!(!tombstone.join("artifact").exists());
+            assert!(tombstone.join("z-fail").is_file());
+            // Filesystem order determines whether the artifact preceded the
+            // failed unlink. Account for exactly the removals that completed.
+            let payload_bytes = if tombstone.join("artifact").exists() {
+                0
+            } else {
+                bytes
+            };
+            assert_eq!(
+                error.report.bytes_freed,
+                payload_bytes + error.report.removed[0].bytes
+            );
             let report = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?;
             assert_eq!(report.removed.len(), 1);
             assert_eq!(report.removed[0].reason, CacheGcReason::Tombstone);

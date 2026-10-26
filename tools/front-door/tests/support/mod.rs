@@ -1,10 +1,6 @@
 //! Isolated process fixtures; no ambient config, credentials, or product state.
 #![allow(dead_code)]
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::ExecOutcome;
-use provenant_os::exec::Executor;
-use provenant_os::exec::StreamPolicy;
-use provenant_os::exec::SystemExecutor;
+use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor};
 use std::{
     ffi::OsString,
     fs,

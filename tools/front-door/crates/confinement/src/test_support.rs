@@ -4,7 +4,6 @@ use crate::utility::{
 };
 use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{ExecOutcome, Executor, SystemExecutor, Termination};
-
 use std::error::Error;
 use std::fs;
 use std::io;

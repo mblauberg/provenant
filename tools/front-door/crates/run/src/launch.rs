@@ -3,13 +3,9 @@
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
 use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId};
-use provenant_supervisor::custody;
-use provenant_supervisor::custody::CapturePlan;
-use provenant_supervisor::custody::ExitObservation;
-use provenant_supervisor::custody::OwnedLaunch;
-use provenant_supervisor::custody::ProviderCommand;
-use provenant_supervisor::custody::PublicationReservation;
-use provenant_supervisor::custody::Scope;
+use provenant_supervisor::custody::{
+    self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
+};
 use rusqlite::{OptionalExtension, params};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 

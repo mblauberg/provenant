@@ -2,10 +2,7 @@
 use super::delivery::*;
 use super::*;
 use provenant_core::GitOid;
-use provenant_os::exec::ExecOptions;
-use provenant_os::exec::Executor;
-use provenant_os::exec::SystemExecutor;
-use provenant_os::exec::Termination;
+use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use std::{ffi::OsString, path::Path, time::Duration};
 
 struct PrepareFixture {

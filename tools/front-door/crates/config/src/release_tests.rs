@@ -3,7 +3,6 @@ use super::{Release, asset_inventory_digest, package_release};
 use crate::{InstallError, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_records::{SourceDigest, VersionInfo};
-
 use std::{
     collections::BTreeMap,
     fs, io,

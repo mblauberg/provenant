@@ -124,9 +124,7 @@ impl OutputCustody {
         // inode, but only the held parent can say whether the name still points
         // to that same object.
         let final_metadata = destination_parent.metadata_at(destination_name, false)?;
-        if !crate::stable_read::same_metadata(&metadata, &final_metadata)
-            || final_metadata.links != 1
-        {
+        if !metadata.unchanged(&final_metadata) || final_metadata.links != 1 {
             return Err(OutputCustodyError::Changed);
         }
         Ok(())

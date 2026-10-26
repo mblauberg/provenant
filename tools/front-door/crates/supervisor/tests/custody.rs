@@ -2,23 +2,17 @@
 #![allow(clippy::disallowed_methods)]
 
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
-use provenant_os::clock::SystemClock;
-use provenant_os::fs::Directory;
-use provenant_os::fs::FileHandle;
-use provenant_os::fs::LockMode;
-use provenant_supervisor::ChildRegistry;
-use provenant_supervisor::ExitPublisher;
-use provenant_supervisor::GuardianHooks;
-use provenant_supervisor::NestedChildStore;
-use provenant_supervisor::RegisteredChild;
-use provenant_supervisor::census::Census;
-use provenant_supervisor::census::CensusError;
-use provenant_supervisor::census::ProcessIdentity;
-use provenant_supervisor::census::ProcessObservation;
-use provenant_supervisor::census::ProcessObserver;
-use provenant_supervisor::custody::*;
-use provenant_supervisor::fixture;
-use provenant_supervisor::machine::StopReason;
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, FileHandle, LockMode},
+};
+use provenant_supervisor::{
+    ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,
+    census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
+    custody::*,
+    fixture,
+    machine::StopReason,
+};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::ffi::OsString;

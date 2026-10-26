@@ -177,7 +177,7 @@ final head and open a pull request after verifying it.
 
 | Leaf | Grammar | Notes |
 | --- | --- | --- |
-| `root` | no flags | Reports the asset root, state directory, selected project and installation identity. Human output is the newline-terminated asset path that scripts read. Read-only; an explicit `--project` verifies the checkout with the supervisor's bounded Git runner. |
+| `root` | no flags | Reports the asset root, state directory, selected project and installation identity. Human output is the newline-terminated asset path that scripts read. Read-only; an explicit `--project` verifies the checkout with the OS crate's bounded Git runner. |
 | `hosts` | no flags | Lists the local host and configured peers with peer and adapter readiness observations. Read-only. |
 | `hosts doctor` | `[SSH_ALIAS]` | Probes sign-in on one host, or every configured host, with no inference and no credential access. |
 | `config show` | `[--task-class NAME]` | The resolved config with secrets redacted and each knob's source (default, profile or override). |
@@ -281,7 +281,7 @@ protocols, not this table. An MCP wait that reaches its deadline reports
 | Output reads | The requested byte or line window, with next offset and EOF. This is a slice the caller asked for, not clipping. |
 
 Where a result has no existing artifact or read API, the CLI publishes a
-redacted overflow result through the supervisor's safe file API before it emits
+redacted overflow result through the OS crate's safe file API before it emits
 the error. A publication failure is exit 3, and a committed mutation stays
 committed. A JSON write failure exits 3 and cannot promise a complete
 envelope; SIGPIPE on a read-only listing succeeds. A parse failure uses the

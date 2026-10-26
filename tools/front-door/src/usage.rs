@@ -1,8 +1,7 @@
 //! Local demand counters. The command edge owns these effects, not the reducer.
 use provenant_cli::{Globals, Stats};
 use provenant_core::{ProjectId, Roots};
-use provenant_os::fs::Directory;
-use provenant_os::fs::LockMode;
+use provenant_os::fs::{Directory, LockMode};
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::{
