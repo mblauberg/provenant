@@ -115,6 +115,11 @@ fn run_check(args: provenant_cli::DiskGuard, globals: &provenant_cli::Globals) -
     probe(
         size(&settings.warn)?,
         || provenant_confinement::disk::available_bytes_at(&root),
+        || match std::fs::metadata(root.join("disk-guard/paused.json")) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        },
         |free| {
             let directory = guard_directory(&root)?;
             let _lock = directory
@@ -148,8 +153,8 @@ fn run_check(args: provenant_cli::DiskGuard, globals: &provenant_cli::Globals) -
                 if state.paused.is_empty() {
                     return Ok(());
                 }
-                // Keep custody of recovery while paused. Healthy scheduled invocations
-                // need no state probe; launchd never overlaps this running service.
+                // Keep custody of recovery while paused. If this checker exits,
+                // the marker sends the next scheduled invocation to recovery.
                 clock
                     .wait_until(
                         clock
@@ -167,10 +172,11 @@ fn run_check(args: provenant_cli::DiskGuard, globals: &provenant_cli::Globals) -
 fn probe(
     warn: u64,
     mut available: impl FnMut() -> io::Result<u64>,
+    pending: impl FnOnce() -> io::Result<bool>,
     pressured: impl FnOnce(u64) -> io::Result<()>,
 ) -> io::Result<()> {
     let free = available()?;
-    if free >= warn {
+    if free >= warn && !pending()? {
         return Ok(());
     }
     pressured(free)
@@ -180,6 +186,11 @@ fn guard_directory(root: &Path) -> io::Result<Directory> {
     provenant_config::private_directory(&root.join("disk-guard"), true).map_err(io::Error::other)
 }
 fn load(directory: &Directory) -> io::Result<State> {
+    match directory.read_bounded("paused.json".as_ref(), 1024 * 1024) {
+        Ok(bytes) => return serde_json::from_slice(&bytes).map_err(io::Error::other),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(io::Error::other(error)),
+    }
     match directory.read_bounded("state.json".as_ref(), 1024 * 1024) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
         Err(error) if error.is_not_found() => Ok(State::default()),
@@ -187,15 +198,31 @@ fn load(directory: &Directory) -> io::Result<State> {
     }
 }
 fn save(directory: &Directory, state: &State) -> io::Result<()> {
+    // The paused-state file is also the marker. Publish recovery custody before
+    // STOP, and remove it only after publishing the empty set. A crash between
+    // the empty write and unlink can only cause a harmless repeated CONT.
+    let name = if state.paused.is_empty() {
+        "state.json"
+    } else {
+        "paused.json"
+    };
     directory
         .atomic_write(
-            "state.json".as_ref(),
+            name.as_ref(),
             ".disk-guard-",
             &serde_json::to_vec(state)?,
             PublishMode::Replace,
         )
         .map(|_| ())
-        .map_err(io::Error::other)
+        .map_err(io::Error::other)?;
+    if state.paused.is_empty() {
+        match directory.unlink("paused.json".as_ref()) {
+            Ok(()) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
+    Ok(())
 }
 
 pub fn resume_saved(root: &Path) -> io::Result<()> {
@@ -228,9 +255,13 @@ pub fn resume_saved(root: &Path) -> io::Result<()> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Process {
     pid: u32,
+    #[serde(default)]
+    ppid: u32,
     uid: u32,
     name: String,
     started: String,
+    #[serde(default)]
+    started_unix: Option<i64>,
 }
 
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,13 +279,16 @@ enum Signal {
 }
 
 trait Host {
+    fn pid(&self) -> u32;
+    fn boot_unix_seconds(&mut self) -> io::Result<i64>;
+    fn log(&mut self, message: &str) -> io::Result<()>;
     fn available(&mut self) -> io::Result<u64>;
     fn processes(&mut self) -> io::Result<Vec<Process>>;
     fn process(&mut self, pid: u32) -> io::Result<Option<Process>>;
     // False means the saved identity has exited or its PID was reused.
     fn signal(&mut self, process: &Process, signal: Signal) -> io::Result<bool>;
     fn notify(&mut self, message: &str) -> io::Result<()>;
-    fn gc(&mut self, floor: &str) -> io::Result<()>;
+    fn gc(&mut self) -> io::Result<()>;
 }
 
 fn check(
@@ -266,12 +300,31 @@ fn check(
     save: &mut impl FnMut(&State) -> io::Result<()>,
 ) -> io::Result<()> {
     let free = host.available()?;
+    discard_prior_boot(state, host, save)?;
     let pause = size(&settings.pause)?;
     let resume_bytes = size(&settings.resume)?;
     let warn = size(&settings.warn)?;
     if free < pause {
-        for process in host.processes()? {
-            if process.uid != uid || process.pid <= 1 || !settings.processes.contains(&process.name)
+        let processes = host.processes()?;
+        let mut protected = std::collections::HashSet::from([host.pid()]);
+        loop {
+            let before = protected.len();
+            for process in &processes {
+                if protected.contains(&process.ppid) {
+                    protected.insert(process.pid);
+                }
+            }
+            if protected.len() == before {
+                break;
+            }
+        }
+        let mut stopped = false;
+        for process in processes {
+            if process.uid != uid
+                || process.pid <= 1
+                || !settings.processes.contains(&process.name)
+                || process.name == "provenant"
+                || protected.contains(&process.pid)
             {
                 continue;
             }
@@ -286,7 +339,7 @@ fn check(
             // STOP is idempotent. Retry a recorded intent even if the previous
             // checker was interrupted after saving it but before signalling.
             match signal_matching(&process, Signal::Stop, uid, host) {
-                Ok(true) => {}
+                Ok(true) => stopped = true,
                 Ok(false) => {
                     state.paused.retain(|saved| saved != &process);
                     save(state)?;
@@ -294,7 +347,7 @@ fn check(
                 Err(error) => return Err(error),
             }
         }
-        if due(state.paused_at, now, 300) {
+        if stopped && due(state.paused_at, now, 300) {
             let _ = host.notify(&format!(
                 "Disk almost full: {} GiB free. Builds paused until {} free.",
                 free / GIB,
@@ -316,7 +369,7 @@ fn check(
             save(state)?;
         }
         if due(state.gc_at, now, 1800) {
-            host.gc(&settings.warn)?;
+            host.gc()?;
             state.gc_at = Some(now);
             save(state)?;
         }
@@ -337,10 +390,18 @@ fn signal_matching(
     uid: u32,
     host: &mut impl Host,
 ) -> io::Result<bool> {
-    if process.pid <= 1
-        || process.uid != uid
-        || host.process(process.pid)?.as_ref() != Some(process)
-    {
+    let current = host.process(process.pid)?;
+    let matches = current.as_ref().is_some_and(|current| {
+        current.pid == process.pid
+            && current.uid == process.uid
+            && current.name == process.name
+            && (signal == Signal::Continue || current.started == process.started)
+    });
+    if process.pid <= 1 || process.uid != uid || !matches {
+        host.log(&format!(
+            "skipping {signal:?} for saved PID {}: identity mismatch or process exited",
+            process.pid
+        ))?;
         return Ok(false);
     }
     host.signal(process, signal)
@@ -351,12 +412,54 @@ fn resume(
     host: &mut impl Host,
     save: &mut impl FnMut(&State) -> io::Result<()>,
 ) -> io::Result<()> {
+    discard_prior_boot(state, host, save)?;
+    let mut resumed = false;
     while let Some(process) = state.paused.last() {
-        signal_matching(process, Signal::Continue, uid, host)?;
+        resumed |= signal_matching(process, Signal::Continue, uid, host)?;
         state.paused.pop();
         save(state)?;
     }
-    let _ = host.notify("Disk space recovered: paused builds resumed.");
+    if resumed {
+        let _ = host.notify("Disk space recovered: paused builds resumed.");
+    }
+    Ok(())
+}
+
+fn started_unix_seconds(started: &str) -> io::Result<i64> {
+    jiff::Timestamp::strptime("%a %b %e %T %Y %z", format!("{started} +0000"))
+        .map(|started| started.as_second())
+        .map_err(io::Error::other)
+}
+
+fn discard_prior_boot(
+    state: &mut State,
+    host: &mut impl Host,
+    save: &mut impl FnMut(&State) -> io::Result<()>,
+) -> io::Result<()> {
+    if state.paused.is_empty() {
+        return Ok(());
+    }
+    let boot = host.boot_unix_seconds()?;
+    for index in (0..state.paused.len()).rev() {
+        let process = &state.paused[index];
+        // Old records have local-time text without an offset. Use the current
+        // UTC observation for those, rather than falsely ageing a live build
+        // across the boot boundary. CONT still checks PID, owner and name.
+        let started = match process.started_unix {
+            Some(started) => Some(started),
+            None => host
+                .process(process.pid)?
+                .and_then(|current| current.started_unix),
+        };
+        if started.is_some_and(|started| started < boot) {
+            host.log(&format!(
+                "dropping saved PID {}: start predates current boot",
+                process.pid
+            ))?;
+            state.paused.remove(index);
+            save(state)?;
+        }
+    }
     Ok(())
 }
 
@@ -367,9 +470,11 @@ mod tests {
     fn process(pid: u32, uid: u32, name: &str) -> Process {
         Process {
             pid,
+            ppid: 1,
             uid,
             name: name.into(),
             started: "Mon Oct 26 12:00:00 2026".into(),
+            started_unix: Some(started_unix_seconds("Mon Oct 26 12:00:00 2026").unwrap()),
         }
     }
     #[derive(Default)]
@@ -379,11 +484,23 @@ mod tests {
         signals: Vec<(u32, Signal)>,
         notifications: Vec<String>,
         gc: Vec<String>,
+        logs: Vec<String>,
+        boot: i64,
         fail_free: bool,
         fail_signal: bool,
         lists: usize,
     }
     impl Host for Fake {
+        fn pid(&self) -> u32 {
+            99
+        }
+        fn boot_unix_seconds(&mut self) -> io::Result<i64> {
+            Ok(self.boot)
+        }
+        fn log(&mut self, message: &str) -> io::Result<()> {
+            self.logs.push(message.into());
+            Ok(())
+        }
         fn available(&mut self) -> io::Result<u64> {
             if self.fail_free {
                 Err(io::Error::other("unavailable"))
@@ -413,8 +530,8 @@ mod tests {
             self.notifications.push(message.into());
             Ok(())
         }
-        fn gc(&mut self, floor: &str) -> io::Result<()> {
-            self.gc.push(floor.into());
+        fn gc(&mut self) -> io::Result<()> {
+            self.gc.push("configured floor".into());
             Ok(())
         }
     }
@@ -430,21 +547,129 @@ mod tests {
         .unwrap();
     }
     #[test]
-    fn healthy_probe_performs_one_free_space_read_and_no_other_io() {
-        // The cold closure owns every config-independent state/process/log/GC
-        // effect. A healthy scheduled check must never enter it.
+    fn healthy_probe_performs_one_free_space_read_and_one_marker_probe() {
+        // With no paused-state marker, a healthy scheduled check skips the
+        // cold closure and its state/process/log/GC effects.
         for free in [60 * GIB, 100 * GIB] {
             let mut reads = 0;
+            let mut probes = 0;
             probe(
                 60 * GIB,
                 || {
                     reads += 1;
                     Ok(free)
                 },
+                || {
+                    probes += 1;
+                    Ok(false)
+                },
                 |_| panic!("unexpected cold-path I/O"),
             )
             .unwrap();
             assert_eq!(reads, 1);
+            assert_eq!(probes, 1);
+        }
+    }
+    #[test]
+    fn next_healthy_tick_recovers_after_the_paused_checker_dies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = guard_directory(tmp.path()).unwrap();
+        let original = process(10, 501, "cargo");
+        let mut host = Fake {
+            free: 24 * GIB,
+            processes: vec![original.clone()],
+            ..Fake::default()
+        };
+        let mut state = State::default();
+        check(
+            &DiskGuardSettings::default(),
+            &mut state,
+            0,
+            501,
+            &mut host,
+            &mut |state| save(&directory, state),
+        )
+        .unwrap();
+        assert_eq!(host.signals, [(10, Signal::Stop)]);
+        assert!(tmp.path().join("disk-guard/paused.json").exists());
+        // Lose all checker memory. The next scheduled tick has only disk state.
+        drop(state);
+        drop(host);
+        let mut next = Fake {
+            free: 100 * GIB,
+            processes: vec![original],
+            ..Fake::default()
+        };
+        probe(
+            60 * GIB,
+            || Ok(100 * GIB),
+            || Ok(tmp.path().join("disk-guard/paused.json").exists()),
+            |_| {
+                let mut state = load(&directory)?;
+                check(
+                    &DiskGuardSettings::default(),
+                    &mut state,
+                    120,
+                    501,
+                    &mut next,
+                    &mut |state| save(&directory, state),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(next.signals, [(10, Signal::Continue)]);
+        assert_eq!(next.notifications.len(), 1);
+        assert!(load(&directory).unwrap().paused.is_empty());
+        assert!(!tmp.path().join("disk-guard/paused.json").exists());
+    }
+    #[test]
+    fn guard_and_descendants_are_excluded_even_with_custom_process_names() {
+        let mut child = process(100, 501, "sh");
+        child.ppid = 99;
+        let mut grandchild = process(101, 501, "cargo");
+        grandchild.ppid = 100;
+        let mut host = Fake {
+            free: 24 * GIB,
+            // The grandchild precedes its parent to exercise transitive protection.
+            processes: vec![
+                grandchild,
+                child,
+                process(99, 501, "cargo"),
+                process(102, 501, "provenant"),
+                process(10, 501, "cargo"),
+            ],
+            ..Fake::default()
+        };
+        let mut settings = DiskGuardSettings::default();
+        settings.processes.extend(["sh".into(), "provenant".into()]);
+        let mut state = State::default();
+        check(&settings, &mut state, 0, 501, &mut host, &mut |_| Ok(())).unwrap();
+        assert_eq!(host.signals, [(10, Signal::Stop)]);
+        assert_eq!(state.paused, [process(10, 501, "cargo")]);
+    }
+    #[test]
+    fn records_from_before_boot_are_discarded_without_a_resume_notification() {
+        let original = process(10, 501, "cargo");
+        for free in [24 * GIB, 100 * GIB] {
+            let mut host = Fake {
+                free,
+                boot: started_unix_seconds("Tue Oct 27 00:00:00 2026").unwrap(),
+                processes: if free >= 50 * GIB {
+                    vec![process(10, 501, "cargo")]
+                } else {
+                    vec![]
+                },
+                ..Fake::default()
+            };
+            let mut state = State {
+                paused: vec![original.clone()],
+                ..State::default()
+            };
+            tick(&mut host, &mut state, 0);
+            assert!(state.paused.is_empty());
+            assert!(host.signals.is_empty());
+            assert!(host.notifications.is_empty());
+            assert_eq!(host.logs.len(), 1);
         }
     }
     #[test]
@@ -679,17 +904,67 @@ mod tests {
         tick(&mut host, &mut state, 0);
         tick(&mut host, &mut state, 1799);
         assert_eq!(host.notifications.len(), 1);
-        assert_eq!(host.gc, ["60G"]);
+        assert_eq!(host.gc, ["configured floor"]);
         tick(&mut host, &mut state, 1800);
         assert_eq!(host.notifications.len(), 2);
         assert_eq!(host.gc.len(), 2);
         host.free = 24 * GIB;
+        host.processes.push(process(10, 501, "cargo"));
         tick(&mut host, &mut state, 1801);
         tick(&mut host, &mut state, 2100);
         assert_eq!(host.notifications.len(), 3);
         tick(&mut host, &mut state, 2101);
         assert_eq!(host.notifications.len(), 4);
         assert_eq!(host.gc.len(), 2);
+    }
+    #[test]
+    fn recovery_continues_matching_pid_uid_and_name_after_start_text_changes() {
+        let original = process(10, 501, "cargo");
+        let mut current = original.clone();
+        current.started = "Mon Oct 26 22:00:00 2026".into();
+        let mut state = State {
+            paused: vec![original],
+            ..State::default()
+        };
+        let mut host = Fake {
+            free: 60 * GIB,
+            processes: vec![current],
+            ..Fake::default()
+        };
+        tick(&mut host, &mut state, 0);
+        assert_eq!(host.signals, [(10, Signal::Continue)]);
+        assert!(state.paused.is_empty());
+    }
+    #[test]
+    fn legacy_local_time_records_resume_when_their_text_looks_older_than_boot() {
+        let mut original = process(10, 501, "cargo");
+        original.started = "Mon Oct 26 05:10:00 2026".into();
+        original.started_unix = None;
+        let mut current = process(10, 501, "cargo");
+        current.started = "Mon Oct 26 12:10:00 2026".into();
+        current.started_unix = Some(started_unix_seconds(&current.started).unwrap());
+        let mut host = Fake {
+            free: 100 * GIB,
+            boot: started_unix_seconds("Mon Oct 26 12:00:00 2026").unwrap(),
+            processes: vec![current],
+            ..Fake::default()
+        };
+        let mut state = State {
+            paused: vec![original],
+            ..State::default()
+        };
+        resume(&mut state, 501, &mut host, &mut |_| Ok(())).unwrap();
+        assert_eq!(host.signals, [(10, Signal::Continue)]);
+        assert!(state.paused.is_empty());
+    }
+    #[test]
+    fn no_builds_stopped_means_no_pause_notification() {
+        let mut host = Fake {
+            free: 24 * GIB,
+            ..Fake::default()
+        };
+        tick(&mut host, &mut State::default(), 0);
+        assert!(host.notifications.is_empty());
     }
     #[test]
     fn failed_observations_and_reused_pids_never_signal_unrelated_processes() {
@@ -699,7 +974,7 @@ mod tests {
             ..State::default()
         };
         let mut host = Fake {
-            free: 50 * GIB,
+            free: 100 * GIB,
             fail_free: true,
             ..Fake::default()
         };
@@ -717,10 +992,12 @@ mod tests {
         assert_eq!(state.paused, [original.clone()]);
         host.fail_free = false;
         let mut reused = original;
-        reused.started = "Tue Oct 27 12:00:00 2026".into();
+        reused.name = "unrelated".into();
         host.processes = vec![reused, process(11, 501, "cargo")];
         tick(&mut host, &mut state, 1);
         assert!(host.signals.is_empty());
         assert!(state.paused.is_empty());
+        assert!(host.notifications.is_empty());
+        assert_eq!(host.logs.len(), 1);
     }
 }

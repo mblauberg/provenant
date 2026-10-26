@@ -54,6 +54,7 @@ impl DiskGuardSettings {
         }
         if self.processes.iter().any(|name| {
             name.is_empty()
+                || name == "provenant"
                 || name.len() > 255
                 || name == "."
                 || name == ".."
@@ -248,6 +249,7 @@ mod tests {
             ".",
             "..",
             "cargo\0",
+            "provenant",
         ] {
             let names = serde_json::to_string(&[name]).unwrap();
             assert_refusal(&format!("processes={names}"), "disk_guard_process_name");

@@ -96,14 +96,14 @@ impl Installed {
         }
     }
 }
-pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Installed {
+pub fn install(state: &Path, home: &Path, _changed: bool, enabled: bool) -> Installed {
     if !enabled || !peer_agent::eligible(state, home) {
         return Installed::Skipped;
     }
     match provenant_config::private_directory(&state.join("disk-guard"), true)
         .map_err(|error| AgentError::Io(std::io::Error::other(error)))
         .and_then(|_| {
-            bootstrap_with(home, changed, launchctl, || {
+            bootstrap_with(home, launchctl, || {
                 crate::disk_guard::resume_saved(state).map_err(AgentError::Io)
             })
         }) {
@@ -117,22 +117,20 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
 #[allow(clippy::disallowed_methods)]
 fn bootstrap_with(
     home: &Path,
-    changed: bool,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
     mut recover: impl FnMut() -> Result<(), AgentError>,
 ) -> Result<(), AgentError> {
     let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
     let loaded = run(&["print".as_ref(), service.as_ref()], home)?.0;
-    if loaded && !changed {
-        return Ok(());
-    }
     if loaded {
         let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {
             return Err(AgentError::Launchctl("bootout", error));
         }
     }
+    // Reinstalling also recovers when settings are unchanged, including state
+    // from versions that did not publish a recovery marker.
     // Restarting a paused checker must not strand the previous checker's PIDs.
     // Installation is a cold path and can read recovery state before bootstrap.
     recover()?;
@@ -196,26 +194,39 @@ mod tests {
         assert!(text.contains("<string>clang++</string>"));
     }
     #[test]
-    fn unchanged_loaded_agent_is_not_restarted() {
+    fn unchanged_loaded_agent_recovers_before_restarting() {
         let mut calls = Vec::new();
+        let recovered = std::cell::Cell::new(false);
         bootstrap_with(
             Path::new("/home"),
-            false,
             |args, _| {
+                if args[0] == "bootstrap" {
+                    assert!(recovered.get());
+                }
                 calls.push(args[0].to_owned());
                 Ok((true, String::new()))
             },
-            || panic!("unchanged service must retain recovery custody"),
+            || {
+                recovered.set(true);
+                Ok(())
+            },
         )
         .unwrap();
-        assert_eq!(calls, [OsStr::new("print")]);
+        assert_eq!(
+            calls,
+            [
+                OsStr::new("print"),
+                OsStr::new("bootout"),
+                OsStr::new("bootstrap")
+            ]
+        );
+        assert!(recovered.get());
     }
     #[test]
     fn restarting_agent_recovers_saved_processes_before_bootstrap() {
         let recovered = std::cell::Cell::new(false);
         bootstrap_with(
             Path::new("/home"),
-            true,
             |args, _| {
                 if args[0] == "bootstrap" {
                     assert!(recovered.get());

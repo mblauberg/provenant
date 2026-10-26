@@ -150,27 +150,33 @@ Thresholds must satisfy `0 < pause < resume <= warn`. `processes` replaces the
 default list with exact executable names, without paths or whitespace. An
 empty list disables pausing while retaining warnings and GC.
 
-Below `warn`, the guard runs `gc --scheduled --apply --free-floor WARN` at
-most once every 30 minutes. It warns at most once every 30 minutes while
+Below `warn`, the guard runs `gc --scheduled --apply` using GC's configured
+free floor at most once every 30 minutes. It warns at most once every 30 minutes while
 space remains at or above `pause`. Below `pause`, it sends `SIGSTOP` to
 matching processes owned by the current user and sends a critical notification
 at most once every five minutes. Paused process identities are saved under
 `<state>/disk-guard/`. They receive `SIGCONT` only when space reaches `resume`;
-PID identity checks prevent signalling a replacement process that reused a PID.
+STOP checks the PID, owner, executable name and UTC start time. CONT checks
+the PID, owner and executable name, tolerating changes to saved start-time text.
+Records from before the current boot are discarded, and identity mismatches
+are logged. The guard excludes itself and its descendants; `provenant` is
+rejected as a configured process name.
 While its processes remain paused, the checker stays running and checks free
 space every two minutes. launchd does not start another instance while it is
 running. On recovery, it checks only the recorded PIDs before resuming them.
 
 Rerun `install` after changing any disk guard setting. The installer puts
 the settings in the LaunchAgent's arguments, so routine healthy checks need
-no config or state reads. The healthy path performs one `statfs` call on the
-state volume and exits before normal CLI initialisation, without process
+no config reads. The healthy path performs one `statfs` call on the
+state volume and one metadata check for `<state>/disk-guard/paused.json`, then
+exits before normal CLI initialisation, without process
 enumeration, GC, Fabric, network requests or log writes. State is written only
 when it changes.
-If the checker crashes while processes are paused and space recovers to
-`warn` or above, a fresh healthy check does not read the saved PIDs or resume
-them. Disable and reinstall the guard, or uninstall it, to resume those
-saved processes.
+The paused-state file also acts as a recovery marker. If the checker crashes,
+the next scheduled check reads it even when space has recovered to `warn` or
+above, and resumes the recorded builds once space reaches `resume`.
+Reinstalling restarts the checker and resumes saved processes even when the
+settings are unchanged, including records saved before recovery markers existed.
 Setting `enabled = false` and reinstalling stops the owned agent and resumes
 its saved paused processes. See [installation](install.md#install) for plist
 ownership and uninstall behaviour.

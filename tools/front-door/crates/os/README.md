@@ -4,6 +4,12 @@ provenant-os owns safe OS operations below supervisor. Unsafe platform
 operations live in sys; custody-specific native operations remain in
 supervisor. The crate depends only on core among workspace members.
 
+`pid::signal_process` sends STOP or CONT to a positive individual PID with
+`kill(2)`, returning false for an exited process and preserving other errors.
+Callers establish process ownership and identity before requesting a signal.
+`clock::boot_unix_seconds` reads the kernel's boot timestamp independently of
+the environment's time zone.
+
 `exec::SystemExecutor` is constructed once at the process edge and shared with
 consumers through `Executor`. Its clones share fixed-capacity cleanup admission,
 reserved before spawn. Every child is reaped explicitly or transferred to that
