@@ -99,7 +99,8 @@ Exited and Published phases. Each turn observes `WNOWAIT` before stop requests.
 Defaults are a 500 ms descendant grace and a 2 s root flush, and run supplies
 the wall and terminal budgets. Process custody is supported only on macOS,
 using kqueue plus SIGCHLD in the guardian. Other platforms return an unsupported
-error before handoff or provider spawn; Linux has no custody backend. Abort
+error at guardian handoff or direct provider spawn; confinement already rejects
+dispatch on Linux, which has no custody backend. Abort
 and `Drop` are never a cleanup mechanism.
 
 The guardian keeps the provider, the attempt lock and the writer-lease
@@ -520,6 +521,7 @@ and every harness config path before it starts children.
 | `crates/confinement/src` tests and `tests/fixtures/external` | Credential, config and protected reads; ref, index and gitfile redirects; hard-link, symlink and root swaps; denied IPC and network, including the peer agent socket from both lane kinds; outside writes; secret chunk splits; scratch classification and drift; quarantine failure preserving unrelated work; backend probe and compile refusal; fixed Git and `gh` argv with arbitrary operations refused |
 | `tools/front-door/tests/worktree_driver.rs`, `dispatch_provider.rs`, `fake_provider.rs` | The public worktree commands and launch, wait, cancel and recover through the built binary against isolated fake providers and temporary repositories |
 
-Unsafe blocks get a second reviewer. CI runs the Linux workspace tests and
-always runs the macOS supervisor and confinement tests. Live-provider recordings
-need the user's authority.
+Unsafe blocks get a second reviewer. CI runs the Linux workspace tests. The
+macOS supervisor and confinement tests run on main and on pull requests that
+change `tools/front-door/`, `apps/` or the CI workflow, and when the base commit
+is unavailable. Live-provider recordings need the user's authority.

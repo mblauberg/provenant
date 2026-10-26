@@ -324,6 +324,49 @@ fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     assert!(reader.has_runs(&call)?);
     Ok(())
 }
+
+#[test]
+fn historical_task_class_preserves_request_verification_and_lane_listing() -> TestResult {
+    for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut input = input();
+        let mut sealed = serde_json::to_value(&input.request)?;
+        sealed["tasks"][0]["profile"] = serde_json::json!({
+            "name": "", "knobs": {}, "overrides": [], "task_class": task_class
+        });
+        let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
+        input.request = serde_json::from_value(sealed.clone())?;
+        store.create(&input, &call)?;
+        assert_eq!(store.run(input.run_id, &call)?.request_digest, digest);
+        assert_eq!(
+            serde_json::to_value(store.request(input.run_id, &call)?)?,
+            sealed
+        );
+        let page = store.lanes(
+            &LaneQuery {
+                targets: Vec::new(),
+                all: true,
+                limit: 10,
+                after: 0,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            &call,
+        )?;
+        assert_eq!(page.lanes.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&page.lanes[0].profile)?,
+            sealed["tasks"][0]["profile"]
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let temp = tempfile::tempdir()?;

@@ -91,6 +91,7 @@ impl<D> crate::ResolvedConfig<D> {
                 .map(|(name, knob)| (name, knob.value))
                 .collect(),
             overrides: overrides.to_vec(),
+            ..Default::default()
         })
     }
 }

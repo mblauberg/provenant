@@ -441,7 +441,10 @@ impl Driver<'_> {
             // Reaping sends no signal, so an adopted zombie is reaped even when
             // descendant stops are not allowed; otherwise a fenced guardian
             // would pin it indefinitely.
-            let mut reaped = child.reap_adopted(&census, &spared)?;
+            let reaped = child.reap_adopted(&census, &spared)?;
+            #[cfg(target_os = "macos")]
+            let mut reaped = reaped;
+            #[cfg(target_os = "macos")]
             if !self.descendant_stop_allowed {
                 reaped.unresolved = !self
                     .tracked

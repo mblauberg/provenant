@@ -45,7 +45,6 @@ impl GuardianReactor {
 
 pub(crate) struct AdoptedCleanup {
     pub(crate) reaped: Vec<ProcessIdentity>,
-    pub(crate) unresolved: bool,
 }
 
 pub(crate) struct ProviderGroup {

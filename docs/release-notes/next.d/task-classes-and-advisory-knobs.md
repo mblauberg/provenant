@@ -5,8 +5,8 @@
   no longer accepts `task_class`: `fabric_submit` rejects it as invalid input,
   and the field is gone from its schema. A route that named only a task class
   now names no route, so give it a `route` or `model`. New dispatch profiles
-  record no `task_class`; requests and attempts sealed with that field are
-  refused. Finish outstanding runs before upgrading (#1571).
+  record no `task_class`; old runs stay readable, including requests and
+  attempts sealed with that field. Upgrade every host together (#1571).
 - The eight advisory knobs are removed from the registry, since no code read
   them: `effort.shift`, `context.ceiling_tokens`, `repair.max_cycles`,
   `council.junior_size`, `routing.pool_mode`, `writing.final_polish`,

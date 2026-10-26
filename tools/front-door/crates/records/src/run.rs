@@ -38,6 +38,20 @@ pub struct HarnessProfile {
     pub name: String,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
     pub overrides: Vec<String>,
+    // Preserve the removed field only to verify sealed request and attempt digests.
+    #[doc(hidden)]
+    #[serde(
+        rename = "task_class",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_legacy_task_class"
+    )]
+    pub legacy_task_class: Option<Option<String>>,
+}
+fn deserialize_legacy_task_class<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 impl HarnessProfile {
     fn is_empty(&self) -> bool {
@@ -551,7 +565,8 @@ mod tests {
     }
 
     #[test]
-    fn request_with_a_removed_task_class_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    fn request_with_a_removed_task_class_retains_its_sealed_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
             schema_version: 1,
             tasks: vec![TaskRequest {
@@ -582,8 +597,26 @@ mod tests {
             parent_attempt: None,
         };
         let mut sealed = serde_json::to_value(&request)?;
-        sealed["tasks"][0]["profile"]["task_class"] = serde_json::json!("mechanical");
-        assert!(serde_json::from_value::<CanonicalRequest>(sealed).is_err());
+        for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
+            sealed["tasks"][0]["profile"]["task_class"] = task_class;
+            let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
+            let parsed: CanonicalRequest = serde_json::from_value(sealed.clone())?;
+            assert_eq!(parsed.digest()?, digest);
+            assert_eq!(serde_json::to_value(parsed)?, sealed);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn new_profile_omits_task_class() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = HarnessProfile {
+            name: "rigorous".into(),
+            ..HarnessProfile::default()
+        };
+        let sealed = serde_json::to_value(&profile)?;
+        assert!(sealed.get("task_class").is_none());
+        let parsed: HarnessProfile = serde_json::from_value(sealed.clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, sealed);
         Ok(())
     }
 }

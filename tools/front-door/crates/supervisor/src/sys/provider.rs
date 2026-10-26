@@ -28,9 +28,6 @@ use std::time::{Duration, Instant};
 const EINTR_RETRIES: usize = 8;
 const MAX_REACTOR_WAIT: Duration = Duration::from_secs(1);
 
-pub(crate) fn ensure_supported() -> io::Result<()> {
-    Ok(())
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PollInterest {
     Read,
@@ -67,7 +64,6 @@ pub(crate) struct ReactorEvent {
 /// Signals stay blocked through guardian exit and are reported through kqueue;
 /// no handler or process-global mutable fd is used.
 pub(crate) struct GuardianReactor {
-    #[cfg(target_os = "macos")]
     queue: std::fs::File,
     _mask: SignalMask,
 }
@@ -75,42 +71,39 @@ impl GuardianReactor {
     pub(crate) fn install() -> io::Result<Self> {
         super::raw_exec::verify_child_wait_policy()?;
         let mask = SignalMask::block()?;
-        #[cfg(target_os = "macos")]
-        {
-            // SAFETY: kqueue has no pointer arguments and returns a fresh fd.
-            let fd = unsafe { libc::kqueue() };
-            if fd < 0 {
+        // SAFETY: kqueue has no pointer arguments and returns a fresh fd.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful kqueue returns a fresh owning descriptor;
+        // this File becomes its sole owner.
+        let queue = unsafe { std::fs::File::from_raw_fd(fd) };
+        let _ = &mask.set;
+        for signal in guardian_signals() {
+            // SAFETY: zero is a valid empty kevent record; fields below
+            // describe one signal filter and retain no pointers.
+            let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+            change.ident = signal as usize;
+            change.filter = libc::EVFILT_SIGNAL;
+            change.flags = libc::EV_ADD | libc::EV_CLEAR;
+            // SAFETY: queue is live, change points to one initialised
+            // record, and the null event list/timeout request no output.
+            let result = unsafe {
+                libc::kevent(
+                    queue.as_raw_fd(),
+                    &change,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if result < 0 {
                 return Err(io::Error::last_os_error());
             }
-            // SAFETY: successful kqueue returns a fresh owning descriptor;
-            // this File becomes its sole owner.
-            let queue = unsafe { std::fs::File::from_raw_fd(fd) };
-            let _ = &mask.set;
-            for signal in guardian_signals() {
-                // SAFETY: zero is a valid empty kevent record; fields below
-                // describe one signal filter and retain no pointers.
-                let mut change: libc::kevent = unsafe { std::mem::zeroed() };
-                change.ident = signal as usize;
-                change.filter = libc::EVFILT_SIGNAL;
-                change.flags = libc::EV_ADD | libc::EV_CLEAR;
-                // SAFETY: queue is live, change points to one initialised
-                // record, and the null event list/timeout request no output.
-                let result = unsafe {
-                    libc::kevent(
-                        queue.as_raw_fd(),
-                        &change,
-                        1,
-                        std::ptr::null_mut(),
-                        0,
-                        std::ptr::null(),
-                    )
-                };
-                if result < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            Ok(Self { queue, _mask: mask })
         }
+        Ok(Self { queue, _mask: mask })
     }
 
     /// Waits for at most the requested duration, capped to one second per
@@ -135,7 +128,6 @@ impl GuardianReactor {
                 .min(MAX_REACTOR_WAIT);
             let millis = remaining.as_millis().min(1_000) as i32;
             let mut pollfds = Vec::with_capacity(watches.len() + 1);
-            #[cfg(target_os = "macos")]
             let signal_raw = self.queue.as_raw_fd();
             pollfds.push(libc::pollfd {
                 fd: signal_raw,
@@ -170,14 +162,12 @@ impl GuardianReactor {
             if let Some(signal_ready) = pollfds.first().map(|fd| fd.revents != 0)
                 && signal_ready
             {
-                #[cfg(target_os = "macos")]
                 self.read_kqueue(&mut event)?;
             }
             return Ok(event);
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn read_kqueue(&self, event: &mut ReactorEvent) -> io::Result<()> {
         let timeout = libc::timespec {
             tv_sec: 0,
@@ -227,7 +217,6 @@ impl GuardianReactor {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn guardian_signals() -> [i32; 4] {
     [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD]
 }
@@ -722,7 +711,6 @@ impl ProviderGroup {
     /// Signal exact identities the guardian found still inside the attempt's
     /// sandbox after they left the provider tree. Each identity is re-observed
     /// immediately before the signal, so a recycled PID is never targeted.
-    #[cfg(target_os = "macos")]
     pub(crate) fn stop_marked(
         &mut self,
         escalation: bool,
@@ -920,7 +908,6 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
         // SAFETY: a successful waitid call initialises siginfo even when no
         // process is ready; in that case si_pid is zero.
         let info = unsafe { info.assume_init() };
-        #[cfg(target_os = "macos")]
         let (seen_pid, status, code) = (info.si_pid, info.si_status, info.si_code);
         if seen_pid == 0 {
             return Ok(None);
