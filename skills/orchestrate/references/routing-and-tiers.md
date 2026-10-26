@@ -35,9 +35,11 @@ and decides readiness. Zero-weight members are ordered fallbacks. Operation ID
 and task index seed the draw so retries repeat the same choice. The utility
 pool uses Claude Haiku@low at weight 4, Codex Luna@low at weight 2, then the
 two OpenCode `*-free` models at weight 1 each. Free members require
-`--allow-free` (default false); Agy Gemini Flash is a paid subscription model
-and is never marked free. `--confidential` excludes training or unclassified
-members and fallbacks. The Rust Fabric task schema has no per-task
+`--allow-free` (default false). Omit `--effort` on OpenCode free routes: their
+recorded model controls do not support effort, so an explicit value is refused
+before launch. Agy Gemini Flash is a paid subscription model and is never
+marked free. `--confidential` excludes training or unclassified members and
+fallbacks. The Rust Fabric task schema has no per-task
 `confidential` field. For an explicit eligibility check, use `provenant route
 resolve --route NAME --confidential`.
 
