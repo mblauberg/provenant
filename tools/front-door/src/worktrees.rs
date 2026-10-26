@@ -433,16 +433,17 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                 let states = RefCell::new(
                     crate::gc_support::lane_states(&roots, project.binding.project_id()).ok(),
                 );
+                let rescan_failed = std::cell::Cell::new(false);
                 let refresh = || {
-                    let mut states = states.borrow_mut();
-                    if !states
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.is_current())
-                    {
-                        *states =
+                    crate::gc_support::refresh_if_stale(
+                        &states,
+                        &rescan_failed,
+                        |snapshot| snapshot.is_current(),
+                        || {
                             crate::gc_support::lane_states(&roots, project.binding.project_id())
-                                .ok();
-                    }
+                                .ok()
+                        },
+                    );
                 };
                 let terminal = |path: &Path| {
                     refresh();

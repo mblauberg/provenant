@@ -9,6 +9,7 @@ use provenant_supervisor::{
     fs::{Directory, FileKind, LockMode, Metadata, PublishMode, entry_names},
 };
 use std::{
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -164,6 +165,25 @@ pub(crate) struct LaneSnapshot {
     stale: std::cell::Cell<bool>,
 }
 
+pub(crate) fn refresh_if_stale<T>(
+    snapshot: &RefCell<Option<T>>,
+    rescan_failed: &Cell<bool>,
+    is_current: impl FnOnce(&T) -> bool,
+    rescan: impl FnOnce() -> Option<T>,
+) {
+    if rescan_failed.get() {
+        return;
+    }
+    if snapshot.borrow().as_ref().is_some_and(is_current) {
+        return;
+    }
+    let refreshed = rescan();
+    if refreshed.is_none() {
+        rescan_failed.set(true);
+    }
+    *snapshot.borrow_mut() = refreshed;
+}
+
 struct StoreSnapshot {
     path: PathBuf,
     root: Directory,
@@ -271,6 +291,10 @@ fn worktree_created_at_micros(path: &Path) -> Option<i128> {
     Some(i128::from(since_epoch.as_secs()) * 1_000_000 + i128::from(since_epoch.subsec_micros()))
 }
 
+fn terminal_after_worktree_creation(finished_at: i64, created_at: Option<i128>) -> bool {
+    created_at.is_some_and(|created| i128::from(finished_at) > created)
+}
+
 pub(crate) fn lane_states(
     roots: &Roots,
     project: provenant_core::ProjectId,
@@ -290,14 +314,74 @@ pub(crate) fn lane_states(
     scan_terminal(&context, &mut snapshot, 0)?;
     for (path, terminal) in &mut snapshot.states {
         if *terminal {
-            *terminal = snapshot
-                .terminal_times
-                .get(path)
-                .zip(worktree_created_at_micros(path))
-                .is_some_and(|(finished, created)| i128::from(*finished) > created);
+            *terminal = snapshot.terminal_times.get(path).is_some_and(|finished| {
+                terminal_after_worktree_creation(*finished, worktree_created_at_micros(path))
+            });
         }
     }
     Ok(snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_age_must_be_newer_than_worktree_creation() {
+        assert!(!terminal_after_worktree_creation(99, Some(100)));
+        assert!(!terminal_after_worktree_creation(100, Some(100)));
+        assert!(terminal_after_worktree_creation(101, Some(100)));
+        assert!(!terminal_after_worktree_creation(101, None));
+    }
+
+    #[test]
+    fn stale_snapshot_is_rescanned_once() {
+        let snapshot = RefCell::new(Some(1));
+        let failed = Cell::new(false);
+        let rescans = Cell::new(0);
+        refresh_if_stale(
+            &snapshot,
+            &failed,
+            |_| false,
+            || {
+                rescans.set(rescans.get() + 1);
+                Some(2)
+            },
+        );
+        assert_eq!(*snapshot.borrow(), Some(2));
+        assert_eq!(rescans.get(), 1);
+        refresh_if_stale(
+            &snapshot,
+            &failed,
+            |_| true,
+            || {
+                rescans.set(rescans.get() + 1);
+                Some(3)
+            },
+        );
+        assert_eq!(rescans.get(), 1);
+    }
+
+    #[test]
+    fn failed_rescan_is_not_retried_during_the_sweep() {
+        let snapshot = RefCell::new(Some(1));
+        let failed = Cell::new(false);
+        let rescans = Cell::new(0);
+        for _ in 0..2 {
+            refresh_if_stale(
+                &snapshot,
+                &failed,
+                |_| false,
+                || {
+                    rescans.set(rescans.get() + 1);
+                    None::<i32>
+                },
+            );
+        }
+        assert!(snapshot.borrow().is_none());
+        assert!(failed.get());
+        assert_eq!(rescans.get(), 1);
+    }
 }
 
 fn scan_terminal(

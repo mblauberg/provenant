@@ -2319,9 +2319,8 @@ mod lifecycle_tests {
         let calls = std::cell::Cell::new(0);
         let terminal = |path: &Path| {
             if path == first.path {
-                let count = calls.get() + 1;
-                calls.set(count);
-                count == 1
+                calls.set(calls.get() + 1);
+                false
             } else {
                 true
             }
@@ -2340,6 +2339,10 @@ mod lifecycle_tests {
             },
             &cancel(),
         )?;
+        assert!(
+            calls.get() >= 2,
+            "prune and removal both recheck terminality"
+        );
         assert!(first.path.is_dir());
         assert!(branch_exists(&fixture, "gc-prune-failed"));
         assert_eq!(report.worktrees.retained.len(), 1);
@@ -2347,6 +2350,66 @@ mod lifecycle_tests {
         assert_eq!(report.worktrees.removed, vec![second.clone()]);
         assert_eq!(report.worktrees.pruned_refs, vec!["gc-prune-next"]);
         assert!(!second.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_skips_unmanaged_worktrees_and_their_output() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let mut lane = gc_merged_worktree(&fixture, &context, "gc-unmanaged")?;
+        let unmanaged = fixture._temp.path().join("unmanaged");
+        std::fs::create_dir(&unmanaged)?;
+        std::fs::write(unmanaged.join("artifact"), "keep")?;
+        lane.path = unmanaged.clone();
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| true,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".to_owned()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert!(unmanaged.join("artifact").is_file());
+        assert!(report.worktrees.removed.is_empty());
+        assert!(report.worktrees.retained.is_empty());
+        assert!(report.output.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let lane = gc_merged_worktree(&fixture, &context, "gc-dry-unknown")?;
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| false,
+                no_live_lanes: &|_| true,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: true,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(report.worktrees.retained.len(), 1);
+        assert_eq!(
+            report.worktrees.retained[0].reason,
+            RetainReason::UnknownWriter
+        );
+        assert!(report.worktrees.removed.is_empty());
         Ok(())
     }
 

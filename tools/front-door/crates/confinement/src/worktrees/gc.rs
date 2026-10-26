@@ -44,7 +44,7 @@ pub fn collect(
         read_worktrees(context, cancel)?
     };
     let primary = canonicalize(context.repo.root_path())?;
-    let managed = primary.join(".worktrees");
+    let managed = primary.join(WORKTREE_ROOT);
     let mut report = WorktreeGcReport {
         dry_run: policy.dry_run,
         ..Default::default()
@@ -180,13 +180,16 @@ pub fn collect(
             }
         }
         if policy.dry_run {
-            if preview_clean && (policy.terminal)(&lane.path) && (policy.no_live_lanes)(&lane.path)
-            {
+            let terminal = (policy.terminal)(&lane.path);
+            let no_live_lanes = (policy.no_live_lanes)(&lane.path);
+            if preview_clean && terminal && no_live_lanes {
                 report.worktrees.removed.push(lane.clone());
                 report
                     .worktrees
                     .pruned_refs
                     .push(branch.short_name().to_owned());
+            } else if !terminal || !no_live_lanes {
+                retain(&mut report.worktrees, &branch, RetainReason::UnknownWriter);
             }
             continue;
         }
