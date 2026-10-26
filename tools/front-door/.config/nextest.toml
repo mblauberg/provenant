@@ -1,6 +1,7 @@
 [profile.ci]
 retries = 2
 flaky-result = "fail"
+fail-fast = false
 leak-timeout = { period = "500ms", result = "fail" }
 
 [profile.ci.junit]
