@@ -22,11 +22,9 @@ diagnostics stay in run files. Transport waits are bounded; later inspection
 and control use retained run identity. A transport disconnect alone does not
 authorise signalling an unrelated PID.
 
-Writer graph nodes require verified worktree custody and a reservation that
-also fences ordinary dispatch. Cancellation persists admission fencing before
-asking the run owner to stop attempts. Trusted graph gates are recorded process
-groups; they are not a confinement boundary. Unknown launch evidence counts as
-launched, so it cannot justify retrying a writer elsewhere.
+Writer graph nodes take run's ordinary writer lock. Cancellation persists
+admission fencing before asking the run owner to stop attempts. Unknown launch
+evidence counts as launched, so it cannot justify retrying a writer elsewhere.
 
 The typed [Fabric surface](../specs/fabric.md#cli-and-mcp-surfaces) and code own
 operation and field inventories. CLI calls remain a path to the same owners.

@@ -19,9 +19,8 @@ fabric-runtime owns identity and host coordination. SQLite serialises writes.
 
 Identity derives from the working directory. Registered worktrees share their
 primary checkout's project identity; other Git or non-Git roots stand alone.
-The agent label can split inboxes. Delivery claims may expire and redeliver an
-unacknowledged message; a claim is neither provider liveness nor a provider
-session lease.
+The agent label can split inboxes. Mail uses per-recipient read cursors, with no
+claim, acknowledgement token or redelivery.
 
 Provider execution belongs to run, providers and supervisor. Fabric's thin MCP
 surface delegates to those owners under

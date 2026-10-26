@@ -36,10 +36,8 @@ Use these only with setup-repo write authority; advisory mode proposes paths.
 - **Link or generate, do not restate.** Each domain keeps its natural owner;
   link code, schemas, tests and other docs. Regenerate derived reference, never
   hand-edit it. Specs retain intent, prohibitions and invariants.
-- Specs and runbooks start with an `Owner:` line naming the responsible
-  module or skill and an `Anchor:` line linking concrete source symbols,
-  tests or governing sections. Recheck anchors on change. See
-  [placement](references/placement.md) for boundaries.
+- Specs and runbooks carry `Owner:` and `Anchor:` lines; see
+  [placement](references/placement.md).
 - Verify cited decision IDs and repair indexes and inbound links together.
   Keep ADR IDs stable; gaps left by retirement are deliberate.
   Keep other numbered directories contiguous.
@@ -53,8 +51,8 @@ Use these only with setup-repo write authority; advisory mode proposes paths.
 
 Record only architecture: crate/module and trust boundaries, protocols,
 storage and major dependencies. Amend accepted ADRs in place to state the
-current decision, adding one line `Changed: YYYY-MM-DD, #issue`. Git keeps
-history. Merge or delete superseded ADRs and fix inbound links; index live
+current decision, keeping one `Changed: YYYY-MM-DD, #issue` line and replacing it on each
+amendment. Git log holds earlier ones. Merge or delete superseded ADRs and fix inbound links; index live
 decisions only. Move process into its skill or constitution, and deferrals
 or product calls into their issues. Do not leave compatibility stubs.
 

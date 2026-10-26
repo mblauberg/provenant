@@ -1,6 +1,6 @@
 # ADR 0031: Retain provider history and expire resume state
 
-**Status:** Accepted 2026-10-26, owner-approved in #1570
+**Status:** Accepted
 
 Changed: 2026-10-26, #1754.
 

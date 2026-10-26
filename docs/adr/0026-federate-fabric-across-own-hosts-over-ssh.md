@@ -13,21 +13,20 @@ network.
 
 ## Decision
 
-Each host owns its runs, output, coordination rows and processes. Reach it
+Each host owns its runs, output and processes; the home host owns messages, tasks, events and claims. Reach it
 through a bounded peer entry point over the user's existing OpenSSH
 configuration. Host-qualified identifiers prevent ambiguous writes; only the
 owning host judges process liveness.
 
-Views query reachable hosts and mark stale observations with their age.
+Views query reachable hosts; an unreachable peer's rows are `Unknown`, not cached.
 Mutations route to the owner with operation IDs for idempotent retry. A lost
 dispatch response is launch-unknown and is reconciled by operation ID, never
 retried locally as a second writer. Explicit host selection never falls back;
 default placement may fall back only before sending the request.
 
 Each project names one home host for fenced shared claims and landing leases.
-Exclusion must not depend on two stores or clocks agreeing. Message transfer
-retains the creation ID and clears pending outbound state only after confirmed
-import. Git objects move directly over SSH; writer results bind base and head.
+Exclusion must not depend on two stores or clocks agreeing. There is no outbox:
+an unreachable home refuses message writes. Git objects move directly over SSH; writer results bind base and head.
 
 The versioned peer protocol accepts typed requests and fixed operations, never
 a caller-built shell command. Each host authenticates its own providers. The

@@ -31,5 +31,11 @@ printf '# Index\n\n[0001](0001-storage.md) [audit](extra.md)\n' >"$scratch/READM
 printf '# No decision\n' >"$scratch/0001-storage.md"
 sh "$check" "$scratch" >"$scratch.log" 2>&1
 grep -q 'warning: no decision statement: 0001-storage.md' "$scratch.log"
+printf '# Index\n\n[0001](0001-storage.md) [a](0001-storage.md#x) [b](/abs.md)\n' >"$scratch/README.md"
+if sh "$check" "$scratch" >"$scratch.log" 2>&1; then
+  echo 'anchor or absolute link accepted' >&2
+  exit 1
+fi
+grep -q 'plain relative file link' "$scratch.log"
 rm "$scratch.log"
 printf 'check-adr-index fixtures passed\n'

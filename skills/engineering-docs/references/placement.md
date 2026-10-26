@@ -39,7 +39,5 @@ projection must remain, name its code owner and drift check; other prose stays
 review-owned. Never move the whole durable corpus into issues merely to relocate
 duplication.
 
-Living ADRs describe the current choice and its consequences. Git retains older
-decisions and rejected migration plans; the live index carries no superseded
-rows or tombstones. Frozen source-equivalence maps and comparison inventories
+Frozen source-equivalence maps and comparison inventories
 are migration evidence, not permanent authoring machinery.

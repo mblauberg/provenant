@@ -15,8 +15,13 @@ and transition machinery without a consumer that needed compatibility.
 Ship one Rust binary at `tools/front-door`, composed from focused domain crates.
 The CLI parses and renders; domain crates own behaviour and may depend only on
 lower layers allowed by the [workspace design](../specs/rust-workspace.md).
-Complete existing seams under change pressure rather than adding a universal
+CLI and MCP calls reach the same run and Fabric owners; the executable adds no
+provider adapter, scheduler, store or lifecycle ledger. Complete existing seams under change pressure rather than adding a universal
 dispatcher, unit-of-work or event framework in advance of a concrete need.
+
+A harness may be a Fabric client without being an enabled execution provider;
+installation or configuration alone proves neither activation nor successful
+execution. Discover commands through `provenant help`, not this record.
 
 Rust is the sole runtime for Provenant-owned execution. No Python/TypeScript
 fallback, selector, dual parser or legacy-state negotiation is retained.
