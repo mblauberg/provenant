@@ -295,3 +295,30 @@ pub fn claude_lane_settings(binary: &Path, state: &Path) -> Result<Value, Instal
     }
     Ok(settings)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removal_prunes_only_the_group_and_event_it_emptied() {
+        const OWNED: &str = "'/x/provenant' 'hook' 'claude' 'pre-compact'";
+        let sel = selector("PreCompact", None, OWNED).expect("selector");
+        let owned = format!(r#"{{"type":"command","command":"{OWNED}"}}"#);
+        let source = format!(
+            r#"{{"hooks":{{"PreCompact":[{{"hooks":[]}},{{"hooks":[{owned}]}},{{"matcher":"x","hooks":[]}}],"Other":[]}}}}"#
+        );
+        let out = set(source.as_bytes(), &sel, None).expect("removal");
+        assert_eq!(
+            std::str::from_utf8(&out).expect("UTF-8"),
+            r#"{"hooks":{"PreCompact":[{"hooks":[]},{"matcher":"x","hooks":[]}],"Other":[]}}"#
+        );
+
+        let source = format!(r#"{{"hooks":{{"PreCompact":[{{"hooks":[{owned}]}}],"Other":[]}}}}"#);
+        let out = set(source.as_bytes(), &sel, None).expect("removal");
+        assert_eq!(
+            std::str::from_utf8(&out).expect("UTF-8"),
+            r#"{"hooks":{"Other":[]}}"#
+        );
+    }
+}
