@@ -752,7 +752,7 @@ pub(super) fn read_only_plan(
     .expect("fixture plan")
 }
 
-fn fixture_access_plan(
+pub(super) fn fixture_access_plan(
     access: Access,
     authentication: Option<&str>,
     include_continuation: bool,
@@ -781,7 +781,7 @@ fn fixture_access_plan(
 
 const FIXTURE_TOKEN: &str = "fixture-access-token";
 
-fn fixture_token() -> crate::claude::OauthToken {
+pub(super) fn fixture_token() -> crate::claude::OauthToken {
     let item = format!(
         r#"{{"claudeAiOauth":{{"accessToken":"{FIXTURE_TOKEN}","refreshToken":"fixture-refresh","expiresAt":4000000000000}}}}"#
     );
