@@ -3341,6 +3341,55 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
 }
 
 #[test]
+fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in [0o500, 0o750, 0o755] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        let temporary = store.temporary_path(id, &call)?;
+        std::fs::write(temporary.join("keep.lock"), "keep")?;
+        store.withdraw(
+            id,
+            AttemptState::Queued,
+            Outcome::Cancelled,
+            "fixture",
+            WallTime::from_micros(150)?,
+            &call,
+        )?;
+        let nested = temporary.join("candidate-0/target");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::write(nested.join("s-1.lock"), "keep")?;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
+        let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+        if mode & 0o077 == 0 {
+            assert_eq!(found, vec![(id, Reconciled::TemporaryRemoved)]);
+            assert!(std::fs::symlink_metadata(&temporary).is_err());
+            continue;
+        }
+        assert!(
+            matches!(found.as_slice(), [(attempt, Reconciled::TemporaryRetained { path, reason })]
+            if *attempt == id && *path == temporary && reason.contains("not private")),
+            "{found:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&temporary)?.permissions().mode() & 0o7777,
+            mode
+        );
+        assert_eq!(
+            std::fs::read_to_string(temporary.join("keep.lock"))?,
+            "keep"
+        );
+        assert_eq!(std::fs::read_to_string(nested.join("s-1.lock"))?, "keep");
+    }
+    Ok(())
+}
+
+#[test]
 fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

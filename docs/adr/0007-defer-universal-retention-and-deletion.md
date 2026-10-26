@@ -34,9 +34,10 @@ reconcile retry inside the attempt's `tmp/`, including rustc incremental
 `*.lock` files, and cache GC (#1591) inside a verified detached cache tree.
 `PayloadTree::claim` in `supervisor::fs` is the only entry point (#1597). It
 refuses a root whose identity differs from the holder's observation, or that
-is not owned by the effective user with mode 0700. Ordinary directory handles
-have no payload removal. Settlement keeps ordinary lock-name protection while
-reservations may remain.
+is not owned by the effective user or grants group or other access. Reconcile
+widens narrower owner bits, such as 0500, before removal. Ordinary directory
+handles have no payload removal. Settlement keeps ordinary lock-name
+protection while reservations may remain.
 Stable owner locks outside `tmp/` remain protected: unlinking a lock and
 recreating its name could split writer exclusion across different inodes.
 

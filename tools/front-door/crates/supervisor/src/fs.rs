@@ -59,6 +59,8 @@ pub enum FsError {
     InvalidLockName { name: OsString },
     #[error("stable lock entry cannot be mutated: {name:?}")]
     ReservedLockName { name: OsString },
+    #[error("payload tree changed from the holder's observation: {name:?}")]
+    PayloadMismatch { name: OsString },
     #[error("payload tree is not private to the effective user: {name:?}")]
     NotPrivate { name: OsString },
     #[error("directory exceeds entry limit {limit}")]

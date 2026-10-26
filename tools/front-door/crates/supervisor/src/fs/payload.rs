@@ -21,15 +21,17 @@ pub struct PayloadTree(Box<dyn SafeDir>);
 
 impl PayloadTree {
     /// Open `name` under `parent` as a payload root. The opened directory must
-    /// keep the `expected` identity, belong to the effective user and have
-    /// mode 0700; anything else is refused before any removal.
+    /// keep the `expected` identity, belong to the effective user and grant no
+    /// group or other access; anything else is refused before any removal.
+    /// Owner bits may be narrower than rwx, so walkers widen them through
+    /// `make_writable` before removing entries.
     pub fn claim(parent: &dyn SafeDir, name: &OsStr, expected: &Metadata) -> Result<Self> {
         let directory = parent.open_verified_directory(name)?;
         let opened = directory.metadata()?;
         if !expected.same_identity(&opened) {
-            return Err(FsError::RaceRefused { name: name.into() });
+            return Err(FsError::PayloadMismatch { name: name.into() });
         }
-        if opened.uid != effective_uid() || opened.mode & 0o7777 != 0o700 {
+        if opened.uid != effective_uid() || opened.mode & 0o077 != 0 {
             return Err(FsError::NotPrivate { name: name.into() });
         }
         Ok(Self(directory))

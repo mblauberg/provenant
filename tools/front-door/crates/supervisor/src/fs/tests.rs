@@ -83,7 +83,7 @@ fn payload_tree_claim_refuses_identity_mismatch() {
     std::fs::write(root.join("Cargo.lock"), b"live").unwrap();
     assert!(matches!(
         PayloadTree::claim(&parent, OsStr::new("payload"), &stale),
-        Err(FsError::RaceRefused { .. })
+        Err(FsError::PayloadMismatch { .. })
     ));
     assert!(root.join("Cargo.lock").is_file());
 }
@@ -91,12 +91,18 @@ fn payload_tree_claim_refuses_identity_mismatch() {
 #[test]
 fn payload_tree_claim_refuses_non_private() {
     let temp = tempfile::tempdir().unwrap();
-    for mode in [0o755, 0o750, 0o500, 0o1700] {
+    for mode in [0o755, 0o750, 0o705, 0o770] {
         let (parent, expected) = payload_root(temp.path(), mode);
         assert!(matches!(
             PayloadTree::claim(&parent, OsStr::new("payload"), &expected),
             Err(FsError::NotPrivate { .. })
         ));
+        std::fs::remove_dir(temp.path().join("payload")).unwrap();
+    }
+    // Narrow owner bits stay private; walkers widen them before removal.
+    for mode in [0o700, 0o500] {
+        let (parent, expected) = payload_root(temp.path(), mode);
+        PayloadTree::claim(&parent, OsStr::new("payload"), &expected).unwrap();
         std::fs::remove_dir(temp.path().join("payload")).unwrap();
     }
     std::fs::write(temp.path().join("file"), b"").unwrap();

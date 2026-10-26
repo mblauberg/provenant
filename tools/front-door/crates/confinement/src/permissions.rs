@@ -729,8 +729,11 @@ fn verify_detached_cache(
         return Err(PermissionError::AnchorMismatch);
     }
     // Only a verified tombstone may dispose of lock-named cache payload.
+    // Verified-open failures keep their operation and path.
     let cache = PayloadTree::claim(root, name, expected).map_err(|error| match error {
-        FsError::RaceRefused { .. } | FsError::NotPrivate { .. } => PermissionError::AnchorMismatch,
+        FsError::PayloadMismatch { .. } | FsError::NotPrivate { .. } => {
+            PermissionError::AnchorMismatch
+        }
         error => cache_fs_error("open verified directory", Path::new(name))(error),
     })?;
     let verified = cache
@@ -4952,6 +4955,9 @@ mod tests {
                 replace_link(name: &OsStr, target: &Path) -> Result<Publication, FsError>;
             }
             fn open_verified_directory(&self, name: &OsStr) -> Result<Box<dyn SafeDir>, FsError> {
+                // A failed hook stands in for a swap detected inside the open.
+                self.notify("open verified", name)
+                    .map_err(|_| FsError::RaceRefused { name: name.into() })?;
                 Ok(Box::new(Self {
                     inner: self.inner.open_verified_directory(name)?,
                     path: self.path.join(name),
@@ -5412,6 +5418,33 @@ mod tests {
                     .is_empty()
             );
             assert!(tombstone.path().join("replacement").is_file());
+            Ok(())
+        }
+
+        #[test]
+        fn gc_reports_swap_during_verified_open() -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            cache(home, &"a".repeat(64), &home.join("missing"))?;
+            let error = sweep(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|event, path| {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if event == "open verified" && name.starts_with(".gc-") {
+                        return Err(io::Error::other("swapped"));
+                    }
+                    Ok(())
+                }),
+            )
+            .expect_err("swapped tombstone must be refused");
+            let message = error.to_string();
+            assert!(
+                message.contains("lane cache open verified directory failed at \".gc-"),
+                "{message}"
+            );
+            assert!(message.contains("entry changed identity"), "{message}");
+            assert_eq!(error.report.bytes_freed, 0);
             Ok(())
         }
 
