@@ -16,7 +16,6 @@ WORKSPACE = Path("tools/front-door")
 SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/tool-schemas.json"
 KNOBS = Path("config/harness-knobs.json")
 SNAPSHOTS = WORKSPACE / "crates/providers/tests/snapshots/seatbelt"
-SNAPSHOT_TEST = "seatbelt_snapshots::seatbelt_profiles_match_snapshots"
 
 
 def cargo(root, *args):
@@ -133,12 +132,7 @@ def generate(root, binary=None):
             gap(name, f"{source} is missing")
 
     if (root / SNAPSHOTS).is_dir():
-        # Verify the real adapter prepare + confinement snapshot goldens before
-        # consuming them. Never rewrite fixtures or duplicate grant construction.
-        result = cargo(root, "test", "--locked", "--quiet", "-p", "provenant-providers",
-                       "--lib", SNAPSHOT_TEST, "--", "--exact")
-        if "1 passed; 0 failed" not in result:
-            raise ValueError(f"Seatbelt snapshot verifier did not run: {SNAPSHOT_TEST}")
+        # The goldens are verified by the rust job's provider tests; copy only.
         profiles = sorted((root / SNAPSHOTS).glob("*.sb"))
         if not profiles:
             gap("seatbelt/README.md", f"{SNAPSHOTS} contains no profile snapshots")

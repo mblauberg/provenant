@@ -131,18 +131,37 @@ class DocTruthTests(unittest.TestCase):
         self.assertIn("unresolved CLI help source", result.stdout)
 
     def test_deleted_tracked_basename_warns(self):
-        code = self.root / "tools/front-door/crates/example/src/removed.rs"
+        code = self.root / "tools/front-door/crates/example/src/gone.rs"
         code.parent.mkdir(parents=True)
         code.write_text("// example\n")
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         subprocess.run(["git", "-C", str(self.root), "add", str(code)], check=True)
         code.unlink()
         self.document("# Paths\nOwner: maintainers\nAnchor: tools/front-door\n"
-                      "Read `removed.rs`.\n")
+                      "Read `gone.rs`.\n")
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.count("warning:"), 1)
-        self.assertIn("unresolved path `removed.rs`", result.stdout)
+        self.assertIn("unresolved path `gone.rs`", result.stdout)
+
+    def test_false_positive_classes_stay_silent(self):
+        for text in (
+            "Writes `release.json`, `prompt.md` and `auth.json` at runtime.",
+            "Uses `git push --force-with-lease` and `rg --include`.",
+            "Passes `--author-email` to the other tool.",
+            "| `--council` | replaced by `provenant route` |",
+            "The `--chain` flag was removed and `provenant gc --chain` is retired.",
+        ):
+            with self.subTest(text=text):
+                self.document("# Quiet\nOwner: maintainers\nAnchor: tools/front-door\n" + text + "\n")
+                result = self.check()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_standalone_flag_is_not_checked_without_a_command(self):
+        self.document("# Quiet\nOwner: maintainers\nAnchor: tools/front-door\n"
+                      "Pass `--vanished` to the other tool.\n")
+        self.assertEqual(self.check().stdout, "")
 
     def test_binary_is_used_only_for_help_and_document_snippets_never_run(self):
         binary = self.root / "provenant"

@@ -2,8 +2,9 @@
 """Warn on unresolved inline provenant commands, long flags, repo paths and ADRs.
 
 Warnings are advisory. Fenced examples, runtime absolute paths and templates are
-excluded. Standalone flags use the whole CLI catalogue; commands scope flags to
-their own help. Documentation snippets are never executed.
+excluded. Commands scope flags to
+their own help; flags are checked only after a provenant command. Lines that
+say removed, replaced or retired are skipped. Documentation snippets are never executed.
 """
 
 import argparse
@@ -64,7 +65,10 @@ def inline_code(text):
             lines[index] = re.sub(r"[^\n]", " ", line)
     masked = "".join(lines)
     for match in re.finditer(r"(?<!`)(`{1,2})(?!`)(.*?)(?<!`)\1(?!`)", masked, re.S):
-        yield text.count("\n", 0, match.start()) + 1, " ".join(match[2].split())
+        first = text.count("\n", 0, match.start())
+        last = text.count("\n", 0, match.end())
+        context = " ".join(text.splitlines()[first:last + 1])
+        yield first + 1, " ".join(match[2].split()), context
 
 
 def flags(entry):
@@ -129,26 +133,34 @@ def path_reference(word):
     return word
 
 
-def resolves_path(root, document, reference, tracked):
+RETIRED = re.compile(r"\b(?:removed|replaced|retired|deprecated)\b", re.I)
+
+
+def resolves_path(root, document, reference, gone):
     for base in (root, document.parent, root / "tools/front-door"):
         if any(mark in reference for mark in "*?["):
             if list(base.glob(reference)):
                 return True
         elif (base / reference).exists():
             return True
-    return "/" not in reference and reference in tracked
+    if "/" not in reference:
+        # Bare filenames are runtime state or other tools' files unless they
+        # were once tracked and are now gone.
+        return reference not in gone
+    return False
 
 
-def check_references(root, document, commands, adrs, tracked):
+def check_references(root, document, commands, adrs, gone):
     display = document.relative_to(root)
-    all_flags = set().union(*(flags(entry) for entry in commands.values())) if commands else set()
-    for line, reference in inline_code(document.read_text()):
+    for line, reference, context in inline_code(document.read_text()):
+        if RETIRED.search(context):
+            continue
         scopes, missing = command_scope(reference, commands) if commands else (None, None)
         if missing:
             warn(display, line, "command", missing)
-        if commands and (scopes or re.match(r"^\[?--[a-z]", reference)):
+        if commands and scopes:
             known_flags = (set().union(*(flags(commands[scope]) for scope in scopes))
-                           | flags(commands["provenant"])) if scopes else all_flags
+                           | flags(commands["provenant"]))
             for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", reference)):
                 if flag not in known_flags:
                     warn(display, line, "flag", flag)
@@ -157,7 +169,7 @@ def check_references(root, document, commands, adrs, tracked):
                 warn(display, line, "ADR", f"ADR {number}")
         for word in dict.fromkeys(reference.split()):
             path = path_reference(word)
-            if path and not resolves_path(root, document, path, tracked):
+            if path and not resolves_path(root, document, path, gone):
                 warn(display, line, "path", path)
 
 
@@ -186,21 +198,26 @@ def main():
     commands = None if args.inventory_only else catalogue(args, root)
     adrs = {int(match[1]) for path in (root / "docs/adr").glob("*.md")
             if (match := re.match(r"(\d+)-", path.name))}
-    # Bare filenames often refer to code named elsewhere in the same paragraph.
-    # Use the tracked inventory rather than walking build or state directories.
+    # Bare filenames are checked only against paths once tracked and now gone:
+    # deleted in history, or listed in the index but missing from the worktree.
+    gone = set()
     try:
-        result = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True,
-                                capture_output=True, text=True)
-        tracked = {Path(path).name for path in result.stdout.split("\0")
-                   if path and (root / path).exists()}
+        listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True,
+                                capture_output=True, text=True).stdout.split("\0")
+        gone |= {Path(path).name for path in listed if path and not (root / path).exists()}
+        deleted = subprocess.run(
+            ["git", "log", "--diff-filter=D", "--name-only", "--pretty=format:", "-z"],
+            cwd=root, check=True, capture_output=True, text=True).stdout.split("\0")
+        gone |= {Path(path.strip()).name for path in deleted
+                 if path.strip() and not (root / path.strip()).exists()}
     except (OSError, subprocess.CalledProcessError):
-        tracked = set()
+        pass
     documents = sorted((root / "docs/runbooks").glob("*.md")) + sorted((root / "docs/specs").glob("*.md"))
     missing = sum(inventory(root, document) for document in documents)
     if not args.inventory_only:
         agents = root / "AGENTS.md"
         for document in ([agents] if agents.exists() else []) + documents:
-            check_references(root, document, commands, adrs, tracked)
+            check_references(root, document, commands, adrs, gone)
     return int(args.strict_inventory and bool(missing))
 
 

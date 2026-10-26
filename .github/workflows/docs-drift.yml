@@ -33,7 +33,8 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: docs-drift
+          shared-key: front-door-ci
+          save-if: false
       - name: Build the worktree CLI
         working-directory: tools/front-door
         run: cargo build --locked --quiet -p provenant --bin provenant
@@ -62,8 +63,8 @@ jobs:
           with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
               summary.write(body)
           PY
-          comment_id="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/1752/comments" \
-            --jq '[.[][] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- provenant-docs-drift -->")))] | first | .id // empty')"
+          comment_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/1752/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- provenant-docs-drift -->"))) | .id' | head -n1)"
           if [ -n "$comment_id" ]; then
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
               --input "$RUNNER_TEMP/doc-truth-comment.json" > /dev/null

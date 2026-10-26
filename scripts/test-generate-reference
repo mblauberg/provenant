@@ -103,21 +103,15 @@ class ReferenceTests(unittest.TestCase):
             GEN['catalogue'](self.root, self.root / 'built-cli')
             globals_['cargo'].assert_not_called()
 
-    def test_seatbelt_goldens_are_verified_then_copied_byte_for_byte_after_header(self):
+    def test_seatbelt_goldens_are_copied_byte_for_byte_after_header_without_cargo(self):
         snapshots = self.root / GEN['SNAPSHOTS']
         snapshots.mkdir(parents=True)
         profile = '; fixture\n(version 1)\n'
         (snapshots / 'fixture-read-only.sb').write_text(profile)
-        with patch.dict(GLOBALS, cargo=unittest.mock.Mock(return_value='1 passed; 0 failed')):
+        with patch.dict(GLOBALS, cargo=unittest.mock.Mock()):
             files, _ = GEN['generate'](self.root)
-            self.assertIn(GEN['SNAPSHOT_TEST'], GLOBALS['cargo'].call_args.args)
+            GLOBALS['cargo'].assert_not_called()
         self.assertEqual(files['seatbelt/fixture-read-only.sb'].split('\n', 1)[1], profile)
-        with patch.dict(GLOBALS, cargo=unittest.mock.Mock(side_effect=subprocess.CalledProcessError(1, 'cargo'))):
-            with self.assertRaises(subprocess.CalledProcessError):
-                GEN['generate'](self.root)
-        with patch.dict(GLOBALS, cargo=unittest.mock.Mock(return_value='0 passed; 0 failed')):
-            with self.assertRaisesRegex(ValueError, 'verifier did not run'):
-                GEN['generate'](self.root)
 
     def test_diff_detects_edits_and_both_missing_and_extra_files(self):
         actual, expected = self.root / 'actual', self.root / 'expected'
