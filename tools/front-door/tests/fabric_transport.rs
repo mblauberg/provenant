@@ -121,7 +121,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     std::fs::write(
         &response,
         serde_json::to_vec(&json!({
-            "version": 1, "protocol":3,
+            "version": 1, "protocol":4,
             "host": first.to_string(),
             "project": project_key,
             "result": {"result":"health","data":{
@@ -167,7 +167,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true, "{hosts}");
-    assert_eq!(hosts[0]["protocol"], 3);
+    assert_eq!(hosts[0]["protocol"], 4);
     assert!(hosts[0].get("reason").is_none());
     assert_eq!(
         replies
@@ -244,7 +244,7 @@ fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
         .as_str()
         .ok_or("project key")?;
     let request = json!({
-        "version": 1, "protocol":3,
+        "version": 1, "protocol":4,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -290,7 +290,7 @@ fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
         .as_str()
         .ok_or("project key")?;
     let request = json!({
-        "version": 1, "protocol":3,
+        "version": 1, "protocol":4,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -337,7 +337,7 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
         .map(|index| json!({"host":host,"attempt":format!("{index:032x}")}))
         .collect::<Vec<_>>();
     let request = json!({
-        "version": 1, "protocol":3,
+        "version": 1, "protocol":4,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -369,7 +369,7 @@ fn peer_wait_refuses_remote_fanout() -> Result {
     let remote = next_host(local)?;
     configure_fixture_peer(&rig, remote)?;
     let request = json!({
-        "version": 1, "protocol":3,
+        "version": 1, "protocol":4,
         "target_host": local.to_string(),
         "source_host": remote.to_string(),
         "agent": "fixture",
@@ -444,7 +444,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
 fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
-    for protocol in [1, 4] {
+    for protocol in [1, 5] {
         for action in [
             json!({"action":"coordination","input":{
                 "domain":"events","input":{"op":"note","note":"must not run","dedup_key":null}
@@ -466,7 +466,7 @@ fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Resul
             )?;
             assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
             let reply: Value = serde_json::from_slice(&output.stdout.bytes)?;
-            assert_eq!(reply["protocol"], 3);
+            assert_eq!(reply["protocol"], 4);
             assert_eq!(reply["result"]["data"]["error"]["code"], "peer_version");
             assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
         }
@@ -477,7 +477,7 @@ fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Resul
 #[test]
 fn peer_ingress_rejects_wrong_host_before_coordination_mutation() -> Result {
     let rig = TestRig::new()?;
-    let input = json!({"version":1,"protocol":3,"target_host":"11111111111111111111111111111111","source_host":"22222222222222222222222222222222","agent":"fixture","project":{"key":"not-a-project","common_dir":"../escape"},"action":{"action":"health"}});
+    let input = json!({"version":1,"protocol":4,"target_host":"11111111111111111111111111111111","source_host":"22222222222222222222222222222222","agent":"fixture","project":{"key":"not-a-project","common_dir":"../escape"},"action":{"action":"health"}});
     let output = rig.execute_os(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
         &["fabric".into(), "peer".into()],
@@ -496,7 +496,7 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
     let host = identity["data"]["host"].as_str().ok_or("host")?;
     configure_fixture_peer(&rig, host.parse()?)?;
     let request = json!({
-        "version": 1, "protocol":3,
+        "version": 1, "protocol":4,
         "target_host": host,
         "source_host": host,
         "agent": "fixture",
@@ -536,7 +536,7 @@ fn peer_ingress_refuses_a_trace_naming_another_host_than_the_sender() -> Result 
     configure_fixture_peer(&rig, source)?;
     let key = &identity["data"]["federation"]["key"];
     let mut request = json!({
-        "version": 1, "protocol": 3, "target_host": host, "source_host": source, "agent": "worker",
+        "version": 1, "protocol":4, "target_host": host, "source_host": source, "agent": "worker",
         "project": {"key": key, "common_dir": "repo/.git"},
         "trace": {"host": host},
         "action": {"action": "health"},
@@ -579,7 +579,7 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     assert!(key.is_string());
     let source = next_host(host.as_str().ok_or("host")?.parse()?)?;
     configure_fixture_peer(&rig, source)?;
-    let request = json!({"version":1,"protocol":3,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
+    let request = json!({"version":1,"protocol":4,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
     let input = serde_json::to_vec(&request)?;
     let args: Vec<OsString> = vec![
         "--state-dir".into(),
@@ -621,7 +621,7 @@ fn peer_frames_a_local_run_event_failure() -> Result {
         std::fs::Permissions::from_mode(0o600),
     )?;
     let request = json!({
-        "version": 1, "protocol":3, "target_host": host, "source_host": source, "agent": "worker",
+        "version": 1, "protocol":4, "target_host": host, "source_host": source, "agent": "worker",
         "project": {"key": key, "common_dir": "repo/.git"},
         "action": {"action": "coordination", "operation_id": null,
             "input": {"domain": "events", "input": {
@@ -1190,7 +1190,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let project_key_value: provenant_fabric_runtime::identity::CrossHostProjectKey =
         serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
     let ingress_request = json!({
-        "version": 1, "protocol":3,
+        "version": 1, "protocol":4,
         "target_host": local_host.to_string(),
         "source_host": remote_host.to_string(),
         "agent": "fixture",
@@ -1533,7 +1533,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     };
     assert!((1..=64).contains(&event_limit));
     let run_events_request = json!({
-        "version": 1, "protocol":3,
+        "version": 1, "protocol":4,
         "target_host": local_host.to_string(),
         "source_host": remote_host.to_string(),
         "agent": "fixture",
@@ -2377,7 +2377,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         std::fs::write(
             &refusal,
             serde_json::to_vec(&json!({
-                "version":1,"protocol":3, "host":host.to_string(), "project":project,
+                "version":1,"protocol":4, "host":host.to_string(), "project":project,
                 "result":{"result":"error","data":{"error":{"code":wire}}},
             }))?,
         )?;
@@ -2399,7 +2399,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         }))?,
     )?;
     std::fs::write(&calls, "")?;
-    let expected = "peer workshop speaks protocol 1, this host speaks 3; upgrade both";
+    let expected = "peer workshop speaks protocol 1, this host speaks 4; upgrade both";
     let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
     assert_eq!(status, 1, "{output}");
     assert_eq!(output["error"]["code"], "PEER_VERSION", "{output}");
@@ -2444,7 +2444,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         .find(|entry| entry["host"] == local.to_string())
         .ok_or("local")?;
     assert_eq!(local_health["available"], true);
-    assert_eq!(local_health["protocol"], 3);
+    assert_eq!(local_health["protocol"], 4);
     let calls = std::fs::read_to_string(calls)?;
     assert_eq!(calls.lines().count(), 3);
     let actions = calls
@@ -2457,7 +2457,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
     concurrent.sort_by_key(|action| action.to_string());
     assert_eq!(concurrent, ["health", "run"]);
     for call in actions {
-        assert_eq!(call["protocol"], 3);
+        assert_eq!(call["protocol"], 4);
     }
     let (status, output) = json_command(&rig, &["hosts", "--json"])?;
     assert_eq!(status, 0, "{output}");
@@ -3048,5 +3048,171 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
     );
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
+    Ok(())
+}
+
+/// Seed one queued attempt with `prompt` in the owner store, optionally
+/// cancelled so it carries two events. Returns the attempt and its events.
+fn seed_attempt(
+    rig: &mut TestRig,
+    prompt: &str,
+    cancel_it: bool,
+) -> Result<(
+    provenant_core::AttemptId,
+    Vec<provenant_records::run::RunEvent>,
+)> {
+    use provenant_core::{
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
+        TaskId, WaitBudget,
+    };
+    use provenant_os::clock::SystemClock;
+    use provenant_records::{
+        CanonicalV1,
+        run::{CanonicalRequest, RequestedRoute, TaskRequest},
+    };
+
+    let identity = federated_identity(rig)?;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let actor = ActorId::parse(identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?)?;
+    let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
+    roots.state_dir = Some(rig.state.clone());
+    let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let context = provenant_run::ExecutionContext {
+        state_root: state,
+        project_id: project,
+        actor_id: actor,
+        read_prompts: false,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    let task_id = TaskId::from_bytes([92; 16]);
+    let attempt_id = AttemptId::from_bytes([91; 16]);
+    store.create(
+        &provenant_run::PreparedRun {
+            run_id: RunId::from_bytes([96; 16]),
+            operation_id: OperationId::parse("page-seed")?,
+            created_at: clock.wall_now()?,
+            request: CanonicalRequest {
+                schema_version: 1,
+                tasks: vec![TaskRequest {
+                    base: None,
+                    base_ref: None,
+                    writer: None,
+                    profile: provenant_records::run::HarnessProfile::default(),
+                    task_id,
+                    prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
+                    route: RequestedRoute::Model {
+                        provider: "fixture".into(),
+                        model: "fixture".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    authority_digest: Digest::from_bytes([94; 32]),
+                    provider_timeout_seconds: 60,
+                    delivery_id: None,
+                    deliver: None,
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                parent: None,
+                lane_depth: Some(1),
+                parent_attempt: None,
+            },
+            attempts: vec![provenant_run::NewAttempt {
+                attempt_id,
+                task_id,
+                prompt: prompt.into(),
+            }],
+        },
+        &call,
+    )?;
+    if cancel_it {
+        store.cancel(attempt_id, "page fixture", &call)?;
+    }
+    let events = store.events(0, 64, Some(attempt_id), &call)?;
+    Ok((attempt_id, events))
+}
+
+fn read_output(
+    rig: &TestRig,
+    attempt: provenant_core::AttemptId,
+    part: &str,
+    offset: u64,
+    max_bytes: u64,
+) -> Result<Value> {
+    let replies = mcp(
+        rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_output","arguments":{"op":"read","target":{"attempt":attempt.to_string()},"part":part,"offset":offset,"max_bytes":max_bytes}}}),
+        ],
+    )?;
+    Ok(replies
+        .into_iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("output reply")?["result"]
+        .clone())
+}
+
+#[test]
+fn trimmed_event_page_continues_from_the_last_kept_event() -> Result {
+    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let (attempt, events) = seed_attempt(&mut rig, "prompt", true)?;
+    assert_eq!(events.len(), 2);
+    let first_only = serde_json::to_vec(&events[..1])?.len() as u64;
+    let both = serde_json::to_vec(&events)?.len() as u64;
+    // The separator byte means two events need more than twice one.
+    assert!(both > first_only + 1);
+
+    // Room for the first event only: the page is trimmed, not exhausted.
+    let page = read_output(&rig, attempt, "events", 0, both - 1)?;
+    assert_ne!(page["isError"], true, "{page}");
+    let page = &page["structuredContent"];
+    assert_eq!(page["eof"], false);
+    assert_eq!(page["next_offset"], events[0].sequence);
+    let kept: Vec<Value> = serde_json::from_str(page["bytes"]["data"].as_str().ok_or("bytes")?)?;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["sequence"], events[0].sequence);
+
+    // The next read starts after the kept event and returns the rest.
+    let rest = read_output(&rig, attempt, "events", events[0].sequence, 65536)?;
+    let rest = &rest["structuredContent"];
+    assert_eq!(rest["eof"], true);
+    assert_eq!(rest["next_offset"], events[1].sequence);
+    let rest: Vec<Value> = serde_json::from_str(rest["bytes"]["data"].as_str().ok_or("bytes")?)?;
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0]["sequence"], events[1].sequence);
+
+    // A limit below one event refuses rather than returning an empty page.
+    let refused = read_output(&rig, attempt, "events", 0, first_only - 1)?;
+    assert_eq!(refused["isError"], true);
+    assert_eq!(text_error_code(&refused), "output_too_large");
+    Ok(())
+}
+
+#[test]
+fn output_page_ending_inside_a_character_stops_before_it() -> Result {
+    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    // 'a' is one byte and the sun is three, so two bytes split the sun.
+    let (attempt, _) = seed_attempt(&mut rig, "a\u{2600}b", false)?;
+    let page = read_output(&rig, attempt, "prompt", 0, 2)?;
+    assert_ne!(page["isError"], true, "{page}");
+    let page = &page["structuredContent"];
+    assert_eq!(page["bytes"]["encoding"], "utf8");
+    assert_eq!(page["bytes"]["data"], "a");
+    assert_eq!(page["next_offset"], 1);
+    assert_eq!(page["eof"], false);
+
+    let next = read_output(&rig, attempt, "prompt", 1, 3)?;
+    let next = &next["structuredContent"];
+    assert_eq!(next["bytes"]["encoding"], "utf8");
+    assert_eq!(next["bytes"]["data"], "\u{2600}");
+    assert_eq!(next["next_offset"], 4);
     Ok(())
 }

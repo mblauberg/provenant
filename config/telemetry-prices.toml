@@ -1,8 +1,8 @@
 # Recorded review and rates from the retired asset; no runtime model aliases.
 # API-equivalent standard rates only; context/peak/TTL adjustments are excluded.
 schema_version = 1
-id = "reviewed-2026-10-22"
-reviewed_at = "2026-10-22"
+id = "reviewed-2026-10-27"
+reviewed_at = "2026-10-27"
 units = "usd_microdollars_per_million_tokens"
 
 [[models]]
@@ -114,14 +114,15 @@ output_excluding_reasoning = 10000000
 
 [[models]]
 provider = "codex"
-model = "gpt-6-astra"
+model = "gpt-6.1-terra"
 billing = "subscription"
-sources = ["https://developers.openai.com/api/docs/models/compare"]
+sources = ["https://developers.openai.com/api/docs/models/gpt-6.1-terra", "https://developers.openai.com/api/docs/pricing"]
+# Standard speed, prompts up to 272K input tokens, 30-minute cache writes.
 [models.rates]
-uncached_input = 10000000
-cache_read = 1000000
-cache_write = 12500000
-output_excluding_reasoning = 50000000
+uncached_input = 1000000
+cache_read = 50000
+cache_write = 1250000
+output_excluding_reasoning = 5000000
 
 [[models]]
 provider = "codex"

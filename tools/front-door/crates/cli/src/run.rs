@@ -165,6 +165,13 @@ impl Registry<'_> {
     }
 }
 impl run::Providers for Registry<'_> {
+    fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
+        REGISTRY
+            .iter()
+            .find(|entry| Some(entry.adapter.id()) == route.provider.as_deref())?
+            .adapter
+            .failure_diagnostic(stderr)
+    }
     fn prepare(
         &self,
         task: &run::TaskRequest,
@@ -1363,6 +1370,14 @@ fn state_name(state: &run::AttemptState) -> String {
             .unwrap_or_default(),
     }
 }
+/// The state name and, for a terminal attempt, its recorded reason.
+pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
+    let reason = match state {
+        run::AttemptState::Terminal { reason, .. } => reason.clone(),
+        _ => None,
+    };
+    (state_name(state), reason)
+}
 fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
@@ -1413,7 +1428,14 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                     plain_text(&skipped.detail, usize::MAX)
                 ));
             }
-            if !lane.protected_paths.is_empty() {
+            let review_required = matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::ReviewRequired,
+                    ..
+                }
+            );
+            if review_required || !lane.protected_paths.is_empty() {
                 human.push_str(&format!(
                     "  review head={} paths={}\n",
                     lane.head
@@ -1795,14 +1817,11 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     // The text alone cannot tell a clean success from one that needs the chair.
-    let reason = match &record.state {
-        run::AttemptState::Terminal { reason, .. } => reason.clone(),
-        _ => None,
-    };
+    let (state, reason) = state_and_reason(&record.state);
     Ok((
         json!({
             "attempt_id": id,
-            "state": state_name(&record.state),
+            "state": state,
             "reason": reason,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,
@@ -3047,6 +3066,46 @@ mod tests {
             "review head={} paths=.github/unsafepath.yml",
             "a".repeat(40)
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn render_lanes_shows_review_line_when_review_required_without_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "review-no-paths",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"terminal","outcome":"failed","exit_code":1,"finished_at":now,"reason":null},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        lane.state = run::AttemptState::Terminal {
+            outcome: run::Outcome::ReviewRequired,
+            exit_code: Some(0),
+            finished_at: now,
+            reason: None,
+        };
+        lane.protected_paths = vec![];
+        let (_, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert!(human.contains("  review head=unknown paths=\n"));
         Ok(())
     }
 
