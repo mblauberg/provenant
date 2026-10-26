@@ -2091,6 +2091,55 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
 }
 
 #[test]
+fn peer_terminal_missing_output_is_not_found() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    loopback_peer(&mut rig)?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "reply OK")?;
+    // No provider executable is on the peer's isolated PATH.
+    let (_, placed) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "workshop",
+            "--mode",
+            "read-only",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "remote-missing-output",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt path")?,
+            "--wait",
+            "30",
+            "--json",
+        ],
+    )?;
+    let lane = &placed["data"]["lanes"][0];
+    assert_eq!(lane["state"], "rejected", "{placed}");
+    let target = format!(
+        "{}/{}/{}",
+        placed["data"]["run_id"].as_str().ok_or("run")?,
+        lane["task_id"].as_str().ok_or("task")?,
+        lane["attempt_id"].as_str().ok_or("attempt")?
+    );
+    let (status, output) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
+    assert_ne!(status, 0, "{output}");
+    assert_eq!(output["error"]["code"], "NOT_FOUND", "{output}");
+    assert!(
+        output["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("peer:")),
+        "{output}"
+    );
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
@@ -2191,10 +2240,10 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
         );
     } else {
         // Confined launch is macOS-only, so the peer rejects before any
-        // output exists. The peer's nonterminal refusal maps to a conflict,
-        // and the read is still the peer's, not a local miss.
+        // captured output exists. The terminal attempt's missing output is
+        // reported by the peer.
         assert_eq!(lane["state"], "rejected", "{placed}");
-        assert_eq!(stderr["error"]["code"], "CONFLICT", "{stderr}");
+        assert_eq!(stderr["error"]["code"], "NOT_FOUND", "{stderr}");
         assert!(
             stderr["error"]["message"]
                 .as_str()
