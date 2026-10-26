@@ -180,10 +180,8 @@ impl WaitBudget {
 pub trait Clock {
     fn wall_now(&self) -> Result<WallTime, TimeError>;
     fn mono_now(&self) -> MonoTime;
-    /// Wait until a monotonic deadline; externally advanced clocks may do nothing here.
-    fn wait_until(&self, _deadline: MonoTime) -> Result<(), TimeError> {
-        Ok(())
-    }
+    /// Wait until a monotonic deadline according to this clock's time source.
+    fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError>;
 }
 /// Explicit, locally-owned clock for deterministic simulations and tests.
 #[derive(Debug)]
@@ -208,9 +206,6 @@ impl TestClock {
         }
     }
     pub fn advance(&mut self, duration: DurationMicros) -> Result<(), TimeError> {
-        self.advance_by(duration)
-    }
-    fn advance_by(&self, duration: DurationMicros) -> Result<(), TimeError> {
         // Both sums are checked before either field changes.
         let mut times = self
             .times
@@ -242,9 +237,14 @@ impl Clock for TestClock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if deadline > times.1 {
-            let duration = DurationMicros::from_micros(deadline.as_micros() - times.1.as_micros());
+            let duration = deadline
+                .as_micros()
+                .checked_sub(times.1.as_micros())
+                .map(DurationMicros::from_micros)
+                .ok_or(TimeError::Overflow)?;
             let wall = times.0.checked_add(duration)?;
-            *times = (wall, deadline);
+            let mono = times.1.checked_add(duration)?;
+            *times = (wall, mono);
         }
         Ok(())
     }

@@ -15,7 +15,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-provenant-test-support = { workspace = true }
 provenant-fabric-store = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }

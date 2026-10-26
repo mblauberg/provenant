@@ -15,7 +15,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use support::{Result, TestRig, code};
+use support::{Result, TestRig, code, eventually};
 
 // Only the harness=false target compiles these observations. The installed
 // binary has no fixture flag, feature or environment override.
@@ -933,7 +933,7 @@ fn await_terminal(
     call: &provenant_run::Request<'_>,
 ) -> Result<provenant_run::AttemptRecord> {
     let mut result = None;
-    if !provenant_test_support::eventually(Duration::from_secs(12), || {
+    if !eventually(Duration::from_secs(12), || {
         match store.record(attempt, call) {
             Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
                 result = Some(Ok(record));
@@ -964,13 +964,11 @@ fn assert_terminal_outcome(
 
 pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result {
     let mut failure = None;
-    let released = provenant_test_support::eventually(Duration::from_secs(5), || {
-        match store.writer_fences() {
-            Ok(fences) => fences.is_empty(),
-            Err(error) => {
-                failure = Some(error);
-                true
-            }
+    let released = eventually(Duration::from_secs(5), || match store.writer_fences() {
+        Ok(fences) => fences.is_empty(),
+        Err(error) => {
+            failure = Some(error);
+            true
         }
     });
     if let Some(error) = failure {
@@ -982,7 +980,7 @@ pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result
 }
 
 fn wait_for_path(path: &Path, timeout: Duration, label: &str) -> Result {
-    if !provenant_test_support::eventually(timeout, || path.exists()) {
+    if !eventually(timeout, || path.exists()) {
         return Err(format!("timed out waiting for {label}: {}", path.display()).into());
     }
     Ok(())
@@ -1055,7 +1053,7 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
             let ready = worktree.join(".writer-fixture-ready");
             let release = worktree.join(".writer-fixture-release");
             fs::write(&ready, b"ready")?;
-            if !provenant_test_support::eventually(Duration::from_secs(10), || release.exists()) {
+            if !eventually(Duration::from_secs(10), || release.exists()) {
                 return Err("writer fixture hold timed out".into());
             }
         }

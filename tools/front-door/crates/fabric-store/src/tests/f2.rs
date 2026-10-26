@@ -1044,6 +1044,9 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
         fn mono_now(&self) -> MonoTime {
             MonoTime::from_micros(0)
         }
+        fn wait_until(&self, _deadline: MonoTime) -> std::result::Result<(), TimeError> {
+            Ok(())
+        }
     }
     let f = Fixture::new();
     let store = f.open();

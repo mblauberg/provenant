@@ -211,8 +211,6 @@ impl RunStore {
     }
     /// Wait until host capacity, startup spacing and resource floors admit
     /// this attempt, then mark it running. Expiry or a state change refuses.
-    // Admission waits are bounded by the sealed deadline and remain cancellable.
-    #[allow(clippy::disallowed_methods)]
     pub fn admit(
         &self,
         id: AttemptId,
@@ -268,7 +266,16 @@ impl RunStore {
                     .saturating_sub(now.as_micros()),
             )
             .unwrap_or(0);
-            std::thread::park_timeout(delay.min(Duration::from_micros(left)));
+            let pause = delay.min(Duration::from_micros(left));
+            let deadline = clock
+                .mono_now()
+                .checked_add(provenant_core::DurationMicros::from_micros(
+                    u64::try_from(pause.as_micros()).unwrap_or(u64::MAX),
+                ))
+                .map_err(|_| RunError::Validation("admission budget"))?;
+            clock
+                .wait_until(deadline)
+                .map_err(|_| RunError::Validation("admission budget"))?;
             delay = (delay * 2).min(Duration::from_secs(2));
         }
     }

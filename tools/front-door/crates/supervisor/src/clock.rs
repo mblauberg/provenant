@@ -29,6 +29,7 @@ impl Clock for SystemClock {
     }
 
     // Waiting uses the same real monotonic coordinate sampled by this clock.
+    // It ignores unpark notifications and returns only at the deadline.
     #[allow(clippy::disallowed_methods)]
     fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError> {
         loop {

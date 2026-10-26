@@ -263,6 +263,10 @@ mod tests {
         fn mono_now(&self) -> MonoTime {
             self.clock.borrow().mono_now()
         }
+
+        fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+            self.clock.borrow().wait_until(deadline)
+        }
     }
 
     impl RetryWait for AdvancingWait {

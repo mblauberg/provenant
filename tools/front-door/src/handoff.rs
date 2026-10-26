@@ -124,14 +124,13 @@ fn read_owner(dir: &Path) -> Option<Owner> {
     let bytes = fs::read(dir.join("owner.json")).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
-// A wall-time nonce distinguishes staged owner files within one process.
-#[allow(clippy::disallowed_methods)]
 fn write_owner(dir: &Path, owner: &Owner) -> io::Result<()> {
     private_dirs(dir)?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |t| t.as_nanos());
-    let staged = dir.join(format!(".owner.{}.{nanos}.tmp", std::process::id()));
+    let staged = dir.join(format!(
+        ".owner.{}.{}.tmp",
+        std::process::id(),
+        provenant_supervisor::fs::temporary_name()?.to_string_lossy()
+    ));
     let result = write_new(&staged, &serde_json::to_vec_pretty(owner)?, 0o600)
         .and_then(|()| fs::rename(&staged, dir.join("owner.json")));
     if result.is_err() {

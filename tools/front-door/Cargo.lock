@@ -431,7 +431,6 @@ dependencies = [
  "provenant-records",
  "provenant-run",
  "provenant-supervisor",
- "provenant-test-support",
  "provenant-workflow",
  "rusqlite",
  "serde",
@@ -515,7 +514,6 @@ dependencies = [
  "provenant-fabric-runtime",
  "provenant-fabric-store",
  "provenant-records",
- "provenant-test-support",
  "regex",
  "serde",
  "serde_json",
@@ -665,10 +663,6 @@ dependencies = [
  "thiserror",
  "toml_edit",
 ]
-
-[[package]]
-name = "provenant-test-support"
-version = "1.0.0"
 
 [[package]]
 name = "provenant-workflow"
