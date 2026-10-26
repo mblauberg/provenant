@@ -5,15 +5,11 @@ description: "Use to audit, create or revise Agent Skills, including triggers, s
 
 # Skill craft
 
-A skill is a reusable, triggerable procedure, not a solved-task narrative
-and not a place to park static reference. Every skill earns its slot on four
-pillars: **Trigger** (fires on the right requests, stays silent on adjacent
-ones), **Structure** (frontmatter contract, progressive disclosure, soft
-length budgets), **Steering** (leading words and bright-line rules over
-repeated emphasis), and **Pruning** (cutting sediment, duplication, sprawl
-and no-ops before they ship).
-
-This skill has two branches and defaults to the safer one.
+A skill is a reusable, triggerable procedure. Assess four pillars:
+**Trigger** (requests and exclusions), **Structure** (contracts and disclosure),
+**Steering** (leading words and bright-line rules), and **Pruning** (sediment,
+duplication, sprawl and no-ops). Keep solved-task narratives and static
+reference elsewhere.
 
 - New or materially revised skill → [references/author.md](references/author.md).
 - Assessment of an existing skill, read-only → [references/audit.md](references/audit.md).
@@ -36,12 +32,9 @@ Both branches follow this without restating it in two voices:
   body, and entrypoint references loaded at one hop. Reference documents may
   link to sibling references, but that depth is not recursively enforced by
   `provenant check harness`.
-- **Tier placement:** a rule is applied reliably only if it sits in the
-  always-loaded `SKILL.md` core rules. A rule buried in a reference file is
-  skipped, because references load late and deep. When a skill keeps missing a
-  rule the user repeats, diagnose a tier-placement bug first: hoist the rule,
-  with concrete banned-pattern examples inline, into `SKILL.md`; do not just
-  expand the reference.
+- **Tier placement:** keep hard rules in `SKILL.md`; references load late.
+  For repeated misses, hoist the rule and concrete banned-pattern examples
+  into the core instead of expanding the reference.
 - **Reuse boundary:** global skills express cross-project triggers, procedures
   and gates. Convert contextual values into parameters, keep examples
   synthetic and leave project policy local. Global promotion requires a
@@ -59,10 +52,8 @@ Both branches follow this without restating it in two voices:
 - **Behaviour changes:** run the fixtures with and without the skill and record
   decisions, differences, model/effort and omissions as reviewer evidence.
   Scores are advisory; only inventory checks may fail CI.
-- **Contract-test boundary:** a contract test protects a machine-enforced
-  invariant, never the prose that describes it. If the invariant has no
-  enforcing script, the correct output is either an enforcing script or
-  nothing, not an assertion about wording.
+- **Contract-test boundary:** test machine-enforced invariants, never prose.
+  Without an enforcing script, add that script or no test; never assert wording.
 - **Failure taxonomy:** name the failure, don't just gesture at quality:
   premature-completion, duplication, sediment, sprawl, no-op, negation-only.
 - **Description contract:** front-load the first 250 characters with trigger

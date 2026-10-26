@@ -671,10 +671,7 @@ pub(crate) fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
         digest.update(LEGACY_CARGO_CACHE_OWNER_PREFIX);
     }
     digest.update(owner.path.as_os_str().as_encoded_bytes());
-    digest.finalize()[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    provenant_core::hex(&digest.finalize()[..16])
 }
 
 pub(crate) fn read_cache_owner(

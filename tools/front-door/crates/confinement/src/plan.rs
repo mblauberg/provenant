@@ -80,7 +80,6 @@ pub struct ConfinedPlan {
     scope: WorkScope,
     permissions: PlanPermissions,
     codex: CodexPolicy,
-    extensions: ExtensionPolicy,
     agy_home: Option<HomeRecipe>,
 }
 
@@ -213,7 +212,6 @@ impl ConfinedPlan {
             scope: input.scope,
             permissions: input.permissions,
             codex: input.codex,
-            extensions: input.extensions,
             agy_home,
         })
     }
@@ -226,9 +224,6 @@ impl ConfinedPlan {
     }
     pub fn codex_policy(&self) -> CodexPolicy {
         self.codex
-    }
-    pub fn extension_policy(&self) -> ExtensionPolicy {
-        self.extensions
     }
     pub fn agy_home(&self) -> Option<&HomeRecipe> {
         self.agy_home.as_ref()

@@ -154,11 +154,7 @@ pub fn scan_disclosure(
         scanner.scan_root(&candidate)?;
     }
     let digest = scanner.digest.finalize();
-    let mut content_digest = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut content_digest, "{byte:02x}").map_err(|_| DisclosureError::DigestBound)?;
-    }
+    let content_digest = provenant_core::hex(&digest);
     Ok(DisclosureReceipt {
         files_scanned: scanner.files,
         bytes_scanned: scanner.bytes,

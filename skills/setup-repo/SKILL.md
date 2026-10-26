@@ -7,9 +7,9 @@ description: "Use when asked to set up or scaffold a repository's process, label
 
 ## User gate first
 
-Before any write, user approves a plan naming the target, exact
-keep/create/adapt/conflict diff and, for GitHub, the Project board. Confirm
-permission; if the target is unnamed, ask instead of inferring it from cwd.
+Before writing, user approves the target, exact
+keep/create/adapt/conflict diff and, for GitHub, Project board.
+Ask for an unnamed target; never infer it from cwd.
 
 ## Inspect and classify
 
@@ -36,7 +36,7 @@ tracker choice, canonical **scope and stories** home (`issue-tracker` or
 docs-layout homes, merge policy/authority and work-item runbook pointer. Use
 pointers only; never duplicate runbook or policy content.
 With `issue-tracker`, the parent issue is the canonical change scope/story home;
-do not duplicate it. This block, not the GitHub scaffolding, is the completion gate.
+do not duplicate it. This block is the completion gate.
 With tracker `none`, use `project-docs` for both scope/story and workflow state.
 
 ## Docs layout
@@ -71,7 +71,7 @@ Only when the tracker is GitHub issues and the remote host is confirmed:
    into `.github/` and adapt evidence rows; retain decision and review sections.
    Merge [`templates/gitignore-agent-runs.txt`](templates/gitignore-agent-runs.txt)
    into the target `.gitignore` once, preserving its other rules. Local writers
-   also add these rules to `.git/info/exclude` on first use.
+   also add these rules to `.git/info/exclude` initially.
 5. **Work-item runbook:** copy [the doctrine](references/doctrine.md) to the
    target's declared work-item runbook path (default
    `docs/runbooks/github-workflow.md`), adding its mechanics; the project

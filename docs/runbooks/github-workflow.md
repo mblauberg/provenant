@@ -131,8 +131,8 @@ for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
 one branch may cover several issues or a slice. The worktree directory is the
 branch with `/` replaced by `-`. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
-extra authority. Removing a clean worktree also needs no extra authority;
-dirty worktrees are refused and unmerged branches are kept.
+extra authority. An authorised merge covers pruning its own worktree and
+merged refs; other deletion needs user authority. Dirty worktrees are refused.
 
 ```sh
 provenant worktree create fix/repo-runbook-mechanics --base main
@@ -150,7 +150,8 @@ provenant worktree create fix/repo-runbook-mechanics
 
 Use `provenant worktree list` to inspect worktrees and
 `provenant worktree remove NAME` to remove an eligible one; its branch goes
-too once merged. `--discard` also deletes an unmerged branch.
+too once merged. `--discard` deletes an unmerged branch and needs explicit
+user authority.
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).
@@ -165,9 +166,9 @@ with an upstream so `gh pr create` finds the branch:
 git push -u origin fix/repo-runbook-mechanics
 ```
 
-A Fabric writer lane cannot write the shared Git `config`, so `-u` pushes but
-cannot record the upstream. From a lane, push with `git push origin HEAD` and
-pass `--head <branch>` to `gh pr create`.
+A Fabric writer lane has no Git credentials. Use host delivery with
+`provenant dispatch --deliver-remote origin --deliver-branch BRANCH --open-pr`
+to push its verified commit and open the pull request.
 
 ### Pull request
 
@@ -233,7 +234,7 @@ Before queueing merge for a substantial software change, confirm its delivery re
 Merge authority is repo-based. Review pressure follows the
 [`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
 recorded-blocker fallback when cross-family review is unavailable. This
-repository is a personal harness, not production: by user directive (2026-07-16), repository auto-merge is enabled
+repository is a personal harness, not production: by user directive, repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
 its tier's review pressure (routine: chair plus objective checks; substantial+
 uses the canonical ladder on the exact head) and
@@ -310,8 +311,8 @@ exact-head evidence), then merge it.
 
 ### Rust build cache
 
-Both Rust cache steps cache `tools/front-door/target`, including Cargo's
-nested build-dir layout. A `build.build-dir` outside that tree is not cached
+Each Rust cache step caches `$GITHUB_WORKSPACE/tools/front-door/target`,
+including Cargo's nested build-dir layout. A `build.build-dir` outside that tree is not cached
 unless its path is added to the action's `cache-directories`.
 
 ### Advisory test signals
@@ -381,7 +382,7 @@ Afterwards:
    not run the merge-commit and squash-merge paths as one sequence.
 
 4. The user-authorised repository setting `delete_branch_on_merge=true`
-   (enabled 2026-07-19) automatically deletes a merged pull request's remote
+   automatically deletes a merged pull request's remote
    head branch, so the remote ref is usually already gone by the time you prune;
    `git remote prune origin` clears the stale remote-tracking ref. This
    automatic merged-head cleanup needs no separate per-branch authority. Forced

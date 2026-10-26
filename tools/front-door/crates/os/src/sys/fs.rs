@@ -367,9 +367,6 @@ pub fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()> {
 pub enum Rename {
     Replace,
     NoReplace,
-    // Kept crate-private until an authorised caller lands.
-    #[allow(dead_code)]
-    Exchange,
 }
 pub fn rename(
     from: &File,
@@ -395,40 +392,32 @@ pub fn rename(
             }
         }
         #[cfg(target_os = "linux")]
-        Rename::NoReplace | Rename::Exchange => {
+        Rename::NoReplace => {
             // SAFETY: both fds are borrowed from live owners and both paths are
             // live NUL-terminated components. renameat2 retains no pointers
-            // and atomically applies the selected exchange mode.
+            // and atomically refuses an existing destination.
             unsafe {
                 libc::renameat2(
                     from.as_raw_fd(),
                     source.as_ptr(),
                     to.as_raw_fd(),
                     destination.as_ptr(),
-                    if matches!(mode, Rename::NoReplace) {
-                        libc::RENAME_NOREPLACE
-                    } else {
-                        libc::RENAME_EXCHANGE
-                    },
+                    libc::RENAME_NOREPLACE,
                 )
             }
         }
         #[cfg(target_os = "macos")]
-        Rename::NoReplace | Rename::Exchange => {
+        Rename::NoReplace => {
             // SAFETY: both fds are borrowed from live owners and both paths are
             // live NUL-terminated components. renameatx_np retains no pointers
-            // and atomically applies the selected exchange mode.
+            // and atomically refuses an existing destination.
             unsafe {
                 libc::renameatx_np(
                     from.as_raw_fd(),
                     source.as_ptr(),
                     to.as_raw_fd(),
                     destination.as_ptr(),
-                    if matches!(mode, Rename::NoReplace) {
-                        libc::RENAME_EXCL
-                    } else {
-                        libc::RENAME_SWAP
-                    },
+                    libc::RENAME_EXCL,
                 )
             }
         }
