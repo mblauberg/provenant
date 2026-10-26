@@ -56,10 +56,11 @@ One surface per action. Fabric MCP tools cover submit, graph, status, resume, ca
   log and diff files into the attempt's temporary scratch directory and names
   their paths in the prompt. Reviewers read `git-context.json` first for the
   resolved base, captured HEAD and truncation flags, then `git-log.txt` and
-  `git-diff.patch`. Report incomplete coverage when either file is truncated.
-  These files describe committed changes; inspect the checkout separately for
-  uncommitted edits. They are removed at settlement, so put review evidence in
-  the final answer.
+  `git-diff.patch`. Report incomplete coverage when either file is truncated
+  or `timed_out` is set. These files describe committed changes; inspect the
+  checkout separately for uncommitted edits. They are removed at settlement,
+  so put review evidence in the final answer. Peer writers (`--host` with
+  `--branch`) get no context files.
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
