@@ -30,8 +30,7 @@ owners. Neither creates another adapter parser, scheduler or lifecycle store.
 A provider receives only the configuration and credentials admitted by its
 launch plan. Codex uses a private home and clean configuration; host hooks,
 MCP processes or personal settings must not silently widen a lane's access.
-The retired Python endpoint and inherited-config modes are not current launch
-contracts. Wire forms belong to the providers crate.
+Wire forms belong to the providers crate.
 
 Attempts retain actual route lineage, observed exit and output paths once in
 the run store. They may be partial or failed. Workflow's delivery receipt

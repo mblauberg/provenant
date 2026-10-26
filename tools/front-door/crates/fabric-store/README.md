@@ -1,4 +1,4 @@
-# Fabric store, F1 and F2
+# Fabric store
 
 One worker owns one `Store` connection at `<StateRoot>/fabric/fabric.sqlite3`.
 Supply a validated, local-filesystem state root, a core clock, cancellation token
@@ -14,7 +14,8 @@ migrations, so a journal with safe metadata is allowed for recovery.
 its idempotency key: an identical replay succeeds, changed content conflicts.
 `read_mail` with `None` uses that recipient's durable cursor; `Some(seq)` replays
 history without changing it. `mark_mail_read` advances monotonically up to that
-recipient's highest delivery. Actor IDs are bound to external addresses by F3.
+recipient's highest delivery. Actor IDs are bound to external addresses by
+fabric-runtime.
 Mail and event reads return store-owned `Page` values with integer sequences;
 task reads use a task-ID cursor. Each page has a `truncated` flag for the 1 MiB
 byte bound; resume after the last returned sequence or task ID.
@@ -37,16 +38,8 @@ the request deadline. Rollback precedes bounded, cancellable backoff for SQLite 
 Other commit failures propagate and are never replayed automatically. The edge
 must preserve the original IDs if explicitly retrying an uncertain mutation.
 
-Shared state design owns time: APIs use core `WallTime`/`UtcMicros`, not Fabric's
-older millisecond sketch. Records use nested `RecordHeader::V1` and the shared
-canonical encoder and bounded decoder. Future SQL schema versions are refused.
-
-F3 binds identity; F6b owns run-event pull cursors; F8/F9
-wire MCP and CLI. Old TS callers for these owners deliberately remain broken
-when their removed store/session/graph paths are called. Their affected tests
-are deleted with this owner, including Python graph reservation fixture tests.
-No adapter, Python/JS emulation, live import or install is included.
-
+APIs use core `WallTime`/`UtcMicros`. Records use nested `RecordHeader::V1`, the
+shared canonical encoder and bounded decoder. Future SQL schema versions are refused.
 
 `acquire_claim` takes an entropy-generated core `ClaimId` for a new scope. Exact
 scope re-acquisition retains the original ID and increments its counter, even
@@ -74,9 +67,9 @@ Unicode rules vary by volume. Run's writer lock remains the writing authority.
 `lock_landing` returns a non-cloneable `LandingGuard` backed by OS crate's safe
 exclusive OS lock in `fabric/locks/`. It binds database directory identity,
 project and fully-qualified branch ref. Validation checks the lock directory's
-identity, not the identity of the locked file; F7 must re-verify that binding.
-Hold it across the entire push or
-reconciliation operation, including Git, and pass it to every landing mutation.
+identity, not the identity of the locked file; the caller must re-verify that binding.
+Hold it across the entire push or reconciliation operation, including Git, and
+pass it to every landing mutation.
 Lock acquisition is bounded by the request budget and never holds a transaction.
 A lock holder can read/mutate through another connection to the same database.
 
@@ -103,15 +96,12 @@ an unchanged expired holder may release only after any unresolved push is closed
 Retryable
 requires explicit Begin and a live fence, never an automatic transport retry.
 Conflict records divergent remote proof and permits explicit release; no Git is
-performed by this crate. F7 owns fast-forward proof, the exact Git lease and
-transport, F6b owns home routing, and F8/F9 own tool/CLI integration.
+performed by this crate.
 
 Identical live acquire retries by the same actor/token return the existing fence
 without renewing it or appending an event. Landing retries also match frozen OIDs;
 a changed expected or candidate OID conflicts, including during an unresolved push.
 
-Migration 3 adds claims, paths and push operations after the two F1 migrations.
-Migration 4 adds persistent counters and indexed path lookup/pruning.
 Migration 7 drops the removed legacy import's table and strips its always-null
 `legacy` members from messages, tasks, coordination receipts and committed peer
 replies, and deletes the `imported` event of an import that brought nothing
@@ -125,12 +115,6 @@ describes. Records no longer decode `legacy` or `legacy_output_path` at all,
 even as null, so a row or peer reply that carries either fails to decode. A
 binary from before migration 7 may still write a null one after it, so upgrade
 every host together.
-All mutations and their events share F1's immediate transaction, injected clock,
+All mutations and their events share an immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.
-
-F2 has no further whole-file legacy deletion: F1 already removed landing-cli.ts,
-lease tests and the old Rust landing owner. Lane F removes the remaining Python driver/writer leases and Git helper.
-Rust run/supervisor and Fabric own their distinct custody/coordination roles;
-F2 does not claim those later deletion savings.
-Implementation route: `codex/gpt-6.1-sol@high` via Fabric.

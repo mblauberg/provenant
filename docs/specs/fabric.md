@@ -36,8 +36,7 @@ Fabric refuses coordination mutations from lanes at the tool surface
 ([nested lanes](routing.md#lane-identity-and-refusals)), and `fabric peer`
 and `peer-agent` refuse to start under the lane environment. Lanes still
 have direct write access to `fabric.sqlite3`, because opening the store
-needs a writable WAL connection; moving those writes to the host is the
-lane-store-isolation follow-up.
+needs a writable WAL connection.
 - Why: the tool refusal is today's boundary; the residual is recorded.
 - Test: `tests/fabric_transport.rs::lane_graph_status_does_not_create_shared_graph_store`.
   The direct SQLite write grant is an open gap.

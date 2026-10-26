@@ -45,7 +45,9 @@ worktrees, sparing live or unobservable writers. Idle removal takes the existing
 writer lock without waiting and releases it immediately after the tombstone
 rename. A held lock keeps the cache as live; a missing or unsafe lock, a
 reservation, or unverifiable registration keeps it as unobservable.
-Manual collection previews by default; `--apply` deletes. Scheduled GC also
+Bare `gc` deletes eligible caches and expired provider state; `--dry-run`
+previews all cleanup. `--apply` also deletes eligible merged worktrees and
+declared output. Scheduled GC also
 removes clean merged worktrees using fetched upstream ancestry and prunes
 explicitly configured regenerable output for known terminal lanes. The
 [configuration runbook](configuration.md#lane-cache-collection) describes

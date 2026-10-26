@@ -719,16 +719,6 @@ impl Directory {
     ) -> Result<()> {
         self.rename(source, destination_dir, destination, os::Rename::NoReplace)
     }
-    // Kept crate-private until an authorised caller lands.
-    #[allow(dead_code)]
-    pub(crate) fn exchange(
-        &self,
-        source: &OsStr,
-        destination_dir: &Self,
-        destination: &OsStr,
-    ) -> Result<()> {
-        self.rename(source, destination_dir, destination, os::Rename::Exchange)
-    }
     pub fn replace(
         &self,
         source: &OsStr,
@@ -1135,9 +1125,7 @@ pub fn entropy_128() -> Result<[u8; 16]> {
 pub fn temporary_name() -> Result<OsString> {
     let bytes = os::entropy::<12>().map_err(error("getentropy", Path::new("<temporary name>")))?;
     let mut name = String::from(".provenant-staging.");
-    for byte in bytes {
-        name.push_str(&format!("{byte:02x}"));
-    }
+    name.push_str(&provenant_core::hex(&bytes));
     Ok(name.into())
 }
 

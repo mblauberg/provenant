@@ -5,149 +5,63 @@ description: "Use for writing the first right-reason failing test for new or cha
 
 # Test-driven development
 
-```text
-NO NEW OR CHANGED OBSERVABLE BEHAVIOUR WITHOUT A RIGHT-REASON FAILURE FIRST
-```
+NO NEW OR CHANGED OBSERVABLE BEHAVIOUR WITHOUT A RIGHT-REASON FAILURE FIRST.
 
-Observable behaviour is what a user or caller can depend on: an outcome, a
-returned value, a stored record, a public contract. Appearance, layout and
-motion are observable too, but their evidence is a rendered capture, not a test
-written first. Every test is code someone must maintain, so it must catch a
-plausible defect that no existing test catches. See
-[When not to write a test](#when-not-to-write-a-test).
-
-Never delete or overwrite unknown, pre-existing or user-authored work to create
-a red state. If this run wrote production code before the test, preserve its
-patch, remove only the exact run-owned hunks when authorised, witness the
-right-reason failure, then reapply and minimise them. Existing code gets a
-regression or characterisation seam before repair. Deliberate throwaway
-prototypes, generated code and configuration may use an explicitly recorded
-exception; deadline pressure is not one.
+Observable behaviour includes outcomes, returned values, stored records and
+public contracts. Appearance, layout and motion need rendered evidence.
 
 ## Red -> green -> refactor
 
-1. **Red:** write one test for one observable behaviour through the public
-   interface. Name it like a specification. Run it and confirm it fails because
-   the behaviour is missing, not from setup, import or typo. A test that passes
-   immediately either needs sharpening or shows the behaviour already exists;
-   decide which before writing production code.
-2. **Green:** write only the simplest production change that passes. Avoid
-   speculative options and unrelated cleanup. Run the focused test each cycle,
-   affected checks at tranche boundaries, and the full required suite at the
-   enclosing verification gate; output must be clean.
-3. **Refactor:** only while green, remove duplication, improve names and deepen
-   modules, in tests as well as production code: merge near-duplicate tests and
-   delete ones a stronger test subsumes. Rerun tests after each structural step.
+1. Write one public-interface test for one behaviour. Witness failure because
+   behaviour is missing, not setup, import or typo. If it passes immediately,
+   sharpen it or establish that the behaviour already exists.
+2. Make the simplest passing change. Work vertically, test then implementation;
+   never write an imagined horizontal batch. Run focused tests each cycle,
+   affected checks at tranche boundaries and the full required suite at the
+   enclosing verification gate.
+3. Refactor only while green, including tests. Remove duplication and rerun
+   checks; never smuggle redesign into green.
 
-When project instructions set a later execution point for tests, such as a
-merged-tree gate under a machine budget, follow that cadence: still write each
-test first, name the mutation or missing behaviour it must fail on, and report
-its red and green runs as deferred. That gate must run them before merge; a
-deferred run is not yet evidence.
+Read [cycle details](references/cycle.md) for deferred project cadence,
+tracer bullets and the optional independent acceptance-test writer for crucial work.
+Deferred red or green runs remain unverified until their gate runs before merge.
 
-Work vertically: test -> implementation -> repeat. Start with one tracer bullet
-through the full path, then add behaviours from what each cycle reveals. Never
-write an imagined horizontal test batch first. Prioritise critical paths and
-complex logic.
+## Hard boundaries
 
-For crucial work, optionally have a fresh-context agent write acceptance tests
-from the approved spec and public interface, without implementation code,
-observed outputs or the author's proposed assertions. Keep the same vertical
-cycle: agree the oracle and witness each right-reason failure before its
-implementation. The author must not loosen those tests to reach green.
+- Never delete or overwrite unknown, pre-existing or user-authored work to
+  create red. Preserve any production patch this run wrote prematurely;
+  remove only its authorised hunks, witness red, then reapply minimally.
+  Existing code needs a regression or characterisation seam before repair.
+- Throwaway prototypes, generated code and configuration need an explicitly
+  recorded exception; deadline pressure grants none.
+- Test public behaviour, not private methods, call order, internal shape,
+  source text, prose, classes, styles or DOM structure. Wire formats,
+  public result shapes and persisted records are contracts. Required disclosures,
+  accessible names and public messages keep their contract tests.
+- Name the plausible production defect no existing test catches. Write no
+  test for duplication, trivial wiring, unconsumed configuration or guarantees
+  already enforced by types, schemas or lint; give the named existing check.
+  Retain one boundary test proving the real path applies that check.
+  Money, authorisation, privacy and data integrity always earn tests.
+- Expected values come from the spec, never implementation output. Assert
+  specific error variants or codes. Stop on a spec/test conflict.
+- Never weaken, skip or delete tests to pass a real behaviour change:
+  no specific-error-to-`is_err()`, exact-to-at-least count, derived expectations
+  or test-input special cases. Report removed tests and reasons.
+- For a preserving change, establish the public contract before replacing
+  an incidental assertion. Replace temporary characterisation with intended
+  behaviour after repair.
+- Mock only external APIs, time/randomness and necessary filesystem/database
+  boundaries; never owned collaborators. Calls are assertions only when contractual.
+- Use the existing owning test file. A new file requires a new production
+  unit without an owner; an audit or documentation pass grants none.
 
-## Test boundaries
-
-Test what callers observe through the public interface, not private methods,
-internal call order, internal data shape or side channels. Wire formats, public
-result shapes and persisted records are contracts. A valid test survives an
-internal refactor and a restyle. [tests.md](references/tests.md) lists what a
-test may and may not pin.
-
-**Prose is not a contract.** Documentation, skill and ADR wording, and
-configuration literals nothing consumes are not behaviour and earn no test. Name the production
-change that would make a test fail before writing it; if the only answer is
-"someone reworded the text", write none. Assert parsed structure or a script's
-effects, never the source text.
-
-Mock only system boundaries: external APIs, time/randomness and, when needed,
-filesystem/database. Never mock owned internal collaborators to pass a test;
-inject a narrow boundary instead. Assert a mock's calls only when the call is
-itself the contract, such as a charge or a sent message. See [mocking.md](references/mocking.md)
-and [interface-design.md](references/interface-design.md).
-
-Hard-to-test code is design evidence: accept dependencies, return results
-instead of hiding effects, and prefer deep modules with small interfaces. On
-green, use [deep-modules.md](references/deep-modules.md) and
-[refactoring.md](references/refactoring.md); do not smuggle redesign into green.
-
-## When not to write a test
-
-Write no test, and give this evidence instead, for:
-
-- **Prose, non-contractual copy and unconsumed configuration:** the diff and
-  review. A required disclosure, an accessible name or a documented error
-  message is a contract and keeps its test.
-- **Appearance, layout and motion:** a rendered capture or recording, judged by
-  a person or a visual diff; never class, style or DOM-structure assertions.
-- **A behaviour-preserving refactor:** the existing suite staying green where
-  it covers the change; otherwise the characterisation evidence `refactor`
-  requires.
-- **What types, a schema, a parser or a linter already guarantee:** that check,
-  plus one boundary test proving the real path applies it.
-- **Trivial delegation or wiring with no decision in it:** the caller's test.
-- **A case an existing test already covers, here or at a lower layer:** that
-  test. Test a shared unit once where it is owned, not again through each
-  consumer.
-- **An exploratory probe or debugging script:** nothing; delete it before
-  handoff.
-- **A test that would fail only on a deliberate rewording, restyle or
-  reordering:** nothing.
-
-Money, authorisation, privacy and data-integrity changes always earn a test.
-Not being able to imagine a defect is never an exemption; the exemption is a
-named existing test or check that already catches it.
-
-## Existing tests
-
-Expected values come from the spec, never from running the code under test.
-Rejection tests assert the specific error variant or code, not just `is_err()`.
-If a test contradicts the spec, stop and report the conflict with evidence;
-do not edit the test or production code to resolve an unsettled contract.
-
-Agents copy the tests beside them. In a file you touch, rewrite or delete a
-rigid test on the behaviour you are changing rather than adding another like
-it. When a change meant to preserve behaviour fails a test, first establish
-whether the public contract still holds. If it does, the test pinned an
-incidental detail: rewrite it to pin behaviour or delete it; never bend
-production code around it. If it does not, the change is a regression. Never
-weaken, skip or delete a test to make a real behaviour change pass. Gaming
-includes replacing a specific error with `is_err()`, an exact count with an
-at-least check, deriving expectations from implementation output, or
-special-casing a test input in production code. Report every test you remove
-with its reason. A characterisation test that pins current, possibly wrong
-behaviour is temporary: replace it with an intended-behaviour test once the
-change lands.
-
-## Where a test lives
-
-Put the test in the file that already owns the unit's behaviour, following this
-repository's layout and naming. A new test file needs a new production unit with
-no owning file; a review, audit or documentation pass never justifies one.
-
-## Advance gate
-
-Before the next behaviour confirm: public observable contract; a named defect
-no existing test catches; nothing incidental pinned; witnessed right-reason
-failure; minimal passing code; focused and broader checks green;
-no dirty output; resilience to internal refactoring. Under a project-deferred
-cadence, report each unwitnessed item as deferred to the gate.
-
-For a bug, reproduce the failing condition as the regression test, asserting
-the corrected behaviour rather than today's output or error text; watch it
-fail, then repair and watch it pass. If no correct seam reaches the bug, route
-to `diagnose`; do not bless a shallow test. `implement` owns independent review,
-repair loops, documentation and delivery acceptance under the tier and approved
-scope.
+Read [test forms, exclusions, existing-test repair and advance gate](references/tests.md)
+before choosing evidence. Use [mocking](references/mocking.md) and
+[interface design](references/interface-design.md) for boundary problems;
+[deep modules](references/deep-modules.md) and
+[refactoring](references/refactoring.md) while green.
+If no correct seam reaches a bug, use diagnose. Implement owns independent
+review, bounded repair and delivery acceptance.
 
 Reference eval cases (not run by CI): [discipline cases](evals/discipline_cases.yaml).

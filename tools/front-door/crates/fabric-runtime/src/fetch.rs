@@ -302,11 +302,10 @@ fn open_or_create_directory(parent: &Directory, name: &str) -> Result<Directory>
 
 fn create_stage(parent: &Directory) -> Result<(String, Directory)> {
     for _ in 0..32 {
-        let mut name = String::from(".provenant-fetch-stage-");
-        for byte in fs::entropy_128()? {
-            use std::fmt::Write as _;
-            write!(&mut name, "{byte:02x}").map_err(|_| FetchError::Invalid("staging name"))?;
-        }
+        let name = format!(
+            ".provenant-fetch-stage-{}",
+            provenant_core::hex(&fs::entropy_128()?)
+        );
         match parent.mkdir(OsStr::new(&name), DIRECTORY_MODE) {
             Ok(()) => {
                 parent.sync()?;

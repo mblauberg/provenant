@@ -42,7 +42,7 @@ pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
 pub use reader::{
     ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
-    LaneTarget, OutputChunk, RunWorkSnapshot, fact,
+    LaneTarget, OutputChunk, fact,
 };
 pub use store::{NewAttempt, PreparedRun, TerminalPublication};
 use thiserror::Error;

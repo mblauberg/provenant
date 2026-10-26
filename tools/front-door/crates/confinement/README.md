@@ -1,7 +1,7 @@
 # Confinement
 
-S3 owns permission policy, disclosure/redaction, verified Git evidence, output
-custody, instruction quarantine, and registered worktree management. Filesystem
+provenant-confinement owns permission policy, disclosure/redaction, verified Git
+evidence, output custody, instruction quarantine, and registered worktree management. Filesystem
 and process effects use supervisor; callers use supervisor locks/publication
 directly rather than a second confinement filesystem API.
 
@@ -22,10 +22,9 @@ allowing sibling refs or caches. Existing cache and lane-parent directories
 must belong to the effective user with mode 0700; setup refuses mismatches
 without changing their metadata. Compilation rechecks the held cache.
 Common config, remote tracking and packed
-refs stay immutable: host fetch/upstream composition remains required under
-the accepted supervisor design (#1255). Hard links are denied; symlinks are
-denied only in provider and private state. Toolchain, network and write-root
-policy is in supervisor.md, Contract (Permission policy).
+refs stay immutable: host fetch/upstream composition is required. Hard links
+are denied; symlinks are denied only in provider and private state. Toolchain, network and write-root
+policy is in the [supervisor spec](../../../../docs/specs/supervisor.md#permission-policy).
 
 No provider profile files are loaded here. Unsupported or nested enforcement refuses before launch. Linux builds
 and tests policy/evidence/worktree code but has no enforcing backend.
@@ -34,8 +33,7 @@ Safe Git requires a pinned executable supporting `--attr-source`; it disables
 tracked attributes with the format-specific empty tree and refuses configured
 filters, includes, and repository `info/attributes`. Reads never create objects.
 Git probes run once when opening a verified repository. Status and diffs ignore
-submodules, and gitlinks require review. Squash-only pruning is retained until
-the binding owner supplies repository-bound GitHub evidence.
+submodules, and gitlinks require review.
 
 Instruction snapshots bind a private quarantine directory on the repository's
 device **before launch**. Restoration moves the observed inode there with atomic
@@ -44,7 +42,7 @@ name. Concurrent open-writer bytes remain on the retained inode. Cross-device
 archives refuse prelaunch; there is no copy/unlink fallback. Run still owns the
 terminal/quarantine attestations and settlement decision.
 
-S3 exports a library. CLI step 4 owns command bindings and cleanup routing.
+CLI owns command bindings and cleanup routing.
 Project identity is a persisted random host-local config binding, shared by
 linked worktrees of the canonical Git common directory.
 
@@ -71,13 +69,10 @@ owns settlement; this module never removes it. Existing SQLite state requires
 a snapshot mechanism and is refused at preparation. Private WAL, SHM or journal
 state refuses copy-back rather than silently dropping committed context.
 
-The Python home staging, provider caller and ps shim are retired in the
-Lane F cut. Rust confinement and providers own the remaining staging contract.
-
 Merged pruning takes explicit branches and retains candidates whose tip is on
 the integration first-parent chain, including fast-forward merges. Linked trees
-with gitlinks require review. The unsafe library `since` path is removed; CLI
-step 4 owns translating its frozen history scope into explicit candidates.
+with gitlinks require review. CLI translates its history scope into explicit
+candidates.
 
 Read-only plans resolve Git reads through `PlanRequest::with_read_only_repo`
 using a host `ProjectBinding`; the common directory is never sourced from a

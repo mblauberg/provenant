@@ -29,5 +29,4 @@ local evidence must not claim an independent external authority.
 
 There is one machine owner for delivery minima. Domain profiles may strengthen
 those minima; execution and coordination add no parallel lifecycle ledger.
-The former external daemon ledger and its receipt ports are retired. Current
-module boundaries are mapped in the [architecture](../ARCHITECTURE.md).
+Module boundaries are mapped in the [architecture](../ARCHITECTURE.md).
