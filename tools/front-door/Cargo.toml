@@ -134,3 +134,8 @@ harness = false
 name = "dispatch_provider"
 path = "tests/dispatch_provider.rs"
 harness = false
+
+[[test]]
+name = "pr"
+path = "tests/pr.rs"
+harness = false

@@ -72,6 +72,7 @@ provenant
   telemetry stats | trace
   quota show | display | tick
   worktree create | list | remove
+  pr watch NUMBER | merge NUMBER --head SHA
   disk report
   workflow review | receipt (show | save) | session (save | show | handoff)
   check config | install | harness | release | writing
@@ -105,6 +106,17 @@ on the CLI and 1 to 55 over MCP, below the client's tool timeout. Omitting
 flag. A wait ends successfully, exit 0, when its condition is met, including a
 lane that needs input; the observed outcome is in `data`. Expiry exits 124 and
 never cancels the underlying work. Cancelling a wait ends only that reader.
+
+`pr watch NUMBER` is an exception: it delegates waiting to
+`gh pr checks --watch`, with a 24-hour process limit and no `--wait` flag.
+It reports pass or fail with the captured head and fails closed on incomplete
+evidence. `pr merge NUMBER --head SHA` rechecks CI without waiting and guards
+the merge with that full Git object ID. Both require at least one passing check,
+with all others passing or skipped, and refuse a head change during verification.
+See the [GitHub workflow](../runbooks/github-workflow.md#merge)
+for the check and merge-author policy. Their JSON data contains `number`,
+`head` and `result` (`pass` or `fail`); failures exit non-zero. A successful
+merge also includes `merged: true` and reports `merged` in text output.
 
 ### Run verbs
 
