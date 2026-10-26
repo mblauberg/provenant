@@ -1,7 +1,7 @@
 # Tests are run with nextest, which gives each test its own process; the
 # `serial-process` group in .config/nextest.toml orders the ones that share
-# cross-process state. Plain `cargo test` is multi-threaded; on Linux the
-# copy-and-exec tests can then hit ETXTBSY, so pass `--test-threads 1` there.
+# cross-process state. Plain `cargo test` is multi-threaded; test support
+# serializes child spawns with executable copies to avoid Linux ETXTBSY.
 
 [build]
 # This repository setting overrides build.rustc-wrapper in global Cargo config.
