@@ -28,6 +28,9 @@ Modeling = "Modeling"
 "uncatalogued" = "uncatalogued"
 "unparseable" = "unparseable"
 "URE" = "URE"
+# GitHub Actions event activity types.
+"labeled" = "labeled"
+"synchronize" = "synchronize"
 
 [default.extend-identifiers]
 # Proper name of the upstream Skill Optimizer.
