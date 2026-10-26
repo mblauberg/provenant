@@ -2884,7 +2884,9 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             .ok_or("not withdrawn")?;
         // Reproduce leaks left by an older binary without a cleanup hint.
         if path_kind == "directory" {
-            std::fs::create_dir(&temporary)?;
+            // Older binaries also created tmp private to the store owner.
+            std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+                .create(&temporary)?;
             std::fs::write(temporary.join("legacy.lock"), "discard")?;
         } else if path_kind == "unreadable" {
             let attempt = temporary.parent().ok_or("attempt directory")?;
