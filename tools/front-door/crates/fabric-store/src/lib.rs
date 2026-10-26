@@ -30,36 +30,6 @@ pub const MAX_PAGE_ROWS: u64 = 100;
 pub(crate) const MAX_RECORD_READ_BYTES: i64 = (MAX_RECORD_BYTES + 1) as i64;
 pub(crate) const MAX_PAGE_BYTES: usize = 1_048_576;
 
-pub(crate) fn null_member<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<(), D::Error> {
-    struct NullMember;
-    impl<'de> serde::de::Visitor<'de> for NullMember {
-        type Value = ();
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("null")
-        }
-
-        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<(), E> {
-            Ok(())
-        }
-
-        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<(), E> {
-            Ok(())
-        }
-
-        fn visit_some<D: serde::Deserializer<'de>>(
-            self,
-            _: D,
-        ) -> std::result::Result<(), D::Error> {
-            Err(serde::de::Error::custom("retired member must be null"))
-        }
-    }
-    // Unlike unit decoding, option decoding rejects empty maps in serde buffers.
-    deserializer.deserialize_option(NullMember)
-}
-
 /// Bounded reads expose byte-cap truncation; resume after the last item's cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

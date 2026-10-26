@@ -453,6 +453,7 @@ fn prepare_with(
             executable: &executable,
             home: &home,
             user: &user,
+            host_var: &|key| std::env::var_os(key),
             account: account.as_ref(),
             token,
             cwd: &cwd,

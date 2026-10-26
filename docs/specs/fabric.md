@@ -326,7 +326,8 @@ Each graph attempt is bounded by `limits.graph_timeout_ms`.
   result consumes the next route. Task failure, input requirements and
   uncertain launches never fall back. After a provider launched, only read-only
   nodes may fall back. A failed writer keeps its worktree in the checkpoint for
-  the chair, and missing launch evidence counts as launched.
+  the chair. Each checkpointed attempt records whether it launched and the
+  actor that submitted it; a checkpoint missing either is refused.
 - Dependants start after their prerequisites succeed and block after one fails.
   Every tried route and its outcome stays in the checkpoint. Plan and
   checkpoint digests, a per-project per-graph lock and atomic publication make
@@ -407,11 +408,27 @@ executable overrides come only from validated config (an absolute SSH
 executable, and per peer an absolute remote executable and a connect timeout of
 1 to 30 s). Supervisor captures bounded stdin, stdout and stderr under a fixed
 argv and deadline. The ingress also carries Git object transfer, so one SSH key
-restricted with `command=` supports every peer operation. The handshake checks
-the protocol major, host ID and `ProjectKey`; a version mismatch refuses writes
-and flags reads. Fan-out uses at most four transport threads, holds no database
-transaction and never recurses from a peer request. Cancelling a peer call stops
-the SSH child, not the remote run.
+restricted with `command=` supports every peer operation. Every request and
+reply envelope carries integer `protocol`, currently 2. Ingress refuses a
+different protocol before decoding or executing the action, replying with
+`peer_version` and its own protocol. The client checks the reply protocol,
+host ID and `ProjectKey` before decoding its result. A reply without `protocol`,
+or the released peer's refusal to decode the request, identifies protocol 1.
+The framing envelope's `version` remains 1. Any protocol difference fails the
+call with `peer_version`, naming the peer and both versions, for example:
+"peer workshop speaks protocol 1, this host speaks 2; upgrade both". Upgrade
+peers together; there is no capability list, negotiation or support for older
+peers. Each call uses one SSH connection.
+Health data also carries `protocol`. Host lists retain mismatched peers with
+`available: false`, their remote `protocol` and `reason: "peer_version"`.
+Unprobed or unreachable hosts omit `protocol`. Fan-out uses at most four
+transport threads, holds no database transaction and never recurses from a
+peer request. Cancelling a peer call stops the SSH child, not the remote run.
+
+The released v1 peer-agent can hide a decode refusal in its log and close
+without a reply. This opaque failure is indistinguishable from a lost reply
+after execution. It remains `home_unavailable` for reads and `launch_unknown`
+for mutations; it cannot safely be classified as a protocol refusal.
 
 Requests carry the version, target and source hosts, the agent label and a
 home-relative locator bound to the `ProjectKey`. Ingress checks the source
@@ -517,13 +534,20 @@ Fabric does not own these wire forms.
   proof stays unknown and cannot release the fence.
 - **Errors.** Libraries return typed `thiserror` enums without raw secrets.
   Expected contention, stale fences and uncertainty are data. The stable service
-  codes are `invalid_input`, `not_found`, `conflict`, `busy`, `stale_fence`,
+  codes are `owner_unavailable`, `invalid_input`, `not_found`, `conflict`,
+  `not_terminal`, `operation_conflict`, `busy`, `stale_fence`,
   `home_unavailable`, `peer_version`, `launch_unknown`,
   `continuation_unsupported`, `confinement_refused`, `lane_depth`,
   `lane_coordination_refused`,
   `worktree_missing`, `base_unreachable`, `branch_exists`, `output_too_large`,
   `state_corrupt`, `upgrade_refused`, `publication_failed`, `cancelled`,
   `timeout` and `io`.
+  `not_terminal` identifies an active attempt; `operation_conflict` identifies
+  an operation ID reused with different input. Both retain their code over the
+  peer wire. The CLI reports `NONTERMINAL`, `OPERATION_CONFLICT` and, for
+  `owner_unavailable`, `OWNER_UNAVAILABLE`. `UNSUPPORTED` remains specific to
+  the operation's origin: continuation refusal on resume, confinement refusal
+  on submission.
   Uncertain mutations include their `operation_id`. Oversized read responses
   return `result_too_large`, while committed mutation receipts keep the
   transport ceiling so a lowered read limit cannot hide them. Health checks do

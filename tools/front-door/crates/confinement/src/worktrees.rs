@@ -1,5 +1,8 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
+mod gc;
+pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
+
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
 };
@@ -994,7 +997,12 @@ pub fn list(
     let _lock = repository_lock(context, LockMode::Shared, cancel)?;
     context.repo.revalidate()?;
     let entries = read_worktrees(context, cancel)?;
-    let candidates = canonical_worktree_paths(&entries)?;
+    // A stale Git registration must not hide the remaining worktrees from GC.
+    let candidates: Vec<_> = entries
+        .iter()
+        .filter(|entry| !entry.bare)
+        .filter_map(|entry| canonicalize(&entry.path).ok().map(|path| (path, entry)))
+        .collect();
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
     let worker_states = context.workers.observe_roots(&roots);
     let primary = canonicalize(context.repo.root_path())?;
@@ -1452,6 +1460,7 @@ const MAX_PRUNE_BRANCHES: usize = 100;
 
 struct RemovedTree {
     info: WorktreeInfo,
+    lane_cache: Option<PathBuf>,
     _writer: LockGuard,
 }
 
@@ -1462,10 +1471,11 @@ fn matching_worktree<'a>(
 ) -> Result<Option<&'a GitWorktree>, WorktreeError> {
     let repo_root = canonicalize(repo_root)?;
     let mut found = None;
-    for (path, entry) in canonical_worktree_paths(entries)? {
-        if entry.branch.as_ref() != Some(branch) {
-            continue;
-        }
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.branch.as_ref() == Some(branch))
+    {
+        let path = canonicalize(&entry.path)?;
         if path == repo_root {
             return Err(WorktreeError::Primary);
         }
@@ -1483,8 +1493,15 @@ fn checked_out_elsewhere(
     allowed_path: Option<&Path>,
 ) -> Result<bool, WorktreeError> {
     let allowed = allowed_path.map(canonicalize).transpose()?;
-    for (path, entry) in canonical_worktree_paths(entries)? {
-        if entry.branch.as_ref() == Some(branch) && allowed.as_ref() != Some(&path) {
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.branch.as_ref() == Some(branch))
+    {
+        if allowed.is_none() {
+            return Ok(true);
+        }
+        let path = canonicalize(&entry.path)?;
+        if allowed.as_ref() != Some(&path) {
             return Ok(true);
         }
     }
@@ -1502,6 +1519,16 @@ fn remove_tree(
     entry: &GitWorktree,
     expected_head: GitOid,
     cancel: &CancelToken,
+) -> Result<RemovedTree, WorktreeError> {
+    remove_tree_when(context, entry, expected_head, cancel, &|| true)
+}
+
+fn remove_tree_when(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    expected_head: GitOid,
+    cancel: &CancelToken,
+    eligible: &dyn Fn() -> bool,
 ) -> Result<RemovedTree, WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::UnknownWriter);
@@ -1522,6 +1549,9 @@ fn remove_tree(
         || current.prunable
     {
         return Err(WorktreeError::IdentityChanged);
+    }
+    if !eligible() {
+        return Err(WorktreeError::UnknownWriter);
     }
     match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}
@@ -1549,12 +1579,6 @@ fn remove_tree(
     tombstone_identity(&locked)?;
     // Keep writer exclusion through cache detachment and verified deletion.
     // Cleanup remains best-effort after Git has removed the worktree.
-    if let Some(cargo_cache) = cargo_cache
-        && let Err(error) =
-            crate::permissions::prune_worktree_cargo_cache(context.home, &cargo_cache.path)
-    {
-        warn_cache_removal(&error);
-    }
     let info = WorktreeInfo {
         path: canonical,
         branch: Some(branch.as_str().to_owned()),
@@ -1565,6 +1589,7 @@ fn remove_tree(
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {
         info,
+        lane_cache: cargo_cache.map(|cache| cache.path),
         _writer: writer,
     })
 }
@@ -1796,6 +1821,7 @@ fn settle_branch(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn remove_merged_candidate(
     context: &WorktreeContext<'_>,
     branch: &GitRefName,
@@ -1804,6 +1830,7 @@ fn remove_merged_candidate(
     branch_tips: &BTreeMap<GitRefName, GitOid>,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
+    detached: &mut Vec<RemovedTree>,
 ) -> Result<(), WorktreeError> {
     let Some(tip) = branch_tips.get(branch).copied() else {
         retain(outcome, branch, RetainReason::Changed);
@@ -1836,7 +1863,8 @@ fn remove_merged_candidate(
             match remove_tree(context, entry, tip, cancel) {
                 Ok(removed) => {
                     outcome.removed.push(removed.info.clone());
-                    Some(removed)
+                    detached.push(removed);
+                    Some(())
                 }
                 Err(error) => {
                     retain(outcome, branch, retain_reason(&error));
@@ -1872,96 +1900,111 @@ pub fn remove(
     cancel: &CancelToken,
 ) -> Result<RemoveOutcome, WorktreeError> {
     validate_binding(context)?;
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-    context.repo.revalidate()?;
-    let entries = read_worktrees(context, cancel)?;
-    let mut outcome = RemoveOutcome::default();
-    match request {
-        WorktreeRemove::Name {
-            name,
-            discard,
-            integration,
-        } => {
-            let (integration, integration_tip) = match integration {
-                Some(text) => pin_integration(context, &text, cancel)?,
-                None => primary_integration(context, cancel)?,
-            };
-            let branch_tips = read_branch_tips(context, cancel)?;
-            let entry = named_worktree(&entries, &name, context.repo.root_path())?;
-            let branch = entry.branch.clone().ok_or(WorktreeError::InvalidRequest)?;
-            let tip = branch_tips
-                .get(&branch)
-                .copied()
-                .filter(|tip| *tip == entry.head)
-                .ok_or(WorktreeError::IdentityChanged)?;
-            let disposition = keep_disposition(
-                context,
-                &branch,
-                tip,
-                PruneRange {
-                    integration: &integration,
-                    tip: integration_tip,
-                },
-                Policy::Named { discard },
-                cancel,
-            );
-            // A dirty or live worktree fails here, before any branch changes.
-            let removed = remove_tree(context, entry, tip, cancel)?;
-            outcome.removed.push(removed.info.clone());
-            settle_branch(context, &branch, tip, disposition, cancel, &mut outcome)?;
-        }
-        WorktreeRemove::Merged { integration, scope } => {
-            let (integration, integration_tip) = pin_integration(context, &integration, cancel)?;
-            let branch_tips = read_branch_tips(context, cancel)?;
-            let mut branches = BTreeMap::new();
-            match scope {
-                PruneScope::Branches(names) => {
-                    if names.is_empty() || names.len() > MAX_PRUNE_BRANCHES {
-                        return Err(WorktreeError::InvalidRequest);
-                    }
-                    for name in names {
-                        let branch =
-                            GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
-                        if branches.insert(branch, ()).is_some() {
-                            return Err(WorktreeError::InvalidRequest);
-                        }
-                    }
-                }
-                PruneScope::Since(bound) => {
-                    if !is_ancestor(context, bound, integration_tip, cancel)? {
-                        return Err(WorktreeError::InvalidRequest);
-                    }
-                    // Scope ancestry-proven tips to the pinned graph delta.
-                    // Squash merges lack exact-head proof here and stay put.
-                    for (branch, tip) in &branch_tips {
-                        if is_ancestor(context, *tip, integration_tip, cancel)?
-                            && !is_ancestor(context, *tip, bound, cancel)?
-                        {
-                            branches.insert(branch.clone(), ());
-                        }
-                    }
-                    if branches.len() > MAX_PRUNE_BRANCHES {
-                        return Err(WorktreeError::InvalidRequest);
-                    }
-                }
-            }
-            for branch in branches.keys() {
-                remove_merged_candidate(
+    let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let mut detached = Vec::new();
+    let result = (|| {
+        context.repo.revalidate()?;
+        let entries = read_worktrees(context, cancel)?;
+        let mut outcome = RemoveOutcome::default();
+        match request {
+            WorktreeRemove::Name {
+                name,
+                discard,
+                integration,
+            } => {
+                let (integration, integration_tip) = match integration {
+                    Some(text) => pin_integration(context, &text, cancel)?,
+                    None => primary_integration(context, cancel)?,
+                };
+                let branch_tips = read_branch_tips(context, cancel)?;
+                let entry = named_worktree(&entries, &name, context.repo.root_path())?;
+                let branch = entry.branch.clone().ok_or(WorktreeError::InvalidRequest)?;
+                let tip = branch_tips
+                    .get(&branch)
+                    .copied()
+                    .filter(|tip| *tip == entry.head)
+                    .ok_or(WorktreeError::IdentityChanged)?;
+                let disposition = keep_disposition(
                     context,
-                    branch,
+                    &branch,
+                    tip,
                     PruneRange {
                         integration: &integration,
                         tip: integration_tip,
                     },
-                    &entries,
-                    &branch_tips,
+                    Policy::Named { discard },
                     cancel,
-                    &mut outcome,
-                )?;
+                );
+                // A dirty or live worktree fails here, before any branch changes.
+                let removed = remove_tree(context, entry, tip, cancel)?;
+                outcome.removed.push(removed.info.clone());
+                detached.push(removed);
+                settle_branch(context, &branch, tip, disposition, cancel, &mut outcome)?;
+            }
+            WorktreeRemove::Merged { integration, scope } => {
+                let (integration, integration_tip) =
+                    pin_integration(context, &integration, cancel)?;
+                let branch_tips = read_branch_tips(context, cancel)?;
+                let mut branches = BTreeMap::new();
+                match scope {
+                    PruneScope::Branches(names) => {
+                        if names.is_empty() || names.len() > MAX_PRUNE_BRANCHES {
+                            return Err(WorktreeError::InvalidRequest);
+                        }
+                        for name in names {
+                            let branch = GitRefName::branch(name)
+                                .map_err(|_| WorktreeError::InvalidRequest)?;
+                            if branches.insert(branch, ()).is_some() {
+                                return Err(WorktreeError::InvalidRequest);
+                            }
+                        }
+                    }
+                    PruneScope::Since(bound) => {
+                        if !is_ancestor(context, bound, integration_tip, cancel)? {
+                            return Err(WorktreeError::InvalidRequest);
+                        }
+                        // Scope ancestry-proven tips to the pinned graph delta.
+                        // Squash merges lack exact-head proof here and stay put.
+                        for (branch, tip) in &branch_tips {
+                            if is_ancestor(context, *tip, integration_tip, cancel)?
+                                && !is_ancestor(context, *tip, bound, cancel)?
+                            {
+                                branches.insert(branch.clone(), ());
+                            }
+                        }
+                        if branches.len() > MAX_PRUNE_BRANCHES {
+                            return Err(WorktreeError::InvalidRequest);
+                        }
+                    }
+                }
+                for branch in branches.keys() {
+                    remove_merged_candidate(
+                        context,
+                        branch,
+                        PruneRange {
+                            integration: &integration,
+                            tip: integration_tip,
+                        },
+                        &entries,
+                        &branch_tips,
+                        cancel,
+                        &mut outcome,
+                        &mut detached,
+                    )?;
+                }
             }
         }
+        Ok(outcome)
+    })();
+    drop(repository);
+    for removed in detached {
+        if let Some(cache) = removed.lane_cache.as_deref()
+            && let Err(error) = crate::permissions::prune_worktree_cargo_cache(context.home, cache)
+        {
+            warn_cache_removal(&error);
+        }
     }
-    Ok(outcome)
+    result
 }
 
 #[cfg(test)]
@@ -2185,6 +2228,260 @@ mod lifecycle_tests {
         fixture
             .run(&["rev-parse", "--verify", "-q", &format!("refs/heads/{name}")])
             .is_ok()
+    }
+
+    fn gc_merged_worktree(
+        fixture: &Fixture,
+        context: &WorktreeContext<'_>,
+        name: &str,
+    ) -> Result<WorktreeInfo, Box<dyn Error>> {
+        let created = create(
+            context,
+            WorktreeCreate {
+                branch: name.to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        run_in_worktree(
+            fixture,
+            &created.path,
+            &["commit", "--allow-empty", "-m", name],
+        )?;
+        fixture.run(&["merge", "--no-ff", name, "-m", "merge GC fixture"])?;
+        list(context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == created.path)
+            .ok_or_else(|| "missing GC fixture worktree".into())
+    }
+
+    #[test]
+    fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let mut lane = gc_merged_worktree(&fixture, &context, "gc-output-lock")?;
+        let target = lane.path.join("target");
+        fs::create_dir(&target)?;
+        fs::write(target.join("artifact"), "output")?;
+        lane.dirty = WorktreeCondition::Ignored;
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&lane.path))?;
+        let observations = std::cell::Cell::new(None);
+        let calls = std::cell::Cell::new(0);
+        let terminal = |_: &Path| {
+            let count = calls.get() + 1;
+            calls.set(count);
+            if count == 1 {
+                let repository_free = context
+                    .project_state
+                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                    .is_ok();
+                let writer_held = matches!(
+                    state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+                    Err(FsError::LockTimeout { .. })
+                );
+                observations.set(Some((repository_free, writer_held)));
+            }
+            true
+        };
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: None,
+                terminal: &terminal,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".to_owned()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(observations.get(), Some((true, true)));
+        assert!(!target.exists());
+        assert_eq!(report.output.len(), 1);
+        assert!(report.output[0].removed);
+        Ok(())
+    }
+
+    #[test]
+    fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let first = gc_merged_worktree(&fixture, &context, "gc-prune-failed")?;
+        let second = gc_merged_worktree(&fixture, &context, "gc-prune-next")?;
+        let calls = std::cell::Cell::new(0);
+        let terminal = |path: &Path| {
+            if path == first.path {
+                calls.set(calls.get() + 1);
+                false
+            } else {
+                true
+            }
+        };
+        let report = collect(
+            &context,
+            &[first.clone(), second.clone()],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &terminal,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".to_owned()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert!(
+            calls.get() >= 2,
+            "prune and removal both recheck terminality"
+        );
+        assert!(first.path.is_dir());
+        assert!(branch_exists(&fixture, "gc-prune-failed"));
+        assert_eq!(report.worktrees.retained.len(), 1);
+        assert_eq!(report.worktrees.retained[0].branch, "gc-prune-failed");
+        assert_eq!(report.worktrees.removed, vec![second.clone()]);
+        assert_eq!(report.worktrees.pruned_refs, vec!["gc-prune-next"]);
+        assert!(!second.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_skips_unmanaged_worktrees_and_their_output() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let mut lane = gc_merged_worktree(&fixture, &context, "gc-unmanaged")?;
+        let unmanaged = fixture._temp.path().join("unmanaged");
+        std::fs::create_dir(&unmanaged)?;
+        std::fs::write(unmanaged.join("artifact"), "keep")?;
+        lane.path = unmanaged.clone();
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| true,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".to_owned()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert!(unmanaged.join("artifact").is_file());
+        assert!(report.worktrees.removed.is_empty());
+        assert!(report.worktrees.retained.is_empty());
+        assert!(report.output.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let lane = gc_merged_worktree(&fixture, &context, "gc-dry-unknown")?;
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| false,
+                no_live_lanes: &|_| true,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: true,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(report.worktrees.retained.len(), 1);
+        assert_eq!(
+            report.worktrees.retained[0].reason,
+            RetainReason::UnknownWriter
+        );
+        assert!(report.worktrees.removed.is_empty());
+        Ok(())
+    }
+
+    /// Fail the first worktree-list read after a successful removal, precisely
+    /// where branch settlement rechecks other checkouts. Later reads succeed.
+    struct FailsFirstGcSettlement<'a> {
+        executor: &'a provenant_supervisor::exec::SystemExecutor,
+        removed: std::sync::atomic::AtomicBool,
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    impl Executor for FailsFirstGcSettlement<'_> {
+        fn execute(
+            &self,
+            options: provenant_supervisor::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_supervisor::exec::ExecError> {
+            use std::sync::atomic::Ordering;
+            let worktree = options.argv.iter().any(|arg| arg == "worktree");
+            let remove = worktree && options.argv.iter().any(|arg| arg == "remove");
+            let list = worktree && options.argv.iter().any(|arg| arg == "list");
+            let mut outcome = self.executor.execute(options)?;
+            if remove && outcome.termination == Termination::Exit(0) {
+                self.removed.store(true, Ordering::SeqCst);
+            } else if list
+                && self.removed.load(Ordering::SeqCst)
+                && !self.failed.swap(true, Ordering::SeqCst)
+            {
+                outcome.termination = Termination::Exit(1);
+            }
+            Ok(outcome)
+        }
+    }
+
+    #[test]
+    fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let mut context = test_context.context();
+        let first = gc_merged_worktree(&fixture, &context, "gc-settle-failed")?;
+        let second = gc_merged_worktree(&fixture, &context, "gc-settle-next")?;
+        let faulty = FailsFirstGcSettlement {
+            executor: &fixture.executor,
+            removed: std::sync::atomic::AtomicBool::new(false),
+            failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        context.executor = &faulty;
+        let report = collect(
+            &context,
+            &[first.clone(), second.clone()],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| true,
+                no_live_lanes: &|_| true,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(
+            report.worktrees.removed,
+            vec![first.clone(), second.clone()]
+        );
+        assert_eq!(report.worktrees.retained.len(), 1);
+        assert_eq!(report.worktrees.retained[0].branch, "gc-settle-failed");
+        assert_eq!(report.worktrees.pruned_refs, vec!["gc-settle-next"]);
+        assert!(branch_exists(&fixture, "gc-settle-failed"));
+        assert!(!first.path.exists());
+        assert!(!second.path.exists());
+        Ok(())
     }
 
     #[test]

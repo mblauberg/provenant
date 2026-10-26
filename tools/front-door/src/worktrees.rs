@@ -16,6 +16,7 @@ use provenant_supervisor::{
 };
 use serde::Serialize;
 use std::{
+    cell::RefCell,
     ffi::OsStr,
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -41,6 +42,8 @@ pub(crate) enum Error {
         Box<provenant_confinement::permissions::CacheGcError>,
         Vec<PathBuf>,
         provenant_run::ProviderStateGc,
+        Vec<worktrees::WorktreeGcReport>,
+        Vec<String>,
     ),
     #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
@@ -54,6 +57,8 @@ pub(crate) enum Error {
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
     Budget,
+    #[error("{0}")]
+    GcObservation(&'static str),
     #[error("invalid worktree removal scope")]
     InvalidScope,
 }
@@ -63,6 +68,11 @@ fn note_kept_unmerged() {
     eprintln!(
         "note: the branch is not merged into the integration branch and was kept; pass --discard to delete it"
     );
+}
+
+#[allow(clippy::print_stderr)]
+fn warn_fetch(error: &Error) {
+    eprintln!("warning: {error}; using the current integration resolution");
 }
 
 impl Error {
@@ -141,7 +151,28 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
                 cancel,
             )?),
             Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
-            Worktree::Remove(args) => {
+            Worktree::Remove(mut args) => {
+                let upstream = if args.discard {
+                    None
+                } else {
+                    match crate::gc_support::fetch_default(context) {
+                        Ok(upstream) => upstream,
+                        Err(error) => {
+                            warn_fetch(&error);
+                            None
+                        }
+                    }
+                };
+                if let Some((reference, _)) = upstream
+                    && args.integration.is_none()
+                {
+                    args.integration = Some(
+                        reference
+                            .strip_prefix("refs/remotes/")
+                            .ok_or(Error::InvalidScope)?
+                            .to_owned(),
+                    );
+                }
                 let named = args.name.is_some();
                 let request = if let Some(name) = args.name {
                     WorktreeRemove::Name {
@@ -174,12 +205,14 @@ fn execute(command: Worktree, globals: &Globals) -> Result<Data, Error> {
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct GcData {
     #[serde(flatten)]
     report: provenant_confinement::permissions::CacheGcReport,
     idle_days: u64,
     provider_state: provenant_run::ProviderStateGc,
+    worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
+    alerts: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unobserved_projects: Vec<PathBuf>,
 }
@@ -189,13 +222,7 @@ struct GcData {
 pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
     match gc(&command, globals) {
         Ok(data) => {
-            let mut human = gc_summary(&data.report);
-            human.push_str(&format!(
-                "{} provider-state removal(s), {} kept, {} error(s)\n",
-                data.provider_state.removed.len(),
-                data.provider_state.kept.len(),
-                data.provider_state.errors.len()
-            ));
+            let human = gc_data_summary(&data);
             let failed = !data.provider_state.errors.is_empty();
             let mut result = CommandResult::new(
                 "gc",
@@ -214,20 +241,19 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
             }
             emit(&result, globals, &human, command.dry_run)
         }
-        Err(Error::CacheGc(error, unobserved_projects, provider_state)) => {
+        Err(Error::CacheGc(error, unobserved_projects, provider_state, worktree_cleanup, alerts)) => {
             let error = *error;
-            let human = gc_summary(&error.report);
-            let message = format!("{error}\n{human}");
-            let mut result = CommandResult::new(
-                "gc",
-                Outcome::Error,
-                GcData {
-                    report: error.report,
-                    idle_days: command.idle_days,
-                    provider_state,
-                    unobserved_projects,
-                },
-            );
+            let failure = error.to_string();
+            let data = GcData {
+                report: error.report,
+                idle_days: command.idle_days,
+                unobserved_projects,
+                provider_state,
+                worktree_cleanup,
+                alerts,
+            };
+            let message = format!("{failure}\n{}", gc_data_summary(&data));
+            let mut result = CommandResult::new("gc", Outcome::Error, data);
             result.error = Some(provenant_records::CommandError {
                 code: "GC".into(),
                 message,
@@ -238,6 +264,39 @@ pub fn run_gc(command: Gc, globals: &Globals) -> u8 {
         }
         Err(error) => fail("gc", error.outcome(), "GC", &error.to_string(), globals),
     }
+}
+
+fn gc_data_summary(data: &GcData) -> String {
+    let mut human = gc_summary(&data.report);
+    human.push_str(&format!(
+        "{} provider-state removal(s), {} kept, {} error(s)\n",
+        data.provider_state.removed.len(),
+        data.provider_state.kept.len(),
+        data.provider_state.errors.len()
+    ));
+    for project in &data.worktree_cleanup {
+        if let Some(error) = &project.upstream_error {
+            human.push_str(&format!("{error}; merged worktrees kept\n"));
+        }
+        for tree in &project.worktrees.removed {
+            human.push_str(&format!(
+                "{} merged worktree {}\n",
+                if project.dry_run {
+                    "would remove"
+                } else {
+                    "removed"
+                },
+                tree.path.display()
+            ));
+        }
+        for output in &project.output {
+            human.push_str(&format!("{} {}\n", output.reason, output.path.display()));
+        }
+    }
+    for alert in &data.alerts {
+        human.push_str(&format!("{alert}\n"));
+    }
+    human
 }
 
 fn gc_summary(report: &provenant_confinement::permissions::CacheGcReport) -> String {
@@ -292,12 +351,14 @@ struct GcProject {
     binding: provenant_config::ProjectBinding,
     state: Directory,
     lanes: Vec<worktrees::WorktreeInfo>,
+    path: PathBuf,
 }
 
 fn gc_project(roots: &provenant_core::Roots, project: &Path) -> Result<GcProject, Error> {
     with_context(roots, project, MUTATION_TIMEOUT, |context, cancel| {
         Ok(GcProject {
             binding: context.binding.clone(),
+            path: project.to_owned(),
             state: Directory::open_anchor(
                 &roots
                     .state
@@ -324,10 +385,11 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         roots::selected_project(globals.project.as_deref(), true)?
     };
     let roots = roots::roots(globals, &assets, &project)?;
+    let mut projects = Vec::new();
+    let mut project_ids = Vec::new();
+    let mut unobserved_projects = Vec::new();
     let config =
         provenant_config::read_with_domains(&roots, &LocalFs, &provenant_cli::domains::SECTIONS)?;
-    let mut projects = Vec::new();
-    let mut unobserved_projects = Vec::new();
     if command.scheduled {
         if !config.gc.schedule {
             return Ok(GcData {
@@ -338,9 +400,11 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                 idle_days: command.idle_days,
                 provider_state: Default::default(),
                 unobserved_projects,
+                ..Default::default()
             });
         }
         for binding in provenant_config::registered_projects(&roots, &LocalFs)? {
+            project_ids.push(binding.project_id());
             let common = binding.common_dir();
             let path = if common.file_name() == Some(OsStr::new(".git")) {
                 common.parent().ok_or(Error::InvalidScope)?
@@ -353,7 +417,96 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
             }
         }
     } else {
-        projects.push(gc_project(&roots, &project)?);
+        let selected = gc_project(&roots, &project)?;
+        project_ids.push(selected.binding.project_id());
+        projects.push(selected);
+    }
+    let alerts = crate::gc_support::disk_alert(
+        &roots,
+        &project_ids,
+        config.gc.alert_below.as_deref(),
+        command.dry_run,
+    )
+    .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
+    let mut worktree_cleanup = Vec::new();
+    for project in &mut projects {
+        let settings = config
+            .gc
+            .projects
+            .get(&project.binding.project_id().to_string())
+            .cloned()
+            .unwrap_or_default();
+        let cleanup = with_context(
+            &roots,
+            &project.path,
+            MUTATION_TIMEOUT,
+            |context, cancel| {
+                // A failed fetch cannot grant removal authority. Output pruning
+                // still has its independent terminal-state proof.
+                let (upstream, upstream_error) = match crate::gc_support::fetch_default(context) {
+                    Ok(upstream) => (upstream, None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                // Fetch can take a while, so begin the single sweep snapshot
+                // only after it completes. A stale snapshot is refreshed by
+                // the callbacks below, which collect() invokes under the
+                // worktree writer lock before each mutation.
+                let states = RefCell::new(
+                    crate::gc_support::lane_states(&roots, project.binding.project_id()).ok(),
+                );
+                let rescan_failed = std::cell::Cell::new(false);
+                let refresh = || {
+                    crate::gc_support::refresh_if_stale(
+                        &states,
+                        &rescan_failed,
+                        |snapshot| snapshot.is_current(),
+                        || {
+                            crate::gc_support::lane_states(&roots, project.binding.project_id())
+                                .ok()
+                        },
+                    );
+                };
+                let terminal = |path: &Path| {
+                    refresh();
+                    states
+                        .borrow()
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.get(path))
+                        == Some(&true)
+                };
+                let no_live_lanes = |path: &Path| {
+                    refresh();
+                    states
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.no_live_lanes(path))
+                };
+                let now_ns = SystemClock
+                    .wall_now()
+                    .map(|now| i128::from(now.as_micros()) * 1_000)
+                    .map_err(|_| Error::Budget)?;
+                let mut report = worktrees::collect(
+                    context,
+                    &project.lanes,
+                    &worktrees::WorktreeGcPolicy {
+                        upstream: upstream.map(|(_, oid)| oid),
+                        terminal: &terminal,
+                        no_live_lanes: &no_live_lanes,
+                        regenerable: &settings.regenerable,
+                        keep: &settings.keep,
+                        written_before_ns: now_ns - 86_400 * 1_000_000_000,
+                        dry_run: command.dry_run || !command.apply,
+                    },
+                    cancel,
+                )?;
+                report.upstream_error = upstream_error;
+                Ok(report)
+            },
+        );
+        match cleanup {
+            Ok(cleanup) => worktree_cleanup.push(cleanup),
+            Err(_) => unobserved_projects.push(project.path.clone()),
+        }
     }
     let provider_state = crate::provider_retention::collect(
         &roots,
@@ -397,6 +550,8 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
                 Box::new(error),
                 unobserved_projects,
                 provider_state,
+                worktree_cleanup,
+                alerts,
             ));
         }
     };
@@ -405,6 +560,8 @@ fn gc(command: &Gc, globals: &Globals) -> Result<GcData, Error> {
         idle_days: command.idle_days,
         provider_state,
         unobserved_projects,
+        worktree_cleanup,
+        alerts,
     })
 }
 

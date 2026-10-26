@@ -22,9 +22,8 @@ struct Identity {
 #[derive(Serialize, Deserialize)]
 struct Report {
     claude: Vec<Identity>,
-    /// The macOS login-session peer agent; absent from older remote builds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    peer_agent: Option<crate::peer_agent::Status>,
+    /// The macOS login-session peer agent.
+    peer_agent: crate::peer_agent::Status,
 }
 fn executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -163,7 +162,7 @@ fn local(globals: &Globals, home: &Path) -> Result<Report, Box<dyn std::error::E
     let state = roots::roots(globals, &assets, home)?.state;
     Ok(Report {
         claude,
-        peer_agent: Some(crate::peer_agent::status(state.as_path(), home)),
+        peer_agent: crate::peer_agent::status(state.as_path(), home),
     })
 }
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, Box<dyn std::error::Error>> {
@@ -228,16 +227,14 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                 }
                 text.push_str("; token validity unverified\n");
             }
-            if let Some(agent) = report.peer_agent {
-                let state = serde_json::to_value(agent)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "unknown".into());
-                text.push_str(&format!(
-                    "peer agent [{}]: {state}\n",
-                    crate::peer_agent::LABEL
-                ));
-            }
+            let state = serde_json::to_value(report.peer_agent)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into());
+            text.push_str(&format!(
+                "peer agent [{}]: {state}\n",
+                crate::peer_agent::LABEL
+            ));
             emit(
                 &CommandResult::new("hosts doctor", Outcome::Ok, report),
                 globals,
@@ -266,5 +263,13 @@ mod tests {
     #[test]
     fn keychain_suffix_is_the_hex_digest_prefix() {
         assert_eq!(super::keychain_suffix(b"/home/u/.claude-work"), "9fa37e90");
+    }
+
+    #[test]
+    fn doctor_report_requires_the_peer_agent() {
+        let report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped"}"#).unwrap();
+        assert_eq!(report.peer_agent, crate::peer_agent::Status::Stopped);
+        assert!(serde_json::from_str::<super::Report>(r#"{"claude":[]}"#).is_err());
     }
 }

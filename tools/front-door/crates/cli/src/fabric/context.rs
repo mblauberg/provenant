@@ -211,6 +211,7 @@ impl Context {
             .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused))?;
         let request = PeerRequest {
             version: 1,
+            protocol: provenant_fabric_runtime::hosts::PROTOCOL,
             target_host: host,
             source_host: self.identity.host,
             agent: self.identity.inbox.agent.clone(),
@@ -289,10 +290,14 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
     match error {
         FacadeError::LaunchUnknown { .. } => (Outcome::Error, "LAUNCH_UNKNOWN"),
         FacadeError::HomeUnavailable => (Outcome::Error, "PEER_UNAVAILABLE"),
-        FacadeError::PeerVersion => (Outcome::Refused, "PEER_VERSION"),
+        FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
+            (Outcome::Refused, "PEER_VERSION")
+        }
         FacadeError::InvalidInput => (Outcome::Invalid, "INVALID"),
         FacadeError::NotFound => (Outcome::Invalid, "NOT_FOUND"),
         FacadeError::Conflict => (Outcome::Refused, "CONFLICT"),
+        FacadeError::NotTerminal => (Outcome::Refused, "NONTERMINAL"),
+        FacadeError::OperationConflict => (Outcome::Refused, "OPERATION_CONFLICT"),
         FacadeError::Busy => (Outcome::Refused, "QUEUE_FULL"),
         FacadeError::ConfinementRefused => (Outcome::Refused, "REFUSED"),
         FacadeError::WorktreeMissing => (Outcome::Invalid, "WORKTREE_MISSING"),
@@ -300,7 +305,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, &'static str) {
         FacadeError::BranchExists => (Outcome::Refused, "BRANCH_EXISTS"),
         FacadeError::LaneDepth => (Outcome::Refused, "LANE_DEPTH"),
         FacadeError::LaneCoordinationRefused => (Outcome::Refused, "lane_coordination_refused"),
-        FacadeError::OwnerUnavailable => (Outcome::Refused, "UNSUPPORTED"),
+        FacadeError::OwnerUnavailable => (Outcome::Refused, "OWNER_UNAVAILABLE"),
         FacadeError::ProviderStateExpired => (Outcome::Refused, "PROVIDER_STATE_EXPIRED"),
         FacadeError::Cancelled => (Outcome::Error, "CANCELLED"),
         FacadeError::StateCorrupt => (Outcome::Error, "STATE_CORRUPT"),
@@ -326,7 +331,13 @@ pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
         _ => None,
     };
     PeerFailure {
-        error: FacadeError::from_code(error.code(), operation_id),
+        error: match error {
+            PeerError::ProtocolMismatch { peer, remote } => FacadeError::PeerProtocolMismatch {
+                peer: peer.clone(),
+                remote: *remote,
+            },
+            _ => FacadeError::from_code(error.code(), operation_id),
+        },
         detail,
     }
 }
@@ -352,4 +363,24 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
         AbsolutePath::new(&path.join(OsStr::new(&name))).map_err(|_| EdgeError::Invalid)
     }
     perform(value, roots).map_err(|_| io::Error::other("cannot publish oversized result"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn protocol_mismatch_keeps_both_versions_and_the_cli_code() {
+        let failure = super::peer_failure(
+            "workshop",
+            &super::PeerError::ProtocolMismatch {
+                peer: "workshop".into(),
+                remote: 1,
+            },
+        );
+        assert_eq!(failure.error.code(), "peer_version");
+        assert_eq!(
+            failure.error.to_string(),
+            "peer workshop speaks protocol 1, this host speaks 2; upgrade both"
+        );
+        assert_eq!(super::facade_outcome(&failure.error).1, "PEER_VERSION");
+    }
 }

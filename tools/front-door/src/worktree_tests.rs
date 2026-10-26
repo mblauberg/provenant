@@ -35,6 +35,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     provenant_supervisor::fixture::run_libtest(
         args,
         &[
+            "gc_fetches_default_and_removes_only_clean_merged_worktrees",
+            "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
+            "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
             "lane_prepare_isolates_nested_state",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
@@ -59,6 +62,9 @@ pub(crate) fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
         ],
         |name| {
             let result = match name {
+                "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
+                "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
+                "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "read_only_dispatch_applies_bound_git_and_project_writes" => {
                     crate::compose_tests::read_only_dispatch_applies_bound_git_and_project_writes()
@@ -1277,6 +1283,7 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
                 args.push("--dry-run");
             }
             let result = ok(&rig, &args)?;
+            assert_eq!(result["data"]["dry_run"], dry_run);
             if writer == "free" {
                 assert_eq!(result["data"]["removed"][0]["reason"], "idle");
                 assert_eq!(cache.exists(), dry_run);
@@ -1384,7 +1391,7 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
             .len(),
         1
     );
-    ok(&rig, &["gc", "--json"])?;
+    ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(!orphan.exists(), "gc must still sweep orphaned caches");
     rig.assert_legacy_unchanged()
 }
@@ -1468,13 +1475,23 @@ fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -> Result {
 
 fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -> Result {
     let rig = repository()?;
+    git(
+        &rig,
+        &["remote", "add", "origin", "/missing/offline-upstream.git"],
+    )?;
     // At the integration tip: nothing unique, so the name removal deletes it.
     ok(
         &rig,
         &["worktree", "create", "at-tip", "--base", "HEAD", "--json"],
     )?;
     let at_tip = rig.project.join(".worktrees/at-tip");
-    let removed = ok(&rig, &["worktree", "remove", "at-tip", "--json"])?;
+    let output = command(&rig, &["worktree", "remove", "at-tip", "--json"])?;
+    assert_eq!(code(&output), 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("using the current integration resolution")
+    );
+    let removed = json(&output)?;
     assert_eq!(
         removed["data"]["pruned_refs"],
         serde_json::json!(["at-tip"])
@@ -1503,6 +1520,10 @@ fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -> Result {
 
 fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
     let rig = repository()?;
+    git(
+        &rig,
+        &["remote", "add", "origin", "/missing/offline-upstream.git"],
+    )?;
     // The worktree directory is the branch with `/` replaced by `-`.
     ok(
         &rig,
@@ -2951,4 +2972,406 @@ fn mcp_error_code(result: &Value) -> &str {
                 .and_then(|text| text.split_once(':'))
                 .map_or("", |(code, _)| code)
         })
+}
+
+fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
+    use provenant_supervisor::fs::{Directory, LockMode};
+    use std::ffi::OsStr;
+    let rig = repository()?;
+    fs::write(rig.project.join(".gitignore"), ".worktrees/\n**/target/\n")?;
+    git(&rig, &["add", ".gitignore"])?;
+    git(&rig, &["commit", "-qm", "ignore output"])?;
+    let remote = rig.root.join("upstream.git");
+    git(
+        &rig,
+        &[
+            "init",
+            "--bare",
+            "--initial-branch=trunk",
+            remote.to_str().ok_or("remote")?,
+        ],
+    )?;
+    git(
+        &rig,
+        &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+    )?;
+    let stale_main = git(&rig, &["rev-parse", "main"])?;
+    ok(&rig, &["worktree", "create", "fresh-old", "--json"])?;
+    let merged = branch_commit(&rig, "merged")?;
+    let merged_tip = git(&rig, &["rev-parse", "merged"])?;
+    let tree = git(&rig, &["rev-parse", "merged^{tree}"])?;
+    let tip = git(
+        &rig,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &stale_main,
+            "-p",
+            &merged_tip,
+            "-m",
+            "merge lane",
+        ],
+    )?;
+    git(
+        &rig,
+        &["push", "origin", &format!("{tip}:refs/heads/trunk")],
+    )?;
+    ok(
+        &rig,
+        &["worktree", "create", "fresh-tip", "--base", &tip, "--json"],
+    )?;
+    for name in [
+        "named",
+        "explicit",
+        "dirty",
+        "live",
+        "queued",
+        "unrecorded",
+        "locked",
+    ] {
+        ok(
+            &rig,
+            &["worktree", "create", name, "--base", "merged", "--json"],
+        )?;
+    }
+    let cache = prepare_lane_cache(&rig, &merged, "merged")?;
+    git(&rig, &["worktree", "lock", ".worktrees/locked"])?;
+    fs::write(rig.project.join(".worktrees/dirty/untracked"), "keep")?;
+    let live = rig.project.join(".worktrees/live");
+    let state_project = fs::read_dir(rig.state.join("worktrees"))?
+        .next()
+        .ok_or("project state")??
+        .path();
+    let state = state_project.join(provenant_confinement::worktrees::state_dir_name(&live));
+    let state = Directory::open_anchor(&state)?;
+    let _guard = state.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+    let unmerged = branch_commit(&rig, "unmerged")?;
+    let (_, context) = writer_context(&rig)?;
+    let store = open_writer_store(&context)?;
+    let clock = provenant_supervisor::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let merged_writer =
+        provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &merged)?;
+    let ended = writer_run(merged_writer, "gc-merged", 120, "finished")?;
+    store.create(&ended, &call)?;
+    store.cancel(ended.attempts[0].attempt_id, "finished", &call)?;
+    fs::create_dir(merged.join("target"))?;
+    fs::write(merged.join("target/artifact"), "old build")?;
+    age_gc_output(&merged.join("target"))?;
+    let output_config = format!(
+        "[gc.projects.'{}']\nregenerable=['target']\n",
+        context.project_id
+    );
+    fs::write(
+        rig.state.join("config.toml"),
+        format!("schema_version=1\n{output_config}"),
+    )?;
+    let queued_path = rig.project.join(".worktrees/queued");
+    let queued_writer =
+        provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &queued_path)?;
+    let queued = writer_run(queued_writer, "gc-queued", 121, "waiting")?;
+    store.create(&queued, &call)?;
+    let explicit = ok(
+        &rig,
+        &[
+            "worktree",
+            "remove",
+            "explicit",
+            "--integration",
+            "main",
+            "--json",
+        ],
+    )?;
+    assert_eq!(explicit["data"]["retained"][0]["reason"], "not_merged");
+    assert!(has_branch(&rig, "explicit")?);
+    let named = ok(&rig, &["worktree", "remove", "named", "--json"])?;
+    assert_eq!(named["data"]["pruned_refs"], serde_json::json!(["named"]));
+    assert_eq!(git(&rig, &["rev-parse", "main"])?, stale_main);
+    assert_eq!(git(&rig, &["rev-parse", "origin/trunk"])?, tip);
+    // One broken registration must not stop the remaining sweep.
+    git(
+        &rig,
+        &["worktree", "add", "-qb", "broken", ".worktrees/broken"],
+    )?;
+    fs::remove_dir_all(rig.project.join(".worktrees/broken"))?;
+    let dry = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    assert_eq!(dry["data"]["dry_run"], true);
+    assert!(merged.is_dir());
+    assert!(cache.is_dir());
+    assert!(dry["data"]["worktree_cleanup"][0]["dry_run"] == true);
+    assert!(
+        dry["data"]["worktree_cleanup"][0]["output"]
+            .as_array()
+            .ok_or("output")?
+            .iter()
+            .any(|entry| entry["reason"] == "would_remove" && entry["removed"] == false)
+    );
+    assert!(
+        dry["data"]["worktree_cleanup"][0]["worktrees"]["pruned_refs"]
+            .as_array()
+            .ok_or("refs")?
+            .contains(&serde_json::json!("merged"))
+    );
+    // Alert failure must not block reclamation, including on a full disk.
+    fs::write(
+        rig.state.join("config.toml"),
+        format!("schema_version=1\n[gc]\nalert_below='18446744073709551615B'\n{output_config}"),
+    )?;
+    fs::write(rig.state.join("gc"), "blocked alert directory")?;
+    let collected = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert!(
+        collected["data"]["alerts"][0]
+            .as_str()
+            .ok_or("alert failure")?
+            .contains("disk alert failed")
+    );
+    assert!(
+        collected["data"]["worktree_cleanup"][0]["worktrees"]["pruned_refs"]
+            .as_array()
+            .ok_or("refs")?
+            .contains(&serde_json::json!("merged"))
+    );
+    assert!(!merged.exists());
+    assert!(!cache.exists());
+    assert!(!has_branch(&rig, "merged")?);
+    assert!(rig.project.join(".worktrees/dirty").is_dir());
+    assert!(live.is_dir());
+    assert!(unmerged.is_dir());
+    assert!(queued_path.is_dir());
+    for name in ["fresh-old", "fresh-tip", "unrecorded"] {
+        assert!(
+            rig.project.join(".worktrees").join(name).is_dir(),
+            "{name} was swept"
+        );
+        assert!(has_branch(&rig, name)?);
+    }
+    for (branch, reason) in [
+        ("fresh-old", "no_unique_commit"),
+        ("fresh-tip", "at_integration_tip"),
+        ("locked", "locked_or_prunable"),
+    ] {
+        let retained = collected["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
+            .as_array()
+            .ok_or("retained")?;
+        assert!(
+            retained
+                .iter()
+                .any(|entry| entry["branch"] == branch && entry["reason"] == reason),
+            "expected {branch} with {reason}; got {retained:?}"
+        );
+    }
+    assert!(
+        !collected["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
+            .as_array()
+            .ok_or("retained")?
+            .iter()
+            .any(|entry| entry["branch"] == "main")
+    );
+    assert!(has_branch(&rig, "unmerged")?);
+    assert_eq!(git(&rig, &["rev-parse", "main"])?, stale_main);
+    store.cancel(queued.attempts[0].attempt_id, "queue ended", &call)?;
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(!queued_path.exists());
+    Ok(())
+}
+
+fn age_gc_output(path: &Path) -> Result {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            age_gc_output(&entry?.path())?;
+        }
+    }
+    fs::File::open(path)?.set_modified(std::time::UNIX_EPOCH)?;
+    Ok(())
+}
+
+fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() -> Result {
+    let rig = repository()?;
+    fs::write(
+        rig.project.join(".gitignore"),
+        ".worktrees/\n**/target/\n**/node_modules\n",
+    )?;
+    fs::create_dir_all(rig.project.join("tracked/target"))?;
+    fs::write(rig.project.join("tracked/target/keep"), "tracked")?;
+    git(&rig, &["add", ".gitignore"])?;
+    git(&rig, &["add", "-f", "tracked/target/keep"])?;
+    git(&rig, &["commit", "-qm", "ignore build output"])?;
+    ok(&rig, &["worktree", "create", "ended", "--json"])?;
+    let path = rig.project.join(".worktrees/ended");
+    for output in [
+        "old/target",
+        "kept/target",
+        "recent/target",
+        "another/node_modules",
+    ] {
+        fs::create_dir_all(path.join(output))?;
+        fs::write(path.join(output).join("artifact.lock"), "regenerate")?;
+        age_gc_output(&path.join(output))?;
+    }
+    age_gc_output(&path.join("tracked/target"))?;
+    fs::write(path.join("recent/target/new"), "new build")?;
+    let external = rig.root.join("external");
+    fs::create_dir(&external)?;
+    fs::write(external.join("keep"), "external")?;
+    std::os::unix::fs::symlink(&external, path.join("node_modules"))?;
+    let (roots, context) = writer_context(&rig)?;
+    let store = open_writer_store(&context)?;
+    let clock = provenant_supervisor::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+    let prepared = writer_run(writer.clone(), "gc-ended", 101, "regenerate")?;
+    let attempt = prepared.attempts[0].attempt_id;
+    store.create(&prepared, &call)?;
+    let config = format!(
+        "schema_version=1\n[gc.projects.'{}']\nregenerable=['target','node_modules']\nkeep=['kept/target']\n",
+        context.project_id
+    );
+    fs::write(rig.state.join("config.toml"), &config)?;
+    // Queued is live, even without a running process or held writer lease.
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(path.join("old/target").is_dir());
+    store.cancel(attempt, "fixture ended", &call)?;
+    let before_child = crate::gc_support::lane_states(&roots, context.project_id)?;
+    assert!(before_child.is_current());
+    assert_eq!(
+        crate::gc_support::lane_states(&roots, context.project_id)?.get(&path),
+        Some(&true)
+    );
+    // A queued child lane also blocks output pruning.
+    let mut child_inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    child_inputs.state_dir = Some(rig.state.join("children/nested"));
+    let child_context = provenant_run::ExecutionContext {
+        state_root: child_inputs
+            .resolve(&provenant_supervisor::fs::LocalFs)?
+            .state,
+        ..context.clone()
+    };
+    let child_store = open_writer_store(&child_context)?;
+    let child_run = writer_run(writer, "gc-child", 111, "nested")?;
+    child_store.create(&child_run, &call)?;
+    assert!(!before_child.is_current());
+    assert!(
+        !crate::gc_support::lane_states(&roots, context.project_id)
+            .is_ok_and(|states| states.get(&path) == Some(&true))
+    );
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(path.join("old/target").is_dir());
+    child_store.cancel(child_run.attempts[0].attempt_id, "child ended", &call)?;
+    let snapshot = crate::gc_support::lane_states(&roots, context.project_id)?;
+    assert!(snapshot.is_current());
+    let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+    let later = writer_run(writer, "gc-later", 112, "queued after snapshot")?;
+    store.create(&later, &call)?;
+    assert!(!snapshot.is_current());
+    store.cancel(later.attempts[0].attempt_id, "later ended", &call)?;
+    assert!(!snapshot.is_current(), "a changed snapshot stays invalid");
+    let dry = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    assert_eq!(dry["data"]["dry_run"], true);
+    assert!(path.join("old/target").is_dir());
+    assert!(
+        dry["data"]["worktree_cleanup"][0]["output"]
+            .as_array()
+            .ok_or("output")?
+            .iter()
+            .all(|entry| entry["removed"] == false)
+    );
+    fs::write(path.join("dirty"), "keep")?;
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(path.join("old/target").is_dir());
+    fs::remove_file(path.join("dirty"))?;
+    // Unreadable sealed lane state protects the worktree.
+    let request = rig
+        .state
+        .join("runs")
+        .join(prepared.run_id.to_string())
+        .join("request.json");
+    let sealed = fs::read(&request)?;
+    fs::write(&request, b"broken")?;
+    assert!(
+        !crate::gc_support::lane_states(&roots, context.project_id)
+            .is_ok_and(|states| states.get(&path) == Some(&true))
+    );
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(path.join("old/target").is_dir());
+    fs::write(&request, sealed)?;
+    // No declaration grants no output deletion.
+    fs::write(rig.state.join("config.toml"), "schema_version=1\n")?;
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(path.join("old/target").is_dir());
+    fs::write(rig.state.join("config.toml"), config)?;
+    let applied = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert!(!path.join("old/target").exists(), "{applied}");
+    assert!(!path.join("another/node_modules").exists());
+    assert!(path.join("kept/target").is_dir());
+    assert!(path.join("tracked/target/keep").is_file());
+    assert!(path.join("recent/target/new").is_file());
+    assert!(
+        fs::symlink_metadata(path.join("node_modules"))?
+            .file_type()
+            .is_symlink()
+    );
+    assert!(external.join("keep").is_file());
+    Ok(())
+}
+
+fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let set_floor = |floor: &str| -> Result {
+        fs::write(
+            rig.state.join("config.toml"),
+            format!("schema_version=1\n[gc]\nalert_below='{floor}'\n"),
+        )?;
+        Ok(())
+    };
+    set_floor("18446744073709551615B")?;
+    let dry = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    assert_eq!(dry["data"]["alerts"].as_array().ok_or("alerts")?.len(), 1);
+    assert!(!rig.state.join("gc/low-disk.json").exists());
+    let first = ok(&rig, &["gc", "--apply", "--json"])?;
+    assert_eq!(first["data"]["alerts"].as_array().ok_or("alerts")?.len(), 1);
+    let again = ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(
+        again["data"]["alerts"]
+            .as_array()
+            .ok_or("alerts")?
+            .is_empty()
+    );
+    set_floor("0B")?;
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(!rig.state.join("gc/low-disk.json").exists());
+    set_floor("18446744073709551615B")?;
+    let second = ok(&rig, &["gc", "--apply", "--json"])?;
+    assert_eq!(
+        second["data"]["alerts"].as_array().ok_or("alerts")?.len(),
+        1
+    );
+    let (roots, context) = writer_context(&rig)?;
+    let clock = provenant_supervisor::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let backoff = provenant_fabric_store::ThreadWait;
+    let request = provenant_fabric_store::Request {
+        clock: &clock,
+        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
+        cancel: &cancel,
+        backoff: &backoff,
+    };
+    let store = provenant_fabric_store::Store::open(&roots.state, &request)?;
+    let events = store.events(context.project_id, 0, 100, &request)?;
+    assert_eq!(
+        events
+            .items
+            .iter()
+            .filter(|event| event.record.entity.as_deref() == Some("gc.low_disk"))
+            .count(),
+        2
+    );
+    Ok(())
 }

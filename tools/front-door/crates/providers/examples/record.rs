@@ -1143,6 +1143,7 @@ fn main() -> Result<()> {
             executable: &args.executable,
             home: &home,
             user: &user,
+            host_var: &|key| std::env::var_os(key),
             account: account.as_ref(),
             token: token.as_ref(),
             cwd,

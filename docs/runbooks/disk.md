@@ -39,6 +39,15 @@ companions of an existing store while reading its live index.
    aggregate's `count` records the number of inventory rows it represents.
    Temporary directories, caches and worktrees keep their individual paths.
 
+4. Preview cleanup with `provenant gc --json`; apply it with
+   `provenant gc --apply --json`. In addition to lane caches, GC removes clean
+   merged worktrees using fetched upstream ancestry. Projects can declare
+   regenerable directory names and keep paths in `[gc.projects.PROJECT_ID]`.
+   Only known terminal lanes qualify for output pruning, and writes within
+   24 hours are kept. See the [configuration runbook](configuration.md#lane-cache-collection).
+   Set `gc.alert_below` for a Fabric event and gc log message once per low-space
+   dip. GC does not sweep arbitrary `/private/tmp/provenant-*` paths.
+
 Every `target` directory is sized, including nested attempt targets and
 `parts.target` in lane caches. Build artefacts are never parsed. Each measured
 path has a budget of 1,000,000 entries and ten seconds, checked between

@@ -52,7 +52,7 @@ const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
 const MAX_WRITABLE_TREE_DEPTH: usize = 32;
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 const DYLD_BOOTSTRAP_RULES: &str = r#"
 (deny file-link)
 (allow file-read* (subpath "/System/Library"))
@@ -105,7 +105,7 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
 /// Fixed operating-system runtime every provider CLI needs under deny-default:
 /// kernel and preference reads, TLS trust, DNS and time zone data. It names no
 /// user path; explicit secret-root denials still override the metadata grant.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
@@ -130,7 +130,7 @@ const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 const PROBE_PROCESS_RULES: &str = "(allow process-exec (literal \"/usr/bin/true\"))\n(allow process-exec (literal \"/bin/cat\"))\n";
 /// Localhost services a build or test run talks to: any loopback TCP port,
 /// its own listeners, and a local Postgres server's Unix socket.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 const LOCAL_SERVICE_RULES: &str = r##"(allow network-bind (local ip "localhost:*"))
 (allow network-inbound (local ip "localhost:*"))
 (allow network-outbound (remote ip "localhost:*"))
@@ -138,12 +138,12 @@ const LOCAL_SERVICE_RULES: &str = r##"(allow network-bind (local ip "localhost:*
 "##;
 /// `openpty` through the multiplexer. The kernel issues the pty extension only
 /// for a terminal this sandbox allocates, so the user's own `ttys` stay denied.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 const PSEUDO_TTY_RULES: &str = r##"(allow pseudo-tty)
 (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
 (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
 "##;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 const PROFILE_LIMIT: usize = 64 * 1024;
 #[cfg(target_os = "macos")]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1359,8 +1359,15 @@ struct WorktreeWriteGrants {
 impl WorktreeWriteGrants {
     fn derive(worktree: &VerifiedWorktree, selected_ref: &GitRefName) -> Self {
         let repo = worktree.repo();
-        let private = repo.private_git_dir();
-        let common = repo.common_git_dir();
+        Self::from_paths(
+            worktree.path(),
+            repo.private_git_dir(),
+            repo.common_git_dir(),
+            selected_ref.short_name(),
+        )
+    }
+
+    fn from_paths(worktree: &Path, private: &Path, common: &Path, branch: &str) -> Self {
         let exact = |path: PathBuf| PathGrant {
             path,
             scope: PathScope::Exact,
@@ -1369,9 +1376,8 @@ impl WorktreeWriteGrants {
             path,
             scope: PathScope::Subtree,
         };
-        let branch = selected_ref.short_name();
         Self {
-            worktree: subtree(worktree.path().to_owned()),
+            worktree: subtree(worktree.to_owned()),
             private_git_dir: subtree(private.to_owned()),
             common_git_dir: subtree(common.to_owned()),
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
@@ -2091,29 +2097,8 @@ fn compile_sbpl(
             verify_writable_tree(&grant.path, anchors)?;
         }
     }
-    if let Some(grants) = &worktree_grants {
-        read_grants.push(grants.worktree.clone());
-    }
-    read_grants.extend(plan.protected_roots.iter().cloned());
-    read_grants.extend(profile.spec.runtime_reads.iter().cloned());
-    read_grants.extend(profile.spec.discovery_reads.iter().cloned());
-    read_grants.extend(profile.spec.process_executables.iter().cloned());
-    let mut credential_writes = Vec::new();
-    if let Some(mechanism) = &plan.selected_authentication {
-        let selected = profile
-            .spec
-            .authentication
-            .iter()
-            .find(|item| &item.mechanism == mechanism)
-            .ok_or(PermissionError::PermissionNotRecorded)?;
-        for grant in &selected.roots {
-            read_grants.push(grant.clone());
-        }
-        credential_writes.extend(selected.in_place_writes.iter().cloned());
-    }
-    if plan.include_continuation {
-        read_grants.extend(profile.spec.continuation_reads.iter().cloned());
-    }
+    let credential_writes =
+        extend_read_grants(&mut read_grants, plan, profile, worktree_grants.as_ref())?;
 
     let shared_writes: Vec<&PathGrant> = plan
         .write_roots
@@ -2296,6 +2281,41 @@ fn compile_sbpl(
     })
 }
 
+/// Adds the plan's and provider's read grants after the plan's own roots, and
+/// returns the selected authentication mechanism's in-place credential writes.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+fn extend_read_grants(
+    read_grants: &mut Vec<PathGrant>,
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    worktree_grants: Option<&WorktreeWriteGrants>,
+) -> Result<Vec<PathGrant>, PermissionError> {
+    if let Some(grants) = worktree_grants {
+        read_grants.push(grants.worktree.clone());
+    }
+    read_grants.extend(plan.protected_roots.iter().cloned());
+    read_grants.extend(profile.spec.runtime_reads.iter().cloned());
+    read_grants.extend(profile.spec.discovery_reads.iter().cloned());
+    read_grants.extend(profile.spec.process_executables.iter().cloned());
+    let mut credential_writes = Vec::new();
+    if let Some(mechanism) = &plan.selected_authentication {
+        let selected = profile
+            .spec
+            .authentication
+            .iter()
+            .find(|item| &item.mechanism == mechanism)
+            .ok_or(PermissionError::PermissionNotRecorded)?;
+        for grant in &selected.roots {
+            read_grants.push(grant.clone());
+        }
+        credential_writes.extend(selected.in_place_writes.iter().cloned());
+    }
+    if plan.include_continuation {
+        read_grants.extend(profile.spec.continuation_reads.iter().cloned());
+    }
+    Ok(credential_writes)
+}
+
 /// Provider state writes stay outside every secret, protected and Git root, and
 /// carry the same hard-link census as other writable trees.
 #[cfg(target_os = "macos")]
@@ -2388,7 +2408,7 @@ fn verify_shared_writes(
 /// else its profile grants. Rendered last so they override every allow.
 /// `Library/Keychains` stays out: Agy reads its login keychain through an
 /// exact authentication grant.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 11] {
     [
         (".ssh", PathScope::Subtree),
@@ -2516,7 +2536,7 @@ fn inspect_writable_directory(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn render_profile(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
@@ -2698,7 +2718,7 @@ fn render_profile(
     Ok(source.into_bytes())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn push_worktree_rule(
     source: &mut String,
     grants: &WorktreeWriteGrants,
@@ -3106,7 +3126,7 @@ fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), PermissionError> 
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn push_network_endpoint(
     source: &mut String,
     endpoint: &NetworkEndpoint,
@@ -3119,7 +3139,7 @@ fn push_network_endpoint(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn push_rule(
     source: &mut String,
     effect: &str,
@@ -3137,7 +3157,7 @@ fn push_rule(
 }
 
 /// Escapes a path for a raw SBPL `#"..."` regex literal.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn sbpl_regex_path(path: &Path) -> Result<String, PermissionError> {
     let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
     let mut escaped = String::with_capacity(text.len());
@@ -3155,7 +3175,7 @@ fn sbpl_regex_path(path: &Path) -> Result<String, PermissionError> {
     Ok(escaped)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
     let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
     let mut escaped = String::with_capacity(text.len());
@@ -3172,6 +3192,9 @@ fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
     }
     Ok(escaped)
 }
+
+#[cfg(feature = "snapshot")]
+pub mod snapshot;
 
 #[cfg(test)]
 mod tests {
