@@ -708,7 +708,6 @@ fn writer_state(
     path: &Path,
     branch: &GitRefName,
     root_identity: Metadata,
-    cancel: &CancelToken,
 ) -> WorkerState {
     let name = state_dir_name(path);
     let directory = match context.project_state.open_verified_directory(&name) {
@@ -740,13 +739,7 @@ fn writer_state(
     } {
         return WorkerState::Unknown;
     }
-    match directory.lock(
-        OsStr::new(WRITER_LOCK),
-        LockMode::Exclusive,
-        WaitBudget::nonblocking(context.clock.mono_now()),
-        cancel,
-        context.clock,
-    ) {
+    match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
         Ok(_guard) => match directory.metadata_at(OsStr::new(RESERVATION), false) {
             Ok(_) => WorkerState::Unknown,
             Err(error) if error.is_not_found() => WorkerState::Free,
@@ -1026,7 +1019,7 @@ pub fn list(
                     worktree_dirty_at(context, worktree.repo(), cancel)
                         .unwrap_or(WorktreeCondition::Unknown),
                     combine_worker_state(
-                        writer_state(context, &path, branch, worktree.identity(), cancel),
+                        writer_state(context, &path, branch, worktree.identity()),
                         observed,
                     ),
                 ),
@@ -1061,9 +1054,22 @@ pub(crate) fn disk_writer_state(
     path: &Path,
     branch: Option<&str>,
 ) -> WorkerState {
-    let observe = || -> Result<WorkerState, WorktreeError> {
+    cache_writer_guard(binding, project_state, path, branch)
+        .map(|_guard| WorkerState::Free)
+        .unwrap_or_else(|state| state)
+}
+
+/// Hold writer exclusion for an idle cache. Missing or unsafe registration and
+/// reservations are unobservable; a busy existing lock identifies a live writer.
+pub fn cache_writer_guard(
+    binding: &ProjectBinding,
+    project_state: &dyn SafeDir,
+    path: &Path,
+    branch: Option<&str>,
+) -> Result<LockGuard, WorkerState> {
+    let observe = || -> Result<LockGuard, WorktreeError> {
         let directory = project_state.open_verified_directory(&state_dir_name(path))?;
-        let bytes = directory.read_bounded(OsStr::new(IDENTITY), MAX_STATE_RECORD)?;
+        let bytes = read_bounded(directory.as_ref(), OsStr::new(IDENTITY), MAX_STATE_RECORD)?;
         let identity: WorktreeIdentity =
             serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
         let root = Directory::open_anchor(path)?.metadata()?;
@@ -1081,16 +1087,16 @@ pub(crate) fn disk_writer_state(
             matches!(directory.metadata_at(OsStr::new(RESERVATION), false),
             Err(error) if error.is_not_found())
         };
-        if !unreserved() {
-            return Ok(WorkerState::Unknown);
-        }
         match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
-            Ok(_guard) if unreserved() => Ok(WorkerState::Free),
-            Err(FsError::LockTimeout { .. }) => Ok(WorkerState::Live),
-            _ => Ok(WorkerState::Unknown),
+            Ok(guard) if unreserved() => Ok(guard),
+            Err(FsError::LockTimeout { .. }) => Err(WorktreeError::LiveWriter),
+            _ => Err(WorktreeError::UnknownWriter),
         }
     };
-    observe().unwrap_or(WorkerState::Unknown)
+    observe().map_err(|error| match error {
+        WorktreeError::LiveWriter => WorkerState::Live,
+        _ => WorkerState::Unknown,
+    })
 }
 
 /// Create a clean linked checkout at a pinned commit. A failed or killed

@@ -13,6 +13,8 @@ pub enum ProviderEvent {
     QuotaLimited {
         message: String,
         pool: Option<String>,
+        /// Seconds from observation until the provider's stated reset.
+        resets_in_seconds: Option<u64>,
     },
     RateLimited {
         message: String,

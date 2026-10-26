@@ -57,6 +57,10 @@ and `provenant help <verb>` lists the flags.
 | `resume` | A prior attempt, a required `--operation-id` and a new prompt. The turn keeps route, access and session. It creates a new attempt linked by `retry_of`; a fresh route is a new `dispatch`. |
 | `reconcile` | Settles open runs and retries terminal `tmp/` removal (all, or `--id`, repeatable). Reports uncertain custody and leftover temporary paths and reasons. It never replays an uncertain launch. |
 
+When a terminal attempt has no requested output, local and peer reads report
+`NOT_FOUND` (facade code `not_found`, exit 2). An active attempt still
+reports `NONTERMINAL`.
+
 Route and access inputs on `dispatch`:
 
 - Exactly one `--model ADAPTER/ID` or `--route NAME`, an optional `--effort`,
@@ -105,6 +109,7 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
   request.json                 # immutable canonical submission and prompt digests
   attempts/<AttemptId>/
     prompt.txt                 # run-owned immutable prompt
+    prompt.md                  # full launch prompt, only for top-level argv spills
     result.md                  # run-owned sealed result, including failure
     (supervisor files)         # custody, launch, process, exit, cancel, stdout, stderr
     provider-state/            # retained provider history; no credentials
@@ -115,6 +120,20 @@ runs/<RunId>/                  # ProjectId is recorded, not a parent directory
 
 The supervisor file names inside an attempt directory are the run and
 supervisor contract; [supervisor](supervisor.md#records-and-state) owns them.
+
+Launch prompts, including the durable-output preamble, are bounded to 1 MiB
+for every adapter. Claude, Codex and OpenCode receive the full launch text on
+stdin, without a spill file. Cursor and Agy receive prompts up to 64 KiB on
+argv unchanged. For larger top-level prompts, dispatch seals the full launch
+text as `prompt.md` and sends a short instruction to read that file first and
+treat its contents as the full task. The OS read grant covers that exact file;
+provider tool permissions may cover its containing directory. Nested Cursor
+and Agy attempts refuse launch prompts over 64 KiB before launch: route the
+child to a stdin adapter or shorten the prompt. Their attempt directories are
+writable by the parent lane, so a spill there could be rewritten before use.
+The submission and attempt prompt digests still cover the full submitted text
+in `prompt.txt`, never the pointer. Both files remain retained with the attempt.
+
 Structured events live in SQLite, and provider parsing uses the live stream, not
 a second copy. Writer and read-only lanes stage provider temporary files in
 `tmp/candidate-N`, with a separate directory for each fallback candidate.

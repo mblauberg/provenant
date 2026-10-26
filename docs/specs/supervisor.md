@@ -239,6 +239,14 @@ home or tmp grants.
   Corepack cache and a writer's `--write-root` and `domains.run.writer_writes`
   roots, which are also executable. Homebrew prefixes are readable except
   `var/`.
+- **Writer tests.** Only `worktree-write` lanes may read and execute fixtures
+  in their own attempt's `tmp/candidate-N` subtree. No parent, sibling
+  candidate, other attempt or retained provider-state directory gains exec.
+  Writers may signal their children (`signal (target children)`) and read
+  `/dev/fd/N` through a file-read grant on the `/dev/fd` subpath. Read-only
+  and other modes keep their existing grants. Hard links remain denied and
+  short Unix socket paths still require host tests. Private check homes use
+  `std::env::temp_dir()`, honouring the lane's `TMPDIR`.
 - **Denied last.** Reads and writes of `~/.ssh`, `~/.aws`, `~/.kube`,
   `~/.secrets` and Cargo's `credentials` files are denied whatever a profile
   grants.
@@ -327,6 +335,9 @@ authority over unrelated Git actors.
 | `worktree remove --merged` | Needs explicit authority, a pinned integration ref (a local branch or a remote-tracking ref such as `origin/main`) and `--branch` or `--since`. Ordinary merges are proved by ancestry. A squash needs a recorded merged PR in this repository whose head OID equals the branch tip and whose merge OID is an ancestor of the integration tip. A `gh` failure or malformed output keeps the branch unless ancestry alone proves it. The integration branch and a branch at its tip are never pruned. The branch OID is rechecked and the ref is deleted with that expected old OID. Remote deletion is not offered. |
 | `hook claude pre-tool-use` | The lane-safety guard, a row in cli's `HookSpec` table. Stdin is bounded to 1 MiB. Unreadable, malformed, oversized or timed-out input emits deny JSON with exit 0, and only a failure to write the denial exits 2. |
 
+`worktree list` never creates a writer lock; a worktree whose lock is missing
+is reported as `unknown`.
+
 For each removed worktree, removal derives its lane cache from the verified
 worktree before Git deletes it, then deletes only that cache through the
 detach-and-verify path while holding writer exclusion. Cache cleanup failures
@@ -335,6 +346,10 @@ orphaned caches and existing cleanup tombstones for `provenant gc` to sweep.
 Cache cleanup accepts v1 owner markers when the owner path is missing, and
 `provenant gc` retries their interrupted tombstones. Existing v1 owners are kept, reported
 as foreign when outside the project, and never collected as idle.
+Idle GC takes the existing writer lock without waiting, checks for reservations
+and releases the guard immediately after the tombstone rename. A held lock keeps
+the cache as live; a missing or unsafe lock, a reservation, or unverifiable
+registration keeps it as unobservable.
 
 Removal and pruning hold writer exclusion, recheck reservations and worker
 observations, and refuse live or unknown candidates. A post-merge hook passes
@@ -358,6 +373,7 @@ runs/<RunId>/
   children/{journal.lock,<ChildId>.json}
   attempts/<AttemptId>/
     prompt.txt  result.md      # run-owned, immutable once sealed
+    prompt.md                  # optional top-level argv spill, run-owned
     custody.lock
     launch.json                # redacted summary
     process.json               # replaceable observation

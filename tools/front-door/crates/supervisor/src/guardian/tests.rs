@@ -2,6 +2,90 @@ use super::*;
 use crate::census::{Census, ProcessFact};
 use std::collections::BTreeSet;
 
+#[test]
+fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
+    let message = LaunchMessage {
+        schema_version: 1,
+        scope: Scope {
+            run: provenant_core::RunId::from_bytes([1; 16]),
+            attempt: provenant_core::AttemptId::from_bytes([2; 16]),
+            generation: 1,
+        },
+        resolved_route: "claude/claude-sonnet-4-6@high".into(),
+        permission_plan_digest: provenant_core::Digest::from_bytes([3; 32]),
+        task: provenant_core::TaskId::from_bytes([4; 16]),
+        requester: provenant_core::ActorId::from_bytes([5; 16]),
+        binding: StoredWriterBinding::ReadOnly,
+        executable_snapshot: ExecutableSnapshot {
+            device: 1,
+            inode: 2,
+            length: 1024,
+            modified_seconds: 1,
+            modified_nanoseconds: 0,
+        },
+        protected_commands: vec!["provenant".into(), "git".into()],
+        argv: [
+            "/fixture/claude/bin/claude",
+            "-p",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--permission-prompts",
+            "none",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--session-id",
+            "01234567-89ab-4cde-8f01-23456789abcd",
+            "--permission-mode",
+            "dontAsk",
+            "--tools",
+            "Read,Grep,Glob",
+            "--model",
+            "claude-sonnet-4-6",
+            "--effort",
+            "high",
+            "--mcp-config",
+            "/fixture/attempt/provider-state/fabric-mcp.json",
+        ]
+        .map(|arg| arg.as_bytes().to_vec())
+        .to_vec(),
+        environment: [
+            ("HOME", "/fixture/home"),
+            ("USER", "fixture"),
+            ("PATH", "/usr/bin:/bin"),
+            ("TMPDIR", "/fixture/attempt/tmp/candidate-0"),
+            ("LANG", "en_US.UTF-8"),
+            ("CLAUDE_CODE_TMPDIR", "/fixture/attempt/tmp/candidate-0"),
+            ("DISABLE_AUTOUPDATER", "1"),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+            ("CLAUDE_CONFIG_DIR", "/fixture/home/.claude"),
+        ]
+        .map(|(key, value)| (key.as_bytes().to_vec(), value.as_bytes().to_vec()))
+        .to_vec(),
+        cwd: b"/fixture/repo".to_vec(),
+        stdin: vec![0xff; 1024 * 1024],
+        secret_input: Some(crate::exec::SecretInput {
+            descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
+            bytes: b"fixture-token".to_vec(),
+        }),
+        holder_context: Vec::new(),
+        capture: CapturePlan::default(),
+    };
+    let payload = serde_json::to_vec(&message).unwrap();
+    let (mut sender, mut receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+    let timeout = Duration::from_secs(10);
+    let sending = std::thread::spawn(move || {
+        crate::sys::handoff::send(&mut sender, &payload, timeout, &CancelToken::new())
+    });
+    let received = crate::sys::handoff::receive(&mut receiver, timeout);
+    sending.join().unwrap().unwrap();
+    let received = received.unwrap();
+    let decoded: LaunchMessage = decode_v1(received.as_slice(), LAUNCH_LIMITS).unwrap();
+    assert_eq!(decoded.stdin, message.stdin);
+    assert_eq!(decoded.argv, message.argv);
+    assert_eq!(decoded.environment, message.environment);
+}
+
 fn identity(pid: i64, start: u64, group: i64, session: i64) -> ProcessIdentity {
     ProcessIdentity {
         boot: "darwin:test".into(),

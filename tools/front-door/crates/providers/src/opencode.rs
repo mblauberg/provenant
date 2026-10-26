@@ -237,7 +237,11 @@ fn quota(message: Option<String>, response: Option<Response>) -> E {
         .or(message)
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| "provider quota exhausted".into());
-    E::QuotaLimited { message, pool }
+    E::QuotaLimited {
+        message,
+        pool,
+        resets_in_seconds: None,
+    }
 }
 #[derive(Deserialize)]
 struct Text {

@@ -6,11 +6,73 @@ leak-timeout = { period = "500ms", result = "fail" }
 [profile.ci.junit]
 path = "junit.xml"
 
+[profile.lane]
+# Filtersets cannot contain comments, so reasons are keyed by test name here.
+# CI still runs these host-only fixtures.
+#
+# Hard links are denied:
+# install_refuses_oversize_and_linked_sources: creates a linked source.
+# linked_worktree_grants_derive_from_verified_git_paths_and_ref: links Git logs.
+# native_sandbox_blocks_path_escape_probes: creates hard-link escape probes.
+# cleanup_refuses_hard_links: creates a linked cleanup entry.
+# measurement_counts_hard_links_once_and_sizes_target_contents: links two files.
+# owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors: links a lock.
+# retained_state_never_follows_a_symlink: also creates a hard-linked state file.
+# retained_state_copy_refuses_a_file_swapped_for_a_hard_link: swaps in a hard link.
+#
+# Pathname socket binds are denied; /tmp is unwritable and lane TMPDIR paths
+# also exceed Unix socket limits:
+# process and custody binaries: every case unconditionally calls short_tempdir.
+# process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes:
+#   needs a short socket root and SIGKILL.
+# concurrent_process_writers_on_one_revision_have_one_winner: short socket root.
+# retained_state_copy_skips_entries_swapped_after_their_check: binds a socket.
+# forward_falls_back_only_when_no_agent_accepts: binds a socket.
+# a_request_refused_at_the_cap_is_busy_not_unknown: binds a socket.
+# listen_replaces_a_stale_socket_but_not_a_live_agent: binds a socket.
+# lane_mcp_refuses_coordination_but_allows_reads_and_child_submission: binds a socket.
+default-filter = '''
+not (
+    (package(=provenant-confinement) & (
+        test(=output_custody::tests::install_refuses_oversize_and_linked_sources) |
+        test(=permissions::tests::linked_worktree_grants_derive_from_verified_git_paths_and_ref) |
+        test(=permissions::tests::native_sandbox_blocks_path_escape_probes)
+    )) |
+    (package(=provenant-fabric-runtime) & test(=fetch::tests::cleanup_refuses_hard_links)) |
+    (package(=provenant-supervisor) & (
+        test(=disk::tests::measurement_counts_hard_links_once_and_sizes_target_contents) |
+        test(=fs::tests::owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors)
+    )) |
+    (package(=provenant-cli) & (
+        test(=run::provider::tests::retained_state_never_follows_a_symlink) |
+        test(=run::provider::tests::retained_state_copy_refuses_a_file_swapped_for_a_hard_link)
+    )) |
+    (package(=provenant-supervisor) & (
+        binary(=process) | binary(=custody) |
+        test(=fs::tests::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes)
+    )) |
+    (package(=provenant-workflow) & test(=store::tests::concurrency::concurrent_process_writers_on_one_revision_have_one_winner)) |
+    (package(=provenant-cli) & test(=run::provider::tests::retained_state_copy_skips_entries_swapped_after_their_check)) |
+    (package(=provenant) & (
+        (binary(=provenant) & (
+            test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
+            test(=peer_agent::tests::a_request_refused_at_the_cap_is_busy_not_unknown) |
+            test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
+        )) |
+        (binary(=fabric_transport) & test(=lane_mcp_refuses_coordination_but_allows_reads_and_child_submission))
+    ))
+)
+'''
+
 [test-groups]
 serial-sqlite = { max-threads = 1 }
 
 # These suites own SQLite stores or launch process/custody fixtures. Keep
 # them serial within a test run; independent pure-data suites remain parallel.
 [[profile.ci.overrides]]
+filter = 'package(provenant-fabric-store) | package(provenant-supervisor) | package(provenant-run) | (package(provenant) & binary(parser))'
+test-group = "serial-sqlite"
+
+[[profile.lane.overrides]]
 filter = 'package(provenant-fabric-store) | package(provenant-supervisor) | package(provenant-run) | (package(provenant) & binary(parser))'
 test-group = "serial-sqlite"

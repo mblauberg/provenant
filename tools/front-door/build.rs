@@ -15,6 +15,7 @@ type BuildResult<T> = Result<T, Box<dyn Error>>;
 const MAX_SOURCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SOURCE_FILES: usize = 100_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const SHIPPED_MEMBER_DIRS: [&str; 2] = ["src", "assets"];
 
 struct InputFile {
     source: PathBuf,
@@ -86,7 +87,11 @@ struct TrackedFiles {
 impl TrackedFiles {
     // Build-time Git metadata discovery, before the runtime supervisor exists.
     #[allow(clippy::disallowed_methods)]
-    fn load(workspace: &Path, repository: &Path) -> BuildResult<Self> {
+    fn load(
+        workspace: &Path,
+        repository: &Path,
+        watched: &mut BTreeSet<PathBuf>,
+    ) -> BuildResult<Self> {
         let top_level = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(workspace)
@@ -102,6 +107,19 @@ impl TrackedFiles {
         if top_level != repository {
             return Err(invalid("source workspace is outside its expected git checkout").into());
         }
+
+        let index = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+            .current_dir(workspace)
+            .output()?;
+        if !index.status.success() {
+            return Err(invalid("cannot resolve source inventory git index").into());
+        }
+        let index = index
+            .stdout
+            .strip_suffix(b"\n")
+            .ok_or_else(|| invalid("git did not return an index path"))?;
+        watch(watched, PathBuf::from(std::str::from_utf8(index)?))?;
 
         let output = Command::new("git")
             .args(["ls-files", "--full-name", "-z", "--", ":/"])
@@ -160,9 +178,8 @@ fn main() -> BuildResult<()> {
         .and_then(Path::parent)
         .ok_or_else(|| invalid("workspace is not nested below the repository root"))?;
     let repository = fs::canonicalize(repository)?;
-    let tracked = TrackedFiles::load(&workspace, &repository)?;
-
     let mut watched = BTreeSet::new();
+    let tracked = TrackedFiles::load(&workspace, &repository, &mut watched)?;
     let mut inputs = Inputs::default();
 
     let workspace_manifest = workspace.join("Cargo.toml");
@@ -191,44 +208,21 @@ fn main() -> BuildResult<()> {
         &mut inputs,
     )?;
 
-    let members = discover_members(&workspace, &workspace_document, &mut watched, &tracked)?;
+    // The Git index covers newly tracked members without watching crates/.
+    let members = discover_members(&workspace, &workspace_document, &tracked)?;
     for member in &members {
-        let manifest = member.directory.join("Cargo.toml");
-        let logical_manifest = join_logical(&member.logical_directory, "Cargo.toml");
-        watch(&mut watched, manifest.clone())?;
-        if logical_manifest != "Cargo.toml" {
-            add_required_file(
-                &workspace,
-                &manifest,
-                logical_manifest,
-                &tracked,
-                &mut inputs,
-            )?;
-        }
-
-        let build_script = member.directory.join("build.rs");
-        let logical_build_script = join_logical(&member.logical_directory, "build.rs");
-        watch(&mut watched, build_script.clone())?;
-        add_optional_file(
-            &workspace,
-            &build_script,
-            logical_build_script,
-            &tracked,
-            &mut inputs,
-        )?;
-
-        for source_directory in ["src", "tests", "examples", "benches", "assets"] {
-            let directory = member.directory.join(source_directory);
-            watch(&mut watched, directory.clone())?;
-            collect_workspace_tree(
-                &workspace,
-                &directory,
-                &mut inputs,
-                source_directory == "src",
-                &tracked,
-            )?;
-        }
+        collect_member_inputs(&workspace, member, &mut watched, &tracked, &mut inputs)?;
     }
+
+    let packager = workspace.join("examples/package-release.rs");
+    watch(&mut watched, packager.clone())?;
+    add_required_file(
+        &workspace,
+        &packager,
+        "examples/package-release.rs".to_owned(),
+        &tracked,
+        &mut inputs,
+    )?;
 
     // External product inputs are assigned their release asset names so the
     // pure digest API only sees normal relative POSIX paths (never ../ paths).
@@ -358,10 +352,48 @@ fn release_asset_inputs(inputs: &Inputs) -> BuildResult<Vec<(String, Vec<u8>)>> 
     Ok(result)
 }
 
+fn collect_member_inputs(
+    workspace: &Path,
+    member: &Member,
+    watched: &mut BTreeSet<PathBuf>,
+    tracked: &TrackedFiles,
+    inputs: &mut Inputs,
+) -> BuildResult<()> {
+    let manifest = member.directory.join("Cargo.toml");
+    let logical_manifest = join_logical(&member.logical_directory, "Cargo.toml");
+    watch(watched, manifest.clone())?;
+    if logical_manifest != "Cargo.toml" {
+        add_required_file(workspace, &manifest, logical_manifest, tracked, inputs)?;
+    }
+
+    let build_script = member.directory.join("build.rs");
+    let logical_build_script = join_logical(&member.logical_directory, "build.rs");
+    watch(watched, build_script.clone())?;
+    add_optional_file(
+        workspace,
+        &build_script,
+        logical_build_script,
+        tracked,
+        inputs,
+    )?;
+
+    for source_directory in SHIPPED_MEMBER_DIRS {
+        let directory = member.directory.join(source_directory);
+        watch(watched, directory.clone())?;
+        collect_workspace_tree(
+            workspace,
+            &directory,
+            inputs,
+            source_directory == "src",
+            tracked,
+        )?;
+    }
+    Ok(())
+}
+
 fn discover_members(
     workspace: &Path,
     manifest: &DocumentMut,
-    watched: &mut BTreeSet<PathBuf>,
     tracked: &TrackedFiles,
 ) -> BuildResult<Vec<Member>> {
     let members = manifest
@@ -386,7 +418,6 @@ fn discover_members(
             }
             "crates/*" => {
                 let crates = workspace.join("crates");
-                watch(watched, crates.clone())?;
                 let metadata = optional_metadata(&crates)?
                     .ok_or_else(|| invalid("workspace crates directory is missing"))?;
                 if !metadata.is_dir() {
@@ -785,6 +816,9 @@ fn join_logical(directory: &str, child: &str) -> String {
 }
 
 fn watch(paths: &mut BTreeSet<PathBuf>, path: PathBuf) -> BuildResult<()> {
+    if fs::symlink_metadata(&path).is_err() {
+        return Ok(());
+    }
     path.to_str()
         .ok_or_else(|| invalid("Cargo rerun path is not UTF-8"))?;
     paths.insert(path);
@@ -823,8 +857,12 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildResult, Inputs, TrackedFiles, collect_external_tree, invalid, source_digest};
-    use provenant_records::SourceInput;
+    use super::{
+        BuildResult, Inputs, TrackedFiles, collect_external_tree, collect_member_inputs,
+        discover_members, invalid, parse_toml, source_digest,
+    };
+    use provenant_records::{SourceDigest, SourceInput};
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -862,16 +900,173 @@ mod tests {
         let workspace = repository.join("tools/front-door");
         fs::create_dir_all(&workspace)?;
 
-        assert!(TrackedFiles::load(&workspace, &repository).is_err());
+        assert!(TrackedFiles::load(&workspace, &repository, &mut BTreeSet::new()).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn linked_worktree_watches_its_own_git_index() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        run_git(&repository, &["init", "--quiet"])?;
+        run_git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        )?;
+        run_git(
+            &repository,
+            &["worktree", "add", "--quiet", "--detach", "linked"],
+        )?;
+        let linked = repository.join("linked");
+        let workspace = linked.join("tools/front-door");
+        fs::create_dir_all(&workspace)?;
+        let mut watched = BTreeSet::new();
+        TrackedFiles::load(&workspace, &linked, &mut watched)?;
+        assert!(watched.contains(&repository.join(".git/worktrees/linked/index")));
+        assert!(!watched.contains(&repository.join(".git/index")));
+        Ok(())
+    }
+
+    #[test]
+    fn untracked_optional_symlink_is_watched_but_not_hashed() -> BuildResult<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        let workspace = repository.join("tools/front-door");
+        fs::create_dir_all(&workspace)?;
+        fs::write(workspace.join("config-target"), b"// local config\n")?;
+        let config = workspace.join("rustfmt.toml");
+        std::os::unix::fs::symlink("config-target", &config)?;
+        run_git(&repository, &["init", "--quiet"])?;
+        let mut watched = BTreeSet::new();
+        let tracked = TrackedFiles::load(&workspace, &repository, &mut watched)?;
+        let mut inputs = Inputs::default();
+        super::add_workspace_configuration(
+            &workspace,
+            &repository,
+            &mut watched,
+            &tracked,
+            &mut inputs,
+        )?;
+        assert!(watched.contains(&config));
+        assert!(inputs.files.is_empty());
+
+        run_git(&repository, &["add", "tools/front-door/rustfmt.toml"])?;
+        let tracked = TrackedFiles::load(&workspace, &repository, &mut watched)?;
+        assert!(
+            super::add_workspace_configuration(
+                &workspace,
+                &repository,
+                &mut watched,
+                &tracked,
+                &mut inputs,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn member_test_edits_do_not_change_the_source_digest() -> BuildResult<()> {
+        let (initial, after_edit) = digests_after_member_edit("tests/integration.rs")?;
+        assert_eq!(initial, after_edit);
+        Ok(())
+    }
+
+    #[test]
+    fn member_shipped_input_edits_change_the_source_digest() -> BuildResult<()> {
+        for relative in ["src/lib.rs", "Cargo.toml", "build.rs", "assets/data.txt"] {
+            let (initial, after_edit) = digests_after_member_edit(relative)?;
+            assert_ne!(initial, after_edit, "{relative}");
+        }
+        Ok(())
+    }
+
+    fn digests_after_member_edit(relative: &str) -> BuildResult<(SourceDigest, SourceDigest)> {
+        let temporary = tempfile::tempdir()?;
+        let repository = fs::canonicalize(temporary.path())?;
+        let workspace = repository.join("tools/front-door");
+        let member = workspace.join("crates/member");
+        fs::create_dir_all(member.join("src"))?;
+        fs::create_dir_all(member.join("tests"))?;
+        fs::write(
+            workspace.join("Cargo.toml"),
+            b"[workspace]\nmembers = [\"crates/*\"]\n",
+        )?;
+        fs::write(member.join("Cargo.toml"), b"[package]\nname = \"member\"\n")?;
+        fs::write(member.join("src/lib.rs"), b"// source\n")?;
+        fs::write(member.join("tests/integration.rs"), b"// test\n")?;
+        let edited = member.join(relative);
+        if !edited.exists() {
+            fs::create_dir_all(
+                edited
+                    .parent()
+                    .ok_or_else(|| invalid("fixture has no parent"))?,
+            )?;
+            fs::write(&edited, b"// optional input\n")?;
+        }
+        run_git(&repository, &["init", "--quiet"])?;
+        run_git(&repository, &["add", "tools/front-door/crates/member"])?;
+
+        let initial = digest_member_sources(&workspace, &repository, &member)?;
+        fs::write(edited, b"// edited\n")?;
+        let after_edit = digest_member_sources(&workspace, &repository, &member)?;
+        Ok((initial, after_edit))
+    }
+
+    fn digest_member_sources(
+        workspace: &Path,
+        repository: &Path,
+        member: &Path,
+    ) -> BuildResult<SourceDigest> {
+        let mut watched = BTreeSet::new();
+        let tracked = TrackedFiles::load(workspace, repository, &mut watched)?;
+        let mut inputs = Inputs::default();
+        let document = parse_toml(&fs::read(workspace.join("Cargo.toml"))?, "fixture manifest")?;
+        for member in discover_members(workspace, &document, &tracked)? {
+            collect_member_inputs(workspace, &member, &mut watched, &tracked, &mut inputs)?;
+        }
+        assert!(
+            watched.iter().all(|path| path.exists()),
+            "missing watch: {watched:?}"
+        );
+        assert!(watched.contains(&member.join("src")));
+        assert!(watched.contains(&repository.join(".git/index")));
+        for optional in ["assets", "build.rs"] {
+            let path = member.join(optional);
+            assert_eq!(watched.contains(&path), path.exists(), "{optional}");
+        }
+        let tests = member.join("tests");
+        assert!(
+            watched
+                .iter()
+                .all(|path| !tests.starts_with(path) && !path.starts_with(&tests)),
+            "member tests are recursively watched: {watched:?}"
+        );
+        let borrowed: Vec<SourceInput<'_>> = inputs
+            .iter()
+            .map(|(name, bytes, _)| SourceInput { name, bytes })
+            .collect();
+        Ok(source_digest(&borrowed)?)
     }
 
     fn digest_assets(
         workspace: &Path,
         repository: &Path,
         assets: &Path,
-    ) -> BuildResult<provenant_records::SourceDigest> {
-        let tracked = TrackedFiles::load(workspace, repository)?;
+    ) -> BuildResult<SourceDigest> {
+        let tracked = TrackedFiles::load(workspace, repository, &mut BTreeSet::new())?;
         let mut inputs = Inputs::default();
         collect_external_tree(assets, "assets", &mut inputs, true, &tracked)?;
         let borrowed: Vec<SourceInput<'_>> = inputs

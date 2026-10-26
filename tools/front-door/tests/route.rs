@@ -137,6 +137,21 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
 }
 
 #[test]
+fn route_list_human_output_omits_dispatch_only_fields() -> Result {
+    let rig = rig()?;
+    let out = rig.command(&["route", "list", "--pool", "junior"])?;
+    assert_eq!(code(&out), 0);
+    let stdout = String::from_utf8(out.stdout.bytes)?;
+    assert!(stdout.contains("weight="));
+    assert!(stdout.contains("pacing="));
+    assert!(!stdout.contains("factor="));
+    assert!(!stdout.contains("readiness="));
+    assert!(!rig.home.join("provider-started").exists());
+    rig.assert_legacy_unchanged()?;
+    Ok(())
+}
+
+#[test]
 fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> Result {
     let rig = rig()?;
     let set = call(
@@ -170,8 +185,11 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
         member["efforts"],
         serde_json::json!(["medium", "high", "xhigh"])
     );
-    assert!(member["factor_basis_points"].as_u64().is_some());
-    assert!(member["readiness"].is_object());
+    assert_eq!(member["factor_basis_points"], 10_000);
+    assert_eq!(
+        member["readiness"],
+        serde_json::json!({"status": "unavailable", "reason": "unknown_availability"})
+    );
 
     let pacing = call(&rig, &["route", "pacing", "codex", "spend"], 0)?;
     assert_eq!(pacing["command"], "route pacing");
