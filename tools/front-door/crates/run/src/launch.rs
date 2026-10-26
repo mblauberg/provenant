@@ -569,9 +569,38 @@ impl RunStore {
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
-            let prompt = self.artifact_bytes(run, &record.prompt, RECORD_LIMIT)?;
-            let prompt = String::from_utf8(prompt)
-                .map_err(|_| RunError::Validation("prompt is not UTF-8"))?;
+            let prompt = match self
+                .artifact_bytes(run, &record.prompt, RECORD_LIMIT)
+                .and_then(|bytes| {
+                    String::from_utf8(bytes)
+                        .map_err(|_| RunError::Validation("prompt is not UTF-8"))
+                }) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    // A prompt the host cannot read back ends the attempt here;
+                    // leaving it Queued would meet the same unreadable input on
+                    // every later start.
+                    let reason = format!("stored prompt unreadable: {error}");
+                    match self.withdraw(
+                        id,
+                        AttemptState::Queued,
+                        Outcome::Rejected,
+                        &reason,
+                        now()?,
+                        call,
+                    ) {
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(RunError::Conflict) => continue,
+                        Err(error) => return Err(error),
+                    }
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason,
+                        kind: RefusalKind::Preparation,
+                    });
+                    continue;
+                }
+            };
             let directory = self
                 .context
                 .state_root

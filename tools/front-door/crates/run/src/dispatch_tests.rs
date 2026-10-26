@@ -2319,6 +2319,83 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     Ok(())
 }
 
+/// Starts a one-task run after `damage` has altered its stored prompt, and
+/// asserts the attempt ends Rejected before preparation with `cause` recorded.
+fn assert_unreadable_prompt_rejected(
+    damage: impl FnOnce(&std::path::Path) -> TestResult,
+    cause: &str,
+) -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    let prompt = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/prompt.txt", run.run_id));
+    damage(&prompt)?;
+    let fake = Fake::default();
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    // Restore access so the tempdir can be removed whatever the outcome.
+    if prompt.exists() {
+        std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o600))?;
+    }
+    assert!(matches!(
+        &started[..],
+        [Started::Refused { attempt, reason, kind: RefusalKind::Preparation }]
+            if *attempt == id && reason.contains("stored prompt unreadable")
+    ));
+    assert_eq!(fake.prepared.get(), 0);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    let fact = store.attempt(id, &call)?;
+    assert_eq!(
+        fact.terminal_state,
+        provenant_records::AttemptOutcome::Rejected
+    );
+    assert!(fact.started_at.is_none());
+    assert!(
+        fact.reason.as_deref().is_some_and(
+            |reason| reason.starts_with("stored prompt unreadable") && reason.contains(cause)
+        ),
+        "{:?}",
+        fact.reason
+    );
+    assert!(
+        store
+            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
+    assert_unreadable_prompt_rejected(
+        |prompt| {
+            std::fs::remove_file(prompt)?;
+            Ok(())
+        },
+        "fstatat failed",
+    )
+}
+
+#[test]
+fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    assert_unreadable_prompt_rejected(
+        |prompt| {
+            std::fs::set_permissions(prompt, std::fs::Permissions::from_mode(0o000))?;
+            Ok(())
+        },
+        "openat read failed",
+    )
+}
+
 #[test]
 fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() -> TestResult {
     let temp = tempfile::tempdir()?;
