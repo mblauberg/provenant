@@ -33,3 +33,7 @@
 - name: source:agent
   color: "c5def5"
   description: Filed by an agent; the issue body records filer and run provenance
+
+- name: mutants
+  color: "fbca04"
+  description: Run advisory mutation testing on this pull request

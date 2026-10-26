@@ -1,0 +1,86 @@
+#!/bin/sh
+# Behaviour tests for scripts/assertion-diff: seeded loosened and removed
+# assertions are flagged, unrelated test diffs and non-test files stay quiet.
+set -eu
+
+dir=$(cd "$(dirname "$0")" && pwd -P)
+script=$dir/assertion-diff
+fixtures=$dir/fixtures
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-assertion-diff.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+expect() { # name patch-file expected-output
+  "$script" "$2" > "$tmp/out"
+  if ! printf '%s\n' "$3" | cmp -s - "$tmp/out"; then
+    echo "assertion-diff: $1: unexpected output" >&2
+    cat "$tmp/out" >&2
+    exit 1
+  fi
+}
+
+T=tools/front-door/crates
+expect "loosened" "$fixtures/loosened-assertion.diff" \
+"$T/config/src/tests.rs:11: assertion.loosened: assert_eq!/assert_ne! replaced by assert!
+$T/config/src/tests.rs:26: assertion.loosened: assert_eq!/assert_ne! replaced by assert!
+$T/config/src/tests.rs:40: assertion.loosened: #[should_panic] removed"
+expect "removed" "$fixtures/removed-assertion.diff" \
+"$T/supervisor/src/tests.rs:51: assertion.removed: Assertion removed without replacement
+$T/supervisor/src/tests.rs:53: assertion.removed: Assertion removed without replacement"
+expect "unrelated" "$fixtures/unrelated-test.diff" \
+"No loosened or removed assertions found."
+
+# Specific variant to is_err(), and a deleted test file.
+cat > "$tmp/variant.diff" <<'DIFF'
+diff --git a/crates/x/tests/t.rs b/crates/x/tests/t.rs
+--- a/crates/x/tests/t.rs
++++ b/crates/x/tests/t.rs
+@@ -5,1 +5,1 @@ fn t() {
+-    assert!(matches!(r, Err(E::Bad)));
++    assert!(r.is_err());
+DIFF
+expect "variant" "$tmp/variant.diff" \
+"crates/x/tests/t.rs:5: assertion.loosened: Specific variant check replaced by is_err()/is_ok()"
+cat > "$tmp/deleted.diff" <<'DIFF'
+diff --git a/crates/x/tests/gone.rs b/crates/x/tests/gone.rs
+deleted file mode 100644
+--- a/crates/x/tests/gone.rs
++++ /dev/null
+@@ -1,4 +0,0 @@
+-#[test]
+-fn gone() {
+-    assert!(true);
+-}
+DIFF
+expect "deleted file" "$tmp/deleted.diff" \
+"crates/x/tests/gone.rs:1: assertion.removed: Test removed (check it moved rather than was dropped)
+crates/x/tests/gone.rs:3: assertion.removed: Assertion removed without replacement"
+
+# Removing an assertion from production code is out of scope.
+cat > "$tmp/src.diff" <<'DIFF'
+diff --git a/crates/x/src/lib.rs b/crates/x/src/lib.rs
+--- a/crates/x/src/lib.rs
++++ b/crates/x/src/lib.rs
+@@ -5,1 +5,0 @@ fn f() {
+-    assert!(ready());
+DIFF
+expect "non-test file" "$tmp/src.diff" "No loosened or removed assertions found."
+
+# Stdin, annotations and the job summary.
+"$script" --annotate < "$fixtures/removed-assertion.diff" > "$tmp/out"
+grep -Fq "::warning file=$T/supervisor/src/tests.rs,line=51,title=assertion.removed::" "$tmp/out"
+GITHUB_STEP_SUMMARY="$tmp/summary" "$script" --github-summary < "$fixtures/loosened-assertion.diff" > /dev/null
+grep -Fq 'assertion.loosened' "$tmp/summary"
+
+# Git input.
+git -C "$tmp" init -q
+git -C "$tmp" config user.email test@example.com
+git -C "$tmp" config user.name test
+git -C "$tmp" config commit.gpgsign false
+mkdir "$tmp/tests"
+printf '#[test]\nfn t() {\n    assert_eq!(1, 1);\n}\n' > "$tmp/tests/t.rs"
+git -C "$tmp" add -A
+git -C "$tmp" commit -qm base
+printf '#[test]\nfn t() {\n    assert!(true);\n}\n' > "$tmp/tests/t.rs"
+git -C "$tmp" commit -qam change
+(cd "$tmp" && "$script" --base HEAD~1 --head HEAD) | grep -Fq 'tests/t.rs:3: assertion.loosened'
+echo 'assertion-diff tests passed'

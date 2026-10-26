@@ -1,0 +1,86 @@
+#!/bin/sh
+# Behaviour tests for scripts/find-changed-tests, run against a scratch repo.
+set -eu
+
+script=$(cd "$(dirname "$0")" && pwd -P)/find-changed-tests
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-find-changed-tests.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cd "$tmp"
+git init -q
+git config user.email test@example.com
+git config user.name test
+git config commit.gpgsign false
+
+mkdir tests
+cat > tests/a.rs <<'RS'
+fn helper() -> u8 {
+    1
+}
+
+#[test]
+fn untouched() {
+    assert_eq!(helper(), 1);
+}
+
+#[test]
+fn edited() {
+    let x = "{";
+    assert_eq!(x, "{");
+}
+
+#[tokio::test]
+async fn deleted_line() {
+    let a = 1;
+    let b = 2;
+    assert_eq!(a + b, 3);
+}
+
+#[test]
+fn renamed_away() {}
+RS
+cat > tests/gone.rs <<'RS'
+#[test]
+fn gone() {
+    assert!(true);
+}
+RS
+git add -A
+git commit -q -m base
+base=$(git rev-parse HEAD)
+
+check() { # name expected-list
+  got=$("$script" --base "$base" --format list | tr '\n' ' ')
+  if [ "$got" != "$2" ]; then
+    echo "find-changed-tests: $1: expected '$2' got '$got'" >&2
+    exit 1
+  fi
+}
+
+# No change, and a non-test change outside any test, select nothing.
+git commit -q --allow-empty -m empty
+check "empty diff" ""
+sed -i.bak 's/^    1$/    2/' tests/a.rs && rm tests/a.rs.bak
+git commit -qam helper
+check "helper-only change" ""
+
+# An edited body, a deleted line, a new test and a deleted file's test.
+sed -i.bak 's/assert_eq!(x, "{");/assert_eq!(x, "{{"[..1]);/' tests/a.rs && rm tests/a.rs.bak
+sed -i.bak '/let b = 2;/d' tests/a.rs && rm tests/a.rs.bak
+cat >> tests/a.rs <<'RS'
+
+#[test]
+fn added() {
+    assert!(true);
+}
+RS
+git rm -q tests/gone.rs
+git commit -qam tests
+check "changed tests" "added deleted_line edited "
+
+# Matching is on the final path segment of the nextest name.
+expr=$("$script" --base "$base")
+case "$expr" in
+  'test(/(^|::)added$/) | test(/(^|::)deleted_line$/) | test(/(^|::)edited$/)') ;;
+  *) echo "find-changed-tests: unexpected expression: $expr" >&2; exit 1 ;;
+esac
+echo 'find-changed-tests tests passed'

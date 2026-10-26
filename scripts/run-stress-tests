@@ -1,0 +1,45 @@
+#!/bin/sh
+# Advisory CI signal: stress-run the tests a pull request added or changed.
+#   run-stress-tests <base> [<head>]
+# Runs nextest with --stress-count 20 and no retries over just those tests.
+# A failure becomes a warning annotation and summary; the script always exits 0.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+base=${1:?usage: run-stress-tests <base> [<head>]}
+head=${2:-HEAD}
+count=${STRESS_COUNT:-20}
+
+note() { # markdown for the job summary
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '### Stress run (advisory)\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+filter=$("$root/scripts/find-changed-tests" --base "$base" --head "$head")
+if [ -z "$filter" ]; then
+  echo "No added or changed tests between $base and $head."
+  note "No added or changed tests in this diff."
+  exit 0
+fi
+
+cd "$root/tools/front-door"
+log=$(mktemp "${TMPDIR:-/tmp}/provenant-stress.XXXXXX")
+trap 'rm -f "$log"' EXIT HUP INT TERM
+status=0
+cargo nextest run --profile ci --workspace --locked \
+  --features provenant-providers/recording \
+  --stress-count "$count" --retries 0 --no-tests=pass -E "$filter" > "$log" 2>&1 || status=$?
+tail -n 200 "$log"
+
+if [ "$status" -eq 0 ]; then
+  note "Changed tests passed $count stress iterations with no retries."
+else
+  echo "::warning title=Stress run failed::Changed tests failed under --stress-count $count with no retries (exit $status); a build error also lands here."
+  note "**Stress run failed** (exit $status), \`--stress-count $count\`, no retries. Tail of the log:
+
+\`\`\`
+$(tail -n 60 "$log")
+\`\`\`"
+fi
+exit 0
