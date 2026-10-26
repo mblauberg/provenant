@@ -730,10 +730,10 @@ fn find_session_state_within(
 }
 
 /// Copy regular files and directories within `RETAINED_STATE`. GC tombstones,
-/// symlinks and other entries are skipped: setup recreates the links a provider
-/// needs. A leftover process may still change the tree, so every entry is
-/// opened from its parent's handle without following a link, and the opened
-/// descriptor is checked and copied.
+/// top-level Codex caches, symlinks and other entries are skipped: setup
+/// recreates the caches and links a provider needs. A leftover process may
+/// still change the tree, so every entry is opened from its parent's handle
+/// without following a link, and the opened descriptor is checked and copied.
 fn copy_state(from: &Path, to: &Path) -> Result<(), String> {
     copy_state_within(from, to, RETAINED_STATE)
 }
@@ -750,6 +750,9 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
         return Err("retained provider state is not a directory".into());
     }
     let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
+    let skip_codex_caches = source
+        .read_bounded(std::ffi::OsStr::new("provider.txt"), 64)
+        .is_ok_and(|provider| provider == b"codex");
     let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
         return Err(failed(&"the destination has no parent directory"));
     };
@@ -774,7 +777,15 @@ fn copy_state_within(from: &Path, to: &Path, limits: StateLimits) -> Result<(), 
     let copied = parent
         .open_directory(&staging)
         .map_err(CopyRefusal::from)
-        .and_then(|target| copy_tree(&source, &target, limits.depth, &mut budget))
+        .and_then(|target| {
+            copy_tree(
+                &source,
+                &target,
+                limits.depth,
+                &mut budget,
+                skip_codex_caches,
+            )
+        })
         .and_then(|()| Ok(parent.replace(&staging, &parent, name)?));
     let copied = copied.map_err(|refusal| match refusal {
         CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
@@ -876,9 +887,18 @@ fn copy_tree(
     to: &Directory,
     depth: u32,
     budget: &mut Budget,
+    skip_codex_caches: bool,
 ) -> Result<(), CopyRefusal> {
     for name in listed(from, &mut budget.entries)?.ok_or(CopyRefusal::TooMany)? {
-        if name.as_encoded_bytes().starts_with(b".provider-gc-") {
+        if name
+            .as_encoded_bytes()
+            .starts_with(run::TOMBSTONE.as_bytes())
+            || (skip_codex_caches
+                && matches!(
+                    name.to_str(),
+                    Some("cache" | "plugins" | "skills" | "models_cache.json")
+                ))
+        {
             continue;
         }
         let metadata = match from.metadata_at(&name, false) {
@@ -908,7 +928,7 @@ fn copy_tree(
                     Err(error) if error.is_exists() => {}
                     Err(error) => return Err(error.into()),
                 }
-                copy_tree(&child, &to.open_directory(&name)?, depth, budget)?;
+                copy_tree(&child, &to.open_directory(&name)?, depth, budget, false)?;
             }
             FileKind::Regular => {
                 let mut file = match from.open_read(&name) {
@@ -2409,13 +2429,14 @@ mod tests {
                 std::fs::write(candidate.join("cache/payload"), "pending deletion")?;
                 let metadata = std::fs::metadata(candidate.join("cache"))?;
                 let tombstone = format!(
-                    ".provider-gc-{:016x}{:016x}-cache",
+                    "{}{:016x}{:016x}-cache",
+                    run::TOMBSTONE,
                     metadata.dev(),
                     metadata.ino()
                 );
                 std::fs::rename(candidate.join("cache"), candidate.join(&tombstone))?;
-                let nested_tombstone = "sessions/.provider-gc-interrupted";
-                std::fs::write(candidate.join(nested_tombstone), "pending deletion")?;
+                let nested_tombstone = format!("sessions/{}interrupted", run::TOMBSTONE);
+                std::fs::write(candidate.join(&nested_tombstone), "pending deletion")?;
 
                 let copied = base.join("resumed-state");
                 let continuation = continuation_for(
@@ -2438,6 +2459,43 @@ mod tests {
                 prior.session = None;
                 assert!(continuation_for(&prior, &route, "fixture", state, state).is_err());
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_state_copy_skips_only_top_level_codex_caches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let source = base.join("candidate-0");
+        std::fs::create_dir_all(source.join("sessions"))?;
+        for name in ["cache", "plugins", "skills"] {
+            std::fs::create_dir(source.join(name))?;
+            std::fs::write(source.join(name).join("installed"), "partial cache")?;
+            std::fs::create_dir(source.join("sessions").join(name))?;
+            std::fs::write(source.join("sessions").join(name).join("keep"), "state")?;
+        }
+        std::fs::write(source.join("models_cache.json"), "cache")?;
+        std::fs::write(source.join("sessions/models_cache.json"), "state")?;
+        std::fs::write(source.join("sessions/rollout.jsonl"), "transcript")?;
+        for provider in [Some("codex"), Some("claude"), None] {
+            if let Some(provider) = provider {
+                std::fs::write(source.join("provider.txt"), provider)?;
+            } else {
+                std::fs::remove_file(source.join("provider.txt"))?;
+            }
+            let copied = base.join(provider.unwrap_or("legacy"));
+            copy_state(&source, &copied)?;
+            for name in ["cache", "plugins", "skills", "models_cache.json"] {
+                assert_eq!(copied.join(name).exists(), provider != Some("codex"));
+                assert!(copied.join("sessions").join(name).exists());
+                assert!(source.join(name).exists());
+            }
+            assert_eq!(
+                std::fs::read_to_string(copied.join("sessions/rollout.jsonl"))?,
+                "transcript"
+            );
         }
         Ok(())
     }
@@ -2808,7 +2866,7 @@ mod tests {
         let opened = std::rc::Rc::new(std::cell::Cell::new(false));
         let seen = std::rc::Rc::clone(&opened);
         BEFORE_OPEN.set(Some(Box::new(move |_| seen.set(true))));
-        let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget);
+        let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget, false);
         BEFORE_OPEN.set(None);
         assert!(matches!(result, Err(CopyRefusal::CrossDevice)));
         assert!(!opened.get(), "a mount point is refused before its open");

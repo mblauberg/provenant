@@ -14,7 +14,7 @@ use std::{
 
 const DAY_MICROS: i64 = 86_400_000_000;
 const EXPIRED: &str = "provider-state-expired.json";
-const TOMBSTONE: &str = ".provider-gc-";
+pub const TOMBSTONE: &str = ".provider-gc-";
 
 // These are fetched or generated again by Codex at startup. Sessions and
 // history databases deliberately do not appear here. Other adapters need

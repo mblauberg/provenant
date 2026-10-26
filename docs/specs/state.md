@@ -193,6 +193,9 @@ provider's proven regenerable caches; the initial table contains Codex's
 `provider.txt` records the adapter. When the marker is absent, a single
 existing candidate or a candidate holding the recorded session can use its
 attempt's applied provider for cache pruning and expiry.
+Resume copies skip GC tombstones at every depth and, when `provider.txt` is
+`codex`, the candidate's top-level cache names, including caches still being
+pruned at settlement.
 
 Before full expiry, GC archives Codex session directories, history files and
 versioned state and thread-history SQLite files, including WAL, SHM and journal

@@ -28,7 +28,7 @@ pub use launch::{
     concurrency,
 };
 pub use plan::read_only_plan;
-pub use retention::{ProviderStateGc, ProviderStateIssue};
+pub use retention::{ProviderStateGc, ProviderStateIssue, TOMBSTONE};
 pub use writer::{
     LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer,
     resolve_writer_proposal,
