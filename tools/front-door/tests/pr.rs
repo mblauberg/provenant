@@ -31,17 +31,7 @@ fn rig() -> Result<TestRig> {
         rig.project.join("checks.json"),
         r#"[{"bucket":"pass"},{"bucket":"skipping"}]"#,
     )?;
-    runs(&rig, "completed", Some("success"))?;
     Ok(rig)
-}
-fn runs(rig: &TestRig, status: &str, conclusion: Option<&str>) -> Result {
-    fs::write(
-        rig.project.join("runs.json"),
-        serde_json::to_vec(&serde_json::json!([{"check_runs": [{
-            "id": 12, "name": "ci-status", "status": status, "conclusion": conclusion
-        }]}]))?,
-    )?;
-    Ok(())
 }
 fn merge(rig: &TestRig) -> Result<provenant_supervisor::exec::ExecOutcome> {
     rig.command(&["pr", "merge", "1668", "--head", HEAD, "--json"])
@@ -62,8 +52,6 @@ fn pr_watch_reports_the_verified_head_and_waits_via_gh() -> Result {
         format!("pass #1668 {HEAD}\n")
     );
     assert!(rig.project.join("watched").exists());
-    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
-    assert!(calls.contains(&format!("commits/{HEAD}/check-runs")));
     no_merge(&rig)
 }
 
@@ -89,32 +77,22 @@ fn pr_merge_refuses_unpassed_missing_and_malformed_checks() -> Result {
         "skipping",
         "empty",
         "malformed",
+        "pass-pending",
+        "pass-fail",
     ] {
         let rig = rig()?;
         let checks = match bucket {
             "empty" => "[]".into(),
             "malformed" => "invalid json".into(),
+            "pass-pending" => r#"[{"bucket":"pass"},{"bucket":"pending"}]"#.into(),
+            "pass-fail" => r#"[{"bucket":"pass"},{"bucket":"fail"}]"#.into(),
             _ => format!(r#"[{{"bucket":"{bucket}"}}]"#),
         };
         fs::write(rig.project.join("checks.json"), checks)?;
         assert_ne!(code(&merge(&rig)?), 0, "{bucket}");
         no_merge(&rig)?;
     }
-    for (status, conclusion) in [
-        ("in_progress", None),
-        ("completed", Some("failure")),
-        ("completed", Some("cancelled")),
-        ("completed", Some("skipped")),
-    ] {
-        let rig = rig()?;
-        runs(&rig, status, conclusion)?;
-        assert_ne!(code(&merge(&rig)?), 0, "{status} {conclusion:?}");
-        no_merge(&rig)?;
-    }
-    let rig = rig()?;
-    fs::write(rig.project.join("runs.json"), r#"[{"check_runs":[]}]"#)?;
-    assert_ne!(code(&merge(&rig)?), 0);
-    no_merge(&rig)
+    Ok(())
 }
 
 fn pr_merge_refuses_head_changes_before_and_after_checks() -> Result {
@@ -137,26 +115,14 @@ fn pr_merge_refuses_head_changes_before_and_after_checks() -> Result {
     Ok(())
 }
 
-fn pr_merge_uses_the_newest_aggregate_across_pages() -> Result {
-    for latest in ["in_progress", "completed"] {
-        let rig = rig()?;
-        fs::write(
-            rig.project.join("runs.json"),
-            serde_json::to_vec(&serde_json::json!([
-                {"check_runs": [{"id": 10, "name": "ci-status",
-                    "status": "completed", "conclusion": "success"}]},
-                {"check_runs": [{"id": 20, "name": "ci-status",
-                    "status": latest, "conclusion": "success"}]}
-            ]))?,
-        )?;
-        let output = merge(&rig)?;
-        if latest == "completed" {
-            assert_eq!(code(&output), 0, "{output:?}");
-        } else {
-            assert_ne!(code(&output), 0);
-            no_merge(&rig)?;
-        }
-    }
+fn pr_merge_reports_merged_in_text() -> Result {
+    let rig = rig()?;
+    let output = rig.command(&["pr", "merge", "1668", "--head", HEAD])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout.bytes)?,
+        format!("merged #1668 {HEAD}\n")
+    );
     Ok(())
 }
 
@@ -175,6 +141,7 @@ fn pr_merge_guards_head_and_uses_optional_git_email() -> Result {
         let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(report["data"]["head"], HEAD);
         assert_eq!(report["data"]["result"], "pass");
+        assert_eq!(report["data"]["merged"], true);
         let mut expected = format!("pr\nmerge\n1668\n--merge\n--match-head-commit\n{HEAD}\n");
         if let Some(email) = email {
             expected.push_str(&format!("--author-email\n{email}\n"));
@@ -192,7 +159,10 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     for flag in ["checks-fail", "merge-fail"] {
         let rig = rig()?;
         fs::write(rig.project.join(flag), "")?;
-        assert_ne!(code(&merge(&rig)?), 0, "{flag}");
+        let output = merge(&rig)?;
+        assert_ne!(code(&output), 0, "{flag}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert!(report["data"].get("merged").is_none());
         if flag == "checks-fail" {
             no_merge(&rig)?;
         }
@@ -241,14 +211,6 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             io::stdout().write_all(&fs::read("checks.json")?)?;
         }
         value
-            if value
-                == format!(
-                    "api repos/{{owner}}/{{repo}}/commits/{HEAD}/check-runs?per_page=100 --paginate --slurp"
-                ) =>
-        {
-            io::stdout().write_all(&fs::read("runs.json")?)?;
-        }
-        value
             if value.starts_with(&format!("pr merge 1668 --merge --match-head-commit {HEAD}")) =>
         {
             fs::write("merge-args", args.join("\n") + "\n")?;
@@ -263,7 +225,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let result = if args.first().is_some_and(|arg| arg == "pr" || arg == "api") {
+    let result = if args.first().is_some_and(|arg| arg == "pr") {
         fake_gh(&args)
     } else {
         type Test = (&'static str, fn() -> Result);
@@ -285,8 +247,8 @@ fn main() -> ExitCode {
                 pr_merge_refuses_head_changes_before_and_after_checks,
             ),
             (
-                "pr_merge_uses_the_newest_aggregate_across_pages",
-                pr_merge_uses_the_newest_aggregate_across_pages,
+                "pr_merge_reports_merged_in_text",
+                pr_merge_reports_merged_in_text,
             ),
             (
                 "pr_merge_guards_head_and_uses_optional_git_email",

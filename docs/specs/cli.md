@@ -111,10 +111,12 @@ never cancels the underlying work. Cancelling a wait ends only that reader.
 `gh pr checks --watch`, with a 24-hour process limit and no `--wait` flag.
 It reports pass or fail with the captured head and fails closed on incomplete
 evidence. `pr merge NUMBER --head SHA` rechecks CI without waiting and guards
-the merge with that full Git object ID. Both require a successful exact-head
-`ci-status` run. See the [GitHub workflow](../runbooks/github-workflow.md#merge)
+the merge with that full Git object ID. Both require at least one passing check,
+with all others passing or skipped, and refuse a head change during verification.
+See the [GitHub workflow](../runbooks/github-workflow.md#merge)
 for the check and merge-author policy. Their JSON data contains `number`,
-`head` and `result` (`pass` or `fail`); failures exit non-zero.
+`head` and `result` (`pass` or `fail`); failures exit non-zero. A successful
+merge also includes `merged: true` and reports `merged` in text output.
 
 ### Run verbs
 

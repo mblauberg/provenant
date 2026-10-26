@@ -230,14 +230,17 @@ provenant pr merge 148 --head <reported-sha>
 
 `pr watch` waits with `gh pr checks --watch`, then prints `pass` or `fail`
 with the captured head. Failure exits non-zero. Both verbs reject pending,
-failed, cancelled or absent checks, require a successful `ci-status` check
-run on that exact commit, and refuse a head that changes during verification.
+failed, cancelled or absent checks, require at least one passing check with
+all others passing or skipped, and refuse a head that changes during verification.
 `pr merge` checks current evidence without waiting and calls
 `gh pr merge --merge --match-head-commit <sha>`. GitHub still enforces branch
 protection and any merge queue. Neither helper bypasses those gates.
 
+`pr merge` is for the immediate-merge path; use `gh pr merge --auto` to queue a merge.
+
 The helpers use the current repository, or the global `--project` selection.
 `--json` includes `number`, `head` and `result` in the normal command envelope.
+After a successful merge, JSON also includes `merged: true` and text says `merged`.
 Merge passes Git's effective `user.email`, when non-empty, as
 `--author-email`. Configure the account's noreply address before an agent
 merge and verify the resulting author as below.

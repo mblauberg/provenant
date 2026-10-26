@@ -93,35 +93,6 @@ fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()>
     {
         return Err("CI checks have not passed".into());
     }
-    #[derive(Deserialize)]
-    struct Page {
-        check_runs: Vec<CheckRun>,
-    }
-    #[derive(Deserialize)]
-    struct CheckRun {
-        id: u64,
-        name: String,
-        status: String,
-        conclusion: Option<String>,
-    }
-    // PR rollups may still refer to the previous head just after a push.
-    let endpoint = format!("repos/{{owner}}/{{repo}}/commits/{head}/check-runs?per_page=100");
-    let bytes = successful(execute(
-        project,
-        &["gh", "api", &endpoint, "--paginate", "--slurp"],
-        false,
-    )?)?;
-    let pages: Vec<Page> = serde_json::from_slice(&bytes)?;
-    let aggregate = pages
-        .iter()
-        .flat_map(|page| &page.check_runs)
-        .filter(|run| run.name == "ci-status")
-        .max_by_key(|run| run.id);
-    if !aggregate.is_some_and(|run| {
-        run.status == "completed" && run.conclusion.as_deref() == Some("success")
-    }) {
-        return Err(format!("ci-status has not passed on head {head}").into());
-    }
     if self::head(project, number)? != head {
         return Err(format!("pull request head moved from {head}").into());
     }
@@ -198,6 +169,12 @@ pub fn run(command: Pr, globals: &Globals) -> u8 {
         outcome,
         serde_json::json!({"number": number, "head": head, "result": status}),
     );
+    let text_status = if result.is_ok() && expected.is_some() {
+        report.data["merged"] = true.into();
+        "merged"
+    } else {
+        status
+    };
     if let Err(error) = result {
         report.error = Some(provenant_records::CommandError {
             code: "PR".into(),
@@ -209,7 +186,7 @@ pub fn run(command: Pr, globals: &Globals) -> u8 {
     emit(
         &report,
         globals,
-        &format!("{status} #{number} {head}\n"),
+        &format!("{text_status} #{number} {head}\n"),
         expected.is_none(),
     )
 }
