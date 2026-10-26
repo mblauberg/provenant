@@ -325,6 +325,13 @@ pub struct HostHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerHealth {
+    pub host: HostId,
+    pub available: bool,
+    /// Readiness requires the run owner; config presence alone proves nothing.
+    pub execution: Option<bool>,
+}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(
     tag = "result",
@@ -339,7 +346,7 @@ pub enum PeerResult {
     Output(crate::coordination::facade::OutputResult),
     RunEvents(crate::runs::RunEventsPage),
     Push(provenant_fabric_store::PushOperation),
-    Health(HostHealth),
+    Health(PeerHealth),
     Coordination(CoordinationResult),
     SessionHandoff(crate::handoff::HandoffReceipt),
     Error {
@@ -813,9 +820,7 @@ mod tests {
                 protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
-                result: PeerResult::Health(HostHealth {
-                    protocol: Some(PROTOCOL),
-                    reason: None,
+                result: PeerResult::Health(PeerHealth {
                     host: request.target_host,
                     available: true,
                     execution: None,
@@ -1060,6 +1065,19 @@ mod tests {
     #[test]
     fn protocol_two_frame_errors_use_a_distinct_diagnostic() {
         assert_eq!(PeerError::Frame.to_string(), "malformed peer frame");
+    }
+
+    #[test]
+    fn peer_health_wire_data_omits_local_diagnostics() {
+        let health = PeerHealth {
+            host: HostId::from_bytes([2; 16]),
+            available: true,
+            execution: Some(true),
+        };
+        let value = serde_json::to_value(health).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert!(value.get("protocol").is_none());
+        assert!(value.get("reason").is_none());
     }
 
     #[test]

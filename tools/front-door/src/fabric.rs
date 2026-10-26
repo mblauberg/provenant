@@ -278,7 +278,13 @@ impl F3Facade for BoundFacade<'_> {
                     Ok(PeerResponse {
                         result: PeerResult::Health(value),
                         ..
-                    }) => health = value,
+                    }) => {
+                        health.protocol = Some(PROTOCOL);
+                        health.reason = None;
+                        health.host = value.host;
+                        health.available = value.available;
+                        health.execution = value.execution;
+                    }
                     Err(PeerError::ProtocolMismatch { remote, .. }) => {
                         health.protocol = Some(remote);
                         health.reason = Some("peer_version".into());
@@ -609,9 +615,7 @@ pub fn peer(globals: &provenant_cli::Globals, in_process: bool) -> u8 {
                     &crate::handoff::Terminal,
                 ))
             }
-            PeerAction::Health => PeerResult::Health(HostHealth {
-                protocol: Some(PROTOCOL),
-                reason: None,
+            PeerAction::Health => PeerResult::Health(provenant_fabric_runtime::hosts::PeerHealth {
                 host: context.identity.host,
                 available: true,
                 execution: Some(owner.capabilities().submit),
