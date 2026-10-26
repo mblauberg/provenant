@@ -1118,10 +1118,6 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
             );
             assert_eq!(spec.stdin, Stdin::Null);
             assert_eq!(spec.cwd, Path::new("/fixture/repo"));
-            assert_eq!(
-                spec.profile.spec.tool_exec_roots.is_empty(),
-                access == Access::ReadOnly
-            );
         }
     }
     let plan = read_only_plan("/fixture", Some("login"));
@@ -1136,6 +1132,37 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
         )),
         Err(ProviderError::PromptTooLarge)
     ));
+    Ok(())
+}
+
+#[test]
+fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("cursor", "fixture-model");
+    let payload = Path::new("/fixture/home/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4");
+    let launcher = payload.join("cursor-agent");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.executable = &launcher;
+        let spec = cursor::Cursor.prepare(input)?.profile.spec;
+        assert_eq!(
+            spec.process_executables,
+            vec![crate::launch::exact(&launcher)]
+        );
+        assert!(
+            spec.runtime_reads
+                .contains(&crate::launch::subtree(payload))
+        );
+        assert_eq!(
+            spec.tool_exec_roots,
+            ["/bin", "/usr/bin"]
+                .map(crate::launch::subtree)
+                .into_iter()
+                .chain([crate::launch::subtree(payload)])
+                .collect::<Vec<_>>()
+        );
+    }
     Ok(())
 }
 
