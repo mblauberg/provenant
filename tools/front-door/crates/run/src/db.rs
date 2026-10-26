@@ -1,9 +1,7 @@
 use crate::*;
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
-use provenant_supervisor::fs::{
-    Directory, FileKind, FsError, LockGuard, LockMode, Metadata, verify_directory_identity,
-};
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use provenant_supervisor::fs::{Directory, FsError, LockGuard, LockMode, Metadata};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::{
     ffi::OsStr,
     marker::PhantomData,
@@ -28,17 +26,19 @@ pub struct Request<'a> {
 }
 impl Request<'_> {
     pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
-        self.wait(|| match action() {
-            Err(RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
-                if matches!(
-                    code.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                ) =>
-            {
-                Ok(None)
-            }
-            result => result.map(Some),
-        })
+        match provenant_sqlite::retry(
+            self.clock,
+            self.budget,
+            self.cancel,
+            &provenant_sqlite::ThreadWait,
+            |error: &RunError| matches!(error, RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)),
+            &mut action,
+        ) {
+            Ok(value) => Ok(value),
+            Err(provenant_sqlite::RetryError::Busy) => Err(RunError::Contention),
+            Err(provenant_sqlite::RetryError::Cancelled) => Err(RunError::Cancelled),
+            Err(provenant_sqlite::RetryError::Action(error)) => Err(error),
+        }
     }
     /// Retry an incomplete observation within the call's budget and cancellation.
     fn wait<T>(&self, mut action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
@@ -227,13 +227,7 @@ impl RunStore {
             }
         }
         let path = context.state_root.as_path().join("run.sqlite3");
-        let db = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        db.busy_timeout(Duration::ZERO)?;
+        let db = provenant_sqlite::open_connection(&path, true)?;
         if request.retry(|| version(&db))? == 0 {
             return Ok(None);
         }
@@ -276,21 +270,29 @@ impl RunStore {
                 Vec::new()
             };
             store.write(request, |tx| {
-                if version(tx)? == 0 {
-                    tx.execute_batch(include_str!("schema.sql"))?;
-                }
-                if version(tx)? == 1 {
-                    tx.execute_batch(include_str!("schema_v2.sql"))?;
-                }
-                if version(tx)? == 2 {
-                    tx.execute_batch(include_str!("schema_v3.sql"))?;
-                }
-                if version(tx)? == 3 {
-                    tx.execute_batch(include_str!("schema_v4.sql"))?;
-                    for id in &absent_temporary {
-                        tx.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
-                    }
-                }
+                let current = version(tx)?;
+                let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
+                let steps = [
+                    include_str!("schema.sql"),
+                    include_str!("schema_v2.sql"),
+                    include_str!("schema_v3.sql"),
+                    include_str!("schema_v4.sql"),
+                ];
+                provenant_sqlite::apply_migrations(
+                    tx,
+                    &steps,
+                    start,
+                    steps.len(),
+                    |_, _| Ok(()),
+                    |index, db| {
+                        if index == 3 {
+                            for id in &absent_temporary {
+                                db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
                 Ok(())
             })?;
         }
@@ -363,16 +365,7 @@ pub(crate) fn open_database(
                 },
                 Err(error) => return Err(error.into()),
             }
-            let before = root.metadata_at(part, false)?;
-            let opened = root.open_directory(part)?;
-            verify_directory_identity(
-                part,
-                before,
-                opened.metadata()?,
-                root.metadata_at(part, false)?,
-                opened.metadata()?.device,
-            )?;
-            root = opened;
+            root = provenant_sqlite::checked_directory(&root, part, None)?;
         }
     }
     private(&root)?;
@@ -408,71 +401,55 @@ pub(crate) fn open_database(
         Err(e) => return Err(e.into()),
     }
     companions(&root, name, request)?;
-    let db = Connection::open_with_flags(
-        path.join(name),
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
-    db.busy_timeout(Duration::ZERO)?;
-    request.retry(|| {
-        let mode: String =
-            db.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(RunError::Validation("WAL unavailable"));
+    let db = provenant_sqlite::open_connection(&path.join(name), false)?;
+    request.retry(|| match provenant_sqlite::enable_wal(&db) {
+        Ok(()) => Ok(()),
+        Err(provenant_sqlite::WalError::Unavailable(_)) => {
+            Err(RunError::Validation("WAL unavailable"))
         }
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
-        Ok(())
+        Err(provenant_sqlite::WalError::Sqlite(error)) => Err(error.into()),
     })?;
     Ok((root, db, initialisation))
 }
 fn version(db: &Connection) -> Result<i64> {
-    let (version, has_schema): (i64, bool) = db.query_row("SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    if !(0..=4).contains(&version) || (version == 0 && has_schema) {
-        return Err(RunError::Version(version));
+    match provenant_sqlite::read_version(db, 4) {
+        Ok(version) => Ok(version as i64),
+        Err(provenant_sqlite::VersionError::Unsupported(version)) => {
+            Err(RunError::Version(version))
+        }
+        Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
+        Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
     }
-    Ok(version)
 }
 pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;
-    if m.mode & 0o077 != 0 || m.uid != provenant_supervisor::fs::effective_uid() {
+    if !provenant_sqlite::is_private(m) {
         return Err(RunError::UnsafePath);
     }
     Ok(())
 }
 fn companions(directory: &Directory, base: &str, request: &Request<'_>) -> Result<()> {
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        companion(request, || {
-            directory.metadata_at(OsStr::new(&format!("{base}{suffix}")), false)
-        })?;
-    }
-    Ok(())
+    let names = ["", "-wal", "-shm", "-journal"]
+        .map(|suffix| std::ffi::OsString::from(format!("{base}{suffix}")));
+    provenant_sqlite::check_companions(
+        directory,
+        &names,
+        |check| request.wait(check),
+        Into::into,
+        |_| RunError::UnsafePath,
+    )
 }
+#[cfg(test)]
 fn companion(
     request: &Request<'_>,
     mut metadata: impl FnMut() -> provenant_supervisor::fs::Result<Metadata>,
 ) -> Result<()> {
-    // Mirrored in crates/fabric-store/src/db.rs::companion; keep metadata checks
-    // and unlink handling in sync.
-    request.wait(|| match metadata() {
-        Ok(m)
-            if m.kind == FileKind::Regular
-                && m.mode & 0o077 == 0
-                && m.uid == provenant_supervisor::fs::effective_uid() =>
-        {
-            match m.links {
-                1 => Ok(Some(())),
-                // SQLite's last connection can unlink WAL/SHM files while
-                // another opener's stat is in flight, outside our setup
-                // lock. Re-stat the name; never accept the removed inode.
-                0 => Ok(None),
-                _ => Err(RunError::UnsafePath),
-            }
-        }
-        Ok(_) => Err(RunError::UnsafePath),
-        Err(e) if e.is_not_found() => Ok(Some(())),
-        Err(e) => Err(e.into()),
-    })
+    provenant_sqlite::check_companion(
+        &mut metadata,
+        |check| request.wait(check),
+        Into::into,
+        || RunError::UnsafePath,
+    )
 }
 pub(crate) fn bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
     let bytes = provenant_records::CanonicalV1::bytes(record)?;
@@ -547,11 +524,11 @@ mod tests {
         for unsafe_metadata in [
             Metadata { links: 2, ..safe },
             Metadata {
-                kind: FileKind::Symlink,
+                kind: provenant_supervisor::fs::FileKind::Symlink,
                 ..safe
             },
             Metadata {
-                kind: FileKind::Directory,
+                kind: provenant_supervisor::fs::FileKind::Directory,
                 ..safe
             },
             Metadata {
