@@ -174,10 +174,11 @@ surface without resolving roots or creating state.
 
 ## Receipt recovery
 
-Receipts with a non-null `legacy` object fail to decode with a reinstall error.
-Current receipts with `"legacy":null` upgrade normally and need no recovery.
-Move `<state>/install/receipt.json` aside, then preview and reapply `install`
-with the desired release and harnesses. Existing exact desired files and links
+A receipt that fails to decode reports a reinstall error. A `legacy` member of
+any value is ignored and dropped on the next install write, so it needs no
+recovery. For any other invalid receipt, move `<state>/install/receipt.json`
+aside, then preview and reapply `install` with the desired release and
+harnesses. Existing exact desired files and links
 remain no-ops. Links into an older release conflict; remove those binary, skill
 and instruction links manually before reapplying install. Use `--adopt-existing`
 for occupied managed MCP selectors or a stable regular executable that must be
