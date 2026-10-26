@@ -1,4 +1,4 @@
-use crate::launch::{Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact};
+use crate::launch::{Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, subtree};
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{
     AuthenticationProfile, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
@@ -28,6 +28,8 @@ const MODEL_ON_WIRE: bool = true;
 /// bound.
 const PRINT_TIMEOUT: &str = "0s";
 const SECURITY: &str = "/usr/bin/security";
+/// Its `run_command` tool runs commands through `SHELL`.
+const SHELL: &str = "/bin/zsh";
 const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 
 /// Agy runs with the attempt's private state as `HOME`, so it sees none of the
@@ -95,26 +97,61 @@ fn prepare(
     }
     argv.extend(["--print".into(), input.prompt.text().into()]);
 
-    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    let shell = access == Access::WorktreeWrite;
+    let path = if shell {
+        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
+    } else {
+        "/usr/bin:/bin".into()
+    };
+    let mut env = base_env(input, &plan.scratch.path, &path);
     for (key, value) in &mut env {
         if key == "HOME" {
             *value = home.into();
         }
     }
+    env.push(("SHELL".into(), SHELL.into()));
     let keychains = home.join("Library/Keychains");
+    let mut setup = vec![
+        SetupStep::CreateDir(keychains.clone()),
+        SetupStep::Symlink {
+            link: keychains.join("login.keychain-db"),
+            target: keychain.clone(),
+        },
+    ];
+    // Only writers run commands, with the system programs and tools Codex and
+    // Claude writers get.
+    let mut runtime_reads = Vec::new();
+    let mut tool_exec_roots = Vec::new();
+    if shell {
+        env.extend([
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+        tool_exec_roots.extend(["/bin", "/usr/bin", "/usr/libexec"].map(subtree));
+        crate::launch::rust_tools(
+            input,
+            access,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+            &mut setup,
+        );
+        crate::launch::node_tools(
+            input.home,
+            access,
+            crate::launch::lane_cache(input),
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+        );
+    }
     Ok(LaunchSpec {
         argv,
         env,
         stdin: Stdin::Null,
         secret_input: None,
         cwd: input.cwd.to_owned(),
-        setup: vec![
-            SetupStep::CreateDir(keychains.clone()),
-            SetupStep::Symlink {
-                link: keychains.join("login.keychain-db"),
-                target: keychain.clone(),
-            },
-        ],
+        setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 // The keyring library reads its token through Apple's `security`.
@@ -127,6 +164,8 @@ fn prepare(
                     roots: vec![exact(&keychain)],
                     in_place_writes: Vec::new(),
                 }],
+                runtime_reads,
+                tool_exec_roots,
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,
