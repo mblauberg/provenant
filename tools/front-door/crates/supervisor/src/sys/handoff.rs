@@ -15,6 +15,8 @@ pub(crate) struct Inherited {
     pub channel: UnixStream,
     pub writer_directory: Directory,
     pub attempt_directory: Directory,
+    /// Host-owned stop channel. A top-level attempt passes its attempt directory.
+    pub control_directory: Directory,
     pub writer: LockGuard,
     pub custody: LockGuard,
 }
@@ -110,11 +112,12 @@ pub(crate) fn receive_cancellable(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "One private handoff transfers four held capabilities and one bounded channel message."
+    reason = "One private handoff transfers five held capabilities and one bounded channel message."
 )]
 pub(crate) fn spawn(
     writer_directory: &Directory,
     attempt_directory: &Directory,
+    control_directory: &Directory,
     writer: &LockGuard,
     custody: &LockGuard,
     environment: &[(OsString, OsString)],
@@ -134,6 +137,7 @@ pub(crate) fn spawn(
         child_channel.as_fd(),
         writer_directory.handoff_file().as_fd(),
         attempt_directory.handoff_file().as_fd(),
+        control_directory.handoff_file().as_fd(),
         writer.handoff_file().as_fd(),
         custody.handoff_file().as_fd(),
     ];
@@ -185,9 +189,10 @@ pub(crate) fn spawn(
 
 /// Adopt exactly the descriptors inherited by the private spawn above. Invalid
 /// descriptors or an unlocked/mismatched lock refuse the handshake before exec.
+/// A host from an older binary passes five descriptors, so it is refused.
 pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
     let mut descriptors = Vec::with_capacity(args.len());
-    let mut malformed = args.len() != 5;
+    let mut malformed = args.len() != 6;
     for arg in args {
         let Some(fd) = arg
             .to_str()
@@ -309,6 +314,8 @@ pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
         Directory::from_handoff(files.next().ok_or(CustodyError::InvalidRecord)?)?;
     let attempt_directory =
         Directory::from_handoff(files.next().ok_or(CustodyError::InvalidRecord)?)?;
+    let control_directory =
+        Directory::from_handoff(files.next().ok_or(CustodyError::InvalidRecord)?)?;
     let writer = verify_lock(
         &writer_directory,
         "writer.lock",
@@ -323,6 +330,7 @@ pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
         channel,
         writer_directory,
         attempt_directory,
+        control_directory,
         writer,
         custody,
     })

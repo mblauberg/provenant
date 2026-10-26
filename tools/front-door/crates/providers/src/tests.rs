@@ -2461,6 +2461,9 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 );
                 assert_eq!(lane.len(), expected.len());
                 assert!(expected.iter().all(|grant| lane.contains(&grant)));
+                // The host-owned stop channel of this lane's children.
+                let control = Path::new("/fixture/state/control/children/attempt");
+                assert!(lane.iter().all(|grant| !control.starts_with(&grant.path)));
             } else {
                 // The accepted design keeps runtime state per attempt. Only the
                 // selected identity's auth.json is linked into CODEX_HOME.

@@ -71,6 +71,89 @@ fn remove_entry_tree(
 }
 
 impl RunStore {
+    /// This store's path below the trusted host root: empty for a top-level
+    /// store, `children/<AttemptId>/...` for a lane's child store.
+    fn control_key(&self) -> Result<std::path::PathBuf> {
+        let key = self
+            .context
+            .state_root
+            .as_path()
+            .strip_prefix(&self.writer_registry)
+            .map_err(|_| RunError::UnsafePath)?;
+        if key
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(RunError::UnsafePath);
+        }
+        Ok(key.to_owned())
+    }
+    /// A lane's child store, whose attempts stop through host-owned control
+    /// directories rather than their lane-writable attempt directories.
+    pub(crate) fn child_store(&self) -> bool {
+        self.control_key()
+            .is_ok_and(|key| !key.as_os_str().is_empty())
+    }
+    /// `<host state root>/control/<store path below it>`, which mirrors the
+    /// store so lane-chosen attempt IDs in different stores never share a
+    /// name. No lane profile grants access there.
+    pub(crate) fn control_parent(&self, create: bool) -> Result<Directory> {
+        let root = Directory::open_anchor(&self.writer_registry)?;
+        db::private(&root)?;
+        let mut directory = subdir(&root, OsStr::new("control"), create)?;
+        for part in self.control_key()?.components() {
+            directory = subdir(&directory, part.as_os_str(), create)?;
+        }
+        Ok(directory)
+    }
+    /// A child's control directory, found by name.
+    pub(crate) fn child_control(&self, attempt: provenant_core::AttemptId) -> Result<Directory> {
+        subdir(
+            &self.control_parent(false)?,
+            OsStr::new(&attempt.to_string()),
+            false,
+        )
+    }
+    /// Where a stop is written when no handle was held at hand-off: a
+    /// top-level attempt's directory, or a child's control directory. A
+    /// confined lane cannot open the latter, so its request lands in the
+    /// child's attempt directory and the parent's host relays it.
+    pub(crate) fn stop_control(
+        &self,
+        attempt: &Directory,
+        id: provenant_core::AttemptId,
+    ) -> Result<Directory> {
+        if self.child_store()
+            && let Ok(control) = self.child_control(id)
+        {
+            return Ok(control);
+        }
+        Ok(attempt.try_clone()?)
+    }
+    /// Remove a child's control directory once its terminal has committed.
+    /// With `inherited`, only the directory the guardian inherited goes.
+    pub(crate) fn remove_control(
+        &self,
+        id: provenant_core::AttemptId,
+        inherited: Option<&Directory>,
+    ) -> Result<()> {
+        if !self.child_store() {
+            return Ok(());
+        }
+        let parent = self.control_parent(false)?;
+        let name = id.to_string();
+        let name = OsStr::new(&name);
+        if let Some(inherited) = inherited
+            && !parent
+                .metadata_at(name, false)?
+                .same_identity(&inherited.metadata()?)
+        {
+            return Ok(());
+        }
+        remove_entry_tree(&parent, name, TemporaryLocks::Protected)?;
+        parent.sync()?;
+        Ok(())
+    }
     pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {
         let runs = subdir(&self.root, OsStr::new("runs"), create)?;
         subdir(&runs, OsStr::new(&run.to_string()), create)

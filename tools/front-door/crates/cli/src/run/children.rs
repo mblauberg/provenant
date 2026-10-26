@@ -108,8 +108,8 @@ impl provenant_supervisor::NestedChildStore for HostHolder<'_> {
     }
 }
 impl Holder for HostHolder<'_> {
-    fn admit(&self, raw: &[u8], attempt: &Directory) -> custody::Result<()> {
-        self.inner.admit(raw, attempt)?;
+    fn admit(&self, raw: &[u8], attempt: &Directory, control: &Directory) -> custody::Result<()> {
+        self.inner.admit(raw, attempt, control)?;
         let context: run::HolderContext =
             serde_json::from_slice(raw).map_err(|_| custody::CustodyError::InvalidRecord)?;
         if context.launch.is_none() {
@@ -139,11 +139,13 @@ impl Holder for HostHolder<'_> {
         &self,
         context: &[u8],
         attempt: &Directory,
+        control: &Directory,
         exit: &custody::ExitObservation,
         recovery: &custody::Recovery,
     ) -> custody::Result<()> {
         self.stop(exit.stop_reason)?;
-        self.inner.terminal(context, attempt, exit, recovery)
+        self.inner
+            .terminal(context, attempt, control, exit, recovery)
     }
 }
 
@@ -260,6 +262,10 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         )?;
         accepted.extend(scan.accepted);
         if let Some(error) = scan.error {
+            launch_error = Some(error);
+        }
+        // The lane may cancel its own children, through this host only.
+        for error in session.store.relay_child_cancels(&call) {
             launch_error = Some(error);
         }
         if stopping {
@@ -606,7 +612,18 @@ mod tests {
                                 "runs/{}/attempts/{}",
                                 record.run_id, record.attempt_id
                             )))?;
-                        store.admit(record.attempt_id, &directory, &Available, &clock, &cancel)?;
+                        let stop = run::StopChannel {
+                            control: &directory,
+                            requester: context.actor_id,
+                        };
+                        store.admit(
+                            record.attempt_id,
+                            &directory,
+                            stop,
+                            &Available,
+                            &clock,
+                            &cancel,
+                        )?;
                         Err(run::RunError::Validation(
                             "fixture admitted without handoff",
                         ))

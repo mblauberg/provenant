@@ -628,9 +628,10 @@ mod tests {
         words.push("overflow.md");
         invalid(&words);
         valid(&["internal", "supervise"]);
-        valid(&["internal", "supervise", "3", "4", "5", "6", "7"]);
+        valid(&["internal", "supervise", "3", "4", "5", "6", "7", "8"]);
         invalid(&["internal", "supervise", "3"]);
-        invalid(&["internal", "supervise", "2", "4", "5", "6", "7"]);
+        invalid(&["internal", "supervise", "3", "4", "5", "6", "7"]);
+        invalid(&["internal", "supervise", "2", "4", "5", "6", "7", "8"]);
     }
     #[test]
     fn bounded_waits_counts_and_byte_windows() {

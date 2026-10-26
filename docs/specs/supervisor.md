@@ -92,7 +92,14 @@ invocation of the same binary in its own session. A private, bounded launch
 channel transfers the plan and a duplicated writer lease, with an ownership
 acknowledgement before the parent disconnects. Secrets travel in memory, pipes
 and the child environment, never argv or disk. Hidden `internal supervise`
-takes no arguments and accepts only this handshake.
+takes only the six inherited descriptor numbers and accepts only this
+handshake. Besides the channel, the writer and attempt directories and their
+two locks, the guardian inherits its stop channel: the directory it reads
+`cancel.json` from. A top-level attempt passes its attempt directory. A lane's
+child passes a host-owned control directory that the lane cannot write (see
+[Records and state](#records-and-state)). Binaries from before the stop
+channel pass five descriptors, so a host and guardian from either side of that
+change refuse each other's hand-off.
 
 The pure machine has Prepared, Running, TerminalGrace, Stopping, Cleaning,
 Exited and Published phases. Each turn observes `WNOWAIT` before stop requests.
@@ -357,7 +364,7 @@ runs/<RunId>/
     custody.lock
     launch.json                # redacted summary
     process.json               # replaceable observation
-    cancel.json                # the only supervisor-consumed cancellation request
+    cancel.json                # a top-level attempt's cancellation request
     process-exit.json          # immutable exit and cleanup evidence
     stdout.log  stderr.log     # bounded, redacted captures
     reserve                    # 64 KiB publication headroom
@@ -367,7 +374,21 @@ runs/<RunId>/
 worktrees/<ProjectId>/
   worktrees.lock
   <WorktreeId>/{identity.json,writer.lock,reservation.json}
+control/<child store>/<AttemptId>/  # e.g. control/children/<ParentId>/<AttemptId>/
+  cancel.json                  # a lane child's cancellation request
 ```
+
+A guardian reads cancellation only from the stop channel it inherited. For a
+top-level attempt that is its attempt directory, which no lane can write. A
+lane can write its child store, `children/<AttemptId>/`, including every child
+attempt directory in it, so the parent's host creates a control directory for
+each child at hand-off. It sits under the host state root, outside every
+`children/` tree and every lane grant, at the child store's path below that
+root followed by the child's attempt ID. Mirroring the store keeps lane-chosen
+attempt IDs in different stores apart, and an existing directory refuses the
+hand-off. The host holds it with the child's scope and sealed requester, and
+the child's terminal removes it after release. Recovery removes it by name
+once the terminal commits and no guardian holds custody.
 
 Run owns its store, request, prompt, result and terminal facts, and Fabric
 indexes IDs without copying lifecycle truth. Owner references hold no
@@ -386,7 +407,7 @@ byte-path encoding. Edge-built facts are `Serialize` only.
 | `ProcessObservation` | Atomic replace. A stale observation cannot establish death. |
 | `ProcessExit` | No-replace, with file and parent fsync. Failure keeps custody for retry. |
 | `WriterReservation` | Published atomically under the writer lock before spawn. It is cleared only after proved quiescence, quarantine and the canonical terminal commit, or an authorised recorded reconcile disposition. A missing or malformed record with conflicting run evidence refuses acquisition. |
-| `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. A stop that finds an undecodable request, or one for another requester or an earlier generation, atomically replaces it and re-reads it, since the guardian would ignore it. A stop from a reattached handle never replaces a later generation's request. A stop from a held scope also replaces a later generation's request, which in a child directory can only be forged, and any symlink, FIFO or oversize entry, since the rename swaps the entry without following it. A directory named `cancel.json` still refuses the stop, and the lane can remove a request after it lands, so a lane can pre-empt or undo the host's stop. |
+| `CancelRequest`, `ChildRegistration` | Atomic no-replace. The journal lock orders child registration against the parent's terminal commit, and stale generations cannot cancel a later attempt. A stop that finds an undecodable request, or one for another requester or an earlier generation, atomically replaces it and re-reads it, since the guardian would ignore it. A stop from a reattached handle never replaces a later generation's request, nor another attempt's in a control directory it found by name. A stop from a held scope also replaces a later generation's request, which can only be forged, and any symlink, FIFO or oversize entry, since the rename swaps the entry without following it. A directory named `cancel.json` still refuses the stop. Stops land in the guardian's stop channel, so a lane can neither pre-empt nor undo the host's stop of its child. Admission and outcome labels decode the request there and honour it only for the attempt's scope and sealed requester; a file elsewhere labels nothing. |
 | `QuarantineManifest`, `GitEvidence` | Evidence files are durable before the no-replace manifest, and partial capture claims no success. |
 
 Authoritative writes use held-directory `SafeFs` capabilities, exclusive 0600

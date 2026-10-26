@@ -123,6 +123,7 @@ pub(crate) fn handoff(
     crate::sys::handoff::spawn(
         &owned.lease.directory,
         &publication.directory,
+        &owned.control,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
         &owned.command.environment,
@@ -181,8 +182,10 @@ pub struct GuardianHooks<'a> {
 /// `admit` runs first, after custody is accepted and before the provider
 /// spawns, so a queued attempt waits for host admission inside its own
 /// guardian. An error publishes a never-spawned exit and still calls `terminal`.
+/// `control` is the host-owned stop channel inherited at hand-off; only a
+/// request there, for this scope and requester, is a stop.
 pub trait Holder {
-    fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
+    fn admit(&self, context: &[u8], attempt: &Directory, control: &Directory) -> Result<()>;
     /// Stop host-side submission services before descendant cleanup begins.
     /// Failure is bookkeeping evidence, never a provider stop reason.
     fn provider_exited(&self, _context: &[u8], _reason: Option<machine::StopReason>) -> Result<()> {
@@ -192,6 +195,7 @@ pub trait Holder {
         &self,
         context: &[u8],
         attempt: &Directory,
+        control: &Directory,
         exit: &ExitObservation,
         custody: &crate::custody::Recovery,
     ) -> Result<()>;
@@ -399,6 +403,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         escapee_stop_allowed: false,
         nested_children: hooks.nested_children,
         attempt: inherited.attempt_directory,
+        control: inherited.control_directory,
         writer_dir: inherited.writer_directory,
         reservation,
         writer: Some(inherited.writer),
@@ -425,6 +430,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
 
 struct Driver<'a> {
     attempt: Directory,
+    /// The host-owned directory this guardian reads stop requests from.
+    control: Directory,
     writer_dir: Directory,
     reservation: Reservation,
     writer: Option<crate::fs::LockGuard>,
@@ -504,7 +511,9 @@ impl Driver<'_> {
             }
         };
         if let Some(holder) = self.holder
-            && holder.admit(&self.holder_context, &self.attempt).is_err()
+            && holder
+                .admit(&self.holder_context, &self.attempt, &self.control)
+                .is_err()
         {
             return self.never_spawned("admission refused");
         }
@@ -1198,7 +1207,13 @@ impl Driver<'_> {
                 delay = delay.saturating_mul(2).min(Duration::from_secs(5));
             }
             if holder
-                .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
+                .terminal(
+                    &self.holder_context,
+                    &self.attempt,
+                    &self.control,
+                    &exit,
+                    &recovery,
+                )
                 .is_err()
             {
                 continue;

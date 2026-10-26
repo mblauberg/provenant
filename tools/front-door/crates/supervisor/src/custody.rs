@@ -618,6 +618,10 @@ impl CapturePlan {
 }
 pub struct OwnedLaunch<'a> {
     pub command: ProviderCommand,
+    /// The directory the guardian reads stop requests from, inherited at
+    /// hand-off. A child passes a host-owned directory its lane cannot write;
+    /// a top-level attempt passes a clone of its attempt directory.
+    pub control: Directory,
     pub lease: &'a mut CustodyLease,
     pub handshake: WaitBudget,
     pub cancel: &'a CancelToken,
@@ -627,6 +631,8 @@ pub struct OwnedLaunch<'a> {
 #[derive(Debug)]
 pub struct CustodyHandle {
     pub(crate) directory: Directory,
+    /// Where `stop` writes: the guardian's inherited control directory.
+    pub(crate) control: Directory,
     pub(crate) scope: Scope,
     pub(crate) requester: ActorId,
     /// Built from the caller's own scope, not from the attempt directory.
@@ -635,6 +641,13 @@ pub struct CustodyHandle {
 impl CustodyHandle {
     pub fn scope(&self) -> Scope {
         self.scope
+    }
+
+    /// Whether the attempt directory asks for this handle's stop. A lane may
+    /// cancel its own child but cannot write the control directory, so the
+    /// host relays such a request through `stop`. The guardian never reads it.
+    pub fn lane_requested_stop(&self) -> bool {
+        requested_stop(&self.directory, self.scope, self.requester).is_some()
     }
 
     /// Observe guardian exit using the custody identity captured at hand-off.
@@ -729,6 +742,10 @@ pub fn launch(
     }
     let scope = owned.lease.scope();
     let requester = owned.command.requester;
+    let control = match owned.control.try_clone() {
+        Ok(control) => control,
+        Err(error) => return Err(failure(error.into(), publication)),
+    };
     let metadata = match publication.directory.metadata() {
         Ok(metadata) => metadata,
         Err(error) => return Err(failure(error.into(), publication)),
@@ -788,6 +805,7 @@ pub fn launch(
     match crate::guardian::handoff(owned, capture, &publication) {
         Ok(()) => Ok(CustodyHandle {
             directory: publication.directory,
+            control,
             scope,
             requester,
             held: false,
@@ -804,6 +822,28 @@ pub(crate) struct CancelRequest {
     pub request_id: provenant_core::OperationId,
     pub requester: ActorId,
     pub reason: StopReason,
+}
+impl CancelRequest {
+    /// A guardian honours only its own scope and the requester sealed at hand-off.
+    pub(crate) fn honours(&self, scope: Scope, requester: ActorId) -> bool {
+        self.scope == scope
+            && self.requester == requester
+            && provenant_core::OperationId::parse(self.request_id.as_str()).is_ok()
+    }
+}
+/// The stop requested in `directory` for exactly this scope and requester.
+/// Absent, stale, foreign or undecodable requests are not a stop. Run labels
+/// outcomes from the guardian's control directory through this, so a file a
+/// lane plants elsewhere cannot make an attempt look cancelled.
+pub fn requested_stop(
+    directory: &Directory,
+    scope: Scope,
+    requester: ActorId,
+) -> Option<StopReason> {
+    read_record::<CancelRequest>(directory, "cancel.json", RECORD_LIMIT)
+        .ok()
+        .filter(|request| request.honours(scope, requester))
+        .map(|request| request.reason)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReceipt {
@@ -823,7 +863,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         reason,
     };
     match write_record(
-        &handle.directory,
+        &handle.control,
         "cancel.json",
         &request,
         PublishMode::NoReplace,
@@ -833,16 +873,17 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
             Ok(StopReceipt::Requested)
         }
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
-            match read_record::<CancelRequest>(&handle.directory, "cancel.json", RECORD_LIMIT) {
+            match read_record::<CancelRequest>(&handle.control, "cancel.json", RECORD_LIMIT) {
                 Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
                 // A stale reattached handle never displaces a later
-                // generation's request. A held scope is the guardian's own,
-                // so a later generation beside it can only be forged.
+                // generation's request, nor another attempt's in a control
+                // directory found by name. A held scope is the guardian's
+                // own, so any other request beside it can only be forged.
                 Ok(previous)
                     if !handle.held
-                        && previous.scope.run == request.scope.run
-                        && previous.scope.attempt == request.scope.attempt
-                        && previous.scope.generation > request.scope.generation =>
+                        && (previous.scope.run != request.scope.run
+                            || previous.scope.attempt != request.scope.attempt
+                            || previous.scope.generation > request.scope.generation) =>
                 {
                     return Err(CustodyError::InvalidRecord);
                 }
@@ -857,13 +898,12 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
             // stale, foreign or undecodable request would leave it running.
             // Replace it and confirm the replacement is the one now visible.
             require_durable(write_record(
-                &handle.directory,
+                &handle.control,
                 "cancel.json",
                 &request,
                 PublishMode::Replace,
             )?)?;
-            let visible: CancelRequest =
-                read_record(&handle.directory, "cancel.json", RECORD_LIMIT)?;
+            let visible: CancelRequest = read_record(&handle.control, "cancel.json", RECORD_LIMIT)?;
             if visible != request {
                 return Err(CustodyError::InvalidRecord);
             }
@@ -1661,7 +1701,9 @@ impl CustodyLease {
 }
 
 /// Reattach only a generation already named by the durable redacted summary.
-pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
+/// `control` is where a stop is written: the attempt directory for a
+/// top-level attempt, or the host-owned control directory found by name.
+pub fn reattach(directory: Directory, control: Directory, scope: Scope) -> Result<CustodyHandle> {
     #[derive(Deserialize)]
     struct Summary {
         scope: Scope,
@@ -1673,6 +1715,7 @@ pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
     }
     Ok(CustodyHandle {
         directory,
+        control,
         scope,
         requester: summary.requester,
         held: false,
@@ -1681,12 +1724,17 @@ pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
 /// A handle from the scope and requester the caller handed the guardian, read
 /// from nothing in the attempt directory. A host whose attempt directory a lane
 /// can write stops through this, so no summary the lane rewrites or deletes
-/// decides for whom it stops. The stop request itself still lands in that
-/// directory, where the lane can pre-empt it with a directory of that name or
-/// remove it after the host writes it.
-pub fn hold(directory: Directory, scope: Scope, requester: ActorId) -> CustodyHandle {
+/// decides for whom it stops. The stop request lands in `control`, the
+/// host-owned directory the guardian inherited, which the lane cannot write.
+pub fn hold(
+    directory: Directory,
+    control: Directory,
+    scope: Scope,
+    requester: ActorId,
+) -> CustodyHandle {
     CustodyHandle {
         directory,
+        control,
         scope,
         requester,
         held: true,

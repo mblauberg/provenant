@@ -281,12 +281,42 @@ fn start(
     let (writer, handle, _) = start_with_custody_identity(root, name, scenario, extra, plan)?;
     Ok((writer, handle))
 }
+/// A lane child's shape: the guardian inherits `<name>-control`, a stop
+/// channel outside the attempt directory, as the host's control directory.
+fn start_child(
+    root: &Path,
+    name: &str,
+    scenario: &str,
+    extra: &[OsString],
+    plan: CapturePlan,
+) -> Result<(CustodyLease, CustodyHandle)> {
+    let control = root.join(format!("{name}-control"));
+    std::fs::create_dir(&control)?;
+    let (writer, handle, _) = launch_case(root, name, scenario, extra, plan, &control)?;
+    Ok((writer, handle))
+}
 fn start_with_custody_identity(
     root: &Path,
     name: &str,
     scenario: &str,
     extra: &[OsString],
     plan: CapturePlan,
+) -> Result<(
+    CustodyLease,
+    CustodyHandle,
+    provenant_supervisor::fs::Metadata,
+)> {
+    // A top-level attempt's guardian reads stops from its attempt directory.
+    let attempt = root.join(format!("{name}-attempt"));
+    launch_case(root, name, scenario, extra, plan, &attempt)
+}
+fn launch_case(
+    root: &Path,
+    name: &str,
+    scenario: &str,
+    extra: &[OsString],
+    plan: CapturePlan,
+    control: &Path,
 ) -> Result<(
     CustodyLease,
     CustodyHandle,
@@ -329,6 +359,7 @@ fn start_with_custody_identity(
     let handle = launch(
         OwnedLaunch {
             command,
+            control: Directory::open_anchor(control)?,
             lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,
@@ -670,7 +701,7 @@ fn cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root: &Path) 
 fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Result<()> {
     let socket = root.join("held.sock");
     let listener = UnixListener::bind(&socket)?;
-    let (writer, _handle) = start(
+    let (writer, _handle) = start_child(
         root,
         "held",
         "socket-blocked",
@@ -688,19 +719,16 @@ fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Res
     let attempt = root.join("held-attempt");
     std::fs::remove_file(attempt.join("launch.json"))?;
     let scope = scope();
-    let planted = serde_json::json!({
-        "schema_version": 1,
-        "scope": scope,
-        "request_id": format!("{}.{}.{}.cancel", scope.run, scope.attempt, scope.generation),
-        "requester": provenant_core::ActorId::from_bytes([66; 16]),
-        "reason": "explicit_cancellation",
-    });
+    let requester = provenant_core::ActorId::from_bytes([4; 16]);
+    let planted = cancel_request(scope, provenant_core::ActorId::from_bytes([66; 16]));
     std::fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
     let handle = hold(
         Directory::open_anchor(&attempt)?,
+        Directory::open_anchor(&root.join("held-control"))?,
         scope,
-        provenant_core::ActorId::from_bytes([4; 16]),
+        requester,
     );
+    assert!(!handle.lane_requested_stop());
     assert_eq!(
         stop(&handle, StopReason::ExplicitCancellation)?,
         StopReceipt::Requested
@@ -711,6 +739,62 @@ fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Res
         stop(&handle, StopReason::ExplicitCancellation)?,
         StopReceipt::AlreadyRequested
     );
+    drop(writer);
+    Ok(())
+}
+fn held_stop_survives_the_lane_removing_attempt_requests(root: &Path) -> Result<()> {
+    let socket = root.join("removed.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (writer, _handle) = start_child(
+        root,
+        "removed",
+        "socket-blocked",
+        &[socket.into_os_string()],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let attempt = root.join("removed-attempt");
+    let control = root.join("removed-control");
+    let requester = provenant_core::ActorId::from_bytes([4; 16]);
+    let handle = hold(
+        Directory::open_anchor(&attempt)?,
+        Directory::open_anchor(&control)?,
+        scope(),
+        requester,
+    );
+    // Even a valid request in the attempt directory is only a lane's ask for
+    // the host to relay. The guardian, polling every 100 ms, ignores it.
+    std::fs::write(
+        attempt.join("cancel.json"),
+        serde_json::to_vec(&cancel_request(scope(), requester))?,
+    )?;
+    assert!(handle.lane_requested_stop());
+    let clock = SystemClock::new();
+    assert!(matches!(
+        observe(
+            &handle,
+            WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 1)?,
+            &CancelToken::new(),
+            &clock
+        )?,
+        Observation::Live
+    ));
+    assert_eq!(
+        stop(&handle, StopReason::ExplicitCancellation)?,
+        StopReceipt::Requested
+    );
+    // The lane removes what it can reach after the host's stop.
+    std::fs::remove_file(attempt.join("cancel.json"))?;
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(control.join("cancel.json"))?)?;
+    assert_eq!(written, cancel_request(scope(), requester));
     drop(writer);
     Ok(())
 }
@@ -764,21 +848,30 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
             Ok(std::fs::write(path, vec![b' '; 2 << 20])?)
         }),
     ];
-    // A held handle replaces whatever a lane left, since the guardian would
-    // ignore it, and the replacement is a regular file naming its requester.
+    // A held handle replaces whatever its control directory holds, since the
+    // guardian would ignore it, and the replacement is a regular file naming
+    // its requester. Only the host writes there; this stays a defence.
     for (name, plant) in plants {
         let attempt = root.join(format!("{name}-attempt"));
+        let control = root.join(format!("{name}-control"));
         std::fs::create_dir(&attempt)?;
-        plant(&attempt.join("cancel.json"))?;
-        let handle = hold(Directory::open_anchor(&attempt)?, scope(), requester);
+        std::fs::create_dir(&control)?;
+        plant(&control.join("cancel.json"))?;
+        let handle = hold(
+            Directory::open_anchor(&attempt)?,
+            Directory::open_anchor(&control)?,
+            scope(),
+            requester,
+        );
         assert_eq!(
             stop(&handle, StopReason::ExplicitCancellation)?,
             StopReceipt::Requested,
             "{name}"
         );
         let written: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+            serde_json::from_slice(&std::fs::read(control.join("cancel.json"))?)?;
         assert_eq!(written, cancel_request(scope(), requester), "{name}");
+        assert!(!attempt.join("cancel.json").exists(), "{name}");
     }
     assert_eq!(std::fs::read(&outside)?, b"untouched");
     // A directory refuses the rename, so it stays an accepted limit.
@@ -786,30 +879,48 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
     std::fs::create_dir_all(blocked.join("cancel.json"))?;
     assert!(
         stop(
-            &hold(Directory::open_anchor(&blocked)?, scope(), requester),
+            &hold(
+                Directory::open_anchor(&blocked)?,
+                Directory::open_anchor(&blocked)?,
+                scope(),
+                requester
+            ),
             StopReason::ExplicitCancellation
         )
         .is_err()
     );
-    // A reattached handle may be stale, so it never displaces a later
-    // generation's request.
-    let attempt = root.join("reattach-attempt");
-    std::fs::create_dir(&attempt)?;
-    let summary =
-        serde_json::json!({"schema_version": 1, "scope": scope(), "requester": requester});
-    std::fs::write(attempt.join("launch.json"), serde_json::to_vec(&summary)?)?;
-    std::fs::write(
-        attempt.join("cancel.json"),
-        serde_json::to_vec(&cancel_request(later, requester))?,
-    )?;
-    let handle = reattach(Directory::open_anchor(&attempt)?, scope())?;
-    assert!(matches!(
-        stop(&handle, StopReason::ExplicitCancellation),
-        Err(CustodyError::InvalidRecord)
-    ));
-    let kept: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
-    assert_eq!(kept, cancel_request(later, requester));
+    // A reattached handle may be stale, or find a control directory by name,
+    // so it never displaces a later generation's or another attempt's request.
+    let other = Scope {
+        attempt: AttemptId::from_bytes([9; 16]),
+        ..scope()
+    };
+    for (name, previous) in [("later", later), ("other", other)] {
+        let attempt = root.join(format!("reattach-{name}-attempt"));
+        std::fs::create_dir(&attempt)?;
+        let summary =
+            serde_json::json!({"schema_version": 1, "scope": scope(), "requester": requester});
+        std::fs::write(attempt.join("launch.json"), serde_json::to_vec(&summary)?)?;
+        std::fs::write(
+            attempt.join("cancel.json"),
+            serde_json::to_vec(&cancel_request(previous, requester))?,
+        )?;
+        let handle = reattach(
+            Directory::open_anchor(&attempt)?,
+            Directory::open_anchor(&attempt)?,
+            scope(),
+        )?;
+        assert!(
+            matches!(
+                stop(&handle, StopReason::ExplicitCancellation),
+                Err(CustodyError::InvalidRecord)
+            ),
+            "{name}"
+        );
+        let kept: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+        assert_eq!(kept, cancel_request(previous, requester), "{name}");
+    }
     Ok(())
 }
 fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Path) -> Result<()> {
@@ -918,6 +1029,7 @@ fn never_spawned_cancel_is_published_and_the_fence_can_advance(root: &Path) -> R
     let failure = launch(
         OwnedLaunch {
             command,
+            control: Directory::open_anchor(&attempt_path)?,
             lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,
@@ -981,6 +1093,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
     let handle = launch(
         OwnedLaunch {
             command,
+            control: Directory::open_anchor(&attempt_path)?,
             lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,
@@ -1733,6 +1846,7 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     drop(held);
     let handle = reattach(
         Directory::open_anchor(&root.join("orphan-attempt"))?,
+        Directory::open_anchor(&root.join("orphan-attempt"))?,
         scope(),
     )?;
     assert_eq!(
@@ -1863,6 +1977,10 @@ const CASES: &[Case] = &[
     (
         "held_stop_ignores_lane_written_summary_and_cancel_request",
         held_stop_ignores_lane_written_summary_and_cancel_request,
+    ),
+    (
+        "held_stop_survives_the_lane_removing_attempt_requests",
+        held_stop_survives_the_lane_removing_attempt_requests,
     ),
     (
         "held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation",

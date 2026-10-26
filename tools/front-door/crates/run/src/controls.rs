@@ -173,14 +173,52 @@ impl RunStore {
         }
         errors
     }
+    /// Cancel each held child whose lane asked for its stop, returning each
+    /// failure. A lane may cancel its own children but cannot write their
+    /// control directories, so its request lands in the child's attempt
+    /// directory and this host stops the child through its held handle. The
+    /// request decides only whether to stop, never the scope or requester.
+    pub fn relay_child_cancels(&self, call: &Request<'_>) -> Vec<String> {
+        let asked: Vec<AttemptId> = self
+            .launched
+            .borrow()
+            .iter()
+            .filter(|held| {
+                !held.relayed
+                    && held
+                        .handle
+                        .as_ref()
+                        .is_some_and(|handle| handle.lane_requested_stop())
+            })
+            .map(|held| held.scope.attempt)
+            .collect();
+        let mut errors = Vec::new();
+        for id in asked {
+            match self.cancel(id, "cancelled by its lane", call) {
+                Ok(CancelReceipt::Unobservable { reason }) => errors.push(reason),
+                Err(error) => errors.push(error.to_string()),
+                Ok(_) => {
+                    for held in self
+                        .launched
+                        .borrow_mut()
+                        .iter_mut()
+                        .filter(|held| held.scope.attempt == id)
+                    {
+                        held.relayed = true;
+                    }
+                }
+            }
+        }
+        errors
+    }
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         // Half the budget for waiting on the handoff; the rest for the store.
         let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
         let deadline = std::time::Instant::now() + std::time::Duration::from_micros(remaining / 2);
-        // A child this host handed to a guardian stops through the directory,
-        // scope and requester held then. The lane can rewrite the child's
-        // record and launch summary, so neither decides whether or for whom
-        // it stops.
+        // A child this host handed to a guardian stops through the control
+        // directory, scope and requester held then. The lane can rewrite the
+        // child's record and launch summary, so neither decides whether or for
+        // whom it stops, and it cannot write the control directory.
         if let Some(held) = self
             .launched
             .borrow()
@@ -198,6 +236,9 @@ impl RunStore {
             return Ok(match stopped {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
+                // Settlement removes the control directory before the
+                // guardian exits; an exited guardian needs no stop.
+                Err(_) if handle.custody_released(&held.custody) => CancelReceipt::AlreadyTerminal,
                 Err(reason) => CancelReceipt::Unobservable { reason },
             });
         }
@@ -228,7 +269,8 @@ impl RunStore {
                 _ => {}
             }
             let dir = self.attempt_dir(record.run_id, id, false)?;
-            match custody::reattach(dir, Self::scope(&record)) {
+            let control = self.stop_control(&dir, id)?;
+            match custody::reattach(dir, control, Self::scope(&record)) {
                 Ok(handle) => {
                     return Ok(
                         match custody::stop(&handle, StopReason::ExplicitCancellation) {
@@ -654,7 +696,8 @@ impl RunStore {
             reason: error.to_string(),
         };
         let dir = || self.attempt_dir(record.run_id, id, false);
-        match custody::reattach(dir()?, scope) {
+        // Observation only; reconcile writes no stop.
+        match custody::reattach(dir()?, dir()?, scope) {
             Ok(handle) => {
                 let budget = provenant_core::WaitBudget::cli(call.clock.mono_now(), 1)
                     .map_err(|_| RunError::Validation("observation budget"))?;

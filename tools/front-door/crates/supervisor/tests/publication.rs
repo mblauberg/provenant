@@ -57,6 +57,7 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
     let handle = launch(
         OwnedLaunch {
             command,
+            control: Directory::open_anchor(&attempt_path)?,
             lease: &mut writer,
             handshake: budget(&clock)?,
             cancel: &cancel,

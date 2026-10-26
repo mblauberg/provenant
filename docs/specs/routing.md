@@ -327,7 +327,9 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   Both also pin `PROVENANT_AGENT_LABEL=lane-<AttemptId>`, so the lane has
   its own actor and inbox. Under the host-set lane environment, Fabric
   refuses coordination mutations with `lane_coordination_refused`; reads and
-  child-store run submit, cancel and output remain available. Local resume is
+  child-store run submit, cancel and output remain available. A lane's cancel
+  of a started child lands in the child's attempt directory as a request,
+  which the parent's host relays (see below). Local resume is
   refused with `continuation_unsupported` because the host never launches a
   child continuation; the CLI returns `UNSUPPORTED` for every in-lane resume. The shared SQLite write grant
   remains pending [lane store isolation](fabric.md#follow-up-lane-store-isolation).
@@ -355,12 +357,26 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   attempt it launched once its record names another owner.
 - The guardian stops its worker on observed provider exit. Parent cancellation,
   deadline or supervisor signal cancels only this worker's children; normal
-  parent completion leaves launched children's custody intact. The host first
-  stops every child it handed to a guardian, including one launched after its
-  last scan, through the attempt-directory descriptor, scope and requester it
-  held at hand-off, so renaming the attempt directory cannot redirect the stop.
-  The child's record and launch summary do not decide the stop. Superseded
-  generations retain their scopes for owner checks but drop their handles.
+  parent completion leaves launched children's custody intact. At hand-off the
+  host creates each child's control directory under the host state root,
+  outside every `children/` tree and lane grant, and the child's guardian
+  inherits it as the only place it reads a stop
+  ([supervisor](supervisor.md#records-and-state)). The host first stops every
+  child it handed to a guardian, including one launched after its last scan,
+  through the control-directory descriptor, scope and requester it held at
+  hand-off. The lane cannot write that directory, so it can neither pre-empt
+  nor undo the stop, and renaming the attempt directory cannot redirect it.
+  The child's record and launch summary do not decide the stop. Admission and
+  the child's outcome label read the request there and honour it only for the
+  child's scope and sealed requester, so a file the lane plants in the attempt
+  directory cannot end admission or label the child cancelled. A lane may still
+  cancel its own child: on each scan the host relays a request in the child's
+  attempt directory, for that child's held scope and sealed requester, through
+  its own cancel of the held handle. An unconfined cancel through the child
+  store writes the control directory it finds by name, so a child that
+  outlives a normally completed parent can still be stopped. The child's
+  terminal removes its control directory. Superseded generations retain their scopes for owner checks but
+  drop their handles.
   At the cap of 64 held child handles, the host probes each custody lock
   through its held directory. An exclusive non-blocking lock on the same
   device and inode captured from the publication reservation proves guardian
@@ -374,10 +390,7 @@ Every lane at every tier can use Fabric and the utility models, except Agy.
   The cap leaves descriptor headroom below macOS's common 256 soft limit;
   lane-writable terminal records cannot authorise release. The host then stops
   accepted children that never reached a guardian, from their records. A failed
-  scan read does not end the worker before that stop. The stop request itself
-  still lands in the attempt directory, which the lane can write, so the lane
-  can pre-empt it (for example with a directory named `cancel.json`) or undo it
-  after the host writes it, and keep its child running.
+  scan read does not end the worker before that stop.
 - Git is resolved once on the host (`PROVENANT_GIT` override, otherwise the
   fixed list preferring package-manager Git), canonicalised, pinned in provider
   and MCP environments, and the only Git path lanes may execute.

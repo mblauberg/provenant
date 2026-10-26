@@ -65,6 +65,21 @@ pub struct SealedTask {
     pub task_id: provenant_core::TaskId,
 }
 
+/// The stop channel a guardian inherited at hand-off: its control directory
+/// and the requester sealed then. Admission and outcome labels honour only a
+/// request there for the attempt's own scope, never a file in the attempt
+/// directory, which a parent lane can write.
+#[derive(Clone, Copy)]
+pub struct StopChannel<'a> {
+    pub control: &'a Directory,
+    pub requester: ActorId,
+}
+impl StopChannel<'_> {
+    pub(crate) fn requested(&self, scope: custody::Scope) -> bool {
+        custody::requested_stop(self.control, scope, self.requester).is_some()
+    }
+}
+
 enum Completion<'a> {
     Live {
         custody: &'a custody::Recovery,
@@ -147,12 +162,21 @@ fn custody_error(error: RunError) -> CustodyError {
     CustodyError::Io(std::io::Error::other(error.to_string()))
 }
 impl provenant_supervisor::Holder for RunHolder<'_> {
-    fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
+    fn admit(
+        &self,
+        context: &[u8],
+        attempt: &Directory,
+        control: &Directory,
+    ) -> custody::Result<()> {
         let (context, store) = HolderContext::open(context).map_err(custody_error)?;
         store
             .admit(
                 context.attempt_id,
                 attempt,
+                StopChannel {
+                    control,
+                    requester: context.actor_id,
+                },
                 self.resources,
                 &SystemClock,
                 &CancelToken::new(),
@@ -164,6 +188,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         &self,
         context: &[u8],
         attempt: &Directory,
+        control: &Directory,
         exit: &ExitObservation,
         recovery: &custody::Recovery,
     ) -> custody::Result<()> {
@@ -174,6 +199,10 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 context.attempt_id,
                 attempt,
                 exit,
+                Some(StopChannel {
+                    control,
+                    requester: context.actor_id,
+                }),
                 Completion::Live {
                     custody: recovery,
                     delivery: context.host_delivery.as_ref(),
@@ -184,7 +213,11 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             )
             .map_err(custody_error)?;
         crate::writer::settle_launch_staging(attempt).map_err(custody_error)?;
-        custody::publish_release(attempt, exit.scope)
+        custody::publish_release(attempt, exit.scope)?;
+        // Settlement no longer reads it. A failure leaves an empty directory,
+        // never a retained fence.
+        let _ = store.remove_control(context.attempt_id, Some(control));
+        Ok(())
     }
 }
 
@@ -222,10 +255,24 @@ impl RunStore {
         } else {
             None
         };
+        // A child's stop lives in its host-owned control directory, which a
+        // confined lane cannot open; the attempt directory never decides.
+        let control = if self.child_store() {
+            self.child_control(id).ok()
+        } else {
+            Some(attempt.try_clone()?)
+        };
+        let requester = match self.sealed_requester {
+            Some(requester) => requester,
+            None => self.run(record.run_id, call)?.actor_id,
+        };
         let record = self.finish_in_custody(
             id,
             attempt,
             exit,
+            control
+                .as_ref()
+                .map(|control| StopChannel { control, requester }),
             Completion::Recovered(recovery.as_ref()),
             providers,
             call,
@@ -242,13 +289,28 @@ impl RunStore {
                 .settle(commit, &mut scratch)
                 .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
         }
+        // A guardian still settling an unresolved exit may yet read a stop,
+        // so remove the control directory only once custody is free.
+        if matches!(record.state, AttemptState::Terminal { .. })
+            && let Ok(_custody) = attempt.try_lock_existing(
+                std::ffi::OsStr::new("custody.lock"),
+                provenant_supervisor::fs::LockMode::Exclusive,
+            )
+        {
+            let _ = self.remove_control(id, None);
+        }
         Ok(record)
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the stop channel is the guardian's, separate from custody completion"
+    )]
     fn finish_in_custody(
         &self,
         id: AttemptId,
         attempt: &Directory,
         exit: &ExitObservation,
+        stop: Option<StopChannel<'_>>,
         completion: Completion<'_>,
         providers: &dyn Providers,
         call: &Request<'_>,
@@ -270,7 +332,7 @@ impl RunStore {
             .clock
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
-        let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
+        let cancelled = stop.is_some_and(|stop| stop.requested(exit.scope));
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
             // Cancelled before spawn; keep the guardian's own reason too.
             (_, true) if cancelled => Decoded {

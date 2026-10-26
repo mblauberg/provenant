@@ -808,11 +808,27 @@ impl RunStore {
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
                 .map_err(|e| local(&e))?;
+        // A child's guardian reads stops from a host-owned directory outside
+        // its lane's grants; a top-level attempt's from its attempt directory.
+        let mut control = if self.sealed_requester.is_some() {
+            Some(ControlDirectory::create(self, id).map_err(|e| local(&e))?)
+        } else {
+            None
+        };
+        let control_clone = || {
+            match &control {
+                Some(control) => control.directory.try_clone(),
+                None => reservation.directory().try_clone(),
+            }
+            .map_err(|e| local(&e))
+        };
+        let launch_control = control_clone()?;
         // Clone before acquiring custody: failure leaves no writer reservation.
         let held = if self.sealed_requester.is_some() {
             Some((
                 custody::hold(
                     reservation.directory().try_clone().map_err(|e| local(&e))?,
+                    control_clone()?,
                     scope,
                     requester,
                 ),
@@ -936,9 +952,15 @@ impl RunStore {
         if let Some((held, custody)) = held {
             self.hold_child(held, custody);
         }
+        // From here a guardian may hold the control directory; its terminal
+        // removes it.
+        if let Some(control) = &mut control {
+            control.handed_off = true;
+        }
         custody::launch(
             OwnedLaunch {
                 command,
+                control: launch_control,
                 lease: &mut lease,
                 handshake: call.budget,
                 cancel: call.cancel,
@@ -968,6 +990,48 @@ impl RunStore {
             )?;
             Ok(())
         })
+    }
+}
+
+/// A child's control directory, created new at hand-off and removed again
+/// if no guardian can have inherited it.
+struct ControlDirectory {
+    parent: provenant_supervisor::fs::Directory,
+    name: OsString,
+    directory: provenant_supervisor::fs::Directory,
+    handed_off: bool,
+}
+impl ControlDirectory {
+    fn create(store: &RunStore, id: AttemptId) -> Result<Self> {
+        let parent = store.control_parent(true)?;
+        let name = OsString::from(id.to_string());
+        // An existing directory cannot be proved to be this attempt's.
+        parent.mkdir(&name, 0o700)?;
+        let opened = (|| -> Result<_> {
+            parent.sync()?;
+            let directory = parent.open_verified_directory(&name)?;
+            crate::db::private(&directory)?;
+            Ok(directory)
+        })();
+        match opened {
+            Ok(directory) => Ok(Self {
+                parent,
+                name,
+                directory,
+                handed_off: false,
+            }),
+            Err(error) => {
+                let _ = parent.rmdir(&name);
+                Err(error)
+            }
+        }
+    }
+}
+impl Drop for ControlDirectory {
+    fn drop(&mut self) {
+        if !self.handed_off {
+            let _ = self.parent.rmdir(&self.name);
+        }
     }
 }
 

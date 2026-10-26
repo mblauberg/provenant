@@ -324,6 +324,7 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
                 secret_input: None,
                 holder_context: Vec::new(),
             },
+            control: Directory::open_anchor(attempt.path())?,
             lease: &mut writer,
             handshake: WaitBudget::cli(clock.mono_now(), 1)?,
             cancel: &token,

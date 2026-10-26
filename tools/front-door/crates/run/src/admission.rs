@@ -215,6 +215,7 @@ impl RunStore {
         &self,
         id: AttemptId,
         attempt: &Directory,
+        stop: crate::holder::StopChannel<'_>,
         resources: &dyn Resources,
         clock: &dyn Clock,
         cancel: &CancelToken,
@@ -235,7 +236,8 @@ impl RunStore {
                 return Err(RunError::Refused);
             }
             // An explicit cancel before spawn ends the wait; finish records it.
-            if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
+            // Only the guardian's control directory carries it.
+            if stop.requested(Self::scope(&self.record(id, &call)?)) {
                 return Err(RunError::Cancelled);
             }
             let fits = match (resources.memory(), resources.disk(attempt)) {

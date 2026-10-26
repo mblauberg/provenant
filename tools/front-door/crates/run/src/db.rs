@@ -78,7 +78,9 @@ pub(crate) const HELD_CHILD_LIMIT: usize = if cfg!(test) { 2 } else { 64 };
 pub(crate) struct Held {
     pub(crate) scope: provenant_supervisor::custody::Scope,
     pub(crate) handle: Option<provenant_supervisor::custody::CustodyHandle>,
-    custody: Metadata,
+    pub(crate) custody: Metadata,
+    /// The lane's own request to stop this child has been relayed.
+    pub(crate) relayed: bool,
 }
 
 /// One connection, one owning thread. Call budgets are supplied afresh and no
@@ -149,6 +151,7 @@ impl RunStore {
             scope,
             handle: Some(handle),
             custody,
+            relayed: false,
         });
     }
 
@@ -157,7 +160,9 @@ impl RunStore {
     /// summaries, so launch and the started attempt's owner use this requester
     /// instead of any actor they name. The view refuses a run or attempt it
     /// launched once its record names another owner, and stops each child
-    /// from the scope and directory it held at hand-off, never from the record.
+    /// from the scope and directories it held at hand-off, never from the
+    /// record. Each child's guardian reads stops from a host-owned control
+    /// directory created at hand-off, which the lane cannot write.
     pub fn with_sealed_requester(mut self, requester: ActorId) -> Self {
         self.sealed_requester = Some(requester);
         self

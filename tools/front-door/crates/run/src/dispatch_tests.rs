@@ -14,21 +14,51 @@ use std::{
 };
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+/// Hold a child as hand-off does. Its control directory sits where hand-off
+/// creates it when the host root is the store root, as in these tests.
 fn hold_child_fixture(
     store: &RunStore,
     directory: Directory,
     scope: provenant_supervisor::custody::Scope,
     requester: provenant_core::ActorId,
-) -> TestResult {
+) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let control = store
+        .context
+        .state_root
+        .as_path()
+        .join("control")
+        .join(scope.attempt.to_string());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&control)?;
     let custody = directory.try_lock(
         std::ffi::OsStr::new("custody.lock"),
         provenant_supervisor::fs::LockMode::Exclusive,
     )?;
     store.hold_child(
-        provenant_supervisor::custody::hold(directory, scope, requester),
+        provenant_supervisor::custody::hold(
+            directory,
+            Directory::open_anchor(&control)?,
+            scope,
+            requester,
+        ),
         custody.metadata()?,
     );
-    Ok(())
+    Ok(control)
+}
+
+fn cancel_request(
+    scope: provenant_supervisor::custody::Scope,
+    requester: provenant_core::ActorId,
+) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "scope": scope,
+        "request_id": format!("{}.{}.{}.cancel", scope.run, scope.attempt, scope.generation),
+        "requester": requester,
+        "reason": "explicit_cancellation",
+    }))
 }
 
 #[test]
@@ -1329,7 +1359,7 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
             generation: started.generation,
         };
         // As hand-off holds it just before launching the guardian.
-        hold_child_fixture(
+        let control = hold_child_fixture(
             &store,
             store.attempt_dir(run.run_id, id, false)?,
             scope,
@@ -1369,15 +1399,19 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
             RECORD_LIMIT,
         )?;
         assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
-        let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(control.join("cancel.json"))?)?;
+        assert_eq!(request["requester"], serde_json::to_value(sealed)?);
+        assert_eq!(request["scope"], serde_json::to_value(scope)?);
+        // The planted request stays where the guardian never reads it.
+        let planted: serde_json::Value = serde_json::from_slice(&std::fs::read(
             store
                 .context
                 .state_root
                 .as_path()
                 .join(format!("runs/{}/attempts/{id}/cancel.json", run.run_id)),
         )?)?;
-        assert_eq!(request["requester"], serde_json::to_value(sealed)?);
-        assert_eq!(request["scope"], serde_json::to_value(scope)?);
+        assert_eq!(planted["requester"], serde_json::to_value(forged)?);
     }
     Ok(())
 }
@@ -1405,7 +1439,7 @@ fn held_stop_follows_the_handed_off_directory() -> TestResult {
         attempt: id,
         generation: started.generation,
     };
-    hold_child_fixture(
+    let control = hold_child_fixture(
         &store,
         store.attempt_dir(run.run_id, id, false)?,
         scope,
@@ -1422,9 +1456,10 @@ fn held_stop_follows_the_handed_off_directory() -> TestResult {
 
     assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
     let request: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(renamed.join("cancel.json"))?)?;
+        serde_json::from_slice(&std::fs::read(control.join("cancel.json"))?)?;
     assert_eq!(request["requester"], serde_json::to_value(sealed)?);
     assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert!(!renamed.join("cancel.json").exists());
     assert!(std::fs::read_dir(&original)?.next().is_none());
     Ok(())
 }
@@ -1467,11 +1502,266 @@ fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
     std::fs::DirBuilder::new().mode(0o700).create(&original)?;
 
     assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
+    // Hand-off created the control directory under the host root, which
+    // these tests share with the store.
+    let control = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("control/{id}"));
     let request: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(renamed.join("cancel.json"))?)?;
+        serde_json::from_slice(&std::fs::read(control.join("cancel.json"))?)?;
     assert_eq!(request["requester"], serde_json::to_value(sealed)?);
     assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert!(!renamed.join("cancel.json").exists());
     assert!(std::fs::read_dir(&original)?.next().is_none());
+    Ok(())
+}
+
+/// A lane's child store below the host root, as its parent's host opens it.
+fn child_store(
+    temp: &std::path::Path,
+    call: &Request<'_>,
+) -> std::result::Result<RunStore, Box<dyn std::error::Error>> {
+    let host = context(temp)?;
+    let base = std::fs::canonicalize(temp)?;
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(
+        host.state_root
+            .as_path()
+            .join("children")
+            .join(AttemptId::from_bytes([90; 16]).to_string()),
+    );
+    let child = ExecutionContext {
+        state_root: inputs.resolve(&provenant_supervisor::fs::LocalFs)?.state,
+        ..host.clone()
+    };
+    Ok(RunStore::open(&child, call)?.with_writer_registry(host.state_root.as_path()))
+}
+
+#[test]
+fn child_outcome_labels_read_only_the_host_control_directory() -> TestResult {
+    for case in ["planted", "control", "foreign"] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = child_store(temp.path(), &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        let started = store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let scope = provenant_supervisor::custody::Scope {
+            run: run.run_id,
+            attempt: id,
+            generation: started.generation,
+        };
+        let requester = store.run(run.run_id, &call)?.actor_id;
+        // The lane can write a valid-looking request into its child's
+        // attempt directory; it never labels the outcome.
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        artifacts::seal(
+            &dir,
+            "cancel.json",
+            &cancel_request(scope, requester)?,
+            RECORD_LIMIT,
+        )?;
+        let parent = store.control_parent(true)?;
+        let control = artifacts::subdir(&parent, std::ffi::OsStr::new(&id.to_string()), true)?;
+        let path = store
+            .writer_registry
+            .join("control/children")
+            .join(AttemptId::from_bytes([90; 16]).to_string())
+            .join(id.to_string());
+        assert!(path.is_dir(), "{case}");
+        match case {
+            "control" => artifacts::seal(
+                &control,
+                "cancel.json",
+                &cancel_request(scope, requester)?,
+                RECORD_LIMIT,
+            )?,
+            "foreign" => artifacts::seal(
+                &control,
+                "cancel.json",
+                &cancel_request(scope, provenant_core::ActorId::from_bytes([66; 16]))?,
+                RECORD_LIMIT,
+            )?,
+            _ => {}
+        }
+        let mut observed = exit();
+        observed.scope = scope;
+        observed.never_spawned = true;
+        observed.termination = None;
+        observed.terminal_observed = false;
+        observed.settlement_evidence =
+            provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
+        seal_exit(&store, &observed)?;
+        // Hand-off left the custody lock its exited guardian released.
+        let custody = std::ffi::OsStr::new("custody.lock");
+        let held = dir.try_lock(custody, provenant_supervisor::fs::LockMode::Exclusive)?;
+        store.finish(id, &dir, &observed, &Fake::default(), &call)?;
+        // A guardian still holding custody keeps the control directory.
+        assert!(path.exists(), "{case}");
+        drop(held);
+        // Recovery settles it by name once custody is free.
+        store.finish(id, &dir, &observed, &Fake::default(), &call)?;
+        let expected = if case == "control" {
+            Outcome::Cancelled
+        } else {
+            Outcome::Rejected
+        };
+        assert_eq!(terminal(&store, id, &call)?, expected, "{case}");
+        // Settlement removes the control directory.
+        assert!(!path.exists(), "{case}");
+    }
+    Ok(())
+}
+
+#[test]
+fn planted_attempt_cancel_request_does_not_end_child_admission() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = child_store(temp.path(), &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let started = store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: run.run_id,
+        attempt: id,
+        generation: started.generation,
+    };
+    let requester = store.run(run.run_id, &call)?.actor_id;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(
+        &dir,
+        "cancel.json",
+        &cancel_request(scope, requester)?,
+        RECORD_LIMIT,
+    )?;
+    let control = artifacts::subdir(
+        &store.control_parent(true)?,
+        std::ffi::OsStr::new(&id.to_string()),
+        true,
+    )?;
+    let stop = crate::StopChannel {
+        control: &control,
+        requester,
+    };
+    let admitted = store.admit(id, &dir, stop, &Host { available: 100 }, &clock, &cancel)?;
+    assert_eq!(admitted.state, AttemptState::Running);
+    Ok(())
+}
+
+#[test]
+fn host_relays_its_lanes_own_child_cancel_into_the_control_directory() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let started = store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: run.run_id,
+        attempt: id,
+        generation: started.generation,
+    };
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let control = hold_child_fixture(&store, dir.try_clone()?, scope, sealed)?;
+    assert!(store.relay_child_cancels(&call).is_empty());
+    assert!(!control.join("cancel.json").exists());
+    // Another scope or requester is not this child's stop.
+    let attempt = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let later = provenant_supervisor::custody::Scope {
+        generation: scope.generation + 1,
+        ..scope
+    };
+    for (other, requester) in [
+        (later, sealed),
+        (scope, provenant_core::ActorId::from_bytes([66; 16])),
+    ] {
+        std::fs::write(
+            attempt.join("cancel.json"),
+            cancel_request(other, requester)?,
+        )?;
+        assert!(store.relay_child_cancels(&call).is_empty());
+        assert!(!control.join("cancel.json").exists());
+    }
+    // The lane's own request, as its reattached cancel writes it, is
+    // relayed once through the held handle.
+    std::fs::write(attempt.join("cancel.json"), cancel_request(scope, sealed)?)?;
+    assert!(store.relay_child_cancels(&call).is_empty());
+    let request: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(control.join("cancel.json"))?)?;
+    assert_eq!(request["requester"], serde_json::to_value(sealed)?);
+    assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert!(store.launched.borrow().iter().all(|held| held.relayed));
+    Ok(())
+}
+
+#[test]
+fn child_hand_off_refuses_an_existing_control_directory() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
+    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    // An existing directory cannot be proved to be this attempt's.
+    let existing = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("control/{id}"));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&existing)?;
+    std::fs::write(existing.join("marker"), b"kept")?;
+    let started = store.start_child(
+        run.run_id,
+        &run.request,
+        &Ready,
+        &|_, _| Ok(Vec::new()),
+        &call,
+    )?;
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == id),
+        "{started:?}"
+    );
+    assert!(store.held_attempts().is_empty());
+    assert_eq!(std::fs::read(existing.join("marker"))?, b"kept");
     Ok(())
 }
 
@@ -1565,6 +1855,7 @@ fn held_children_retain_busy_missing_and_recreated_custody_locks() -> TestResult
         for index in 0..crate::db::HELD_CHILD_LIMIT {
             store.hold_child(
                 provenant_supervisor::custody::hold(
+                    directory.try_clone()?,
                     directory.try_clone()?,
                     Scope {
                         run: run.run_id,
@@ -1676,7 +1967,12 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
     store.check_held_capacity(scope.attempt)?;
     scope.generation += 1;
     store.hold_child(
-        provenant_supervisor::custody::hold(directory.try_clone()?, scope, sealed),
+        provenant_supervisor::custody::hold(
+            directory.try_clone()?,
+            directory.try_clone()?,
+            scope,
+            sealed,
+        ),
         custody.metadata()?,
     );
     {
@@ -1891,7 +2187,7 @@ fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResu
         attempt: late,
         generation: started.generation,
     };
-    hold_child_fixture(
+    let control = hold_child_fixture(
         &store,
         store.attempt_dir(batch.run_id, late, false)?,
         scope,
@@ -1899,13 +2195,8 @@ fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResu
     )?;
     let accepted = std::collections::BTreeSet::from([(queued, 1)]);
     assert!(store.stop_children(accepted, "stop", &call).is_empty());
-    let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        store
-            .context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{late}/cancel.json", batch.run_id)),
-    )?)?;
+    let request: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(control.join("cancel.json"))?)?;
     assert_eq!(request["requester"], serde_json::to_value(sealed)?);
     assert_eq!(request["scope"], serde_json::to_value(scope)?);
     assert_eq!(terminal(&store, queued, &call)?, Outcome::Cancelled);
@@ -2168,8 +2459,12 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         &call,
     )?;
     let starved = Host { available: 1 };
+    let stop = crate::StopChannel {
+        control: &attempt,
+        requester: store.run(expired.run_id, &call)?.actor_id,
+    };
     assert!(matches!(
-        store.admit(id, &attempt, &starved, &clock, &cancel),
+        store.admit(id, &attempt, stop, &starved, &clock, &cancel),
         Err(RunError::Refused)
     ));
     Ok(())
@@ -2601,12 +2896,23 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         CancelReceipt::Unobservable { .. }
     ));
     drop(held);
-    // Supervisor's stop writes cancel.json; the waiting guardian sees it.
+    // Supervisor's stop writes cancel.json in a top-level attempt's control
+    // directory, its attempt directory; the waiting guardian sees it.
     let dir = store.attempt_dir(batch.run_id, starting, false)?;
-    artifacts::seal(&dir, "cancel.json", b"{}", RECORD_LIMIT)?;
+    let requester = store.run(batch.run_id, &call)?.actor_id;
+    artifacts::seal(
+        &dir,
+        "cancel.json",
+        &cancel_request(scope, requester)?,
+        RECORD_LIMIT,
+    )?;
     let host = Host { available: 100 };
+    let stop = crate::StopChannel {
+        control: &dir,
+        requester,
+    };
     assert!(matches!(
-        store.admit(starting, &dir, &host, &clock, &cancel),
+        store.admit(starting, &dir, stop, &host, &clock, &cancel),
         Err(RunError::Cancelled)
     ));
     let mut observed = exit();

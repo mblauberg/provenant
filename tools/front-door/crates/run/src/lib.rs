@@ -19,7 +19,7 @@ pub use admission::{
 };
 pub use controls::{CancelReceipt, Reconciled, Resume};
 pub use delivery::HostDeliveryContext;
-pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
+pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask, StopChannel};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
     concurrency,

@@ -61,9 +61,13 @@ and `other`; these parts use unshared bytes and sum to the lane's unshared total
 | `attempt_tmp` | Attempt `tmp`; `leak: true` when its indexed attempt is terminal, `false` while nonterminal |
 | `attempt_retained` | One class aggregate for scratch, provider-state, quarantine, logs, stdout and stderr |
 | `child_store` | One class aggregate for `children/<attempt>`, including nested stores |
-| `other_state` | One class aggregate for remaining host, run and attempt state |
+| `other_state` | One class aggregate for remaining host, run and attempt state, including the host-owned `control/` directories of lane children |
 
 Owner and writer facts on `host_target` rows grant no removal authority.
+A lane child's control directory, `control/<child store>/<AttemptId>/` under
+the host state root, holds at most its stop request. It counts in the
+host-root `other_state` row, not `child_store`, and the child's terminal
+removes it.
 
 Lane states are `live`, `idle`, `orphaned`, `foreign`, `legacy`, `tombstone`,
 `refused` and `unmarked`. Classification reuses cache-owner parsing and GC

@@ -509,13 +509,15 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
         &self,
         context: &[u8],
         attempt: &provenant_supervisor::fs::Directory,
+        control: &provenant_supervisor::fs::Directory,
     ) -> provenant_supervisor::custody::Result<()> {
-        self.0.admit(context, attempt)
+        self.0.admit(context, attempt, control)
     }
     fn terminal(
         &self,
         context: &[u8],
         attempt: &provenant_supervisor::fs::Directory,
+        control: &provenant_supervisor::fs::Directory,
         exit: &provenant_supervisor::custody::ExitObservation,
         recovery: &provenant_supervisor::custody::Recovery,
     ) -> provenant_supervisor::custody::Result<()> {
@@ -529,7 +531,7 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
         {
             std::process::exit(70);
         }
-        self.0.terminal(context, attempt, exit, recovery)
+        self.0.terminal(context, attempt, control, exit, recovery)
     }
 }
 
@@ -2244,12 +2246,14 @@ fn verify_lane_profile(
             &self,
             _: &[u8],
             _: &provenant_supervisor::fs::Directory,
+            _: &provenant_supervisor::fs::Directory,
         ) -> provenant_supervisor::custody::Result<()> {
             Ok(())
         }
         fn terminal(
             &self,
             _: &[u8],
+            _: &provenant_supervisor::fs::Directory,
             _: &provenant_supervisor::fs::Directory,
             _: &provenant_supervisor::custody::ExitObservation,
             _: &provenant_supervisor::custody::Recovery,
@@ -2261,6 +2265,7 @@ fn verify_lane_profile(
     let host = provenant_cli::run::HostHolder::new(&ParentFixture);
     host.admit(
         &parent.encode()?,
+        &provenant_supervisor::fs::Directory::open_anchor(attempt)?,
         &provenant_supervisor::fs::Directory::open_anchor(attempt)?,
     )?;
     let shell_writer = launch

@@ -76,19 +76,16 @@ impl Driver<'_> {
         }
     }
 
-    /// The attempt's pending cancellation request, if it is valid for this
-    /// scope and requester. Stale or unreadable requests only warn.
+    /// The pending cancellation request in the host-owned control directory,
+    /// if it is valid for this scope and requester. Stale or unreadable
+    /// requests only warn. The attempt directory is never read for a stop.
     pub(super) fn read_cancel(
         &self,
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) -> Option<machine::StopReason> {
-        match read_record::<CancelRequest>(&self.attempt, "cancel.json", RECORD_LIMIT) {
-            Ok(request)
-                if request.scope == self.reservation.scope
-                    && request.requester == self.requester
-                    && provenant_core::OperationId::parse(request.request_id.as_str()).is_ok() =>
-            {
+        match read_record::<CancelRequest>(&self.control, "cancel.json", RECORD_LIMIT) {
+            Ok(request) if request.honours(self.reservation.scope, self.requester) => {
                 Some(request.reason)
             }
             Ok(_) => {
