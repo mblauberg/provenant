@@ -2,9 +2,10 @@
 # Advisory CI signal: mutation-test the source lines a diff changed.
 #   run-mutants [<base> [<head>]]
 # Without a base it covers the last 24 hours of HEAD (the nightly run). Uses
-# cargo-mutants --in-diff --in-place (CI checkouts only) with nextest, skips every file that mentions unsafe,
-# and runs at most MUTANT_CAP mutants (default 40) by taking one shard of the
-# list. Surviving mutants become warning annotations; the script always exits 0.
+# cargo-mutants --in-diff --in-place (CI checkouts only) with nextest, skips
+# every file that mentions unsafe, and runs at most MUTANT_CAP mutants (default
+# 40) by taking one shard of the list. Surviving and timed-out mutants become
+# warning annotations; the script always exits 0.
 # --in-diff finds nothing in a diff that only touches tests.
 set -eu
 
@@ -40,7 +41,7 @@ for f in $(cd "$ws" && grep -rlw --include='*.rs' unsafe crates src 2>/dev/null)
 done
 
 cd "$ws"
-common="--in-place --workspace --in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --cargo-arg=--locked"
+common="--in-place --workspace --in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --timeout 120 --cargo-arg=--locked"
 # shellcheck disable=SC2086
 total=$(cargo mutants $common "$@" --list | grep -c . || true)
 if [ "$total" -eq 0 ]; then
@@ -56,20 +57,21 @@ status=0
 # shellcheck disable=SC2086
 cargo mutants $common "$@" --shard "0/$shards" --output "$out" || status=$?
 
-missed=$out/mutants.out/missed.txt
-if [ -s "$missed" ]; then
+report=$out/mutants.out
+cat "$report/missed.txt" "$report/timeout.txt" > "$tmp/flagged" 2>/dev/null || true
+if [ -s "$tmp/flagged" ]; then
   while IFS= read -r line; do
-    echo "::warning title=Surviving mutant::$line"
-  done < "$missed"
-  note "$total mutants in the diff; ran shard 1 of $shards (cap $cap). Surviving mutants:
+    echo "::warning title=Surviving or timed-out mutant::$line"
+  done < "$tmp/flagged"
+  note "$total mutants in the diff; ran shard 1 of $shards (cap $cap). Surviving or timed-out mutants:
 
 \`\`\`
-$(cat "$missed")
+$(cat "$tmp/flagged")
 \`\`\`"
 elif [ "$status" -eq 0 ]; then
   note "$total mutants in the diff; ran shard 1 of $shards (cap $cap). All were caught."
 else
-  echo "::warning title=Mutation run incomplete::cargo-mutants exited $status with no missed.txt (baseline failure or error)."
+  echo "::warning title=Mutation run incomplete::cargo-mutants exited $status with no survivor report (baseline failure or error)."
   note "cargo-mutants exited $status without a survivor report (baseline failure or error)."
 fi
 exit 0
