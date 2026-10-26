@@ -200,7 +200,9 @@ fn collect_resolved(
         Ok(worktrees) => {
             for info in worktrees {
                 if info.writer != provenant_confinement::worktrees::WriterState::Free {
-                    policy.protected_owners.insert(info.path.clone());
+                    policy
+                        .protected_owners
+                        .insert(info.path.clone(), info.writer);
                 }
                 policy.project_owners.insert(info.path);
             }
