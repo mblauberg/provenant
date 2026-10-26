@@ -808,6 +808,7 @@ pub(super) fn fixture_input<'a>(
         account: None,
         token,
         cwd,
+        git_context: false,
         nonce: [9; 16],
         provenant: crate::LaneRuntime {
             executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
@@ -1276,16 +1277,17 @@ fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> 
     let route = route("agy", "fixture-model");
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
-        let spec = agy::Agy.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None,
-        ))?;
-        assert!(spec.argv.windows(2).any(|pair| {
-            pair[0] == "--add-dir" && pair[1] == plan.permissions().scratch.path.as_os_str()
-        }));
+        for git_context in [false, true] {
+            let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            input.git_context = git_context;
+            let spec = agy::Agy.prepare(input)?;
+            assert_eq!(
+                spec.argv.windows(2).any(|pair| {
+                    pair[0] == "--add-dir" && pair[1] == plan.permissions().scratch.path.as_os_str()
+                }),
+                git_context
+            );
+        }
     }
     Ok(())
 }
@@ -1327,69 +1329,79 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        let plan = fixture_access_plan(access, None, false);
-        let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
-        let spec = opencode::OpenCode.prepare(input)?;
-        let env = |key: &str| {
-            spec.env
-                .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value)
-        };
-        assert_eq!(
-            env("HOME"),
-            Some(&std::ffi::OsString::from("/fixture/home"))
-        );
-        let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
-        let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
-        assert!(!config_home.starts_with("/fixture/state"));
-        assert!(!data_home.starts_with("/fixture/state"));
-        if config_home.join("opencode").is_dir() {
+        for git_context in [false, true] {
+            let plan = fixture_access_plan(access, None, false);
+            let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            let spec = opencode::OpenCode.prepare(PrepareInput {
+                git_context,
+                ..input
+            })?;
+            let env = |key: &str| {
+                spec.env
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value)
+            };
+            assert_eq!(
+                env("HOME"),
+                Some(&std::ffi::OsString::from("/fixture/home"))
+            );
+            let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
+            let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
+            assert!(!config_home.starts_with("/fixture/state"));
+            assert!(!data_home.starts_with("/fixture/state"));
+            if config_home.join("opencode").is_dir() {
+                assert!(
+                    spec.profile
+                        .spec
+                        .runtime_reads
+                        .contains(&crate::launch::subtree(config_home.join("opencode")))
+                );
+            }
             assert!(
                 spec.profile
                     .spec
                     .runtime_reads
-                    .contains(&crate::launch::subtree(config_home.join("opencode")))
+                    .contains(&crate::launch::subtree(data_home.join("opencode")))
+            );
+            let auth = data_home.join("opencode/auth.json");
+            assert!(spec.profile.spec.state_writes.iter().all(|grant| {
+                match grant.scope {
+                    provenant_confinement::permissions::PathScope::Exact => grant.path != auth,
+                    provenant_confinement::permissions::PathScope::Subtree => {
+                        !auth.starts_with(&grant.path)
+                    }
+                }
+            }));
+            let config: serde_json::Value = serde_json::from_str(
+                &env("OPENCODE_CONFIG_CONTENT")
+                    .expect("inline config")
+                    .to_string_lossy(),
+            )
+            .expect("JSON config");
+            let permission = if access == Access::ReadOnly {
+                "deny"
+            } else {
+                "allow"
+            };
+            assert_eq!(config["permission"]["edit"], permission);
+            assert_eq!(config["permission"]["bash"], permission);
+            let scratch = format!("{}/**", plan.permissions().scratch.path.display());
+            if git_context {
+                assert_eq!(
+                    config["permission"]["external_directory"],
+                    serde_json::json!({ scratch.clone(): "allow" })
+                );
+                assert_eq!(config["permission"]["read"][&scratch], "allow");
+            } else {
+                assert!(config["permission"]["external_directory"].is_null());
+                assert!(config["permission"]["read"].is_null());
+            }
+            assert_eq!(
+                spec.profile.spec.tool_exec_roots.is_empty(),
+                access == Access::ReadOnly
             );
         }
-        assert!(
-            spec.profile
-                .spec
-                .runtime_reads
-                .contains(&crate::launch::subtree(data_home.join("opencode")))
-        );
-        let auth = data_home.join("opencode/auth.json");
-        assert!(spec.profile.spec.state_writes.iter().all(|grant| {
-            match grant.scope {
-                provenant_confinement::permissions::PathScope::Exact => grant.path != auth,
-                provenant_confinement::permissions::PathScope::Subtree => {
-                    !auth.starts_with(&grant.path)
-                }
-            }
-        }));
-        let config: serde_json::Value = serde_json::from_str(
-            &env("OPENCODE_CONFIG_CONTENT")
-                .expect("inline config")
-                .to_string_lossy(),
-        )
-        .expect("JSON config");
-        let permission = if access == Access::ReadOnly {
-            "deny"
-        } else {
-            "allow"
-        };
-        assert_eq!(config["permission"]["edit"], permission);
-        assert_eq!(config["permission"]["bash"], permission);
-        let scratch = format!("{}/**", plan.permissions().scratch.path.display());
-        assert_eq!(
-            config["permission"]["external_directory"],
-            serde_json::json!({ scratch.clone(): "allow" })
-        );
-        assert_eq!(config["permission"]["read"][&scratch], "allow");
-        assert_eq!(
-            spec.profile.spec.tool_exec_roots.is_empty(),
-            access == Access::ReadOnly
-        );
     }
     Ok(())
 }

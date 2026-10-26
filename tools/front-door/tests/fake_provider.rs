@@ -257,6 +257,7 @@ fn account_placement() -> Result {
             account: Some(account),
             token: None,
             cwd: &rig.project,
+            git_context: false,
             nonce: [1; 16],
             provenant: provenant_providers::LaneRuntime {
                 executable: &executable,
