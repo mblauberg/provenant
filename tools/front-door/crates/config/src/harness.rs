@@ -47,13 +47,7 @@ pub(crate) fn default_hooks(h: Harness, base: &Path) -> Option<PathBuf> {
     }
 }
 pub(crate) fn name(h: Harness) -> &'static str {
-    match h {
-        Harness::Claude => "claude",
-        Harness::Codex => "codex",
-        Harness::Cursor => "cursor",
-        Harness::Agy => "agy",
-        Harness::Opencode => "opencode",
-    }
+    h.spec().name
 }
 fn selector(h: Harness) -> &'static str {
     match h {
