@@ -229,6 +229,27 @@ fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
 }
 
 #[test]
+fn install_keeps_the_settings_indent_and_leaves_unchanged_settings_alone() {
+    let mut f = Fixture::new();
+    f.targets.harnesses =
+        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    fs::create_dir_all(f.home.join(".claude")).unwrap();
+    let path = f.home.join(".claude/settings.json");
+    fs::write(&path, "{\n    \"model\": \"opus\"\n}\n").unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let installed = fs::read_to_string(&path).unwrap();
+    assert!(installed.contains("\n    \"hooks\": {\n"), "{installed}");
+    assert!(!installed.contains("\n  \"hooks\""), "{installed}");
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), installed);
+}
+
+#[test]
 fn missing_peer_agent_is_stopped_only_when_the_last_harness_is_removed() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))

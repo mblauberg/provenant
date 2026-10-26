@@ -39,7 +39,7 @@ pub(crate) fn set(
 }
 
 /// Reformat a validated JSON settings document while retaining its source key
-/// order.
+/// order. The indent follows the source when it is two or four spaces.
 pub(crate) fn pretty_json(source: &[u8]) -> Result<Vec<u8>, InstallError> {
     let document = read_document(source, Limits::CONFIG)?;
     if document.tokens().iter().any(|token| {
@@ -51,6 +51,7 @@ pub(crate) fn pretty_json(source: &[u8]) -> Result<Vec<u8>, InstallError> {
         let _: Value = document.decode()?;
         return Ok(source.to_vec());
     }
+    let indent = indent_width(source);
     let mut output = Vec::with_capacity(source.len());
     let mut index = 0;
     let mut depth = 0usize;
@@ -118,19 +119,19 @@ pub(crate) fn pretty_json(source: &[u8]) -> Result<Vec<u8>, InstallError> {
                     continue;
                 }
                 output.push(b'\n');
-                output.extend(std::iter::repeat_n(b' ', depth * 2));
+                output.extend(std::iter::repeat_n(b' ', depth * indent));
             }
             b'}' | b']' => {
                 depth = depth.saturating_sub(1);
                 output.push(b'\n');
-                output.extend(std::iter::repeat_n(b' ', depth * 2));
+                output.extend(std::iter::repeat_n(b' ', depth * indent));
                 output.push(byte);
             }
             b',' => {
                 if !matches!(next_json_byte(source, index + 1)?, Some(b'}' | b']')) {
                     output.push(byte);
                     output.push(b'\n');
-                    output.extend(std::iter::repeat_n(b' ', depth * 2));
+                    output.extend(std::iter::repeat_n(b' ', depth * indent));
                 }
             }
             b':' => {
@@ -143,6 +144,17 @@ pub(crate) fn pretty_json(source: &[u8]) -> Result<Vec<u8>, InstallError> {
     output.push(b'\n');
     let _: Value = read_document(&output, Limits::CONFIG)?.decode()?;
     Ok(output)
+}
+
+/// The narrowest leading-space width in the source, when it is two or four.
+fn indent_width(source: &[u8]) -> usize {
+    source
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.first() == Some(&b' ') && !line.iter().all(u8::is_ascii_whitespace))
+        .map(|line| line.iter().take_while(|byte| **byte == b' ').count())
+        .min()
+        .filter(|width| [2, 4].contains(width))
+        .unwrap_or(2)
 }
 
 fn next_json_byte(source: &[u8], mut index: usize) -> Result<Option<u8>, InstallError> {
@@ -1088,6 +1100,16 @@ mod tests {
         assert_eq!(
             text,
             "{\n  \"z\": {\n    \"one\": 1,\n    \"two\": 2\n  },\n  \"a\": [\n    {\n      \"x\": true,\n      \"y\": false\n    }\n  ]\n}\n"
+        );
+    }
+
+    #[test]
+    fn pretty_json_follows_a_four_space_source_indent() {
+        let source = b"{\n    \"a\": {\n        \"b\": [1, 2]\n    }\n}\n";
+        let pretty = super::pretty_json(source).expect("fixture formats");
+        assert_eq!(
+            std::str::from_utf8(&pretty).expect("UTF-8 output"),
+            "{\n    \"a\": {\n        \"b\": [\n            1,\n            2\n        ]\n    }\n}\n"
         );
     }
 
