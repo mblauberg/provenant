@@ -22,7 +22,7 @@ fn explicit_profile_selects_the_compiled_preset() {
         Some(&b"schema_version = 1\nprofile = 'economy'\n"[..]),
     )
     .unwrap();
-    assert_eq!(config.profile, Profile::Economy);
+    assert!(config.profile == Profile::Economy);
 }
 
 #[test]
@@ -1123,4 +1123,13 @@ fn set_creates_a_missing_private_state_directory() {
         0o700
     );
     assert_eq!(read(&roots).unwrap().profile, Profile::Rigorous);
+}
+
+#[test]
+fn seeded_flaky_signal_probe() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    assert!(nanos % 4 != 0, "seeded flake");
 }

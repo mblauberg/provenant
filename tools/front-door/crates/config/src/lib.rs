@@ -199,3 +199,8 @@ pub use release::{Release, package_release};
 pub const CONFIG_SCHEMA_VERSION: u64 = 1;
 
 pub use managed::HookRegistration;
+
+/// Seeded surviving mutant for the test-signals probe.
+pub fn seeded_mutant_probe(a: u32, b: u32) -> u32 {
+    a + b
+}
