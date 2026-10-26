@@ -99,6 +99,17 @@ risk with a validation route.
 
 ## Verification
 
+For each changed test, ask:
+
+- What plausible defect does it catch?
+- Does it survive an internal refactor that preserves behaviour?
+- Is its oracle independent of the code under test and grounded in the spec?
+- Is it hermetic, with controlled time, randomness and external state?
+- Was any assertion loosened, such as a specific error becoming `is_err()` or
+  an exact count becoming an at-least check?
+
+Then verify the evidence itself:
+
 - Map acceptance criteria to tests, checks or inspected evidence.
 - Prefer public-interface and integration-style coverage over implementation
   assertions.
