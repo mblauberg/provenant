@@ -5,76 +5,71 @@ description: "Use for creating, placing, indexing, updating, or archiving engine
 
 # Engineering docs
 
-Treat docs as deliverables: cite decisions, archive retired docs and load
-`engineering-writing` for substantial prose.
+Treat docs as deliverables. Load engineering-writing for substantial prose;
+this skill owns placement and decision lifecycle.
 
-Read `Repository process` first. If absent, use an unambiguous existing owner or
-propose paths in chat; never invent one. In `issue-tracker`, parent issues own
-canonical scope and stories; docs own durable intent, decisions and invariants.
-In `project-docs`, use its named home. Do not create a second story or status
-projection. Link-only files are unavailable or cross-tracker fallbacks.
+Read `Repository process` first. If absent, use an unambiguous existing owner
+or propose paths; never invent authority. In `issue-tracker`, parent issues own
+change scope, stories and current status. Docs own durable intent, decisions
+and invariants. In `project-docs`, use its named home. Do not create a second
+story or status projection.
+Link-only files are unavailable or cross-tracker fallbacks.
 
 ## Default homes
 
-Use this table only with `setup-repo` write authority; advisory mode proposes
-paths without creating them.
+Use these only with setup-repo write authority; advisory mode proposes paths.
 
 | Type | Home | Convention |
 |---|---|---|
-| Durable intent / specifications | `docs/specs/` | semantic, indexed |
-| Architecture map | `docs/ARCHITECTURE.md` | current state; link ADRs |
-| Diagrams | owning document or `docs/diagrams/` | colocate unless independently owned, reused or generated |
-| Runbooks | `docs/runbooks/` | numbered steps; verification |
-| Open-decision register | declared project-docs path | never create in issue-tracker mode |
-| Threat models | `docs/threat-models/` | STRIDE/LINDDUN structure |
-| Session or run continuity | declared owner; explicit run state | `session` handoff; autopilot state remains run-local |
-| Archive | `docs/archive/` | indexed by its README |
+| Invariant specifications | `docs/specs/` | non-derivable intent; semantic paths |
+| Generated reference | `docs/reference/` | code-derived inventories; generator command on first line |
+| Architectural decisions | `docs/adr/` | current decisions; indexed |
+| Architecture map | `docs/ARCHITECTURE.md` | current boundaries; link ADRs |
+| Runbooks | `docs/runbooks/` | operator steps and verification |
+| Open-decision register | declared project-docs path | never in issue-tracker mode |
+| Diagrams | owning doc or `docs/diagrams/` | separate only for distinct ownership or reuse |
+| Threat models | `docs/threat-models/` | STRIDE/LINDDUN |
+| Continuity / archive | declared owner / `docs/archive/` | session owns handoff lifecycle; index archives |
 
 ## Binding rules
 
-1. Verify a decision ID against its log before citing it.
-2. Regenerate generated files; never hand-edit them.
-3. Keep numbered directories contiguous and update their index in the same
-   change.
-4. Quote and link frozen legal, compliance or gate wording; do not paraphrase.
-5. **Anti-bloat**: a doc past ~15 KB signals review, not an automatic split.
-   Split when owners, audiences, lifecycles or change rates
-   differ; merge duplicate truths or tiny files changed together. Keep one
-   owner and make claim → owner → evidence reachable in three hops. Session
-   residue belongs in `session`'s context-hygiene pass.
+- **Link or generate, do not restate.** Each domain keeps its natural owner;
+  link code, schemas, tests and other docs. Regenerate derived reference, never
+  hand-edit it. Specs retain intent, prohibitions and invariants.
+- Specs and runbooks start with an `Owner:` line naming the responsible
+  module or skill and an `Anchor:` line linking concrete source symbols,
+  tests or governing sections. Recheck anchors on change. See
+  [placement](references/placement.md) for boundaries.
+- Verify cited decision IDs and repair indexes and inbound links together.
+  Keep ADR IDs stable; gaps left by retirement are deliberate.
+  Keep other numbered directories contiguous.
+- Quote and link frozen legal, compliance or gate wording.
+- Review bloat by owner, audience and lifecycle. Merge duplicate truths and
+  tiny files changed together; make claim → owner → evidence reachable in
+  three hops. Session residue belongs in session.
+  A doc past about 15 KB signals review, not an automatic split.
 
-## Diagrams
+## Living ADRs
 
-Default to **Mermaid** for GitHub and operational docs: use
-`flowchart` for routing, `sequenceDiagram` for calls, `stateDiagram-v2` for
-lifecycles and `erDiagram` for schemas. Colocate a load-bearing diagram with
-its owner when both have the same audience, owner and lifecycle; separate it when reused,
-generated or independently maintained.
+Record only architecture: crate/module and trust boundaries, protocols,
+storage and major dependencies. Amend accepted ADRs in place to state the
+current decision, adding one line `Changed: YYYY-MM-DD, #issue`. Git keeps
+history. Merge or delete superseded ADRs and fix inbound links; index live
+decisions only. Move process into its skill or constitution, and deferrals
+or product calls into their issues. Do not leave compatibility stubs.
 
-**Render and visually inspect before commit.** Parser success proves syntax, not
-layout quality:
+## Instruction files
 
-```sh
-src="$(pwd)/path/to/owning-document.md"
-out="$(mktemp -d)"
-(cd "$out" && mmdc -i "$src" -o check.md)
-```
+The root file routes. Add nested files only at real boundaries, after an
+observed failure; keep each 10 to 40 lines. `AGENTS.md` is canonical and each
+`CLAUDE.md` contains exactly `@AGENTS.md` on one line. Re-check placement
+and loading on model upgrades. Do not infer loading behaviour from filenames.
 
-Keep one conceptual level; check normal and narrow widths for overlap, clipping,
-crossings and unreadable scaling. Apply
-[diagram-quality.md](references/diagram-quality.md); use `d2-diagrams` only
-when fixed layout or publication quality justifies it.
+## Diagrams and retirement
 
-## Retirement and archiving
-
-Preserve durable records in the archive and index. After an authorised move,
-repair inbound links and remove a pointer-only file when history and the index
-preserve provenance. Keep a tombstone only while an external link or
-unsupported consumer requires one. Deleting substantive records needs owner
-authority.
-
-## Red flags
-
-- Unverified decision citation.
-- Hand-edited generated output.
-- Deleted history or an unindexed new document.
+Use Mermaid by default; apply [diagram quality](references/diagram-quality.md),
+render and visually inspect before commit. Use d2-diagrams for justified fixed
+layouts. Archive retired substantive docs with owner authority, index them and
+repair references. Outside ADRs, keep a tombstone only for an external link or
+unsupported consumer that needs it. ADR retirement follows the living policy
+above.

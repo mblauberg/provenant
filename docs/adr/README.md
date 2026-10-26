@@ -1,46 +1,27 @@
 # Architecture decision records
 
-Each ADR is the canonical owner of its decision and carries its own status and
-ratification date. Supporting scoping evidence, challenge history and rejected
-alternatives remain available in Git history without forming a live
-cross-reference dependency; per [ADR
-0024](0024-git-log-and-adrs-own-history.md), Git log owns when a decision
-changed, so this index does not restate a ratification chronology.
-Pre-ADR-0020 implementation
-paths in retained decisions are
-historical evidence; the current Fabric owner is
-[Fabric Rust design](../specs/fabric.md).
+This index lists live architectural decisions. The engineering-docs skill owns
+their authoring and retirement policy. Git retains history; surviving IDs stay
+stable.
 
-| ADR | Title | Status |
-|---|---|---|
-| [0001](0001-personal-first-product-compatible.md) | Personal-first, product-compatible posture | Accepted |
-| [0002](0002-capability-compiled-execution-authority.md) | Capability-compiled execution authority (write profiles) | Superseded by ADR 0020 |
-| [0003](0003-modular-monolith-complete-existing-seams.md) | Modular monolith; complete existing seams | Accepted; daemon-era implementation historical after ADR 0020; anti-scaffolding principle retained |
-| [0004](0004-per-domain-truth-owners.md) | Per-domain truth owners, no god manifest | Accepted |
-| [0005](0005-lifecycle-kernel-extends-delivery.md) | Lifecycle kernel extends the delivery kernel | Accepted (amended 2026-07-15) |
-| [0006](0006-defer-backlog-contract.md) | Defer a canonical backlog contract | Superseded by ADR 0011 |
-| [0007](0007-defer-universal-retention-and-deletion.md) | Defer universal retention classes and typed deletion | Accepted; provider-state deferral superseded by ADR 0031 |
-| [0008](0008-review-pressure-risk-and-oracle-adjusted.md) | Risk/oracle-adjusted certifying review | Accepted; unimplemented follow-up superseded 2026-07-15; amended 2026-07-16; addendum 2026-07-22 |
-| [0009](0009-standalone-semantic-specifications.md) | Standalone semantic specifications | Accepted (amended 2026-07-28 by ADR 0017; 2026-08-31 issue-native amendment noted) |
-| [0010](0010-lifecycle-receipt-authority-distinct-trust-boundary.md) | The lifecycle receipt authority is a trust boundary distinct from provider authority compilation | Accepted; daemon-era implementation historical after ADR 0020; vocabulary boundary retained |
-| [0011](0011-github-owns-work-state.md) | GitHub owns current work state | Accepted (user amendment 2026-08-31 via issue 711) |
-| [0012](0012-defer-bun-node-pinned-runtime.md) | Defer Bun; Node stays the pinned runtime family | Superseded by ADR 0029 |
-| [0013](0013-thin-provenant-cli.md) | Thin `provenant` CLI for command discovery | Accepted; current command map amended by ADRs 0020–0022 |
-| [0014](0014-comparative-skill-evals-on-suspicion.md) | Comparative skill evals run on suspicion, not by default | Accepted |
-| [0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) | Bootstrap paired-task completion via an evidence-bound reply, not authority widening | Superseded by ADR 0020 |
-| [0016](0016-gate-b-restate-permanent-by-design.md) | Keep GATE-B' skipped by design after the RESTATE decision | Superseded by ADR 0029 |
-| [0017](0017-specifications-own-non-derivable-intent.md) | Specifications own non-derivable intent only | Accepted (user amendment 2026-08-31 via issue 711); daemon-era schema example historical |
-| [0018](0018-accept-portal-stdio-v1-launch-custody.md) | Accept `portal-stdio-v1` as review-portal launch custody | Superseded by ADR 0020 |
-| [0019](0019-installed-file-class-ownership.md) | Installed file-class ownership by product, instance, or seeded template | Accepted (amended 2026-07-31; ADR 0020 cutover note) |
-| [0020](0020-retire-the-daemon-fabric.md) | Retire the daemon fabric for a daemonless SQLite bus | Accepted (amended 2026-09-01 via issue 721 and ADR 0022) |
-| [0021](0021-configured-workspace-dispatch-boundaries.md) | Configured-workspace provider access and dispatch boundaries | Accepted; amended by ADR 0022 |
-| [0022](0022-thin-fabric-mcp-execution-facade.md) | Thin Fabric MCP execution façade | Accepted |
-| [0023](0023-codex-custom-providers-inline-config.md) | Codex custom providers arrive inline, not by relaxing `--ignore-user-config` | Accepted |
-| [0024](0024-git-log-and-adrs-own-history.md) | Git history and ADRs own the change record | Accepted |
-| [0025](0025-broker-upstream-family-attribution.md) | Broker upstream family attribution for multi-family pipes | Accepted |
-| [0026](0026-federate-fabric-across-own-hosts-over-ssh.md) | Federate Fabric across the user's own hosts over SSH | Accepted |
-| [0027](0027-rust-front-door.md) | Replace the two-layer Python front door with one Rust binary | Accepted |
-| [0028](0028-rust-port-dependencies.md) | Port the whole project to Rust with a small crate allowlist | Accepted; landing method superseded by ADR 0029 |
-| [0029](0029-rust-rewrite-in-one-pass.md) | Rewrite in Rust in one pass, with no transition period | Accepted |
-| [0030](0030-defer-apfs-seeding-and-vm-backend.md) | Defer APFS clone seeding and a VM sandbox backend | Proposed |
-| [0031](0031-retain-provider-history-and-expire-resume-state.md) | Retain provider history and expire resume state | Accepted |
+| ADR | Decision |
+|---|---|
+| [0005](0005-lifecycle-kernel-extends-delivery.md) | One delivery kernel, separate from execution |
+| [0007](0007-defer-universal-retention-and-deletion.md) | Deletion requires custody of disposable state |
+| [0013](0013-thin-provenant-cli.md) | Thin CLI composition edge |
+| [0014](0014-comparative-skill-evals-on-suspicion.md) | Comparative skill evals on behaviour change or suspicion |
+| [0019](0019-installed-file-class-ownership.md) | Product, user and machine-local installation ownership |
+| [0020](0020-retire-the-daemon-fabric.md) | Daemonless project coordination in SQLite |
+| [0021](0021-configured-workspace-dispatch-boundaries.md) | Configured-workspace access and one execution owner |
+| [0022](0022-thin-fabric-mcp-execution-facade.md) | Thin Fabric MCP execution façade |
+| [0025](0025-broker-upstream-family-attribution.md) | Verified upstream lineage for brokered providers |
+| [0026](0026-federate-fabric-across-own-hosts-over-ssh.md) | Federate the user's own hosts over SSH |
+| [0027](0027-rust-front-door.md) | One Rust binary and domain-owned workspace |
+| [0028](0028-rust-port-dependencies.md) | A small allowlist of major Rust dependencies |
+| [0031](0031-retain-provider-history-and-expire-resume-state.md) | Retain provider history and expire resume state |
+
+ADR 0014 is the explicit process-record exception required by #1761.
+Temporary [audit evidence](AUDIT.md) moves to the PR body before landing;
+remove this paragraph with that file.
+
+Run `scripts/check-adr-index` to check file coverage and index targets.

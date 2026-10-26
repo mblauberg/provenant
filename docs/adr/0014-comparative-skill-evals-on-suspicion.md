@@ -1,50 +1,38 @@
-# ADR 0014: Comparative skill evals run on suspicion, not by default
+# ADR 0014: Comparative skill evals on behaviour change or suspicion
 
-## Status
+**Status:** Accepted
 
-Accepted (wording user-approved 2026-07-20). Lands with PR 4 of the
-[disclosure-refactor spec](https://github.com/mblauberg/provenant/blob/cfe1084619a93cfbb898efd4c347fbf177f354dc/docs/specs/harness/disclosure-refactor.md), which
-also amends `MAINTAINING.md`.
-
-Amended 2026-09-02 (issue #761): the contract-test half of the first Decision
-bullet is narrowed. Trigger fixtures remain mandatory for every skill change;
-a contract test is required only for an invariant a script, validator or CI
-gate evaluates at runtime. `MAINTAINING.md` §"Change a skill" step 7 is the
-live statement of the rule.
+Changed: 2026-10-26, #1754, #1761.
 
 ## Context
 
-`MAINTAINING.md` requires frozen held-out eval comparisons (candidate vs
-without-skill vs previous package, across primary families) for every material
-skill change. The requirement guards against silent trigger-routing
-regressions: a reworded description can stop a skill firing, or steal a
-sibling's triggers, and no structural or contract test observes model routing
-behaviour.
-
-That guard is priced for a published, multi-user harness. This repository
-currently serves one operator who uses the skills daily; a routing regression
-surfaces within a day of normal use, and the eval machinery (frozen cases,
-repeated trials, per-family lineage records) costs more attention than the
-failures it would catch. The cheap layer — positive/negative/boundary trigger
-fixtures and machine-enforced contract tests — catches structural drift at
-near-zero cost and stays.
+Structural fixtures catch malformed routes, but cannot show whether a skill
+improves the agent's choices. Full frozen comparative studies cost more than
+routine maintenance in a personal harness.
 
 ## Decision
 
-- Trigger fixtures and contract tests remain mandatory for every skill change.
-- Frozen held-out comparative evals become conditional. Run them when:
-  1. a routing regression is suspected or observed in use;
-  2. a change rewrites trigger-bearing description text across several skills
-     at once (as in the disclosure refactor), at the maintainer's discretion;
-  3. the harness is being prepared for publication or another operator.
-- The eval machinery (`evals/`, held-out datasets, lineage recording rules) is
-  retained, not deleted, so the conditional path stays cheap to invoke.
+Every skill change runs its trigger fixtures. Contract tests protect only
+machine-enforced invariants; prose alone does not require a contract test.
+
+A skill behaviour change triggers a run of its fixtures with and without the
+skill. Record the difference, including regressions, omissions and failures,
+for the reviewer. Scores are advisory and do not fail CI.
+
+Frozen held-out comparative evals remain conditional. Run them when a routing
+regression is suspected or observed, when preparing publication or use by
+another operator, or at the maintainer's discretion when rewriting
+trigger-bearing descriptions across several skills. Compare candidate,
+without-skill and previous-package arms on current primary families. Retain
+invalid, omitted, timed-out and failed attempts with model lineage and cost.
 
 ## Consequences
 
-- Routine skill maintenance loses a heavyweight gate; the operator accepts
-  detection-in-use as the routing-regression backstop.
-- Publication to other users re-arms the full requirement; this ADR must be
-  revisited in any public-release checklist.
-- `MAINTAINING.md` §"Change a skill" and §"Change the delivery kernel" are
-  amended to state the conditional rule and cite this ADR.
+Behaviour changes always supply comparative evidence. Wording-only maintenance
+keeps the cheap fixture checks without requiring a full held-out study.
+Detection in ordinary use remains the routing-regression backstop between
+studies. Publication re-arms the full comparison requirement.
+
+This process record is retained as the explicit in-place amendment required by
+[#1761](https://github.com/mblauberg/provenant/issues/1761); new process rules
+belong in their governing skill.

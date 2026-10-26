@@ -1,0 +1,60 @@
+#!/bin/sh
+# Check the flat ADR index. Optional directory supports isolated fixtures.
+set -eu
+dir=${1:-"$(git rev-parse --show-toplevel)/docs/adr"}
+index=$dir/README.md
+if [ ! -f "$index" ]; then
+  echo "check-adr-index: missing $index" >&2
+  exit 1
+fi
+
+# The index uses inline Markdown links with plain relative paths. Reject other
+# destinations rather than silently skipping an index entry.
+links=$(awk '
+  {
+    text = $0
+    while (match(text, /\[[^]]+\]\([^)]*\)/)) {
+      link = substr(text, RSTART, RLENGTH)
+      sub(/^[^(]*\(/, "", link)
+      sub(/\)$/, "", link)
+      print link
+      text = substr(text, RSTART + RLENGTH)
+    }
+  }
+' "$index")
+status=0
+while IFS= read -r link; do
+  [ -n "$link" ] || continue
+  case "$link" in
+    *:*|*\#*|*\?*|*' '*|/*)
+      echo "check-adr-index: use a plain relative file link: $link" >&2
+      status=1
+      ;;
+    *)
+      if [ ! -f "$dir/$link" ]; then
+        echo "check-adr-index: unresolved link: $link" >&2
+        status=1
+      fi
+      ;;
+  esac
+done <<EOF
+$links
+EOF
+
+for file in "$dir"/*; do
+  [ -f "$file" ] || continue
+  name=${file##*/}
+  [ "$name" = README.md ] && continue
+  if ! printf '%s\n' "$links" | grep -qxF -- "$name"; then
+    echo "check-adr-index: unindexed file: $name" >&2
+    status=1
+  fi
+  case "$name" in
+    [0-9][0-9][0-9][0-9]-*.md)
+      if ! grep -q '^## Decision$' "$file"; then
+        echo "check-adr-index: warning: no decision statement: $name" >&2
+      fi
+      ;;
+  esac
+done
+exit "$status"
