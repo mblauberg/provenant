@@ -300,7 +300,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     Ok(Inspection::Check(page))
 }
 fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
-    let temp = fs::canonicalize(Path::new("/tmp"))?;
+    let temp = fs::canonicalize(&std::env::temp_dir()).map_err(io::Error::from)?;
     let anchor = LocalFs.open_anchor(&temp)?;
     let name = LocalFs.temporary_name()?;
     anchor.mkdir(&name, 0o700)?;

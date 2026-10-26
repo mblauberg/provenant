@@ -23,9 +23,6 @@ pub mod fixture;
 mod guardian;
 pub mod machine;
 pub mod scratch;
-#[cfg(test)]
-mod test_support;
-
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
 pub use guardian::{

@@ -2,9 +2,51 @@ mod support;
 use support::{Result, TestRig, code};
 
 // Install inspection intentionally refuses a device crossing from its anchor.
-// CI supplies a temporary root on the checkout device; /tmp can be a tmpfs.
+// CI supplies a temporary root on the checkout device; the default can be a tmpfs.
 fn check_rig() -> Result<TestRig> {
     TestRig::in_directory(&std::env::temp_dir())
+}
+
+#[test]
+fn check_install_uses_tmpdir_and_cleans_private_home() -> Result {
+    use std::{collections::BTreeSet, fs};
+
+    let mut rig = check_rig()?;
+    let entries = || -> std::io::Result<BTreeSet<_>> {
+        fs::read_dir(&rig.root)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect()
+    };
+    let before = entries()?;
+    let output = rig.command(&["check", "install", "--json"])?;
+    // An uninstalled rig reports a missing receipt after a successful inspection.
+    assert_eq!(
+        code(&output),
+        1,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert_eq!(
+        json(&output)?["data"]["findings"][0]["rule"],
+        "missing_receipt"
+    );
+    assert_eq!(entries()?, before);
+
+    let missing = rig.root.join("missing");
+    let (_, tmpdir) = rig
+        .env
+        .iter_mut()
+        .find(|(key, _)| key == "TMPDIR")
+        .ok_or("missing TMPDIR fixture variable")?;
+    *tmpdir = missing.into_os_string();
+    let output = rig.command(&["check", "install", "--json"])?;
+    assert_ne!(code(&output), 0);
+    assert_eq!(
+        json(&output)?["error"]["message"],
+        "cannot prepare check context"
+    );
+    Ok(())
 }
 
 #[test]
@@ -161,19 +203,19 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     provenant_config::install(&plan, &context, &mut Reporter, &FixedSmoke(version), false)?;
 
     let output = rig.command(&["check", "install", "--json"])?;
-    let home = PathBuf::from(fs::read_to_string(&marker)?.trim());
-    assert_ne!(home, rig.home);
-    assert!(home.starts_with(fs::canonicalize("/tmp")?));
-    assert!(home.join("keep").is_file());
-    fs::remove_file(home.join("keep"))?;
-    fs::remove_dir(&home)?;
-    fs::remove_file(&marker)?;
     assert_eq!(
         code(&output),
         0,
         "{}",
         String::from_utf8_lossy(&output.stdout.bytes)
     );
+    let home = PathBuf::from(fs::read_to_string(&marker)?.trim());
+    assert_ne!(home, rig.home);
+    assert!(home.starts_with(&rig.root));
+    assert!(home.join("keep").is_file());
+    fs::remove_file(home.join("keep"))?;
+    fs::remove_dir(&home)?;
+    fs::remove_file(&marker)?;
     let stderr = String::from_utf8_lossy(&output.stderr.bytes);
     assert!(
         stderr.contains("warning") && stderr.contains("private check directory"),

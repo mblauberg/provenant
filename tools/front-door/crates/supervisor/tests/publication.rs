@@ -1,7 +1,3 @@
-#[allow(dead_code)]
-#[path = "../src/test_support.rs"]
-mod test_support;
-
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
 use provenant_supervisor::{
     ExitPublisher, GuardianHooks, clock::SystemClock, custody::*, fixture, fs::Directory,
@@ -276,7 +272,11 @@ const TESTS: &[&str] = &[
 ];
 
 fn run_case(name: &str) -> Result<()> {
-    let root = test_support::tempdir("s2-publication-")?;
+    let root = fixture::tempdir(|root| {
+        tempfile::Builder::new()
+            .prefix("s2-publication-")
+            .tempdir_in(root)
+    })?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let result = match name {
         "exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot" => {
