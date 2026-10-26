@@ -123,7 +123,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
             "host": first.to_string(),
             "project": project_key,
             "result": {"result":"health","data":{
-                "host":first.to_string(),"available":true,"execution":true,"protocol":2
+                "host":first.to_string(),"available":true,"execution":true
             }}
         }))?,
     )?;
@@ -166,6 +166,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true);
     assert_eq!(hosts[0]["protocol"], 2);
+    assert!(hosts[0].get("reason").is_none());
     assert_eq!(
         replies
             .iter()
