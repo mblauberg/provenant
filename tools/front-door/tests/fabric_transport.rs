@@ -393,6 +393,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
     let identity =
         &replies.iter().find(|r| r["id"] == 3).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(identity["client"], "codex");
+    assert_eq!(identity["server_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(identity["inbox"]["agent"], "fixture");
     let sent = &replies.iter().find(|r| r["id"] == 4).ok_or("mail")?["result"];
     assert_ne!(sent["isError"], true, "{sent}");

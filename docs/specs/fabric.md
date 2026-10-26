@@ -244,6 +244,11 @@ list keeps its JSON `data` array; peer health replies keep the single
 satisfies the object requirement in MCP 2025-11-25; MCP 2026-07-28 permits any
 JSON value.
 
+The identity reply adds `server_version`, the MCP server's package version. A
+reinstall does not restart a running server, and the CLI keeps no record of
+running MCP servers, so agents compare `server_version` with
+`provenant --version` (see the orchestrate identity reference).
+
 The shared submit wire type accepts `new_worktree` for peer ingress. The MCP
 submit owner refuses worktree creation, so MCP parsing rejects that field,
 including `null`, with `invalid_input` at `arguments.tasks[N].new_worktree`.

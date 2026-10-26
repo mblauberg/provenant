@@ -333,7 +333,13 @@ impl ToolCall {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
-            Self::Identity(input) => call!(facade, identity, input),
+            Self::Identity(input) => response(
+                tool_name,
+                IdentityReply {
+                    identity: service.facade.identity(input, budget, cancel)?,
+                    server_version: env!("CARGO_PKG_VERSION"),
+                },
+            ),
             Self::Mail(input, operation_id) => {
                 if matches!(&input, MailInput::Send { .. } | MailInput::MarkRead { .. }) {
                     response(
@@ -677,6 +683,15 @@ fn response<T: Serialize>(tool: &str, typed: T) -> Result<ToolResponse, ServiceE
         content: vec![TextContent { kind: "text", text }],
         structured_content,
     })
+}
+
+/// Identity plus this server's version. A reinstall does not restart a running
+/// server, so agents compare `server_version` with `provenant --version`.
+#[derive(Serialize)]
+pub(crate) struct IdentityReply<T> {
+    #[serde(flatten)]
+    pub(crate) identity: T,
+    pub(crate) server_version: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
