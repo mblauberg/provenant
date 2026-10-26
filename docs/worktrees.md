@@ -23,7 +23,8 @@ provenant worktree remove fix-repo-example --discard
 ```
 
 `remove NAME` deletes the clean worktree and then its branch when every commit
-on the branch is contained in the primary checkout's integration branch. This
+on the branch is contained in the fetched upstream default branch. Without
+`origin`, the primary checkout's integration branch remains the fallback. This
 includes a branch still at the integration tip, which nothing is lost from. An unmerged branch
 is kept and reported as `not_merged`; `--discard` deletes it too and returns
 its head, which recovers it with `git branch NAME HEAD` while Git still holds
@@ -76,7 +77,15 @@ GC collects idle caches (default seven days); `--free-floor SIZE` additionally
 collects eligible caches oldest-first by last write to reach a free-space
 floor. Both paths protect live writers and reservations. macOS default-state
 installs schedule cache GC every six hours; the `[gc]` configuration can
-disable or adjust it. See the
+disable or adjust it. Manual GC previews by default; `--apply` deletes.
+GC also fetches `origin`'s default branch and removes clean registered linked
+worktrees whose branch tips are ancestors of that fetched tip, including tips
+equal to it. It deletes their local branches and own lane caches, keeping
+dirty, unmerged and live or unobservable worktrees. Broken registrations are
+skipped individually. Configured regenerable output uses this same worktree
+selection, with the additional requirement that every associated lane is
+known terminal. Ignored output may be pruned; tracked paths, configured keep
+paths, symlinks and output written within 24 hours are kept. See the
 [configuration runbook](runbooks/configuration.md#lane-cache-collection).
 Cleanup recognises v1 owner markers for missing owners; existing v1 owners
 are kept and never collected as idle.

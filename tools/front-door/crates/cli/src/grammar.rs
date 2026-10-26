@@ -543,9 +543,12 @@ pub struct Gc {
     /// Keep at least this much free space (20G, or plain GiB)
     #[arg(long, value_name = "SIZE", value_parser = provenant_config::parse_cache_size)]
     pub free_floor: Option<u64>,
-    /// Report what would be removed without deleting anything
-    #[arg(long)]
+    /// Report what would be removed without deleting anything (manual default)
+    #[arg(long, conflicts_with = "apply")]
     pub dry_run: bool,
+    /// Apply a manual collection
+    #[arg(long)]
+    pub apply: bool,
     /// Also remove caches with no file written for this many days
     #[arg(long, default_value = "7", value_parser = clap::value_parser!(u64).range(1..=3650))]
     pub idle_days: u64,

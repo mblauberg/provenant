@@ -1,5 +1,8 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
+mod gc;
+pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
+
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
 };
@@ -994,7 +997,12 @@ pub fn list(
     let _lock = repository_lock(context, LockMode::Shared, cancel)?;
     context.repo.revalidate()?;
     let entries = read_worktrees(context, cancel)?;
-    let candidates = canonical_worktree_paths(&entries)?;
+    // A stale Git registration must not hide the remaining worktrees from GC.
+    let candidates: Vec<_> = entries
+        .iter()
+        .filter(|entry| !entry.bare)
+        .filter_map(|entry| canonicalize(&entry.path).ok().map(|path| (path, entry)))
+        .collect();
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
     let worker_states = context.workers.observe_roots(&roots);
     let primary = canonicalize(context.repo.root_path())?;
@@ -1462,10 +1470,11 @@ fn matching_worktree<'a>(
 ) -> Result<Option<&'a GitWorktree>, WorktreeError> {
     let repo_root = canonicalize(repo_root)?;
     let mut found = None;
-    for (path, entry) in canonical_worktree_paths(entries)? {
-        if entry.branch.as_ref() != Some(branch) {
-            continue;
-        }
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.branch.as_ref() == Some(branch))
+    {
+        let path = canonicalize(&entry.path)?;
         if path == repo_root {
             return Err(WorktreeError::Primary);
         }
@@ -1483,8 +1492,15 @@ fn checked_out_elsewhere(
     allowed_path: Option<&Path>,
 ) -> Result<bool, WorktreeError> {
     let allowed = allowed_path.map(canonicalize).transpose()?;
-    for (path, entry) in canonical_worktree_paths(entries)? {
-        if entry.branch.as_ref() == Some(branch) && allowed.as_ref() != Some(&path) {
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.branch.as_ref() == Some(branch))
+    {
+        if allowed.is_none() {
+            return Ok(true);
+        }
+        let path = canonicalize(&entry.path)?;
+        if allowed.as_ref() != Some(&path) {
             return Ok(true);
         }
     }
@@ -1502,6 +1518,16 @@ fn remove_tree(
     entry: &GitWorktree,
     expected_head: GitOid,
     cancel: &CancelToken,
+) -> Result<RemovedTree, WorktreeError> {
+    remove_tree_when(context, entry, expected_head, cancel, &|| true)
+}
+
+fn remove_tree_when(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    expected_head: GitOid,
+    cancel: &CancelToken,
+    eligible: &dyn Fn() -> bool,
 ) -> Result<RemovedTree, WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::UnknownWriter);
@@ -1522,6 +1548,9 @@ fn remove_tree(
         || current.prunable
     {
         return Err(WorktreeError::IdentityChanged);
+    }
+    if !eligible() {
+        return Err(WorktreeError::UnknownWriter);
     }
     match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}

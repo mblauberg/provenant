@@ -65,6 +65,12 @@ The optional `[gc]` section controls the macOS per-user schedule:
 schedule = true
 idle_days = 7
 # free_floor = "20G"
+# alert_below = "10G"
+
+# Use the project ID from `provenant fabric identity`.
+[gc.projects."PROJECT_ID"]
+regenerable = ["node_modules", "target"]
+keep = ["web/target"]
 ```
 
 `gc.schedule` defaults to true. Setting it to false prevents subsequent
@@ -87,6 +93,29 @@ checkout as its working directory. Unobservable projects keep their caches.
 Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
+
+Manual `provenant gc` previews cleanup by default; pass `--apply` to remove
+eligible entries. Scheduled GC applies cleanup and also removes clean merged
+worktrees after fetching `origin`'s actual default branch. It does not need a
+fresh local `main`. Failed fetches keep worktrees and report the failure.
+
+`gc.projects` is keyed by the registered Fabric project ID. Each project's
+`regenerable` list contains directory names, matched at any depth in its
+registered linked worktrees. The default is an empty list, which prunes
+nothing. `keep` contains optional paths relative to the worktree; those paths,
+their descendants and any matching directory containing them are preserved.
+Tracked paths are also preserved. `.git`, `.worktrees`, absolute names and
+parent traversal are refused. Unknown or non-terminal lanes, dirty worktrees,
+recent writes within 24 hours and symlinks prevent pruning. Failures skip
+individual entries. Lane caches still use their existing GC path.
+
+`gc.alert_below` accepts the same size syntax as `free_floor` and is unset by
+default. Applied collections emit a Fabric note with entity `gc.low_disk` and
+a gc log message once per observed dip below this threshold on the state
+filesystem. A reading at or above it rearms the alert. The latch persists
+under `<state>/gc/`; a preview reports low space without changing it. An alert
+failure is logged without blocking collection. This setting is read each run
+and does not require reinstalling the agent.
 
 ## Writer extra write paths
 
