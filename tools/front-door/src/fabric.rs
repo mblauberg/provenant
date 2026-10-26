@@ -111,11 +111,7 @@ impl stdio::Factory for Factory {
         let coordination = self.coordination().map_err(|error| {
             let typed = FacadeError::from(&error);
             if matches!(typed, FacadeError::Io { .. }) {
-                ServiceError::Facade(scope_io(
-                    typed,
-                    "open coordination store",
-                    self.context.roots.state.as_path(),
-                ))
+                ServiceError::Facade(scope_io(typed, "open coordination store"))
             } else {
                 ServiceError::Coordination(error)
             }
@@ -320,12 +316,12 @@ impl F3Facade for BoundFacade<'_> {
     }
 }
 
-/// The bound state root supplies scope for failures without a lower-level path.
-fn scope_io(error: FacadeError, operation: &str, state: &Path) -> FacadeError {
+/// Retain lower-level diagnostics while naming the request that failed.
+fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
     match error {
-        FacadeError::Io { path: None, .. } => FacadeError::Io {
-            operation: operation.into(),
-            path: Some(state.to_string_lossy().into_owned()),
+        FacadeError::Io { operation, path } => FacadeError::Io {
+            operation: format!("{scope}: {operation}"),
+            path,
         },
         other => other,
     }
@@ -1203,9 +1199,6 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::WorktreeRequired
         | E::WorktreeNotApplicable => FacadeError::InvalidInput,
         E::WorktreeMissing => FacadeError::WorktreeMissing,
-        E::WorktreeUnregistered => FacadeError::WorktreeUnregistered {
-            path: String::new(),
-        },
         E::NotFound => FacadeError::NotFound,
         E::Conflict => FacadeError::Conflict,
         E::OperationConflict => FacadeError::OperationConflict,
@@ -1216,7 +1209,8 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         E::ContinuationUnsupported => FacadeError::ContinuationUnsupported,
         E::ProviderStateExpired => FacadeError::ProviderStateExpired,
         E::OwnerUnavailable => FacadeError::OwnerUnavailable,
-        E::StateCorrupt => FacadeError::StateCorrupt,
+        // An unregistered worktree must arrive with typed detail and its path.
+        E::StateCorrupt | E::WorktreeUnregistered => FacadeError::StateCorrupt,
         E::BaseUnreachable => FacadeError::BaseUnreachable,
         E::BranchExists => FacadeError::BranchExists,
         E::LaneCoordinationRefused => FacadeError::LaneCoordinationRefused,
@@ -1482,7 +1476,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
         self.submit_inner(input, budget, cancel)
-            .map_err(|error| scope_io(error, "submit", self.factory.context.roots.state.as_path()))
+            .map_err(|error| scope_io(error, "submit"))
     }
     fn submit_inner(
         &mut self,
@@ -2924,6 +2918,43 @@ pub fn events(
 }
 #[cfg(test)]
 mod peer_tests {
+    #[test]
+    fn submit_io_keeps_the_inner_operation_without_inventing_a_path() {
+        let error = super::scope_io(super::FacadeError::io("access Fabric database"), "submit");
+        assert_eq!(
+            error,
+            super::FacadeError::Io {
+                operation: "submit: access Fabric database".into(),
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn writer_repository_open_failure_keeps_its_operation_and_project_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let request = provenant_run::WriterRequest {
+            project: root.clone(),
+            worktree: root.join("writer"),
+        };
+        let project = provenant_core::ProjectId::from_bytes([1; 16]);
+        let error = match provenant_run::prepare_writer(&request, &root, project) {
+            Ok(_) => return Err("non-repository unexpectedly opened".into()),
+            Err(error) => super::run_error(error),
+        };
+        assert_eq!(
+            serde_json::to_value(error)?,
+            serde_json::json!({
+                "code": "io",
+                "operation": "open writer repository",
+                "path": root,
+            })
+        );
+        Ok(())
+    }
+
     #[test]
     fn typed_run_errors_keep_their_codes() {
         for (error, expected) in [

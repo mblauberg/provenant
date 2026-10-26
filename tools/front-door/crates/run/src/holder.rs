@@ -92,7 +92,12 @@ impl HolderContext {
         let mut delay = std::time::Duration::from_millis(100);
         for _ in 0..10 {
             match Self::open_once(raw) {
-                Err(RunError::Contention | RunError::Sqlite(_) | RunError::Io(_)) => {
+                Err(
+                    RunError::Contention
+                    | RunError::Sqlite(_)
+                    | RunError::Io(_)
+                    | RunError::OperationIo { .. },
+                ) => {
                     std::thread::park_timeout(delay);
                     delay = (delay * 2).min(std::time::Duration::from_secs(5));
                 }

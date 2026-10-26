@@ -76,6 +76,15 @@ impl From<run::RunError> for Fail {
             run::RunError::Filesystem(error) | run::RunError::Publication(error) => {
                 Some(FacadeError::filesystem(error))
             }
+            run::RunError::OperationIo {
+                operation, path, ..
+            } => Some(FacadeError::Io {
+                operation: (*operation).into(),
+                path: path
+                    .as_ref()
+                    .filter(|path| path.is_absolute())
+                    .map(|path| path.to_string_lossy().into_owned()),
+            }),
             _ => None,
         };
         let kind = ErrorKind::from(&error);

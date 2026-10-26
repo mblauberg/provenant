@@ -2875,26 +2875,55 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
         ],
     )?;
     assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
+    let submit = || -> Result<Value> {
+        let replies = mcp(
+            &rig,
+            &[
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name":"fabric_run","arguments":{"op":"submit","operation_id":"writer-io","tasks":[{
+                        "prompt":"commit the fix", "access":"worktree_write", "worktree":worktree,
+                        "route":{"kind":"model","provider":"codex","model":"gpt-6.1-sol"},"timeout_seconds":60
+                    }]}
+                }}),
+            ],
+        )?;
+        Ok(replies
+            .iter()
+            .find(|reply| reply["id"] == 1)
+            .ok_or("submit reply")?["result"]
+            .clone())
+    };
+
+    let gitfile = std::fs::read_to_string(worktree.join(".git"))?;
+    let private = Path::new(gitfile.trim().strip_prefix("gitdir: ").ok_or("gitdir")?);
+    let head = private.join("HEAD");
+    let original_head = std::fs::read(&head)?;
+    for (contents, operation) in [
+        (None, "submit: openat read"),
+        (Some(vec![0xff]), "submit: decode writer HEAD"),
+        (
+            Some(b"ref: refs/heads/../invalid\n".to_vec()),
+            "submit: parse writer branch",
+        ),
+    ] {
+        if let Some(contents) = contents {
+            std::fs::write(&head, contents)?;
+        } else {
+            std::fs::remove_file(&head)?;
+        }
+        let result = submit()?;
+        let error = &result["structuredContent"];
+        assert_eq!(error["code"], "io", "{result}");
+        assert_eq!(error["operation"], operation, "{result}");
+        assert_eq!(error["path"], head.to_string_lossy().as_ref(), "{result}");
+    }
+    std::fs::write(&head, original_head)?;
     let blocked = rig.state.join("worktrees");
     std::fs::write(&blocked, "not a directory")?;
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"fabric_run","arguments":{"op":"submit","operation_id":"writer-io","tasks":[{
-                    "prompt":"commit the fix", "access":"worktree_write", "worktree":worktree,
-                    "route":{"kind":"model","provider":"codex","model":"gpt-6.1-sol"},"timeout_seconds":60
-                }]}
-            }}),
-        ],
-    )?;
-    let result = &replies
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("submit reply")?["result"];
+    let result = submit()?;
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
-    assert_eq!(error["operation"], "openat directory", "{result}");
+    assert_eq!(error["operation"], "submit: openat directory", "{result}");
     assert_eq!(
         error["path"],
         blocked.to_string_lossy().as_ref(),
@@ -2926,7 +2955,10 @@ fn submit_coordination_io_names_the_failed_operation_and_path() -> Result {
         .ok_or("submit reply")?["result"];
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
-    assert_eq!(error["operation"], "openat directory", "{result}");
+    assert_eq!(
+        error["operation"], "open coordination store: openat directory",
+        "{result}"
+    );
     assert_eq!(
         error["path"],
         blocked.to_string_lossy().as_ref(),

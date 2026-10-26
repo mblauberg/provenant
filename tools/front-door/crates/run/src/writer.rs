@@ -22,12 +22,20 @@ use std::{
     time::Duration,
 };
 
-fn error(error: impl std::fmt::Display) -> RunError {
-    RunError::Io(std::io::Error::other(error.to_string()))
+fn error<E: std::fmt::Display>(
+    operation: &'static str,
+    path: Option<&Path>,
+) -> impl FnOnce(E) -> RunError {
+    let path = path.map(Path::to_path_buf);
+    move |source| RunError::OperationIo {
+        operation,
+        path,
+        source: std::io::Error::other(source.to_string()),
+    }
 }
-/// Held-directory errors name paths relative to their anchor. This registry
-/// anchor is the state root, so retain its location before crossing the edge.
-fn state_error(error: FsError, state: &Path) -> RunError {
+/// Held-directory errors name paths relative to their anchor. Retain a known
+/// anchor before crossing the edge; the facade omits paths with unknown anchors.
+fn anchored_error(error: FsError, anchor: &Path) -> RunError {
     match error {
         FsError::Io {
             operation,
@@ -35,7 +43,7 @@ fn state_error(error: FsError, state: &Path) -> RunError {
             source,
         } => FsError::Io {
             operation,
-            path: state.join(path),
+            path: anchor.join(path),
             source,
         }
         .into(),
@@ -44,18 +52,22 @@ fn state_error(error: FsError, state: &Path) -> RunError {
 }
 fn runtime(state: &Path) -> Result<UtilityRuntime> {
     let home = state.join("writer-git-home");
-    let state = Directory::open_anchor(state)?;
-    match state.mkdir(OsStr::new("writer-git-home"), 0o700) {
-        Ok(()) => state.sync()?,
+    let directory = Directory::open_anchor(state)?;
+    match directory.mkdir(OsStr::new("writer-git-home"), 0o700) {
+        Ok(()) => directory
+            .sync()
+            .map_err(|error| anchored_error(error, state))?,
         Err(e) if e.is_exists() => {}
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(anchored_error(e, state)),
     }
     let git = provenant_os::git::git_executable()
         .ok_or(RunError::Validation("Git executable unavailable"))?;
-    UtilityRuntime::new(canonicalize(&git)?, home).map_err(error)
+    UtilityRuntime::new(canonicalize(&git)?, home.clone())
+        .map_err(error("initialise writer Git runtime", Some(&home)))
 }
 fn budget() -> Result<UtilityBudget> {
-    UtilityBudget::bounded(Duration::from_secs(5)).map_err(error)
+    UtilityBudget::bounded(Duration::from_secs(5))
+        .map_err(error("set writer Git utility budget", None))
 }
 /// Resolve relative paths from the selected repository's primary root. Git's
 /// linked-worktree registration proves membership and excludes the primary.
@@ -75,10 +87,11 @@ fn resolve_writer_with(
     verify: bool,
 ) -> Result<WriterRequest> {
     let utility = runtime(state)?;
-    let executor = SystemExecutor::new(1).map_err(error)?;
+    let executor =
+        SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let selected = utility
         .project_location(&executor, cwd, budget()?, &CancelToken::new())
-        .map_err(error)?;
+        .map_err(error("locate writer project", Some(cwd)))?;
     let repo = selected
         .repository
         .ok_or(RunError::Validation("writer needs a Git project"))?;
@@ -122,29 +135,33 @@ pub fn prepare_writer(
     project: ProjectId,
 ) -> Result<WriterLaunch> {
     let utility = runtime(state)?;
-    let executor = SystemExecutor::new(1).map_err(error)?;
+    let executor =
+        SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let repo = utility
         .open_repo(&executor, &request.project, budget()?, &CancelToken::new())
-        .map_err(error)?;
+        .map_err(error("open writer repository", Some(&request.project)))?;
     let worktree = provenant_confinement::verify_worktree(&repo, &request.worktree)
         .map_err(worktrees::WorktreeError::from)?;
+    let head_path = worktree.repo().private_git_dir().join("HEAD");
     let mut head = Vec::new();
     worktree
         .repo()
         .private_dir()
-        .open_read(OsStr::new("HEAD"))?
+        .open_read(OsStr::new("HEAD"))
+        .map_err(|error| anchored_error(error, worktree.repo().private_git_dir()))?
         .take(4097)
-        .read_to_end(&mut head)?;
+        .read_to_end(&mut head)
+        .map_err(error("read writer HEAD", Some(&head_path)))?;
     if head.len() > 4096 {
         return Err(RunError::Validation("writer HEAD exceeds bound"));
     }
-    let head = std::str::from_utf8(&head).map_err(error)?;
+    let head = std::str::from_utf8(&head).map_err(error("decode writer HEAD", Some(&head_path)))?;
     let branch = GitRefName::new(
         head.trim()
             .strip_prefix("ref: ")
             .ok_or(RunError::Validation("writer needs a branch"))?,
     )
-    .map_err(error)?;
+    .map_err(error("parse writer branch", Some(&head_path)))?;
     let base = provenant_confinement::run_utility(
         &executor,
         provenant_confinement::GitRead::ResolveRef {
@@ -155,16 +172,16 @@ pub fn prepare_writer(
         budget()?,
         &CancelToken::new(),
     )
-    .map_err(error)?;
+    .map_err(error("resolve writer branch", Some(&request.worktree)))?;
     if base.termination != provenant_os::exec::Termination::Exit(0) || base.stdout.truncated {
         return Err(RunError::Validation("writer branch cannot be resolved"));
     }
     let base = GitOid::parse(
         std::str::from_utf8(&base.stdout.bytes)
-            .map_err(error)?
+            .map_err(error("decode writer base", Some(&request.worktree)))?
             .trim(),
     )
-    .map_err(error)?;
+    .map_err(error("parse writer base", Some(&request.worktree)))?;
     let state_dir = Directory::open_anchor(state)?;
     // Git knows the worktree but Provenant holds no state for it: it was not
     // created by `provenant worktree create`.
@@ -172,7 +189,7 @@ pub fn prepare_writer(
         if error.is_not_found() {
             RunError::WorktreeUnregistered(request.worktree.clone())
         } else {
-            state_error(error, state)
+            anchored_error(error, state)
         }
     };
     let projects = state_dir
@@ -213,7 +230,8 @@ impl LaunchConfinement {
         attempt: &provenant_core::AttemptId,
         cancel: &CancelToken,
     ) -> Result<Vec<OsString>> {
-        let executor = SystemExecutor::new(1).map_err(error)?;
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
         let backend = system_backend(&BackendContext {
             executor: &executor,
             cancel,
@@ -293,8 +311,8 @@ impl crate::RunStore {
             Err(error) if error.is_not_found() => return Ok(Default::default()),
             Err(error) => return Err(error.into()),
         };
-        let mut listing =
-            provenant_supervisor::custody::list_writer_reservations(&directory).map_err(error)?;
+        let mut listing = provenant_supervisor::custody::list_writer_reservations(&directory)
+            .map_err(error("list writer reservations", Some(&path)))?;
         for reservation in &mut listing.reservations {
             reservation.reservation = path.join(&reservation.reservation);
         }
@@ -314,7 +332,8 @@ impl WriterLaunch {
     ) -> Result<()> {
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
         let utility = runtime(state)?;
-        let executor = SystemExecutor::new(1).map_err(error)?;
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
         let cancel = CancelToken::new();
         let git = provenant_confinement::Git::new(
             &executor,
@@ -323,14 +342,22 @@ impl WriterLaunch {
             budget()?,
             &cancel,
         );
-        let paths = git.writer_instruction_paths().map_err(error)?;
+        let paths = git.writer_instruction_paths().map_err(error(
+            "list writer instruction paths",
+            Some(self.worktree.path()),
+        ))?;
         let snapshot = git
             .snapshot_instructions(scope, &paths, &archive)
-            .map_err(error)?;
+            .map_err(error(
+                "snapshot writer instructions",
+                Some(self.worktree.path()),
+            ))?;
         if snapshot.head() != self.base {
             return Err(RunError::Validation("writer base changed before launch"));
         }
-        snapshot.persist(&archive).map_err(error)
+        snapshot
+            .persist(&archive)
+            .map_err(error("persist writer instruction snapshot", None))
     }
     pub(crate) fn terminal(
         &self,
@@ -346,9 +373,13 @@ impl WriterLaunch {
                 self.worktree.repo().private_dir(),
                 self.branch.as_str(),
             )
-            .map_err(error)?;
+            .map_err(error(
+                "read writer custody base",
+                Some(self.worktree.path()),
+            ))?;
         let utility = runtime(state)?;
-        let executor = SystemExecutor::new(1).map_err(error)?;
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
         let cancel = CancelToken::new();
         let git = provenant_confinement::Git::new(
             &executor,
@@ -359,7 +390,10 @@ impl WriterLaunch {
         );
         let snapshot = git
             .recover_instruction_snapshot(custody, base, &archive)
-            .map_err(error)?;
+            .map_err(error(
+                "recover writer instruction snapshot",
+                Some(self.worktree.path()),
+            ))?;
         let oid = |repo: &provenant_confinement::repo::VerifiedRepo, operation| -> Result<GitOid> {
             let output = provenant_confinement::run_utility(
                 &executor,
@@ -369,7 +403,7 @@ impl WriterLaunch {
                 budget()?,
                 &cancel,
             )
-            .map_err(error)?;
+            .map_err(error("resolve writer comparison", Some(repo.root_path())))?;
             if output.termination != provenant_os::exec::Termination::Exit(0)
                 || output.stdout.truncated
             {
@@ -377,10 +411,10 @@ impl WriterLaunch {
             }
             GitOid::parse(
                 std::str::from_utf8(&output.stdout.bytes)
-                    .map_err(error)?
+                    .map_err(error("decode writer comparison", Some(repo.root_path())))?
                     .trim(),
             )
-            .map_err(error)
+            .map_err(error("parse writer comparison", Some(repo.root_path())))
         };
         let tip = oid(
             self.worktree.repo(),
@@ -399,7 +433,10 @@ impl WriterLaunch {
                 budget()?,
                 &cancel,
             )
-            .map_err(error)?;
+            .map_err(error(
+                "resolve writer remote HEAD",
+                Some(self.worktree.path()),
+            ))?;
             if remote_head.termination != provenant_os::exec::Termination::Exit(0)
                 || remote_head.stdout.truncated
             {
@@ -409,12 +446,18 @@ impl WriterLaunch {
             }
             let name = GitRefName::remote_tracking(
                 std::str::from_utf8(&remote_head.stdout.bytes)
-                    .map_err(error)?
+                    .map_err(error(
+                        "decode writer remote HEAD",
+                        Some(self.worktree.path()),
+                    ))?
                     .trim()
                     .strip_prefix("refs/remotes/")
                     .ok_or(RunError::Validation("writer delivery target is not remote"))?,
             )
-            .map_err(error)?;
+            .map_err(error(
+                "parse writer remote HEAD",
+                Some(self.worktree.path()),
+            ))?;
             let target = oid(
                 self.worktree.repo(),
                 provenant_confinement::GitRead::ResolveRef { name },
@@ -430,7 +473,10 @@ impl WriterLaunch {
         .unwrap_or(snapshot.head());
         let outcome = git
             .quarantine_instructions(custody, &snapshot, comparison_base, &archive)
-            .map_err(error)?;
+            .map_err(error(
+                "quarantine writer instructions",
+                Some(self.worktree.path()),
+            ))?;
         let (evidence, review, protected_paths) = match outcome {
             provenant_confinement::quarantine::QuarantineOutcome::Restored {
                 evidence_digest,
@@ -478,7 +524,7 @@ impl WriterLaunch {
             budget()?,
             &cancel,
         )
-        .map_err(error)?;
+        .map_err(error("verify writer ancestry", Some(self.worktree.path())))?;
         if ancestry.termination != provenant_os::exec::Termination::Exit(0) {
             return Err(RunError::Validation(
                 "writer branch no longer descends from its recorded base",
@@ -514,9 +560,13 @@ impl WriterLaunch {
                 self.worktree.repo().private_dir(),
                 self.branch.as_str(),
             )
-            .map_err(error)?;
+            .map_err(error(
+                "read writer custody base",
+                Some(self.worktree.path()),
+            ))?;
         let utility = runtime(state)?;
-        let executor = SystemExecutor::new(1).map_err(error)?;
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
         let cancel = CancelToken::new();
         let git = provenant_confinement::Git::new(
             &executor,
@@ -525,7 +575,10 @@ impl WriterLaunch {
             budget()?,
             &cancel,
         );
-        let paths = git.uncommitted_since(base).map_err(error)?;
+        let paths = git.uncommitted_since(base).map_err(error(
+            "read writer uncommitted changes",
+            Some(self.worktree.path()),
+        ))?;
         Ok(uncommitted_reason(&paths))
     }
 }

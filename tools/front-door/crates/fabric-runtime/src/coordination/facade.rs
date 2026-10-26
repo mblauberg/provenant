@@ -206,7 +206,7 @@ pub enum FacadeError {
     Cancelled,
     #[error("wait timed out")]
     Timeout,
-    #[error("I/O operation {operation} failed at {path:?}")]
+    #[error("I/O operation {operation:?} failed at {path:?}")]
     Io {
         operation: String,
         path: Option<String>,
@@ -256,6 +256,13 @@ impl FacadeError {
     }
 
     pub fn filesystem(error: &provenant_os::fs::FsError) -> Self {
+        Self::filesystem_anchored(error, None)
+    }
+
+    fn filesystem_anchored(
+        error: &provenant_os::fs::FsError,
+        anchor: Option<&std::path::Path>,
+    ) -> Self {
         use provenant_os::fs::FsError;
         let (operation, path) = match error {
             FsError::Io {
@@ -273,7 +280,10 @@ impl FacadeError {
         };
         Self::Io {
             operation: operation.into(),
-            path: path.map(|path| path.to_string_lossy().into_owned()),
+            path: path
+                .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
+                .filter(|path| path.is_absolute())
+                .map(|path| path.to_string_lossy().into_owned()),
         }
     }
 }
@@ -347,17 +357,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             }
             Error::Filesystem(error) => {
                 // Fabric's held directories are traversed from `/`.
-                let mut detail = Self::filesystem(error);
-                if let Self::Io {
-                    path: Some(path), ..
-                } = &mut detail
-                {
-                    *path = std::path::Path::new("/")
-                        .join(&*path)
-                        .to_string_lossy()
-                        .into_owned();
-                }
-                detail
+                Self::filesystem_anchored(error, Some(std::path::Path::new("/")))
             }
             Error::Io { path, .. } => Self::Io {
                 operation: "access Fabric store".into(),
@@ -369,6 +369,37 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
                 path: Some(path.to_string_lossy().into_owned()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::FacadeError;
+
+    #[test]
+    fn filesystem_diagnostic_omits_paths_with_unknown_anchors() {
+        let error = provenant_os::fs::FsError::Io {
+            operation: "openat read",
+            path: "HEAD".into(),
+            source: std::io::ErrorKind::NotFound.into(),
+        };
+        assert_eq!(
+            FacadeError::filesystem(&error),
+            FacadeError::Io {
+                operation: "openat read".into(),
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn io_operation_display_escapes_controls() {
+        let error = FacadeError::io("read\n\u{1b}[31m\"peer");
+        let display = error.to_string();
+        assert!(!display.contains('\n'), "{display:?}");
+        assert!(!display.contains('\u{1b}'), "{display:?}");
+        assert!(display.contains("\\n"), "{display:?}");
+        assert!(display.contains("\\\"peer"), "{display:?}");
     }
 }
 
