@@ -3173,6 +3173,9 @@ fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
     Ok(escaped)
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod snapshot_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
