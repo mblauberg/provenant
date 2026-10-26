@@ -961,6 +961,53 @@ fn claude_read_only_adds_external_git_dir_only() {
 }
 
 #[test]
+fn claude_lanes_disable_commit_and_pr_attribution() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("claude", "fixture-model");
+    let account = crate::identity::RegisteredAccount::new(
+        "claude",
+        "opaque-account",
+        "/fixture/home/.claude".into(),
+    )?;
+    let token = fixture_token().for_account(account.key(), account.directory());
+    let continuation = Continuation::retained("claude", "fixture-session", &route, "fixture")?;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for resume in [false, true] {
+            let plan = fixture_access_plan(access, None, resume);
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(&token),
+            );
+            input.account = Some(&account);
+            input.continuation = resume.then_some(&continuation);
+            let spec = claude::Claude.prepare(input)?;
+            let settings_path = spec
+                .argv
+                .windows(2)
+                .find(|args| args[0] == "--settings")
+                .map(|args| Path::new(&args[1]))
+                .expect("lane settings argument");
+            let bytes = spec
+                .setup
+                .iter()
+                .find_map(|step| match step {
+                    SetupStep::WriteFile { path, bytes } if path == settings_path => Some(bytes),
+                    _ => None,
+                })
+                .expect("lane settings file");
+            let settings: serde_json::Value =
+                serde_json::from_slice(bytes).expect("lane settings JSON");
+            assert_eq!(settings["attribution"]["commit"], "");
+            assert_eq!(settings["attribution"]["pr"], "");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = std::path::Path::new("/fixture/repo");

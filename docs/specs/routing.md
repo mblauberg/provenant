@@ -302,6 +302,9 @@ provider tests. Intent that the fixtures cannot show:
 | Agy | `agy --print` with the prompt on argv, a print timeout and no `--sandbox` (headless mode denies tools it cannot prompt for, so writers auto-approve inside the confinement profile). Top-level prompts over 64 KiB spill to `prompt.md`; nested attempts refuse them. HOME is a private directory holding only a link to the login keychain. A print-timeout diagnostic keeps answer text as partial. Agy runs without Fabric MCP, hooks or lane environment. |
 | OpenCode | `opencode run --standalone --format json` with the prompt on stdin. HOME is attempt-private. Inline config denies shell and web fetch, allows edit for writers only, and sets no MCP servers or plugins. |
 
+Claude's generated lane settings set `attribution.commit` and `attribution.pr`
+to empty strings, disabling Claude's commit and PR attribution.
+
 Provider endpoints are `*:443` because Seatbelt cannot filter by host name.
 
 ### Claude token and refresh
