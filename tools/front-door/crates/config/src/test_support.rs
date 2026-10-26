@@ -1,4 +1,4 @@
-//! Origin coverage assertion shared with domain crates via `test-support`.
+//! Origin coverage assertion for this crate's tests.
 #![allow(clippy::panic)]
 use crate::ResolvedConfig;
 use serde::Serialize;
