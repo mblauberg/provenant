@@ -128,6 +128,9 @@ command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 Requests bind source and target host IDs and a project locator. The transport
 bounds frames to 1 MiB and refuses identity or version mismatches.
 
+Tasks and messages have no `legacy` or `legacy_output_path` members. A store
+or peer reply that still carries one, even as null, is refused.
+
 Every request and reply envelope carries integer `protocol`, currently 2.
 Ingress refuses a different protocol before decoding or executing the action,
 replying with `peer_version` and its own version. The client checks the reply

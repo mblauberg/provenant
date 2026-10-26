@@ -330,7 +330,13 @@ fn inspect<T: DeserializeOwned + Serialize>(
     walk_table(&defaults, "", &mut |key, _, _| {
         origins.insert(key.into(), compiled.clone());
     });
-    for key in ["gc.schedule", "gc.idle_days", "gc.free_floor"] {
+    for key in [
+        "gc.schedule",
+        "gc.idle_days",
+        "gc.free_floor",
+        "gc.alert_below",
+        "gc.projects",
+    ] {
         origins.insert(key.into(), compiled.clone());
     }
     if let Some(item) = &gc_item {

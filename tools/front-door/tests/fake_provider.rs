@@ -254,6 +254,7 @@ fn account_placement() -> Result {
             executable: &executable,
             home: &rig.home,
             user: OsStr::new("fixture"),
+            host_var: &|_| None,
             account: Some(account),
             token: None,
             cwd: &rig.project,

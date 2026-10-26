@@ -4139,59 +4139,55 @@ fn receipt_with_null_legacy_upgrades_cleanly() {
 }
 
 #[test]
-fn receipt_legacy_fields_require_reinstall_without_mutation() {
-    for legacy in [
-        serde_json::json!({}),
-        serde_json::json!({"git_hooks_dir":"/old/hooks"}),
-    ] {
-        let f = Fixture::new();
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let ctx = context(&clock, &cancel);
-        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        let release = f.release();
-        let mut receipt: serde_json::Value =
-            serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
-        receipt["legacy"] = legacy;
-        let bytes = serde_json::to_vec(&receipt).unwrap();
-        fs::write(f.receipt(), &bytes).unwrap();
-        let binary = fs::read_link(f.targets.bin_dir.join("provenant")).unwrap();
-        let skill = fs::read_link(f.link()).unwrap();
-        let config = fs::read(&f.targets.harnesses[0].mcp_file).unwrap();
+fn receipt_with_a_legacy_object_upgrades_and_drops_it() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    receipt["legacy"] = serde_json::json!({
+        "checkout": "/Users/dev/Repos/agents",
+        "home": "/Users/dev",
+        "manifest_digest": format!("sha256:{}", "ab".repeat(32)),
+        "git_hooks_dir": "/Users/dev/.config/git/hooks",
+    });
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
 
-        let error = Snapshots::capture(&release, &f.targets, &LocalFs).unwrap_err();
-        assert!(matches!(error, InstallError::ReceiptDecode(_)));
-        assert!(
-            error
-                .to_string()
-                .starts_with("invalid installation receipt:")
-        );
-        assert!(error.to_string().ends_with("; reinstall Provenant"));
-        let inspection = inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &LocalFs,
-            &Smoke,
-            &cancel,
-        )
-        .unwrap();
-        assert!(inspection.error.as_ref().is_some_and(|error| {
-            error
-                .to_string()
-                .starts_with("invalid installation receipt:")
-                && error.to_string().ends_with("; reinstall Provenant")
-        }));
-        let error = uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap_err();
-        assert!(matches!(error, InstallError::ReceiptDecode(_)));
-        assert!(error.to_string().ends_with("; reinstall Provenant"));
+    let inspection = inspect_install(
+        &f.targets,
+        None,
+        "fixture-target",
+        &LocalFs,
+        &Smoke,
+        &cancel,
+    )
+    .unwrap();
+    assert!(inspection.error.is_none(), "{:?}", inspection.error);
+    assert!(inspection.findings.is_empty());
 
-        assert_eq!(fs::read(f.receipt()).unwrap(), bytes);
-        assert_eq!(
-            fs::read_link(f.targets.bin_dir.join("provenant")).unwrap(),
-            binary
-        );
-        assert_eq!(fs::read_link(f.link()).unwrap(), skill);
-        assert_eq!(fs::read(&f.targets.harnesses[0].mcp_file).unwrap(), config);
-    }
+    let release = f.release_variant("upgrade", &["example"]);
+    let plan = f.plan_for(release.clone());
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let root = release_root(
+        f.targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
+    assert_eq!(
+        fs::read_link(f.targets.bin_dir.join("provenant")).unwrap(),
+        root.join("bin/provenant")
+    );
+    assert_eq!(
+        fs::read_link(f.link()).unwrap(),
+        root.join("skills/example")
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    assert!(receipt.get("legacy").is_none());
+    assert_eq!(
+        receipt["source_digest"],
+        release.manifest.source_digest.to_string()
+    );
+    assert!(f.plan_for(release).actions().is_empty());
 }
