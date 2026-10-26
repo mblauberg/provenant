@@ -1,7 +1,6 @@
 # Skill portfolio evaluation appendix
 
 Evaluation evidence cut-off: 19 July 2026
-Current-state note refreshed: 30 August 2026
 Predecessor delivery run: `SKAUD-20260714`
 
 This appendix is the durable evidence index for the 2026 portfolio refactor.
@@ -33,11 +32,10 @@ The holdout therefore records catalogue coverage only. Any future trials must
 record the actual provider/model-family route in a dispatch receipt and retain
 every terminal action without retrying or relabelling failures.
 
-## Current dispatch infrastructure fixture
+## Current dispatch infrastructure coverage
 
-The old Python dispatch fixture and batch contract tests were removed in the
-Rust cut. Current boundary coverage lives with the Rust run/CLI owners. The
-18-case holdout above remains unrun; deletion is not new semantic evidence.
+Boundary coverage lives with the Rust run/CLI owners. The 18-case holdout
+above remains unrun.
 
 ## Predecessor routing evidence
 
@@ -107,7 +105,7 @@ blind judge scored 256 items after deterministic checks.
 - Model aliases, discovery behaviour, caching and pricing can change. Re-run
   after a material model, host or catalogue change.
 - The current semantic holdout is unexecuted and provider-dependent. The
-  provider-free infrastructure fixture establishes only the dispatch/batch
+  Rust boundary tests establish only the dispatch/batch
   contract, not behavioural routing quality; a deliberate direct-provider
   batch run is required for the semantic result.
 - A completed routing regression establishes only its frozen synthetic cases.

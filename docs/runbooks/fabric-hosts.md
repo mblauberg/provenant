@@ -34,7 +34,7 @@ dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
 
 Use a graph for a writer followed by a review. Create and register the writer's
 worktree first with `provenant worktree create`, then save a project-local
-document such as `graph.json`:
+graph document in the project:
 
 ```json
 {
@@ -217,7 +217,7 @@ opens it after the upgrade finds a newer schema and fails with `state_corrupt`.
 
 Install the same release on both hosts and restart their peer agents, MCP
 servers and running workers after upgrading. `not_terminal` and
-`operation_conflict` now travel unchanged over the peer wire; the CLI reports
+`operation_conflict` travel unchanged over the peer wire; the CLI reports
 `NONTERMINAL` and `OPERATION_CONFLICT`. An unavailable run owner reports
 `OWNER_UNAVAILABLE`, distinct from an operation's `UNSUPPORTED` refusal.
 

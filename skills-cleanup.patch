@@ -1,0 +1,2248 @@
+diff --git a/skills/autopilot/SKILL.md b/skills/autopilot/SKILL.md
+--- a/skills/autopilot/SKILL.md
++++ b/skills/autopilot/SKILL.md
+@@ -1,86 +1,78 @@
+----
+-name: autopilot
+-description: "Use when an open-ended mission must continue across sessions until the user says STOP. Use orchestrate for bounded waves and the owning skills for decisions and changes. Not for bounded delivery work."
+----
+-
+-# Autopilot
+-
+-Autopilot guides a long-running mission. It delegates bounded work to
+-`orchestrate` and decisions or software changes to their owning skills. The run
+-and Fabric own task state, execution, admission, and recovery; this skill keeps
+-the mission goal and user authority clear. It does not create a second queue,
+-lease ledger, or run journal.
+-
+-The mission remains open until the user sets `STATUS: STOP` in its goal. An
+-empty lane list or an idle run means there is no eligible work now; it does not
+-mean the mission is complete. Record what event can resume work, end the current
+-invocation, and leave the mission open.
+-
+-## Entry gate
+-
+-Use autopilot only when the work is open-ended, spans multiple work waves or
+-sessions, and the user has set an explicit STOP gate. Otherwise use a bounded
+-skill such as `orchestrate`, `implement`, or `deliver`.
+-
+-Before proceeding, read the goal, current project instructions, scope and
+-authority, and the current owner records. Stop for missing authority or a
+-one-way-door decision. Keep other in-scope work moving where it is independent.
+-
+-## Operating loop
+-
+-1. Check the user-owned goal and STOP status. Reopen the current scope and
+-   authority sources.
+-2. Run `provenant reconcile` after an interruption or when task state may be
+-   stale. Inspect `provenant lanes` and the relevant Fabric tasks before
+-   selecting work.
+-3. Dispatch bounded work through `fabric_run` (`op: submit`) and `orchestrate`.
+-   Use Fabric tasks for assignment, coordination, and results. `orchestrate`
+-   owns routing, topology, and review requirements.
+-4. Inspect returned work with `provenant output`; verify artifacts and checks
+-   before treating a task as complete. Route changes through `implement` or
+-   `deliver` as required.
+-5. Respect bounded retry and escalation rules from the owning lifecycle. Do
+-   not bypass a user gate, widen the build ceiling, or infer authority from a
+-   worker's result.
+-6. When work is interrupted, use `provenant reconcile --id RUN`, then resume
+-   the exact attempt with `fabric_run`'s `resume` operation
+-   (`target: { attempt }`, `expected_generation: 0`, `operation_id`, `prompt`).
+-   `expected_generation` counts earlier continuations, so pass 0; it is not the
+-   attempt record's `generation`. Preserve partial outputs and verify the
+-   target before retrying.
+-7. Before compaction or a substantial handoff, save a bounded Markdown
+-   checkpoint for the actual host session with
+-   `provenant workflow session save <session-id> --file <checkpoint.md>`.
+-   Include authority/evidence references, verified progress, next actions,
+-   blockers, and a resume trigger.
+-8. If the run has no eligible or active work, follow run admission and pause
+-   behavior. Report the waiting condition and resume trigger. Do not label the
+-   mission complete or change `STATUS`; only the user can stop it.
+-
+-## Mission evidence and STOP
+-
+-Keep durable project knowledge in its existing owner. Run lanes and Fabric
+-retain live task state and results; a session checkpoint carries only the
+-context needed to resume one host session. SessionStart injects only the
+-checkpoint for its exact key, or an explicit missing/stale status. PreCompact
+-reports whether that checkpoint needs saving. Neither hook expands authority
+-or selects a latest file.
+-
+-When the user sets `STATUS: STOP`, reconcile current work, verify the outcome,
+-and provide a concise handoff with completed evidence, remaining work, and any
+-unresolved gate. Do not close the mission because the current frontier is dry.
+-External actions retain their own user gates.
+-
+-## References
+-
+-Read [state-contract.md](references/state-contract.md) for state ownership,
+-[operating-loop.md](references/operating-loop.md) for the run/Fabric work loop,
+-[recovery-and-cadence.md](references/recovery-and-cadence.md) for interruption
+-and idle handling, and [assumptions-and-steering.md](references/assumptions-and-steering.md)
+-for decisions made within an approved authority envelope.
+-
+-Use the [Codex operating reference](references/codex-operator.md),
+-[cross-family review reference](references/cross-family-review.md), and the
+-[goal](templates/GOAL.template.md), [state](templates/STATE.template.md),
+-[handoff](templates/HANDOFF.template.md), and
+-[README](templates/README.template.md) templates when preparing those artifacts.
++---
++name: autopilot
++description: "Use when an open-ended mission must continue across sessions until the user says STOP. Use orchestrate for bounded waves and the owning skills for decisions and changes. Not for bounded delivery work."
++---
++
++# Autopilot
++
++Delegate bounded work to `orchestrate` and decisions or changes to their
++owning skills. The run and Fabric own execution state; keep mission goals and
++authority clear without a second queue or journal.
++
++The mission remains open until the user sets `STATUS: STOP` in its goal. An
++empty lane list or an idle run means there is no eligible work now; it does not
++mean the mission is complete. Record what event can resume work, end the current
++invocation, and leave the mission open.
++
++## Entry gate
++
++Use autopilot only when the work is open-ended, spans multiple work waves or
++sessions, and the user has set an explicit STOP gate. Otherwise use a bounded
++skill such as `orchestrate`, `implement`, or `deliver`.
++
++Before proceeding, read the goal, current project instructions, scope and
++authority, and the current owner records. Stop for missing authority or a
++one-way-door decision. Keep other in-scope work moving where it is independent.
++
++## Operating loop
++
++1. Check the user-owned goal and STOP status. Reopen the current scope and
++   authority sources.
++2. Run `provenant reconcile` after an interruption or when task state may be
++   stale. Inspect `provenant lanes` and the relevant Fabric tasks before
++   selecting work.
++3. Dispatch bounded work through `fabric_run` (`op: submit`) and `orchestrate`.
++   Use Fabric tasks for assignment, coordination, and results. `orchestrate`
++   owns routing, topology, and review requirements.
++4. Inspect returned work with `provenant output`; verify artifacts and checks
++   before treating a task as complete. Route changes through `implement` or
++   `deliver` as required.
++5. Respect bounded retry and escalation rules from the owning lifecycle. Do
++   not bypass a user gate, widen the build ceiling, or infer authority from a
++   worker's result.
++6. After interruption, reconcile and resume the exact attempt following
++   [recovery](references/recovery-and-cadence.md#interruption-and-resume).
++   Preserve partial outputs, verify the target and use `expected_generation: 0`.
++7. Before compaction or a substantial handoff, save a bounded Markdown
++   checkpoint for the host session with
++   `provenant workflow session save <session-id> --file <checkpoint.md>`.
++   Include authority/evidence references, verified progress, next actions,
++   blockers, and a resume trigger.
++8. If the run has no eligible or active work, follow run admission and pause
++   behavior. Report the waiting condition and resume trigger. Do not label the
++   mission complete or change `STATUS`; only the user can stop it.
++
++## Mission evidence and STOP
++
++Keep durable project knowledge with its existing owner and live state in run
++lanes and Fabric. Apply `session` for keyed checkpoints: hooks neither expand
++authority nor select another session's latest file.
++
++When the user sets `STATUS: STOP`, reconcile current work, verify the outcome,
++and provide a concise handoff with completed evidence, remaining work, and any
++unresolved gate. Do not close the mission because the current frontier is dry.
++External actions retain their own user gates.
++
++## References
++
++Read [state-contract.md](references/state-contract.md) for state ownership,
++[operating-loop.md](references/operating-loop.md) for the run/Fabric work loop,
++[recovery-and-cadence.md](references/recovery-and-cadence.md) for interruption
++and idle handling, and [assumptions-and-steering.md](references/assumptions-and-steering.md)
++for decisions made within an approved authority envelope.
++
++Use the [Codex operating reference](references/codex-operator.md),
++[cross-family review reference](references/cross-family-review.md), and the
++[goal](templates/GOAL.template.md), [state](templates/STATE.template.md),
++[handoff](templates/HANDOFF.template.md), and
++[README](templates/README.template.md) templates when preparing those artifacts.
+diff --git a/skills/autopilot/references/recovery-and-cadence.md b/skills/autopilot/references/recovery-and-cadence.md
+--- a/skills/autopilot/references/recovery-and-cadence.md
++++ b/skills/autopilot/references/recovery-and-cadence.md
+@@ -1,51 +1,53 @@
+-# Recovery and cadence
+-
+-Use the run and Fabric as the source of live execution state. Session text may
+-be compacted or lost; work is recoverable through the run's task records and
+-outputs, with a short keyed Markdown checkpoint for human-readable context.
+-
+-## Interruption and resume
+-
+-After a crash, context loss, or uncertain dispatch:
+-
+-1. Run `provenant reconcile` to recover queued or orphaned work.
+-2. Inspect `provenant lanes` and the related Fabric tasks.
+-3. Use `fabric_run` `resume` (`expected_generation: 0`) to continue the attempt
+-   in a new run that has it as parent. On `Conflict`, read the target's
+-   `fabric_run` `status`. If its `state` is not `terminal`, wait and retry. If
+-   you are retrying your own resume, repeat it with the same `operation_id`,
+-   prompt and target; the replay returns the existing continuation, including on
+-   a peer. Otherwise use `fabric_run` `list` (local host only) and target the
+-   attempt whose `retry_of` is the target. Use a fresh `operation_id` only when
+-   the ID was reused with a different prompt. Read task outputs and verify the
+-   exact target before repeating any work.
+-4. Preserve useful partial outputs. Retry only the failed or missing work, and
+-   stay within the retry bound owned by the relevant lifecycle.
+-5. Record the blocker, evidence, and next trigger in the host-session
+-   checkpoint when it will help a later resume.
+-
+-Do not relaunch work merely because the current conversation lacks a result.
+-Do not treat a worker's success message as proof; inspect its artifact and run
+-the required objective checks. An unavailable provider, failed task, and
+-unverified result remain distinct states.
+-
+-## Cadence and idle work
+-
+-Respect run-owned admission, wait, and pause behavior. Do not poll unchanged
+-state, busy-dispatch into a known limit, or invent work to keep an iteration
+-active. If no eligible or active work remains, describe the waiting condition
+-and what event can resume it, then end the current invocation. This does not
+-complete or close the mission. The mission remains open until the user sets
+-`STATUS: STOP`.
+-
+-When new instructions, a gate answer, external completion, or material change
+-arrives, reconcile the run before assigning work. Keep the user-visible status
+-accurate and preserve the evidence for any residual.
+-
+-## User STOP and handoff
+-
+-Check the user-owned goal each iteration. Only the user may set `STATUS: STOP`.
+-After that instruction, reconcile active work, verify completed artifacts and
+-checks, and provide a handoff listing evidence, remaining work, blockers, and
+-the next owner. A dry frontier, a successful task, or an idle run is never a
+-substitute for STOP.
++# Recovery and cadence
++
++Use the run and Fabric as the source of live execution state. Session text may
++be compacted or lost; work is recoverable through the run's task records and
++outputs, with a short keyed Markdown checkpoint for human-readable context.
++
++## Interruption and resume
++
++After a crash, context loss, or uncertain dispatch:
++
++1. Run `provenant reconcile --id RUN` to recover queued or orphaned work.
++2. Inspect `provenant lanes` and the related Fabric tasks.
++3. Use `fabric_run` `resume` (`target: { attempt }`,
++   `expected_generation: 0`, `operation_id`, `prompt`) to continue the attempt
++   in a new run that has it as parent. `expected_generation` counts earlier
++   continuations, not the attempt record's `generation`. Pass 0. On `Conflict`, read the target's
++   `fabric_run` `status`. If its `state` is not `terminal`, wait and retry. If
++   you are retrying your own resume, repeat it with the same `operation_id`,
++   prompt and target; the replay returns the existing continuation, including on
++   a peer. Otherwise use `fabric_run` `list` (local host only) and target the
++   attempt whose `retry_of` is the target. Use a fresh `operation_id` only when
++   the ID was reused with a different prompt. Read task outputs and verify the
++   exact target before repeating any work.
++4. Preserve useful partial outputs. Retry only the failed or missing work, and
++   stay within the retry bound owned by the relevant lifecycle.
++5. Record the blocker, evidence, and next trigger in the host-session
++   checkpoint when it will help a later resume.
++
++Do not relaunch work merely because the current conversation lacks a result.
++Do not treat a worker's success message as proof; inspect its artifact and run
++the required objective checks. An unavailable provider, failed task, and
++unverified result remain distinct states.
++
++## Cadence and idle work
++
++Respect run-owned admission, wait, and pause behavior. Do not poll unchanged
++state, busy-dispatch into a known limit, or invent work to keep an iteration
++active. If no eligible or active work remains, describe the waiting condition
++and what event can resume it, then end the current invocation. This does not
++complete or close the mission. The mission remains open until the user sets
++`STATUS: STOP`.
++
++When new instructions, a gate answer, external completion, or material change
++arrives, reconcile the run before assigning work. Keep the user-visible status
++accurate and preserve the evidence for any residual.
++
++## User STOP and handoff
++
++Check the user-owned goal each iteration. Only the user may set `STATUS: STOP`.
++After that instruction, reconcile active work, verify completed artifacts and
++checks, and provide a handoff listing evidence, remaining work, blockers, and
++the next owner. A dry frontier, a successful task, or an idle run is never a
++substitute for STOP.
+diff --git a/skills/code-review/SKILL.md b/skills/code-review/SKILL.md
+--- a/skills/code-review/SKILL.md
++++ b/skills/code-review/SKILL.md
+@@ -1,76 +1,70 @@
+----
+-name: code-review
+-description: "Use for read-only source review of PRs, diffs, commits, migrations and refactors through dependencies. Not for root cause (diagnose), fixes (implement) or browser/UX review (ui-ux-design)."
+----
+-
+-# Code review
+-
+-Review is source-read-only unless the user separately authorises fixes. A
+-reviewer may write compressed findings and traces only to an assigned
+-artifact directory. The diff is the entry point, not the boundary. Judge the
+-resulting system, not the changed lines alone.
+-
+-## Review
+-
+-1. Read project instructions and preserve the requested scope and output
+-   contract. Briefs carry the target and rubric, never the hypothesis or
+-   verdict; see [review outcome](references/finding-contract.md#review-outcome).
+-2. Establish the change intent from the spec, issue, tests, commit message, or
+-   user request. Mark unclear intent instead of inventing it.
+-3. Trace the affected dependency cone: full touched files, live callers/
+-   consumers, exports, canonical owners, tests, configuration, migrations,
+-   persistence boundaries, dependency/lock changes, and generated artefacts.
+-   Record inspected/excluded surfaces; unavailable context stays `unknown`.
+-4. Select review lenses from the task/risk profile. Correctness/spec alignment
+-   is mandatory; add security/privacy, data/concurrency,
+-   performance/reliability, tests, architecture, readability, UX/accessibility
+-   or operations only when activated by the dependency cone.
+-5. Select independent reviewers under the `HARNESS.md` Review ladder;
+-   `orchestrate` owns their families and scheduling. Routine work needs only
+-   the chair and objective checks. Substantial work adds one independent
+-   review; crucial work needs two with distinct lenses, and terminal adds an
+-   adversarial lens. Record blockers when the required cross-family coverage
+-   is unavailable. For a council review, challenge anonymised claims before
+-   a fresh reduction. Never rank prose or majority-vote findings.
+-   `provenant config show` sets `review.*` above that floor.
+-6. Review the design delta. Look for duplicated ownership, scattered flags,
+-   nullable modes, casts hiding invariants, thin wrappers, parallel flows, and
+-   abstractions adding concepts without reducing complexity.
+-7. Ask whether a proven reframe could delete branches, state, layers, or
+-   duplicated flows. More than 1,000 lines warrants inspection, not a finding.
+-   Report a concrete cohesion, ownership, reviewability or change-risk defect.
+-8. Check tests and verification against the acceptance criteria. Confirm the
+-   trajectory: relevant deterministic checks ran and their results are
+-   available. Never infer coverage from a green summary alone.
+-9. Report only high-confidence, actionable findings. Return `clean` when no
+-   genuine defect exists and required review coverage is complete.
+-
+-Load [review-lenses.md](references/review-lenses.md) for the detailed inspection
+-questions, [multi-agent-review.md](references/multi-agent-review.md) for lens
+-fan-out/council reduction, and [finding-contract.md](references/finding-contract.md)
+-before writing findings.
+-
+-## Boundaries
+-
+-- `orchestrate` chooses reviewer topology, families, and waves. This skill
+-  defines what each reviewer inspects and the independence/reduction contract.
+-- `diagnose` owns reproduction and root cause for known broken behaviour.
+-- `implement` owns authorised fixes and bounded re-review; `tdd` or `refactor`
+-  may supply the method. Do not mutate source or Git state during review: no
+-  Git write verbs (`orchestrate` lists them); read other refs with `git show`.
+-- Artifact-only authority permits named outputs under the assigned run
+-  directory; it does not permit arbitrary repo-root scratch. Use the session
+-  scratchpad when no run directory exists. Never redirect a command
+-  over a wildcard/list that can include its own growing output; keep
+-  captures bounded.
+-- Language, framework, UI, security, and project skills add specialised lenses;
+-  do not repeat their doctrine here. For a rendered-UI change, look at light
+-  and dark desktop captures of the changed surfaces before the verdict
+-  (`ui-ux-design`).
+-- Before aligning a looser validator with a stricter one, search tests for the
+-  permissive values; they may be a designed route into a rejection path.
+-- A structural alternative blocks only when tied to a present defect or
+-  material regression with a safer, validated design. Attractive redesign
+-  alone is not a finding.
+-
+-Reference eval cases (not run by CI): [discipline cases](evals/discipline_cases.yaml).
++---
++name: code-review
++description: "Use for read-only source review of PRs, diffs, commits, migrations and refactors through dependencies. Not for root cause (diagnose), fixes (implement) or browser/UX review (ui-ux-design)."
++---
++
++# Code review
++
++Review is source-read-only unless fixes are separately authorised. Write
++findings and traces only to the assigned artifact directory. Trace beyond the
++diff and judge the resulting system.
++
++## Review
++
++1. Read project instructions and preserve the requested scope and output
++   contract. Briefs carry the target and rubric, never the hypothesis or
++   verdict; see [review outcome](references/finding-contract.md#review-outcome).
++2. Establish the change intent from the spec, issue, tests, commit message, or
++   user request. Mark unclear intent instead of inventing it.
++3. Trace the affected dependency cone: full touched files, live callers/
++   consumers, exports, canonical owners, tests, configuration, migrations,
++   persistence boundaries, dependency/lock changes, and generated artefacts.
++   Record inspected/excluded surfaces; unavailable context stays `unknown`.
++4. Select review lenses from the task/risk profile. Correctness/spec alignment
++   is mandatory; add security/privacy, data/concurrency,
++   performance/reliability, tests, architecture, readability, UX/accessibility
++   or operations only when activated by the dependency cone.
++5. Follow the `HARNESS.md` Review ladder: routine needs chair and checks;
++   substantial adds one independent review; crucial needs two distinct lenses;
++   terminal adds an adversarial lens. `orchestrate` owns families/scheduling.
++   Record unavailable cross-family coverage. Councils challenge anonymised
++   claims before fresh reduction; never rank prose or majority-vote.
++   `provenant config show` sets `review.*` above that floor.
++6. Review the design delta. Look for duplicated ownership, scattered flags,
++   nullable modes, casts hiding invariants, thin wrappers, parallel flows, and
++   abstractions adding concepts without reducing complexity.
++7. Ask whether a proven reframe could delete branches, state, layers, or
++   duplicated flows. More than 1,000 lines warrants inspection, not a finding.
++   Report a concrete cohesion, ownership, reviewability or change-risk defect.
++8. Check tests and verification against the acceptance criteria. Confirm the
++   trajectory: relevant deterministic checks ran and their results are
++   available. Never infer coverage from a green summary alone.
++9. Report only high-confidence, actionable findings. Return `clean` when no
++   defect exists and required review coverage is complete.
++
++Load [review-lenses.md](references/review-lenses.md) for the detailed inspection
++questions, [multi-agent-review.md](references/multi-agent-review.md) for lens
++fan-out/council reduction, and [finding-contract.md](references/finding-contract.md)
++before writing findings.
++
++## Boundaries
++
++- `orchestrate` chooses reviewer topology, families, and waves. This skill
++  defines what each reviewer inspects and the independence/reduction contract.
++- `diagnose` owns reproduction and root cause for known broken behaviour.
++- `implement` owns authorised fixes and bounded re-review; `tdd` or `refactor`
++  may supply the method. Do not mutate source or Git state during review: no
++  Git write verbs (`orchestrate` lists them); read other refs with `git show`.
++- Artifact-only authority permits assigned run outputs, not repo-root scratch.
++  Without a run directory, use the session scratchpad. Bound captures; never
++  redirect over a wildcard/list that could include its own output.
++- Domain/project skills supply specialised lenses. For rendered-UI changes,
++  inspect light and dark desktop captures of changed surfaces before the
++  verdict (`ui-ux-design`).
++- Before aligning a looser validator with a stricter one, search tests for the
++  permissive values; they may be a designed route into a rejection path.
++- A structural alternative blocks only when tied to a defect or
++  material regression with a safer, validated design. Attractive redesign
++  alone is not a finding.
++
++Reference eval cases (not run by CI): [discipline cases](evals/discipline_cases.yaml).
+diff --git a/skills/engineering-docs/SKILL.md b/skills/engineering-docs/SKILL.md
+--- a/skills/engineering-docs/SKILL.md
++++ b/skills/engineering-docs/SKILL.md
+@@ -1,79 +1,68 @@
+----
+-name: engineering-docs
+-description: "Use for creating, placing, indexing, updating, or archiving engineering docs and docs structures. Not for prose-only rewriting or session continuity; use engineering-writing or session."
+----
+-
+-# Engineering docs
+-
+-Treat docs as deliverables. Load engineering-writing for substantial prose;
+-this skill owns placement and decision lifecycle.
+-
+-Read `Repository process` first. If absent, use an unambiguous existing owner
+-or propose paths; never invent authority. In `issue-tracker`, parent issues own
+-change scope, stories and current status. Docs own durable intent, decisions
+-and invariants. In `project-docs`, use its named home. Do not create a second
+-story or status projection.
+-Link-only files are unavailable or cross-tracker fallbacks.
+-
+-## Default homes
+-
+-Use these only with setup-repo write authority; advisory mode proposes paths.
+-
+-| Type | Home | Convention |
+-|---|---|---|
+-| Invariant specifications | `docs/specs/` | non-derivable intent; semantic paths |
+-| Generated reference | `docs/reference/` | code-derived inventories; generator command on first line |
+-| Architectural decisions | `docs/adr/` | current decisions; indexed |
+-| Architecture map | `docs/ARCHITECTURE.md` | current boundaries; link ADRs |
+-| Runbooks | `docs/runbooks/` | operator steps and verification |
+-| Open-decision register | declared project-docs path | never in issue-tracker mode |
+-| Diagrams | owning doc or `docs/diagrams/` | separate only for distinct ownership or reuse |
+-| Threat models | `docs/threat-models/` | STRIDE/LINDDUN |
+-| Continuity / archive | declared owner / `docs/archive/` | session owns handoff lifecycle; index archives |
+-
+-## Binding rules
+-
+-- **Link or generate, do not restate.** Each domain keeps its natural owner;
+-  link code, schemas, tests and other docs. Regenerate derived reference, never
+-  hand-edit it. Specs retain intent, prohibitions and invariants.
+-- **Edit in place, do not append history.** A living doc states the current
+-  truth: rewrite or delete superseded text in the same change. Never add
+-  dated `Update:`, `Changed on`, "as of" or progress entries to a spec,
+-  runbook, README or ADR; git log and the PR hold the narrative. A diff that
+-  only adds lines to a living doc needs a reason. Changelogs and release notes
+-  are the exception, since recording change is their job.
+-- Specs and runbooks carry `Owner:` and `Anchor:` lines; see
+-  [placement](references/placement.md).
+-- Verify cited decision IDs and repair indexes and inbound links together.
+-  Keep ADR IDs stable; gaps left by retirement are deliberate.
+-  Keep other numbered directories contiguous.
+-- Quote and link frozen legal, compliance or gate wording.
+-- Review bloat by owner, audience and lifecycle. Merge duplicate truths and
+-  tiny files changed together; make claim → owner → evidence reachable in
+-  three hops. Session residue belongs in session.
+-  A doc past about 15 KB signals review, not an automatic split.
+-
+-## Living ADRs
+-
+-Record only architecture: crate/module and trust boundaries, protocols,
+-storage and major dependencies. Amend accepted ADRs in place to state the
+-current decision, keeping one `Changed: YYYY-MM-DD, #issue` line and replacing it on each
+-amendment. Git log holds earlier ones. Merge or delete superseded ADRs and fix inbound links; index live
+-decisions only. Move process into its skill or constitution, and deferrals
+-or product calls into their issues. Do not leave compatibility stubs.
+-
+-## Instruction files
+-
+-The root file routes. Add nested files only at real boundaries, after an
+-observed failure; keep each 10 to 40 lines. `AGENTS.md` is canonical and each
+-`CLAUDE.md` contains exactly `@AGENTS.md` on one line. Re-check placement
+-and loading on model upgrades. Do not infer loading behaviour from filenames.
+-
+-## Diagrams and retirement
+-
+-Use Mermaid by default; apply [diagram quality](references/diagram-quality.md),
+-render and visually inspect before commit. Use d2-diagrams for justified fixed
+-layouts. Archive retired substantive docs with owner authority, index them and
+-repair references. Outside ADRs, keep a tombstone only for an external link or
+-unsupported consumer that needs it. ADR retirement follows the living policy
+-above.
++---
++name: engineering-docs
++description: "Use for creating, placing, indexing, updating, or archiving engineering docs and docs structures. Not for prose-only rewriting or session continuity; use engineering-writing or session."
++---
++
++# Engineering docs
++
++Treat docs as deliverables. Load engineering-writing for substantial prose;
++this skill owns placement and decision lifecycle.
++
++Read `Repository process` first. If absent, use an unambiguous existing owner
++or propose paths; never invent authority. In `issue-tracker`, parent issues own
++change scope, stories and current status. Docs own durable intent, decisions
++and invariants. In `project-docs`, use its named home. Do not create a second
++story or status projection.
++Link-only files are unavailable or cross-tracker fallbacks.
++
++## Default homes
++
++Use [placement defaults](references/placement.md#default-homes) only with
++setup-repo write authority; advisory mode proposes paths.
++
++## Binding rules
++
++- **Link or generate, do not restate.** Each domain keeps its natural owner;
++  link code, schemas, tests and other docs. Regenerate derived reference, never
++  hand-edit it. Specs retain intent, prohibitions and invariants.
++- **Edit in place, do not append history.** A living doc states the current
++  truth: rewrite or delete superseded text in the same change. Never add
++  dated `Update:`, `Changed on`, "as of" or progress entries to a spec,
++  runbook, README or ADR; git log and the PR hold the narrative. A diff that
++  only adds lines to a living doc needs a reason. Changelogs and release notes
++  are the exception, since recording change is their job.
++- Specs and runbooks carry `Owner:` and `Anchor:` lines; see
++  [placement](references/placement.md).
++- Verify cited decision IDs and repair indexes and inbound links together.
++  Keep ADR IDs stable; gaps left by retirement are deliberate.
++  Keep other numbered directories contiguous.
++- Quote and link frozen legal, compliance or gate wording.
++- Review bloat by owner, audience and lifecycle. Merge duplicate truths and
++  tiny files changed together; make claim → owner → evidence reachable in
++  three hops. Session residue belongs in session.
++  A doc past about 15 KB signals review, not an automatic split.
++
++## Living ADRs
++
++Record only architecture: crate/module and trust boundaries, protocols,
++storage and major dependencies. Amend accepted ADRs in place to state the
++current decision, keeping one `Changed: YYYY-MM-DD, #issue` line and replacing it on each
++amendment. Git log holds earlier ones. Merge or delete superseded ADRs and fix inbound links; index live
++decisions only. Move process into its skill or constitution, and deferrals
++or product calls into their issues. Do not leave compatibility stubs.
++
++## Instruction files
++
++The root file routes. Add nested files only at real boundaries, after an
++observed failure; keep each 10 to 40 lines. `AGENTS.md` is canonical and each
++`CLAUDE.md` contains exactly `@AGENTS.md` on one line. Re-check placement
++and loading on model upgrades. Do not infer loading behaviour from filenames.
++
++## Diagrams and retirement
++
++Use Mermaid by default; apply [diagram quality](references/diagram-quality.md),
++render and visually inspect before commit. Use d2-diagrams for justified fixed
++layouts. Archive retired substantive docs with owner authority, index them and
++repair references. Outside ADRs, keep a tombstone only for an external link or
++unsupported consumer that needs it. ADR retirement follows the living policy
++above.
+diff --git a/skills/evaluate/SKILL.md b/skills/evaluate/SKILL.md
+--- a/skills/evaluate/SKILL.md
++++ b/skills/evaluate/SKILL.md
+@@ -1,80 +1,70 @@
+----
+-name: evaluate
+-description: "Use for repeatable quality or safety evaluation of stochastic or judgement-bearing systems, prompts, agents, rankings, or artifacts. Not for deterministic tests or ordinary code review; use tdd or code-review."
+----
+-
+-# Evaluate
+-
+-Turn judgement into a frozen, repeatable assurance result. Deterministic
+-tests still run; this skill covers behaviour whose quality cannot be proven by
+-an exit code alone.
+-
+-## Contract
+-
+-Freeze the canonical evaluation plan before seeing results:
+-
+-- decision the evaluation informs and unacceptable failure modes;
+-- hash-bound dataset/corpus, provenance, consent or licence, data policy and
+-  holdout boundary;
+-- candidate and applicable comparator manifests, sampling paired by task,
+-  seeds, repetitions, timeouts, retries and exclusions;
+-- metric ranges, aggregation, thresholds and per-metric regression margins;
+-- deterministic preflight, rubric, blinded independent graders and
+-  disagreement handling;
+-- safety, bias, privacy and adversarial cases proportionate to risk;
+-- enclosing delivery run when this evidence supports a non-trivial outcome.
+-
+-Use [EVALUATION.template.json](templates/EVALUATION.template.json) and the
+-[receipt contract](references/receipt.md). Keep raw examples outside the hot
+-receipt; link safe relative artifacts and SHA-256 digests.
+-
+-## Run
+-
+-1. Validate fixtures, hashes, schemas and leakage controls before any judgement
+-   attempt. Deterministic failure stops or explicitly skips the frozen schedule.
+-2. Run each planned arm/family/repetition. Retain every attempt, retry and case
+-   row with actual adapter/provider/model/effort lineage and usage disposition.
+-3. Account for passes, failures, omissions, skips, exclusions, timeouts, invalid
+-   output and tool/provider errors. A retry appends; it never erases its parent.
+-4. Aggregate from retained rows. Report raw numerators/denominators,
+-   distributions and failure clusters, rather than averages alone. Schema v2
+-   supports mean aggregation only; distributions and tail analysis live in
+-   linked digest-bound evidence until another aggregation is added through a
+-   new schema version.
+-5. Blind independent graders to treatment identity. Record criterion evidence;
+-   send disagreements to a fresh adjudicator rather than majority vote.
+-   Prefer execution oracles such as tests and type checks; use model graders
+-   only for rubric items those cannot capture. Run each pairwise model
+-   judgement in both orders; it counts only when both agree, else it is a tie.
+-6. Compare with frozen thresholds and applicable arms. A post-hoc change creates
+-   a fresh run; it does not rewrite the completed evidence. A single run, or a
+-   gap below about 5 percentage points on a pass-rate-style metric or below the
+-   plan's frozen minimum effect for any other metric, never justifies a routing
+-   or preset change.
+-7. Preserve bounded failures and route product defects to `implement`, unclear
+-   requirements to `scope`, and operational regressions to `diagnose`.
+-
+-Never claim impossibility from a stochastic search: solve it exactly, or say
+-"best found in this sample".
+-
+-Before you call a receipt final, read it against this checklist:
+-
+-- `plan.digest` still matches the plan frozen before results were seen, and
+-  `plan.frozen_at` precedes the first attempt;
+-- every declared artifact resolves to a safe relative path whose live SHA-256
+-  matches its recorded digest;
+-- attempts, case rows, exclusions and grader records account for the whole
+-  frozen schedule, with no silent drops;
+-- reported aggregates recompute from the retained rows;
+-- `status` matches the threshold comparison, and `pass` is claimed only when
+-  every applicable threshold and regression margin held;
+-- the enclosing delivery run, evaluation ID and plan digest match the binding
+-  the delivery receipt records.
+-
+-`pass` is a machine assurance result for the named distribution, not general
+-safety or delivery acceptance. Attach it to the canonical delivery receipt;
+-the enclosing lifecycle combines objective checks with the review required
+-by the tier to meet acceptance. Explicit user acceptance is required only
+-for `terminal` work or when the approved scope asks for it. Unsupported receipt
+-shapes fail closed; rerun them from a freshly frozen plan instead of migrating
+-or guessing missing evidence.
++---
++name: evaluate
++description: "Use for repeatable quality or safety evaluation of stochastic or judgement-bearing systems, prompts, agents, rankings, or artifacts. Not for deterministic tests or ordinary code review; use tdd or code-review."
++---
++
++# Evaluate
++
++Turn judgement into a frozen, repeatable assurance result. Deterministic
++tests still run; this skill covers behaviour whose quality cannot be proven by
++an exit code alone.
++
++## Contract
++
++Freeze the canonical evaluation plan before seeing results:
++
++- decision the evaluation informs and unacceptable failure modes;
++- hash-bound dataset/corpus, provenance, consent or licence, data policy and
++  holdout boundary;
++- candidate and applicable comparator manifests, sampling paired by task,
++  seeds, repetitions, timeouts, retries and exclusions;
++- metric ranges, aggregation, thresholds and per-metric regression margins;
++- deterministic preflight, rubric, blinded independent graders and
++  disagreement handling;
++- safety, bias, privacy and adversarial cases proportionate to risk;
++- enclosing delivery run when this evidence supports a non-trivial outcome.
++
++Use [EVALUATION.template.json](templates/EVALUATION.template.json) and the
++[receipt contract](references/receipt.md). Keep raw examples outside the hot
++receipt; link safe relative artifacts and SHA-256 digests.
++
++## Run
++
++1. Validate fixtures, hashes, schemas and leakage controls before any judgement
++   attempt. Deterministic failure stops or explicitly skips the frozen schedule.
++2. Run each planned arm/family/repetition. Retain every attempt, retry and case
++   row with actual adapter/provider/model/effort lineage and usage disposition.
++3. Account for passes, failures, omissions, skips, exclusions, timeouts, invalid
++   output and tool/provider errors. A retry appends; it never erases its parent.
++4. Aggregate from retained rows. Report raw numerators/denominators,
++   distributions and failure clusters, rather than averages alone. Schema v2
++   supports mean aggregation only; distributions and tail analysis live in
++   linked digest-bound evidence until another aggregation is added through a
++   new schema version.
++5. Blind independent graders to treatment identity. Record criterion evidence;
++   send disagreements to a fresh adjudicator rather than majority vote.
++   Prefer execution oracles such as tests and type checks; use model graders
++   only for rubric items those cannot capture. Run each pairwise model
++   judgement in both orders; it counts only when both agree, else it is a tie.
++6. Compare with frozen thresholds and applicable arms. A post-hoc change creates
++   a fresh run; it does not rewrite the completed evidence. A single run, or a
++   gap below about 5 percentage points on a pass-rate-style metric or below the
++   plan's frozen minimum effect for any other metric, never justifies a routing
++   or preset change.
++7. Preserve bounded failures and route product defects to `implement`, unclear
++   requirements to `scope`, and operational regressions to `diagnose`.
++
++Never claim impossibility from a stochastic search: solve it exactly, or say
++"best found in this sample".
++
++Before finalising, apply the [receipt checklist](references/receipt.md#final-checklist):
++verify frozen anchors, safe paths and live digests, complete accounting,
++recomputable aggregates, thresholds and delivery binding.
++
++`pass` is a machine assurance result for the named distribution, not general
++safety or delivery acceptance. Attach it to the canonical delivery receipt;
++the enclosing lifecycle combines objective checks with the review required
++by the tier to meet acceptance. Explicit user acceptance is required only
++for `terminal` work or when the approved scope asks for it. Unsupported receipt
++shapes fail closed; rerun them from a freshly frozen plan instead of migrating
++or guessing missing evidence.
+diff --git a/skills/legal-writing/SKILL.md b/skills/legal-writing/SKILL.md
+--- a/skills/legal-writing/SKILL.md
++++ b/skills/legal-writing/SKILL.md
+@@ -1,78 +1,77 @@
+----
+-name: legal-writing
+-description: "Use for Australian legal drafting, review, condensation, source checks, decision overviews and correspondence. Not for academic/general prose (natural-writing) or engineering (engineering-writing)."
+----
+-
+-# Australian legal writing
+-
+-General Australian legal style, document-shape and source-discipline layer.
+-Stricter project and forum instructions override it. This is drafting
+-assistance, not legal advice: verify current law, forms and procedure against
+-official sources and retain qualified or human review for filing-facing work.
+-
+-This skill is a specialisation of the `natural-writing` hub. The hub owns the
+-Australian English default, the anti-AI taxonomy and the condense pass; this
+-skill owns jurisdiction, forum, instrument and filing-facing rules. The Legal
+-Function Test is this skill's own claim-classification scheme and does not map
+-to the hub's observed/inferred evidence schema.
+-
+-## Scope
+-
+-Use this skill when the output is an Australian legal instrument, filing-facing
+-text or legal correspondence: court and tribunal forms, affidavits, statutory
+-declarations, witness statements, submissions and outlines, proposed orders,
+-chronologies, annexure indexes, deeds and agreements, letters of demand and
+-pre-action correspondence, registry and party correspondence, non-filing legal
+-decision overviews, and AGLC4 citation.
+-
+-Legal subject matter alone is not the trigger. An article, chapter, summary or
+-plain-language explanation about law goes to `natural-writing`; a spec, README,
+-runbook or other engineering artefact goes to `engineering-writing`. This skill
+-joins either as a companion where legal status, authority, forum wording or
+-source altitude must survive the rewrite.
+-
+-## Workflow
+-
+-1. Read project instructions, live matter state and source-boundary rules. Load
+-   the matching jurisdiction, forum and document skill where one exists.
+-2. Choose `draft`, `rewrite`, `condense`, `diagnose`, `correspondence`,
+-   `decision-overview` or `final-scrub`. Load [legal concision](references/legal-concision-and-anti-ai.md)
+-   for all prose; the reference map in
+-   [validation-checklists.md](references/validation-checklists.md) gives the
+-   remaining reference each mode, document type or content type needs.
+-3. Classify each sentence by legal function before polishing. Affidavits and
+-   witness statements give evidence; submissions argue; orders command;
+-   chronologies organise; internal notes analyse; correspondence communicates.
+-   Move wrong-home material first.
+-4. Lock legal status, source anchors, exact quotations, authorities, labels,
+-   offer terms, non-admission/non-waiver wording, deadlines, attachments,
+-   redactions and user-authority conditions.
+-5. Draft the minimum complete text in Australian English. Front-load the relief,
+-   request, answer or next step; use one proposition per paragraph, one home per
+-   point and exact pinpoints. Cut padding, duplicate history, intensifiers and
+-   internal agent language.
+-
+-Every filing-facing fact needs a verified real source anchor. Never humanise by
+-weakening a threshold, deleting an anchor, casualising court language or
+-changing forum wording.
+-
+-Never invent or silently alter an authority, instrument, finding, rule title,
+-forum term or decision-maker label. Verify canonical sources, not indexes,
+-summaries, OCR, renders or agent notes. Preserve contentions as contentions and
+-hold the register the procedural stage requires. Protective-order,
+-police-issued or other safety material remains a dated source with the legal
+-effect its verified text supports, not a finding.
+-
+-For substantial condensation or relocation, run the deterministic token
+-set-diff and an independent qualitative pass. Stop before losing an anchor,
+-qualification, disputed status, redaction, label, amount, date, forum wording
+-or authority condition. Final scrub adds no new argument, fact, authority,
+-history or courtesy closer.
+-
+-```sh
+-provenant check writing path/to/source --rules legal
+-```
+-
+-Lint is a guardrail; source checks, forum skills, render checks and user gates
+-still apply. Changes to filing-facing, source-boundary or lint rules require the
+-owning harness's independent review gate.
++---
++name: legal-writing
++description: "Use for Australian legal drafting, review, condensation, source checks, decision overviews and correspondence. Not for academic/general prose (natural-writing) or engineering (engineering-writing)."
++---
++
++# Australian legal writing
++
++Stricter project and forum instructions prevail. Verify current law, forms
++and procedure against official sources; retain qualified or human review for
++filing-facing work. This is drafting assistance, not legal advice.
++
++This skill is a specialisation of the `natural-writing` hub. The hub owns the
++Australian English default, the anti-AI taxonomy and the condense pass; this
++skill owns jurisdiction, forum, instrument and filing-facing rules. The Legal
++Function Test is this skill's own claim-classification scheme and does not map
++to the hub's observed/inferred evidence schema.
++
++## Scope
++
++Use this skill when the output is an Australian legal instrument, filing-facing
++text or legal correspondence: court and tribunal forms, affidavits, statutory
++declarations, witness statements, submissions and outlines, proposed orders,
++chronologies, annexure indexes, deeds and agreements, letters of demand and
++pre-action correspondence, registry and party correspondence, non-filing legal
++decision overviews, and AGLC4 citation.
++
++Legal subject matter alone is not the trigger. An article, chapter, summary or
++plain-language explanation about law goes to `natural-writing`; a spec, README,
++runbook or other engineering artefact goes to `engineering-writing`. This skill
++joins either as a companion where legal status, authority, forum wording or
++source altitude must survive the rewrite.
++
++## Workflow
++
++1. Read project instructions, live matter state and source-boundary rules. Load
++   the matching jurisdiction, forum and document skill where one exists.
++2. Choose `draft`, `rewrite`, `condense`, `diagnose`, `correspondence`,
++   `decision-overview` or `final-scrub`. Load [legal concision](references/legal-concision-and-anti-ai.md)
++   for all prose; the reference map in
++   [validation-checklists.md](references/validation-checklists.md) maps
++   references by mode, document and content type.
++3. Classify each sentence by legal function before polishing. Affidavits and
++   witness statements give evidence; submissions argue; orders command;
++   chronologies organise; internal notes analyse; correspondence communicates.
++   Move wrong-home material first.
++4. Lock legal status, source anchors, exact quotations, authorities, labels,
++   offer terms, non-admission/non-waiver wording, deadlines, attachments,
++   redactions and user-authority conditions.
++5. Draft the minimum complete text in Australian English. Front-load the relief,
++   request, answer or next step; use one proposition per paragraph, one home per
++   point and exact pinpoints. Cut padding, duplicate history, intensifiers and
++   internal agent language.
++
++Every filing-facing fact needs a verified real source anchor. Never humanise by
++weakening a threshold, deleting an anchor, casualising court language or
++changing forum wording.
++
++Never invent or silently alter an authority, instrument, finding, rule title,
++forum term or decision-maker label. Verify canonical sources, not indexes,
++summaries, OCR, renders or agent notes. Preserve contentions as contentions and
++hold the register the procedural stage requires. Protective-order,
++police-issued or other safety material remains a dated source with the legal
++effect its verified text supports, not a finding.
++
++For substantial condensation or relocation, run the deterministic token
++set-diff and an independent qualitative pass. Stop before losing an anchor,
++qualification, disputed status, redaction, label, amount, date, forum wording
++or authority condition. Final scrub adds no new argument, fact, authority,
++history or courtesy closer.
++
++```sh
++provenant check writing path/to/source --rules legal
++```
++
++Lint is a guardrail; source checks, forum skills, render checks and user gates
++still apply. Changes to filing-facing, source-boundary or lint rules require the
++owning harness's independent review gate.
+diff --git a/skills/setup-repo/SKILL.md b/skills/setup-repo/SKILL.md
+--- a/skills/setup-repo/SKILL.md
++++ b/skills/setup-repo/SKILL.md
+@@ -1,90 +1,90 @@
+----
+-name: setup-repo
+-description: "Use when asked to set up or scaffold a repository's process, labels, tracker, branch ruleset, issue forms, docs layout, work-item runbook, or board. Not for this repo's own day-to-day GitHub mechanics; use its runbook."
+----
+-
+-# Setup
+-
+-## User gate first
+-
+-Before any write, user approves a plan naming the target, exact
+-keep/create/adapt/conflict diff and, for GitHub, the Project board. Confirm
+-permission; if the target is unnamed, ask instead of inferring it from cwd.
+-
+-## Inspect and classify
+-
+-Read the target's `Repository process` declaration first, then inventory
+-`MAINTAINING.md`, docs layout, `.github/**`, the work-item runbook and board.
+-Classify each action as **keep (exact match)**, **create
+-(absent)**, **adapt (compatible; propose the merge)** or **conflict (semantic
+-mismatch; STOP and ask)**. Never overwrite; amend the declarations block per
+-heading. A re-run against an already-set-up repository must produce no diff.
+-
+-## Choose tracker
+-
+-Ask: **Use GitHub issues?** If yes, use the GitHub branch, confirming
+-the remote host before any `gh` command. If no, record the chosen tracker or
+-`none`; skip labels, ruleset, issue forms and board. Tracker-specific setup
+-remains out of scope; document the skip.
+-
+-## Declare repository process
+-
+-Amend or create the **Repository process** block in `MAINTAINING.md` from
+-[`templates/repo-declarations.md`](templates/repo-declarations.md). Record the
+-tracker choice, canonical **scope and stories** home (`issue-tracker` or
+-`project-docs`), workflow-state owner (`tracker` or `project-docs`) and pointer,
+-docs-layout homes, merge policy/authority and work-item runbook pointer. Use
+-pointers only; never duplicate runbook or policy content.
+-With `issue-tracker`, the parent issue is the canonical change scope/story home;
+-do not duplicate it. This block, not the GitHub scaffolding, is the completion gate.
+-With tracker `none`, use `project-docs` for both scope/story and workflow state.
+-
+-## Docs layout
+-
+-Ask where specs, runbooks and ADRs live. `setup-repo` owns the declaration and
+-may apply `engineering-docs`'s **Default homes** without invoking it.
+-
+-## GitHub branch: steps 1-7
+-
+-Only when the tracker is GitHub issues and the remote host is confirmed:
+-
+-1. **Labels:** copy [`templates/labels.yml`](templates/labels.yml) and
+-   [`templates/workflows-labels.yml`](templates/workflows-labels.yml) to
+-   `.github/labels.yml` and `.github/workflows/labels.yml`; warn that
+-   `skip-delete: false` prunes undeclared labels.
+-2. **Ruleset:** add the [`ci-status` aggregate](templates/ci-status-aggregate.yml),
+-   then create the ruleset per
+-   [ruleset guidance](references/ruleset-and-ci.md), confirming its app id.
+-3. **Issue forms/security:** copy [`templates/SECURITY.md`](templates/SECURITY.md)
+-   to the root or verify a valid private route. Copy
+-   [`bug.yml`](templates/ISSUE_TEMPLATE/bug.yml),
+-   [`config.yml`](templates/ISSUE_TEMPLATE/config.yml),
+-   [`feature.yml`](templates/ISSUE_TEMPLATE/feature.yml), and
+-   [`work-item.yml`](templates/ISSUE_TEMPLATE/work-item.yml) to
+-   `.github/ISSUE_TEMPLATE/`, adapting project gates, fields, owner and repo.
+-   Use feature for discovery and work-item for accepted, bounded proposals. Confirm private vulnerability
+-   reporting is enabled or replace `<private-reporting-route>` with a working
+-   confidential contact method. Publish only when the placeholder is gone and
+-   both routes work.
+-4. **PR template:** copy
+-   [`templates/pull_request_template.md`](templates/pull_request_template.md)
+-   into `.github/` and adapt evidence rows; retain decision and review sections.
+-   Merge [`templates/gitignore-agent-runs.txt`](templates/gitignore-agent-runs.txt)
+-   into the target `.gitignore` once, preserving its other rules. Local writers
+-   also add these rules to `.git/info/exclude` on first use.
+-5. **Work-item runbook:** copy [the doctrine](references/doctrine.md) to the
+-   target's declared work-item runbook path (default
+-   `docs/runbooks/github-workflow.md`), adding its mechanics; the project
+-   decides merge authority.
+-   If the repository declares a tracker command, document it in the runbook
+-   and route issue and project-item writes through that command.
+-6. **Project board:** create the [six-status board](references/project-board.md).
+-7. **CODEOWNERS/Dependabot:** adapt to the stack; the
+-   [`Dependabot` template](templates/dependabot.yml) keeps its dependency label.
+-
+-## Stop conditions
+-
+-Stop for an unnamed target, unconfirmed write permission, an unconfirmed
+-remote host before any `gh` command, replacement of an existing ruleset or
+-labels file, semantic conflict, or ambiguous `ci-status` dependencies. Ask
+-which jobs it should `needs:`.
++---
++name: setup-repo
++description: "Use when asked to set up or scaffold a repository's process, labels, tracker, branch ruleset, issue forms, docs layout, work-item runbook, or board. Not for this repo's own day-to-day GitHub mechanics; use its runbook."
++---
++
++# Setup
++
++## User gate first
++
++Before writing, obtain user approval of the target, exact
++keep/create/adapt/conflict diff and GitHub Project board. Ask for an unnamed
++target; never infer it from cwd.
++
++## Inspect and classify
++
++Read the target's `Repository process` declaration first, then inventory
++`MAINTAINING.md`, docs layout, `.github/**`, the work-item runbook and board.
++Classify each action as **keep (exact match)**, **create
++(absent)**, **adapt (compatible; propose the merge)** or **conflict (semantic
++mismatch; STOP and ask)**. Never overwrite; amend the declarations block per
++heading. A re-run against an already-set-up repository must produce no diff.
++
++## Choose tracker
++
++Ask: **Use GitHub issues?** If yes, use the GitHub branch, confirming
++the remote host before any `gh` command. If no, record the chosen tracker or
++`none`; skip labels, ruleset, issue forms and board. Tracker-specific setup
++remains out of scope; document the skip.
++
++## Declare repository process
++
++Amend or create the **Repository process** block in `MAINTAINING.md` from
++[`templates/repo-declarations.md`](templates/repo-declarations.md). Record the
++tracker choice, canonical **scope and stories** home (`issue-tracker` or
++`project-docs`), workflow-state owner (`tracker` or `project-docs`) and pointer,
++docs-layout homes, merge policy/authority and work-item runbook pointer. Use
++pointers only; never duplicate runbook or policy content.
++With `issue-tracker`, the parent issue is the canonical change scope/story home;
++do not duplicate it. This block is the completion gate.
++With tracker `none`, use `project-docs` for both scope/story and workflow state.
++
++## Docs layout
++
++Ask where specs, runbooks and ADRs live. `setup-repo` owns the declaration and
++may apply `engineering-docs`'s **Default homes** without invoking it.
++
++## GitHub branch: steps 1-7
++
++Only when the tracker is GitHub issues and the remote host is confirmed:
++
++1. **Labels:** copy [`templates/labels.yml`](templates/labels.yml) and
++   [`templates/workflows-labels.yml`](templates/workflows-labels.yml) to
++   `.github/labels.yml` and `.github/workflows/labels.yml`; warn that
++   `skip-delete: false` prunes undeclared labels.
++2. **Ruleset:** add the [`ci-status` aggregate](templates/ci-status-aggregate.yml),
++   then create the ruleset per
++   [ruleset guidance](references/ruleset-and-ci.md), confirming its app id.
++3. **Issue forms/security:** copy [`templates/SECURITY.md`](templates/SECURITY.md)
++   to the root or verify a valid private route. Copy
++   [`bug.yml`](templates/ISSUE_TEMPLATE/bug.yml),
++   [`config.yml`](templates/ISSUE_TEMPLATE/config.yml),
++   [`feature.yml`](templates/ISSUE_TEMPLATE/feature.yml), and
++   [`work-item.yml`](templates/ISSUE_TEMPLATE/work-item.yml) to
++   `.github/ISSUE_TEMPLATE/`, adapting project gates, fields, owner and repo.
++   Use feature for discovery and work-item for accepted, bounded proposals. Confirm private vulnerability
++   reporting is enabled or replace `<private-reporting-route>` with a working
++   confidential contact method. Publish only when the placeholder is gone and
++   both routes work.
++4. **PR template:** copy
++   [`templates/pull_request_template.md`](templates/pull_request_template.md)
++   into `.github/` and adapt evidence rows; retain decision and review sections.
++   Merge [`templates/gitignore-agent-runs.txt`](templates/gitignore-agent-runs.txt)
++   into the target `.gitignore` once, preserving its other rules. Local writers
++   also add these rules to `.git/info/exclude` initially.
++5. **Work-item runbook:** copy [the doctrine](references/doctrine.md) to the
++   target's declared work-item runbook path (default
++   `docs/runbooks/github-workflow.md`), adding its mechanics; the project
++   decides merge authority.
++   If the repository declares a tracker command, document it in the runbook
++   and route issue and project-item writes through that command.
++6. **Project board:** create the [six-status board](references/project-board.md).
++7. **CODEOWNERS/Dependabot:** adapt to the stack; the
++   [`Dependabot` template](templates/dependabot.yml) keeps its dependency label.
++
++## Stop conditions
++
++Stop for an unnamed target, unconfirmed write permission, an unconfirmed
++remote host before any `gh` command, replacement of an existing ruleset or
++labels file, semantic conflict, or ambiguous `ci-status` dependencies. Ask
++which jobs it should `needs:`.
+diff --git a/skills/skill-craft/SKILL.md b/skills/skill-craft/SKILL.md
+--- a/skills/skill-craft/SKILL.md
++++ b/skills/skill-craft/SKILL.md
+@@ -1,78 +1,69 @@
+----
+-name: skill-craft
+-description: "Use to audit, create or revise Agent Skills, including triggers, structure, examples and overlap. Default to read-only; edits need authority. Use the plugin tooling for packaging and implement for delivery."
+----
+-
+-# Skill craft
+-
+-A skill is a reusable, triggerable procedure, not a solved-task narrative
+-and not a place to park static reference. Every skill earns its slot on four
+-pillars: **Trigger** (fires on the right requests, stays silent on adjacent
+-ones), **Structure** (frontmatter contract, progressive disclosure, soft
+-length budgets), **Steering** (leading words and bright-line rules over
+-repeated emphasis), and **Pruning** (cutting sediment, duplication, sprawl
+-and no-ops before they ship).
+-
+-This skill has two branches and defaults to the safer one.
+-
+-- New or materially revised skill → [references/author.md](references/author.md).
+-- Assessment of an existing skill, read-only → [references/audit.md](references/audit.md).
+-- **Default with no explicit authoring request: audit.** Do not cross
+-  audit → edit without an authority envelope naming `implement` as
+-  action-owner; surface that requirement instead of silently fixing what an
+-  audit finds.
+-
+-## Shared doctrine
+-
+-Both branches follow this without restating it in two voices:
+-
+-- **Three-mode invocation:** direct audit; direct authoring under authority;
+-  or composed, where audit is a companion to a primary lifecycle owner (for
+-  example `implement`) that stays the action-owner.
+-- **Budgets:** soft ~500-word body per branch file; the standing
+-  catalogue-description lever is governed in `MAINTAINING.md`; link it,
+-  don't restate the number here.
+-- **Token model, three-tier:** always-loaded frontmatter, triggered branch
+-  body, and entrypoint references loaded at one hop. Reference documents may
+-  link to sibling references, but that depth is not recursively enforced by
+-  `provenant check harness`.
+-- **Tier placement:** a rule is applied reliably only if it sits in the
+-  always-loaded `SKILL.md` core rules. A rule buried in a reference file is
+-  skipped, because references load late and deep. When a skill keeps missing a
+-  rule the user repeats, diagnose a tier-placement bug first: hoist the rule,
+-  with concrete banned-pattern examples inline, into `SKILL.md`; do not just
+-  expand the reference.
+-- **Reuse boundary:** global skills express cross-project triggers, procedures
+-  and gates. Convert contextual values into parameters, keep examples
+-  synthetic and leave project policy local. Global promotion requires a
+-  reusable trigger, artifact, fixture and ownership boundary. When evidence is
+-  limited, keep it opt-in and provisional. Follow the repository gate in
+-  [MAINTAINING.md](../../MAINTAINING.md).
+-- **Project skills that extend a global skill** state their own hard rules, so
+-  they work without the global skill installed; name each changed default
+-  under `Project overrides:`; and keep harness and Fabric mechanics out of
+-  everything but coordination skills. Global skills stay project-agnostic.
+-- **Trigger fixtures:** positive, negative, boundary and composition cases.
+-  Each skill has at least two `near-miss` negatives (`relation: negative`,
+-  target excluded from both expected routes) that share its vocabulary but
+-  belong elsewhere. Routing-text changes re-run the held-out set.
+-- **Behaviour changes:** run the fixtures with and without the skill and record
+-  decisions, differences, model/effort and omissions as reviewer evidence.
+-  Scores are advisory; only inventory checks may fail CI.
+-- **Contract-test boundary:** a contract test protects a machine-enforced
+-  invariant, never the prose that describes it. If the invariant has no
+-  enforcing script, the correct output is either an enforcing script or
+-  nothing, not an assertion about wording.
+-- **Failure taxonomy:** name the failure, don't just gesture at quality:
+-  premature-completion, duplication, sediment, sprawl, no-op, negation-only.
+-- **Description contract:** front-load the first 250 characters with trigger
+-  words and the nearest exclusion; keep boundary-routing negation explicit
+-  (name the skill to use instead); never drop it for brevity.
+-- **Provenance:** any adaptation from a third-party source records source
+-  URL, version/commit, retrieval date and licence in the repository
+-  `THIRD_PARTY_NOTICES.md` index, with the full licence text under `LICENSES/`.
+-  See [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) for this skill's
+-  own Skill Optimizer lineage.
+-
+-Reference eval cases (not run by CI): [boundary traces](evals/boundary_trace_cases.yaml)
+-and [behaviour cases](evals/behaviour_cases.yaml).
++---
++name: skill-craft
++description: "Use to audit, create or revise Agent Skills, including triggers, structure, examples and overlap. Default to read-only; edits need authority. Use the plugin tooling for packaging and implement for delivery."
++---
++
++# Skill craft
++
++A skill is a reusable, triggerable procedure. Assess four pillars:
++**Trigger** (requests and exclusions), **Structure** (contracts and disclosure),
++**Steering** (leading words and bright-line rules), and **Pruning** (sediment,
++duplication, sprawl and no-ops). Keep solved-task narratives and static
++reference elsewhere.
++
++- New or materially revised skill → [references/author.md](references/author.md).
++- Assessment of an existing skill, read-only → [references/audit.md](references/audit.md).
++- **Default with no explicit authoring request: audit.** Do not cross
++  audit → edit without an authority envelope naming `implement` as
++  action-owner; surface that requirement instead of silently fixing what an
++  audit finds.
++
++## Shared doctrine
++
++Both branches follow this without restating it in two voices:
++
++- **Three-mode invocation:** direct audit; direct authoring under authority;
++  or composed, where audit is a companion to a primary lifecycle owner (for
++  example `implement`) that stays the action-owner.
++- **Budgets:** soft ~500-word body per branch file; the standing
++  catalogue-description lever is governed in `MAINTAINING.md`; link it,
++  don't restate the number here.
++- **Token model, three-tier:** always-loaded frontmatter, triggered branch
++  body, and entrypoint references loaded at one hop. Reference documents may
++  link to sibling references, but that depth is not recursively enforced by
++  `provenant check harness`.
++- **Tier placement:** keep hard rules in `SKILL.md`; references load late.
++  For repeated misses, hoist the rule and concrete banned-pattern examples
++  into the core instead of expanding the reference.
++- **Reuse boundary:** global skills express cross-project triggers, procedures
++  and gates. Convert contextual values into parameters, keep examples
++  synthetic and leave project policy local. Global promotion requires a
++  reusable trigger, artifact, fixture and ownership boundary. When evidence is
++  limited, keep it opt-in and provisional. Follow the repository gate in
++  [MAINTAINING.md](../../MAINTAINING.md).
++- **Project skills that extend a global skill** state their own hard rules, so
++  they work without the global skill installed; name each changed default
++  under `Project overrides:`; and keep harness and Fabric mechanics out of
++  everything but coordination skills. Global skills stay project-agnostic.
++- **Trigger fixtures:** positive, negative, boundary and composition cases.
++  Each skill has at least two `near-miss` negatives (`relation: negative`,
++  target excluded from both expected routes) that share its vocabulary but
++  belong elsewhere. Routing-text changes re-run the held-out set.
++- **Behaviour changes:** run the fixtures with and without the skill and record
++  decisions, differences, model/effort and omissions as reviewer evidence.
++  Scores are advisory; only inventory checks may fail CI.
++- **Contract-test boundary:** test machine-enforced invariants, never prose.
++  Without an enforcing script, add that script or no test; never assert wording.
++- **Failure taxonomy:** name the failure, don't just gesture at quality:
++  premature-completion, duplication, sediment, sprawl, no-op, negation-only.
++- **Description contract:** front-load the first 250 characters with trigger
++  words and the nearest exclusion; keep boundary-routing negation explicit
++  (name the skill to use instead); never drop it for brevity.
++- **Provenance:** any adaptation from a third-party source records source
++  URL, version/commit, retrieval date and licence in the repository
++  `THIRD_PARTY_NOTICES.md` index, with the full licence text under `LICENSES/`.
++  See [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) for this skill's
++  own Skill Optimizer lineage.
++
++Reference eval cases (not run by CI): [boundary traces](evals/boundary_trace_cases.yaml)
++and [behaviour cases](evals/behaviour_cases.yaml).
+diff --git a/skills/tracker/SKILL.md b/skills/tracker/SKILL.md
+--- a/skills/tracker/SKILL.md
++++ b/skills/tracker/SKILL.md
+@@ -1,74 +1,68 @@
+----
+-name: tracker
+-description: "Use for GitHub issues/boards: dedupe before filing, epic placement, priorities, PR links, stale issues and steward queues. Not for execution; use implement or orchestrate."
+----
+-
+-# Tracker
+-
+-A generic issue-and-board steward. Search the repository's instructions and
+-docs for a `Repository process` heading and read it first. A project with its own tracker commands and runbook owns the mechanics;
+-this skill supplies duplicate, placement and closure judgements. Use raw `gh`
+-only when no project command exists.
+-
+-## Quickstart
+-
+-1. **Evidence before filing.** An agent-filed issue cites an event that already
+-   happened, such as a failure, contradiction or review finding. Refuse to file
+-   speculation without evidence. Agents never approve their own filings.
+-2. **Search before filing.** Run at least two searches (title keywords, then a
+-   symbol or error string) and record what you ran and found in the issue body,
+-   even when no duplicate is found. Consider reusing or
+-   widening partial matches.
+-3. **Place it.** An epic is an outcome with a `Done when` needing at least two
+-   independently shippable features over more than one wave; if it fits one
+-   feature's acceptance list (about 10 lines) and one PR train, file a feature
+-   with sub-issues. Nest a new issue under an epic when it belongs to that
+-   outcome. Bugs and one-off tidying can stand alone. Record why.
+-   For new scoping, later epics hold a `## Backlog` checklist: a line becomes
+-   an issue with a full brief when leased or Ready, one open issue per live
+-   task. Keep existing well-scoped leaves.
+-4. **Write for a stranger.** The body holds all content: cite `path#Symbol`,
+-   never line numbers, and never point at scratch files, plan codes, run
+-   directories, `/tmp` or claude.ai pages. Links to tracked files are fine.
+-   State the observed problem or outcome and an epic's `Done when`.
+-   Apply `source:agent` where the repository declares that label, and append `Filed-by: <PROVENANT_AGENT_LABEL> <run>` using actual identities.
+-5. **Link, don't restate.** Sub-issues are the only parent relation; a blocker
+-   is a dependency, never a parent. Every PR carries one `Closes #n` or
+-   `Refs #n` line per issue it touches; never a closing keyword in a commit.
+-6. **Keep the board true.** Observe the repository's advisory Ready cap, about
+-   two to three times its declared concurrent writer lanes; pause filing at
+-   the cap. Status follows the work. Start priority or horizon at the
+-   repository's documented default; promote only under its logged rule.
+-7. **Sweep for stale.** Re-verify content when a referenced PR merges, a
+-   dependency closes or evidence moves; age and `updatedAt` do not decide it.
+-   Update moved evidence; close with merge evidence or a stated reason
+-   (not planned, duplicate-of, superseded). Quiet is not done.
+-
+-See [references/filing.md](references/filing.md) for duplicate/placement
+-detail and [references/linking-and-board.md](references/linking-and-board.md)
+-and [references/hygiene.md](references/hygiene.md) for the rest.
+-
+-## Authority limits
+-
+-Create, edit, comment, link, close and set Status inside the repo's rules.
+-Never delete an issue, never transfer it, never edit another author's comment,
+-and never change a priority or horizon field except by the repo's own rule.
+-Worker lanes report follow-ups; only the coordinator or steward writes the
+-tracker.
+-
+-## Rate limits
+-
+-Prefer REST for issue/PR state, labels, comments, search and closing; GraphQL
+-carries its own, smaller quota and is easy to exhaust with board reads. On a
+-rate limit or secondary limit, stop and report the reset time — never loop or
+-retry. See [references/rate-limits.md](references/rate-limits.md).
+-
+-## Steward mode
+-
+-A coordinator can delegate tracker work to an authorised worker using
+-Fabric tasks and current issue/PR references. Before retrying a write,
+-reconcile current issues and tasks with `gh` reads to avoid duplicates.
+-Return a digest of at most 15 lines with links and blockers. See
+-[references/steward.md](references/steward.md).
+-
+-Reference eval cases (not run by CI): [placement cases](evals/placement_cases.yaml).
++---
++name: tracker
++description: "Use for GitHub issues/boards: dedupe before filing, epic placement, priorities, PR links, stale issues and steward queues. Not for execution; use implement or orchestrate."
++---
++
++# Tracker
++
++Read the repository's `Repository process` declaration first. Project tracker
++commands and runbooks own mechanics; this skill owns duplicate, placement and
++closure judgements. Use raw `gh` only without a project command.
++
++## Quickstart
++
++1. **Evidence before filing.** An agent-filed issue cites an event that already
++   happened, such as a failure, contradiction or review finding. Refuse to file
++   speculation without evidence. Agents never approve their own filings.
++2. **Search before filing.** Run two searches: title keywords, then a symbol
++   or error string. Record searches and results in the issue body, including
++   no matches. Reuse or widen partial matches.
++3. **Place it.** An epic is an outcome with a `Done when` needing at least two
++   independently shippable features over more than one wave; if it fits one
++   feature's acceptance list (about 10 lines) and one PR train, file a feature
++   with sub-issues. Nest a new issue under an epic when it belongs to that
++   outcome. Bugs and one-off tidying can stand alone. Record why.
++   For new scoping, later epics hold a `## Backlog` checklist: a line becomes
++   an issue with a full brief when leased or Ready, one open issue per live
++   task. Keep existing well-scoped leaves.
++4. **Write for a stranger.** The body holds all content: cite `path#Symbol`,
++   never line numbers, and never point at scratch files, plan codes, run
++   directories, `/tmp` or claude.ai pages. Links to tracked files are fine.
++   State the observed problem or outcome and an epic's `Done when`.
++   Apply `source:agent` where the repository declares that label, and append `Filed-by: <PROVENANT_AGENT_LABEL> <run>` using actual identities.
++5. **Link, don't restate.** Only sub-issues express parentage; blockers are
++   dependencies. Every PR carries one `Closes #n` or `Refs #n` per touched
++   issue. Never put closing keywords in commits.
++6. **Keep the board true.** Pause filing at the advisory Ready cap, about
++   two to three times concurrent writer lanes. Status follows work. Start
++   priority/horizon at the repository default; promote only under its logged rule.
++7. **Sweep for stale.** Re-verify content when a referenced PR merges, a
++   dependency closes or evidence moves; age and `updatedAt` do not decide it.
++   Update moved evidence; close with merge evidence or a stated reason
++   (not planned, duplicate-of, superseded). Quiet is not done.
++
++See [references/filing.md](references/filing.md) for duplicate/placement
++detail and [references/linking-and-board.md](references/linking-and-board.md)
++and [references/hygiene.md](references/hygiene.md) for the rest.
++
++## Authority limits
++
++Create, edit, comment, link, close and set Status inside the repo's rules.
++Never delete an issue, never transfer it, never edit another author's comment,
++and never change a priority or horizon field except by the repo's own rule.
++Worker lanes report follow-ups; only the coordinator or steward writes the
++tracker.
++
++## Rate limits
++
++Prefer REST; reserve GraphQL for board fields REST cannot reach. On any rate
++limit, stop and report the reset time; never loop or retry. See
++[rate limits](references/rate-limits.md).
++
++## Steward mode
++
++Delegate only to authorised workers through Fabric with current issue/PR
++references. Reconcile issues and tasks before retrying writes. Return at most
++15 lines with links/blockers. Read [steward mode](references/steward.md).
++
++Reference eval cases (not run by CI): [placement cases](evals/placement_cases.yaml).
+diff --git a/library/react-performance/SKILL.md b/library/react-performance/SKILL.md
+--- a/library/react-performance/SKILL.md
++++ b/library/react-performance/SKILL.md
+@@ -1,85 +1,69 @@
+----
+-name: react-performance
+-description: "Use for slow React 19 UIs: render profiling, input lag, React Compiler memoisation and lint errors, transitions, bundle size. Not for Query caching (tanstack) or visual design (ui-ux-design)."
+----
+-
+-# React performance
+-
+-This skill targets client-rendered React 19 with React Compiler 1.x on Vite.
+-Before starting, confirm the React version and whether the compiler is on, and
+-for which files. If the app renders on a server (Server Components, SSR,
+-Next.js), this skill does not cover that layer; follow the framework's own
+-docs.
+-
+-## Measure first
+-
+-- **Profile a production profiling build** (`vite build`, then `vite preview`).
+-  A plain production build strips React's profiling instrumentation, so alias
+-  `react-dom/client` to `react-dom/profiling` in the Vite config for the
+-  profiling run. Dev mode doubles renders under Strict Mode and loads modules
+-  unbundled, so its numbers mislead.
+-- **Use the right tools:** React DevTools Profiler shows which component
+-  rendered and why. Chrome's Performance panel shows React's Scheduler and
+-  Components tracks from 19.2. INP and LCP come from field data or `web-vitals`.
+-  Run a bundle visualiser on the build output.
+-- **Classify the bottleneck before editing:** network waterfall, JavaScript
+-  size, render work, layout and paint, or memory. Re-measure under the same
+-  conditions, and keep a change only if the number moved.
+-
+-## React Compiler
+-
+-- **New code:** write plain components and let the compiler memoise components
+-  and hooks. Use `useMemo` or `useCallback` only as an escape hatch, mainly to
+-  hold an effect dependency steady.
+-- **Existing code:** leave manual memoisation alone. Removing it can change the
+-  compiled output, so do that only as a separate, tested change.
+-- **Limits:** the compiler does not memoise ordinary functions called during
+-  render, and it shares no results between components. A costly calculation
+-  used in several places needs a cache outside React, or lifting.
+-- **Compiler lint errors** (`eslint-plugin-react-hooks` v6 or later) mean the
+-  code breaks React's rules or blocks compilation, so fix the code. Typical
+-  causes:
+-  - touching `ref.current` during render;
+-  - mutating props, state or values after render;
+-  - a synchronous `setState` inside an effect;
+-  - impure render (`Date.now()`, `Math.random()`);
+-  - a component defined inside another component.
+-- **Escape hatches:** `incompatible-library` means a library's API cannot be
+-  memoised safely, so handle that value deliberately. Use `'use no memo'` only
+-  as a short-lived, commented debugging step.
+-- **Coverage:** compiling more files is not a fix in itself. Follow the
+-  project's opt-in rule and the evidence it asks for.
+-
+-## Fixes, roughly by payoff
+-
+-1. **Waits.** Start independent requests together. Prefetch at route or intent
+-   boundaries (loaders: see `tanstack`). Break parent-then-child fetch
+-   chains.
+-2. **Bytes.** Split routes with `lazy()`, load rare heavy libraries with
+-   dynamic `import()`, and avoid barrel imports the bundler cannot prune.
+-3. **Render work.** Derive values in render rather than syncing through
+-   effects. Push state down or split contexts. Keep pointer, scroll and timer
+-   values in refs or a `useSyncExternalStore` store. Virtualise long lists.
+-4. **Responsiveness.** Wrap expensive, non-urgent updates in `startTransition`.
+-   `useDeferredValue` helps an expensive view of fast-changing input only when
+-   the slow child is memoised, which the compiler does for you in compiled
+-   files. From 19.3, transitions render independently, so a slow one no longer
+-   blocks the others.
+-5. **`<Activity mode="hidden">`.** It keeps a hidden subtree's state and can
+-   pre-render it at low priority. It also keeps DOM and memory alive and tears
+-   down effects while hidden. Use it where kept state is the point, such as tabs
+-   and back navigation, not as a cache.
+-6. **`useEffectEvent`.** Use it when an effect must read the latest props
+-   without resubscribing. The function it returns is not a dependency.
+-
+-## Reject
+-
+-Reject a "win" that shifts the cost to a later interaction, weakens freshness
+-or authorisation, or appears only on synthetic data. Report before and after
+-numbers with their conditions, and anything left unmeasured.
+-
+-## Sources
+-
+-Checked 22 October 2026: react.dev blog (React 19.2, React Compiler 1.0,
+-React 19.3), react.dev/learn/react-compiler,
+-react.dev/reference/eslint-plugin-react-hooks, vite.dev/blog (Vite 8.1).
++---
++name: react-performance
++description: "Use for slow React 19 UIs: render profiling, input lag, React Compiler memoisation and lint errors, transitions, bundle size. Not for Query caching (tanstack) or visual design (ui-ux-design)."
++---
++
++# React performance
++
++This skill targets client-rendered React 19 with React Compiler 1.x on Vite.
++Before starting, confirm the React version and whether the compiler is on, and
++for which files. If the app renders on a server (Server Components, SSR,
++Next.js), this skill does not cover that layer; follow the framework's own
++docs.
++
++## Measure first
++
++- **Profile a production profiling build** (`vite build`, then `vite preview`).
++  A plain production build strips React's profiling instrumentation, so alias
++  `react-dom/client` to `react-dom/profiling` in the Vite config for the
++  profiling run. Dev mode doubles renders under Strict Mode and loads modules
++  unbundled, so its numbers mislead.
++- **Use the right tools:** React DevTools Profiler shows which component
++  rendered and why. Chrome's Performance panel shows React's Scheduler and
++  Components tracks from 19.2. INP and LCP come from field data or `web-vitals`.
++  Run a bundle visualiser on the build output.
++- **Classify the bottleneck before editing:** network waterfall, JavaScript
++  size, render work, layout and paint, or memory. Re-measure under the same
++  conditions, and keep a change only if the number moved.
++
++## React Compiler
++
++Write plain new components; use manual memoisation only as an escape hatch.
++Leave existing memoisation for a separate, tested change. Fix compiler lint
++errors rather than suppressing them. Use `'use no memo'` only for short-lived,
++commented debugging and respect project opt-in/evidence rules. Read
++[compiler limits and lint causes](references/compiler.md) before compiler work.
++
++## Fixes, roughly by payoff
++
++1. **Waits.** Start independent requests together. Prefetch at route or intent
++   boundaries (loaders: see `tanstack`). Break parent-then-child fetch
++   chains.
++2. **Bytes.** Split routes with `lazy()`, load rare heavy libraries with
++   dynamic `import()`, and avoid barrel imports the bundler cannot prune.
++3. **Render work.** Derive values in render rather than syncing through
++   effects. Push state down or split contexts. Keep pointer, scroll and timer
++   values in refs or a `useSyncExternalStore` store. Virtualise long lists.
++4. **Responsiveness.** Wrap expensive, non-urgent updates in `startTransition`.
++   `useDeferredValue` helps an expensive view of fast-changing input only when
++   the slow child is memoised, which the compiler does for you in compiled
++   files. From 19.3, transitions render independently, so a slow one no longer
++   blocks the others.
++5. **`<Activity mode="hidden">`.** It keeps a hidden subtree's state and can
++   pre-render it at low priority. It also keeps DOM and memory alive and tears
++   down effects while hidden. Use it where kept state is the point, such as tabs
++   and back navigation, not as a cache.
++6. **`useEffectEvent`.** Use it when an effect must read the latest props
++   without resubscribing. The function it returns is not a dependency.
++
++## Reject
++
++Reject a "win" that shifts the cost to a later interaction, weakens freshness
++or authorisation, or appears only on synthetic data. Report before and after
++numbers with their conditions, and anything left unmeasured.
++
++## Sources
++
++Checked 22 October 2026: react.dev blog (React 19.2, React Compiler 1.0,
++React 19.3), react.dev/learn/react-compiler,
++react.dev/reference/eslint-plugin-react-hooks, vite.dev/blog (Vite 8.1).
+diff --git a/library/tanstack/SKILL.md b/library/tanstack/SKILL.md
+--- a/library/tanstack/SKILL.md
++++ b/library/tanstack/SKILL.md
+@@ -1,97 +1,76 @@
+----
+-name: tanstack
+-description: "Use for TanStack Query v5, Router, Table v9 and react-virtual: keys, queryOptions, staleTime, mutations, loaders, search params, useTable, virtualised rows. Not for local UI state, render speed (react-performance) or backend caches."
+----
+-
+-# TanStack Query v5, Router, Table and Virtual
+-
+-This skill targets `@tanstack/react-query` 5.10x, so confirm the installed
+-version first. Project conventions win over this file.
+-
+-## API newer than most training data
+-
+-- **Imperative calls have moved.** Query 5.10x deprecates `fetchQuery`,
+-  `prefetchQuery`, `ensureQueryData` and their infinite-query versions, ahead
+-  of removal in the next major. The replacements are `queryClient.query(opts)`
+-  and `queryClient.infiniteQuery(opts)`:
+-  - fetch becomes `query(opts)`;
+-  - prefetch becomes `query(opts).catch(noop)`, because a prefetch must not
+-    throw;
+-  - ensure becomes `query({ ...opts, staleTime: 'static' })`.
+-
+-  Write the new form in new code. Flag old call sites for migration rather
+-  than rewriting them inside an unrelated change. If unsure, grep `@deprecated`
+-  in the installed `query-core` type declarations. Older docs still show
+-  `ensureQueryData`.
+-- **`staleTime: 'static'` overrides invalidation.** If any active observer of
+-  a query uses it, `invalidateQueries` and `refetchQueries` skip that query.
+-  Keep it to one-off imperative calls, and never put it on a hook whose data a
+-  mutation must refresh. `Infinity` still honours invalidation.
+-- **Table v9 is not v8.** `useReactTable` is now `useTable`, features go
+-  through `tableFeatures()`, and `getState()` became `table.state`. Read
+-  [references/table.md](references/table.md) before writing table code.
+-
+-## Where agents slip
+-
+-- **Incomplete keys:** the key must hold every value the `queryFn` reads.
+-  Otherwise one tenant's or filter's data is served under another's key.
+-- **Duplicated query contracts:** write one `queryOptions` factory per resource
+-  and reuse it in the hook, the loader, prefetching and
+-  `getQueryData`/`setQueryData`. The typed key then carries the data type.
+-- **Failed requests that resolve:** `fetch` resolves on 4xx and 5xx responses.
+-  The `queryFn` must throw for them, and should forward `signal` so requests
+-  can be cancelled.
+-- **Status flags:**
+-  - `isPending` means no data yet;
+-  - `isFetching` means a request is running;
+-  - `isLoading` means both.
+-
+-  Keep cached data on screen during a background refetch. When a list
+-  changes key (new sort or filter), use `placeholderData: keepPreviousData`.
+-- **Freshness:** the default `staleTime` of 0 refetches on every mount and
+-  focus. Set it from how fast the data actually changes. Switching off focus
+-  refetching to hide a bad value is the wrong fix.
+-- **Tracked results:** destructure only the fields you read. Rest-spreading the
+-  result, or listing the whole result object as a dependency, breaks property
+-  tracking.
+-- **Optimistic updates:** show the mutation's `variables` before editing the
+-  cache; money is never optimistic. Cache edits need cancel, snapshot,
+-  rollback and settled invalidation: see
+-  [references/mutations.md](references/mutations.md).
+-- **Mutation aftermath:**
+-  - Invalidate the narrowest key prefix that covers the change.
+-  - Write the response straight into the cache only when its shape is exactly
+-    the cached shape.
+-- **Query data is not component state:** do not copy it into `useState`.
+-  Derive during render or use `select`.
+-- **`skipToken`:** it disables a query with type safety, but `refetch()`
+-  cannot run that query.
+-- **`useSuspenseQuery`:** no `enabled` or `placeholderData`; a key change
+-  suspends again unless inside `startTransition`. Details in
+-  [references/mutations.md](references/mutations.md).
+-
+-## Router loaders and tables
+-
+-Loaders await `queryClient.query({ ...opts, staleTime: 'static' })` and the
+-component calls `useSuspenseQuery(opts)` with the same factory. See
+-[references/router.md](references/router.md).
+-
+-Table and virtual rules to always apply:
+-
+-- Table is headless. Keep the project's markup and feed it from `useTable`.
+-- Server-driven tables set `manualSorting`, `manualFiltering` and
+-  `manualPagination`, and hold that state in the query key, never only in the
+-  table. Pass `getRowId` with the record's stable id.
+-- Never use `stockFeatures` in shipped code. Register only the features used.
+-- Virtualise only hundreds of rendered rows. Banned: `rows.map` over the full
+-  model when thousands are loaded.
+-
+-## Verification
+-
+-- Table tests render the component and assert on rows, header sort state and
+-  selection, not on `table` internals.
+-- Tests get a fresh `QueryClient` with `retry: false` and go through the public
+-  hook or component.
+-- `@tanstack/eslint-plugin-query` provides `exhaustive-deps`,
+-  `stable-query-client`, `no-rest-destructuring`, `no-unstable-deps` and
+-  `prefer-query-options`. Suggest it where it is missing; don't add it unasked.
++---
++name: tanstack
++description: "Use for TanStack Query v5, Router, Table v9 and react-virtual: keys, queryOptions, staleTime, mutations, loaders, search params, useTable, virtualised rows. Not for local UI state, render speed (react-performance) or backend caches."
++---
++
++# TanStack Query, Router, Table, Virtual
++
++This skill targets `@tanstack/react-query` 5.10x, so confirm the installed
++version first. Project conventions win over this file.
++
++## API newer than most training data
++
++- **Imperative calls:** Query 5.10x deprecates fetch/prefetch/ensure methods.
++  Read [migration mappings](references/imperative-queries.md) before writing
++  calls. Use the new form in new code; flag existing sites rather than
++  migrating them inside unrelated changes. Prefetch must never throw.
++- **`staleTime: 'static'` overrides invalidation.** If any active observer of
++  a query uses it, `invalidateQueries` and `refetchQueries` skip that query.
++  Keep it to one-off imperative calls, and never put it on a hook whose data a
++  mutation must refresh. `Infinity` still honours invalidation.
++- **Table v9 is not v8.** `useReactTable` is now `useTable`, features go
++  through `tableFeatures()`, and `getState()` became `table.state`. Read
++  [references/table.md](references/table.md) before writing table code.
++
++## Where agents slip
++
++- **Incomplete keys:** the key must hold every value the `queryFn` reads.
++  Otherwise one tenant's or filter's data is served under another's key.
++- **Duplicated query contracts:** write one `queryOptions` factory per resource
++  and reuse it in the hook, the loader, prefetching and
++  `getQueryData`/`setQueryData`. The typed key then carries the data type.
++- **Failed requests that resolve:** `fetch` resolves on 4xx and 5xx responses.
++  The `queryFn` must throw for them, and should forward `signal` so requests
++  can be cancelled.
++- **Status:** `isPending` means no data; `isFetching` means a running request;
++  `isLoading` means both. Keep cached data during refetches; list key changes
++  use `placeholderData: keepPreviousData`.
++- **Freshness:** choose `staleTime` from data freshness needs. Its default 0
++  refetches on mount/focus; never disable focus refetching to hide a bad value.
++- **Tracked results:** destructure only fields read; never rest-spread results
++  or use the whole result as a dependency.
++- **Optimistic updates:** show the mutation's `variables` before editing the
++  cache; money is never optimistic. Cache edits need cancel, snapshot,
++  rollback and settled invalidation: see
++  [references/mutations.md](references/mutations.md).
++- **Mutation aftermath:** invalidate the narrowest covering key prefix.
++  Cache responses only with exactly the cached shape.
++- **Query data is not component state:** do not copy it into `useState`.
++  Derive during render or use `select`.
++- **`skipToken`:** it disables a query with type safety, but `refetch()`
++  cannot run that query.
++- **`useSuspenseQuery`:** no `enabled` or `placeholderData`; a key change
++  suspends again unless inside `startTransition`. Details in
++  [references/mutations.md](references/mutations.md).
++
++## Router loaders and tables
++
++Loaders and components share a query factory. Read
++[router integration](references/router.md) before loader work.
++
++Table and virtual rules to always apply:
++
++- Preserve project markup; feed headless tables through `useTable`.
++- Server-driven tables set `manualSorting`, `manualFiltering` and
++  `manualPagination`, and hold that state in the query key, never only in the
++  table. Pass `getRowId` with the record's stable id.
++- Never use `stockFeatures` in shipped code. Register only the features used.
++- Virtualise only hundreds of rendered rows. Banned: `rows.map` over the full
++  model when thousands are loaded.
++
++## Verification
++
++Test public hooks/components with a fresh `QueryClient` and `retry: false`.
++Table assertions cover rendered rows, header sort and selection, never internals.
++Suggest missing Query ESLint rules; never add them unasked. See
++[verification](references/verification.md).
+diff --git a/library/typescript-clean-code/SKILL.md b/library/typescript-clean-code/SKILL.md
+--- a/library/typescript-clean-code/SKILL.md
++++ b/library/typescript-clean-code/SKILL.md
+@@ -1,79 +1,78 @@
+----
+-name: typescript-clean-code
+-description: "Use for TypeScript compiler and type-safety work: tsconfig, TS 6/7 upgrades, unsafe casts, floating promises, type tests. Not for restyling working code; pair with implement, code-review or refactor."
+----
+-
+-# TypeScript
+-
+-Check the installed compiler first. A repository may pin TypeScript 6.x as
+-`typescript` and install 7.x under an alias such as `typescript-native`.
+-
+-General habits are assumed: discriminated unions, `unknown` over `any`,
+-`satisfies`, `never` exhaustiveness and schema parsing at boundaries. This file
+-covers recent changes and the defects reviews keep finding.
+-
+-## TypeScript 6 and 7
+-
+-- **6.0 defaults:**
+-  - `strict` is on;
+-  - `module` is `esnext` and `target` is `es2025`;
+-  - `rootDir` is the tsconfig's own directory;
+-  - `noUncheckedSideEffectImports` is on;
+-  - `types` is `[]`, so global type packages such as `@types/node` must be
+-    listed. A new "cannot find name `process`" after upgrading is usually this.
+-- **Retired options:** 6.0 deprecates or removes `baseUrl`, `moduleResolution`
+-  `node10` and `classic`, `target` `es5`, `downlevelIteration`, AMD, UMD and
+-  System modules, `outFile`, `esModuleInterop: false` and import `assert` (use
+-  `with`). `ignoreDeprecations: "6.0"` only buys time for the deprecated ones,
+-  and 7.0 turns all of them into hard errors. Fix the config instead.
+-- **7.0 is the Go-native compiler.** It is much faster but has no programmatic
+-  API until 7.1. typescript-eslint, ts-morph and some bundler plugins still load
+-  TypeScript 6. Keep 6.x installed through npm aliases
+-  (`@typescript/typescript6` re-exports the 6.0 API and ships `tsc6`) rather
+-  than deleting it to "finish" a migration.
+-- **Flags outside `strict` that earn their keep:** `noUncheckedIndexedAccess`,
+-  `exactOptionalPropertyTypes`, `noImplicitOverride` and `verbatimModuleSyntax`.
+-  With `exactOptionalPropertyTypes`, `x?: T` means "may be absent", not "may
+-  hold `undefined`", so expect churn. Turn each one on as its own migration.
+-- **Erasable syntax:** `erasableSyntaxOnly` rejects enums, runtime namespaces,
+-  constructor parameter properties and `import =`. Node 22.18 or later cannot
+-  run these when it executes `.ts` files by stripping types. Prefer string
+-  literal unions or `as const` objects to enums.
+-
+-## Defects worth hunting
+-
+-- **Casting outside data:** `as T` or `as unknown as T` on JSON, storage,
+-  messages or environment values claims a shape no one checked. Parse it with
+-  the project's schema library. `as const` and `satisfies` are fine.
+-- **Voided promises:** prefixing a promise with `void` silences
+-  `no-floating-promises`, which allows voiding by default, but a rejection
+-  still goes nowhere. Each promise needs a handler: awaited, returned, or given
+-  `.catch(report)`. The rule only runs under type-aware linting
+-  (`parserOptions.projectService`), which many ESLint configs lack.
+-- **Unbounded `Promise.all`:** over a large or user-sized collection, it has no
+-  limit. Use a pool.
+-- **Defensive nulls:** adding `| null | undefined` to a return type "just in
+-  case" forces a check on every caller.
+-- **Caught errors:** a caught error is `unknown`. Narrow it before reading
+-  `.message`, and pass it as `cause` when wrapping.
+-
+-## Type tests
+-
+-- **`expectTypeOf` and `assertType`** are only checked in Vitest's typecheck
+-  mode (`vitest --typecheck` or the `typecheck` config). A normal run never
+-  checks them.
+-- **`@ts-expect-error`** marks code that must fail to compile. It needs a
+-  stated reason (`@typescript-eslint/ban-ts-comment` can enforce one). Never
+-  use `@ts-ignore`.
+-
+-## Leave alone
+-
+-Do not churn working code over taste: `type` against `interface`, `null`
+-against `undefined`, or import style. Follow the repository.
+-
+-## Sources
+-
+-Checked 22 October 2026: devblogs.microsoft.com/typescript (5.8, 5.9, 6.0 and
+-7.0 announcements), typescriptlang.org release notes,
+-typescript-eslint.io/rules/no-floating-promises, vitest.dev/api/expect-typeof,
+-and nodejs.org type-stripping docs.
++---
++name: typescript-clean-code
++description: "Use for TypeScript compiler and type-safety work: tsconfig, TS 6/7 upgrades, unsafe casts, floating promises, type tests. Not for restyling working code; pair with implement, code-review or refactor."
++---
++
++# TypeScript
++
++Check the installed compiler first. A repository may pin TypeScript 6.x as
++`typescript` and install 7.x under an alias such as `typescript-native`.
++
++Use discriminated unions, `unknown`, `satisfies`, `never` exhaustiveness
++and boundary schemas.
++
++## TypeScript 6 and 7
++
++- **6.0 defaults:**
++  - `strict` is on;
++  - `module` is `esnext` and `target` is `es2025`;
++  - `rootDir` is the tsconfig's own directory;
++  - `noUncheckedSideEffectImports` is on;
++  - `types` is `[]`, so global type packages such as `@types/node` must be
++    listed. A new "cannot find name `process`" after upgrading is usually this.
++- **Retired options:** 6.0 deprecates or removes `baseUrl`, `moduleResolution`
++  `node10` and `classic`, `target` `es5`, `downlevelIteration`, AMD, UMD and
++  System modules, `outFile`, `esModuleInterop: false` and import `assert` (use
++  `with`). `ignoreDeprecations: "6.0"` only buys time for the deprecated ones,
++  and 7.0 turns all of them into hard errors. Fix the config instead.
++- **7.0 is the Go-native compiler.** It is much faster but has no programmatic
++  API until 7.1. typescript-eslint, ts-morph and some bundler plugins still load
++  TypeScript 6. Keep 6.x installed through npm aliases
++  (`@typescript/typescript6` re-exports the 6.0 API and ships `tsc6`) rather
++  than deleting it to "finish" a migration.
++- **Flags outside `strict` that earn their keep:** `noUncheckedIndexedAccess`,
++  `exactOptionalPropertyTypes`, `noImplicitOverride` and `verbatimModuleSyntax`.
++  With `exactOptionalPropertyTypes`, `x?: T` means "may be absent", not "may
++  hold `undefined`", so expect churn. Turn each one on as its own migration.
++- **Erasable syntax:** `erasableSyntaxOnly` rejects enums, runtime namespaces,
++  constructor parameter properties and `import =`. Node 22.18 or later cannot
++  run these when it executes `.ts` files by stripping types. Prefer string
++  literal unions or `as const` objects to enums.
++
++## Defects worth hunting
++
++- **Casting outside data:** `as T` or `as unknown as T` on JSON, storage,
++  messages or environment values claims a shape no one checked. Parse it with
++  the project's schema library. `as const` and `satisfies` are fine.
++- **Voided promises:** prefixing a promise with `void` silences
++  `no-floating-promises`, which allows voiding by default, but a rejection
++  still goes nowhere. Each promise needs a handler: awaited, returned, or given
++  `.catch(report)`. The rule only runs under type-aware linting
++  (`parserOptions.projectService`), which many ESLint configs lack.
++- **Unbounded `Promise.all`:** over a large or user-sized collection, it has no
++  limit. Use a pool.
++- **Defensive nulls:** adding `| null | undefined` to a return type "just in
++  case" forces a check on every caller.
++- **Caught errors:** a caught error is `unknown`. Narrow it before reading
++  `.message`, and pass it as `cause` when wrapping.
++
++## Type tests
++
++- **`expectTypeOf` and `assertType`** are only checked in Vitest's typecheck
++  mode (`vitest --typecheck` or the `typecheck` config). A normal run never
++  checks them.
++- **`@ts-expect-error`** marks code that must fail to compile. It needs a
++  stated reason (`@typescript-eslint/ban-ts-comment` can enforce one). Never
++  use `@ts-ignore`.
++
++## Leave alone
++
++Do not churn working code over taste: `type` against `interface`, `null`
++against `undefined`, or import style. Follow the repository.
++
++## Sources
++
++Checked 22 October 2026: devblogs.microsoft.com/typescript (5.8, 5.9, 6.0 and
++7.0 announcements), typescriptlang.org release notes,
++typescript-eslint.io/rules/no-floating-promises, vitest.dev/api/expect-typeof,
++and nodejs.org type-stripping docs.
+diff --git a/skills/engineering-docs/references/placement.md b/skills/engineering-docs/references/placement.md
+--- a/skills/engineering-docs/references/placement.md
++++ b/skills/engineering-docs/references/placement.md
+@@ -1,43 +1,59 @@
+-# Document ownership and placement
+-
+-Link or generate, do not restate. A domain's natural owner generates or
+-validates its projections; do not introduce a universal manifest as another
+-source of truth.
+-
+-| Content | Owner / placement |
+-|---|---|
+-| Implemented fields, schemas, flags, defaults, command/tool catalogues | Code and registries; link them or generate reference in `docs/reference/` |
+-| Generated reference | Name the generator command on line one; regenerate and check diffs |
+-| Non-derivable intent, negative requirements, ordering, failure semantics, digest preimages and security invariants | `docs/specs/`; link tests without copying their assertions |
+-| Architectural rationale and trade-offs | Live ADR, amended in place |
+-| Process and agent behaviour | Governing skill or `HARNESS.md` section |
+-| Product calls, deferrals and unimplemented requirements | Owning issue; use the declared project-docs home where applicable |
+-| Current owner, scope, dependencies, delivery evidence and workflow state | Declared tracker or project-docs owner, never a parallel docs status table |
+-| Operational steps | Runbook, linked to its source and verification |
+-| What changed and when | Git history; curated release fragments follow repository release policy |
+-
+-Specs use independent semantic topic paths, indexed for discovery. No directory
+-imposes load order, mirrored versions or a parent contract. One owner holds each
+-requirement. Git owns integrity and history; do not maintain hashes or synthetic
+-concatenation beside source. Keep a spec below 999 lines and 100 KiB by splitting
+-at an actual ownership boundary.
+-
+-Each spec and runbook starts beneath its title with two lines:
+-
+-- `Owner:` names the responsible crate/module, skill or declared document owner.
+-- `Anchor:` links concrete source symbols, tests or governing document sections
+-  sufficient to check its claims. Use relative source links and name the symbol
+-  or test, so a line-number shift does not hide its identity.
+-
+-Mechanical owner, anchor, link and generated-diff checks may fail CI. Whether
+-prose belongs in a spec, expresses the right invariant or needs shortening is
+-review judgement, advisory to CI.
+-
+-Before cutting apparent restatement, check renames and live callers. Identifier
+-absence alone does not prove the requirement obsolete. If a machine-critical
+-projection must remain, name its code owner and drift check; other prose stays
+-review-owned. Never move the whole durable corpus into issues merely to relocate
+-duplication.
+-
+-Frozen source-equivalence maps and comparison inventories
+-are migration evidence, not permanent authoring machinery.
++# Document ownership and placement
++
++Link or generate, do not restate. A domain's natural owner generates or
++validates its projections; do not introduce a universal manifest as another
++source of truth.
++
++| Content | Owner / placement |
++|---|---|
++| Implemented fields, schemas, flags, defaults, command/tool catalogues | Code and registries; link them or generate reference in `docs/reference/` |
++| Generated reference | Name the generator command on line one; regenerate and check diffs |
++| Non-derivable intent, negative requirements, ordering, failure semantics, digest preimages and security invariants | `docs/specs/`; link tests without copying their assertions |
++| Architectural rationale and trade-offs | Live ADR, amended in place |
++| Process and agent behaviour | Governing skill or `HARNESS.md` section |
++| Product calls, deferrals and unimplemented requirements | Owning issue; use the declared project-docs home where applicable |
++| Current owner, scope, dependencies, delivery evidence and workflow state | Declared tracker or project-docs owner, never a parallel docs status table |
++| Operational steps | Runbook, linked to its source and verification |
++| What changed and when | Git history; curated release fragments follow repository release policy |
++
++Specs use independent semantic topic paths, indexed for discovery. No directory
++imposes load order, mirrored versions or a parent contract. One owner holds each
++requirement. Git owns integrity and history; do not maintain hashes or synthetic
++concatenation beside source. Keep a spec below 999 lines and 100 KiB by splitting
++at an actual ownership boundary.
++
++Each spec and runbook starts beneath its title with two lines:
++
++- `Owner:` names the responsible crate/module, skill or declared document owner.
++- `Anchor:` links concrete source symbols, tests or governing document sections
++  sufficient to check its claims. Use relative source links and name the symbol
++  or test, so a line-number shift does not hide its identity.
++
++Mechanical owner, anchor, link and generated-diff checks may fail CI. Whether
++prose belongs in a spec, expresses the right invariant or needs shortening is
++review judgement, advisory to CI.
++
++Before cutting apparent restatement, check renames and live callers. Identifier
++absence alone does not prove the requirement obsolete. If a machine-critical
++projection must remain, name its code owner and drift check; other prose stays
++review-owned. Never move the whole durable corpus into issues merely to relocate
++duplication.
++
++Frozen source-equivalence maps and comparison inventories
++are migration evidence, not permanent authoring machinery.
++
++## Default homes
++
++Use these only with setup-repo write authority; advisory mode proposes paths.
++
++| Type | Home | Convention |
++|---|---|---|
++| Invariant specifications | `docs/specs/` | non-derivable intent; semantic paths |
++| Generated reference | `docs/reference/` | code-derived inventories; generator command on first line |
++| Architectural decisions | `docs/adr/` | current decisions; indexed |
++| Architecture map | `docs/ARCHITECTURE.md` | current boundaries; link ADRs |
++| Runbooks | `docs/runbooks/` | operator steps and verification |
++| Open-decision register | declared project-docs path | never in issue-tracker mode |
++| Diagrams | owning doc or `docs/diagrams/` | separate only for distinct ownership or reuse |
++| Threat models | `docs/threat-models/` | STRIDE/LINDDUN |
++| Continuity / archive | declared owner / `docs/archive/` | session owns handoff lifecycle; index archives |
+diff --git a/skills/evaluate/references/receipt.md b/skills/evaluate/references/receipt.md
+--- a/skills/evaluate/references/receipt.md
++++ b/skills/evaluate/references/receipt.md
+@@ -1,95 +1,111 @@
+-# Evaluation-run receipt
+-
+-`EVALUATION.json` is evidence, not a second delivery lifecycle. It records a
+-machine evaluation from frozen plan to result. The enclosing `delivery-run`
+-owns delivery acceptance and separate release authority. Acceptance requires
+-objective checks and the review required by the tier; explicit user acceptance
+-is required only for `terminal` work or when the approved scope asks for it.
+-
+-## Status
+-
+-| Status | Meaning | Can satisfy assurance? |
+-|---|---|---:|
+-| `planned` | Protocol frozen; no execution rows | no |
+-| `running` | Partial retained execution | no |
+-| `pass` | Complete rows meet every machine gate | yes |
+-| `fail` | Complete evidence fails a declared gate | no |
+-| `incomplete` | Complete accounting exposes unusable coverage | no |
+-| `cancelled` | Schedule is conserved as skipped/cancelled evidence | no |
+-
+-`conclusion.machine_only` is always `true`. Acceptance fields are invalid. For a
+-gating run, delivery records the evaluation ID, plan digest and delivery run ID
+-before execution; the evaluator cannot create that anchor after seeing results.
+-
+-## Bound evidence
+-
+-Every artifact has a safe relative POSIX path, media type, SHA-256, owner,
+-retention and data policy. The validator rejects absolute paths, traversal,
+-symlink escape and, with `--verify-hashes`, missing or changed bytes. Raw prompts,
+-outputs and failure examples stay in retained evidence artifacts rather than the
+-hot receipt.
+-
+-The plan binds:
+-
+-- dataset ID/version, provenance, consent or licence, development/holdout split
+-  digests and leakage boundary;
+-- treatment manifests and configuration digests;
+-- a shared runtime digest plus paired inputs/seeds so comparator arms differ
+-  only in their declared treatment;
+-- cases, families, repetitions, paired seeds, shards, timeout, retry and
+-  exclusion policies;
+-- deterministic preflight requirements;
+-- metric ranges, aggregation, threshold, target/comparator arms and regression
+-  margin; and
+-- required graders, blinding, independence, self-judging prohibition and
+-  disagreement protocol.
+-
+-For `kind: skill-quality`, roles are `candidate`, `without` and `previous`.
+-`candidate` and `without` are required. A genuinely new skill records
+-`previous` as `not-applicable` with a reason; it never aliases it to `without`.
+-
+-## Conservation and lineage
+-
+-One base attempt exists for every active arm x family x repetition x shard.
+-Retries reference an earlier failed attempt with the same cell and remain in the
+-receipt. Each attempt records timestamps, seed, input/output/route artifacts,
+-terminal status, usage or its unavailability, and requested plus actual adapter,
+-endpoint, provider family, model and effort. Substitution needs a reason.
+-Every attempt repeats the frozen plan, shared-runtime, arm-manifest and
+-arm-configuration digests. Paired arms keep input and undeclared runtime
+-dimensions identical; an intentional runtime treatment is declared in the plan.
+-Preflight begins only after the plan anchor. Attempt duration must agree with the
+-frozen timeout, and a timed-out leg links timer evidence.
+-
+-Each attempt accounts for every case in its shard. Terminal case states are
+-`pass`, `fail`, `omitted`, `skipped`, `excluded`, `timed-out`, `invalid` and
+-`tool-error`. `results.accounting` must exactly match retained rows. Passing
+-receipts cannot hide a non-semantic state or critical candidate failure.
+-Separate `attempt_accounting` preserves provider-run reliability: base attempts
+-plus retained retries and every terminal attempt state must also conserve.
+-
+-Required graders judge every semantic row. A model grader cannot judge output
+-from its own provider family. Differing required judgements need a fresh
+-adjudicator; unresolved disagreement blocks `pass`. Metric values,
+-numerators/denominators, comparator deltas and non-inferiority decisions are
+-recomputed from retained scores.
+-
+-## Validation
+-
+-There is no receipt validator. The consumer reads the receipt itself and
+-confirms, in order: the artifact's own SHA-256 matches the digest its binding
+-records; `evaluation_id`, `plan.digest` and the enclosing delivery run ID match
+-the anchors frozen before execution; every linked artifact digest matches its
+-live bytes; accounting conserves against retained rows; and `status` is `pass`
+-only where every applicable threshold and margin held.
+-
+-A clean reading proves only a machine pass for the canonical receipt. Before execution the
+-consumer anchors evaluation ID, plan digest and delivery run ID. Afterwards it
+-binds the evaluation artifact's own SHA-256, loads it, requires
+-`contract: evaluation-run` and `schema_version: 2`, and reads the receipt
+-against the checks above. It must not trust copied dataset, threshold or
+-summary fields.
+-
+-Unsupported receipts lack sufficient lineage and provenance to migrate
+-truthfully. Preserve them as historical evidence and rerun from a fresh frozen
+-plan.
++# Evaluation-run receipt
++
++`EVALUATION.json` is evidence, not a second delivery lifecycle. It records a
++machine evaluation from frozen plan to result. The enclosing `delivery-run`
++owns delivery acceptance and separate release authority. Acceptance requires
++objective checks and the review required by the tier; explicit user acceptance
++is required only for `terminal` work or when the approved scope asks for it.
++
++## Status
++
++| Status | Meaning | Can satisfy assurance? |
++|---|---|---:|
++| `planned` | Protocol frozen; no execution rows | no |
++| `running` | Partial retained execution | no |
++| `pass` | Complete rows meet every machine gate | yes |
++| `fail` | Complete evidence fails a declared gate | no |
++| `incomplete` | Complete accounting exposes unusable coverage | no |
++| `cancelled` | Schedule is conserved as skipped/cancelled evidence | no |
++
++`conclusion.machine_only` is always `true`. Acceptance fields are invalid. For a
++gating run, delivery records the evaluation ID, plan digest and delivery run ID
++before execution; the evaluator cannot create that anchor after seeing results.
++
++## Bound evidence
++
++Every artifact has a safe relative POSIX path, media type, SHA-256, owner,
++retention and data policy. The validator rejects absolute paths, traversal,
++symlink escape and, with `--verify-hashes`, missing or changed bytes. Raw prompts,
++outputs and failure examples stay in retained evidence artifacts rather than the
++hot receipt.
++
++The plan binds:
++
++- dataset ID/version, provenance, consent or licence, development/holdout split
++  digests and leakage boundary;
++- treatment manifests and configuration digests;
++- a shared runtime digest plus paired inputs/seeds so comparator arms differ
++  only in their declared treatment;
++- cases, families, repetitions, paired seeds, shards, timeout, retry and
++  exclusion policies;
++- deterministic preflight requirements;
++- metric ranges, aggregation, threshold, target/comparator arms and regression
++  margin; and
++- required graders, blinding, independence, self-judging prohibition and
++  disagreement protocol.
++
++For `kind: skill-quality`, roles are `candidate`, `without` and `previous`.
++`candidate` and `without` are required. A genuinely new skill records
++`previous` as `not-applicable` with a reason; it never aliases it to `without`.
++
++## Conservation and lineage
++
++One base attempt exists for every active arm x family x repetition x shard.
++Retries reference an earlier failed attempt with the same cell and remain in the
++receipt. Each attempt records timestamps, seed, input/output/route artifacts,
++terminal status, usage or its unavailability, and requested plus actual adapter,
++endpoint, provider family, model and effort. Substitution needs a reason.
++Every attempt repeats the frozen plan, shared-runtime, arm-manifest and
++arm-configuration digests. Paired arms keep input and undeclared runtime
++dimensions identical; an intentional runtime treatment is declared in the plan.
++Preflight begins only after the plan anchor. Attempt duration must agree with the
++frozen timeout, and a timed-out leg links timer evidence.
++
++Each attempt accounts for every case in its shard. Terminal case states are
++`pass`, `fail`, `omitted`, `skipped`, `excluded`, `timed-out`, `invalid` and
++`tool-error`. `results.accounting` must exactly match retained rows. Passing
++receipts cannot hide a non-semantic state or critical candidate failure.
++Separate `attempt_accounting` preserves provider-run reliability: base attempts
++plus retained retries and every terminal attempt state must also conserve.
++
++Required graders judge every semantic row. A model grader cannot judge output
++from its own provider family. Differing required judgements need a fresh
++adjudicator; unresolved disagreement blocks `pass`. Metric values,
++numerators/denominators, comparator deltas and non-inferiority decisions are
++recomputed from retained scores.
++
++## Validation
++
++There is no receipt validator. The consumer reads the receipt itself and
++confirms, in order: the artifact's own SHA-256 matches the digest its binding
++records; `evaluation_id`, `plan.digest` and the enclosing delivery run ID match
++the anchors frozen before execution; every linked artifact digest matches its
++live bytes; accounting conserves against retained rows; and `status` is `pass`
++only where every applicable threshold and margin held.
++
++A clean reading proves only a machine pass for the canonical receipt. Before execution the
++consumer anchors evaluation ID, plan digest and delivery run ID. Afterwards it
++binds the evaluation artifact's own SHA-256, loads it, requires
++`contract: evaluation-run` and `schema_version: 2`, and reads the receipt
++against the checks above. It must not trust copied dataset, threshold or
++summary fields.
++
++Unsupported receipts lack sufficient lineage and provenance to migrate
++truthfully. Preserve them as historical evidence and rerun from a fresh frozen
++plan.
++
++## Final checklist
++
++Before calling a receipt final, confirm:
++
++- `plan.digest` matches the plan frozen before results were seen, and
++  `plan.frozen_at` precedes the first attempt;
++- every artifact resolves to a safe relative path whose live SHA-256 matches
++  its recorded digest;
++- attempts, case rows, exclusions and grader records account for the whole
++  frozen schedule;
++- aggregates recompute from retained rows;
++- `status` matches threshold comparison; `pass` requires every applicable
++  threshold and regression margin;
++- the enclosing delivery run, evaluation ID and plan digest match the binding
++  recorded by the delivery receipt.
+diff --git a/library/react-performance/references/compiler.md b/library/react-performance/references/compiler.md
+new file mode 100644
+--- /dev/null
++++ b/library/react-performance/references/compiler.md
+@@ -0,0 +1,23 @@
++# React Compiler
++
++- **New code:** write plain components and let the compiler memoise components
++  and hooks. Use `useMemo` or `useCallback` only as an escape hatch, mainly to
++  hold an effect dependency steady.
++- **Existing code:** leave manual memoisation alone. Removing it can change the
++  compiled output, so do that only as a separate, tested change.
++- **Limits:** the compiler does not memoise ordinary functions called during
++  render, and it shares no results between components. A costly calculation
++  used in several places needs a cache outside React, or lifting.
++- **Compiler lint errors** (`eslint-plugin-react-hooks` v6 or later) mean the
++  code breaks React's rules or blocks compilation, so fix the code. Typical
++  causes:
++  - touching `ref.current` during render;
++  - mutating props, state or values after render;
++  - a synchronous `setState` inside an effect;
++  - impure render (`Date.now()`, `Math.random()`);
++  - a component defined inside another component.
++- **Escape hatches:** `incompatible-library` means a library's API cannot be
++  memoised safely, so handle that value deliberately. Use `'use no memo'` only
++  as a short-lived, commented debugging step.
++- **Coverage:** compiling more files is not a fix in itself. Follow the
++  project's opt-in rule and the evidence it asks for.
+diff --git a/library/tanstack/references/imperative-queries.md b/library/tanstack/references/imperative-queries.md
+new file mode 100644
+--- /dev/null
++++ b/library/tanstack/references/imperative-queries.md
+@@ -0,0 +1,18 @@
++# Imperative query migration
++
++Query 5.10x deprecates `fetchQuery`, `prefetchQuery`, `ensureQueryData` and
++their infinite-query versions, ahead of removal in the next major. Use
++`queryClient.query(opts)` and `queryClient.infiniteQuery(opts)`:
++
++- fetch becomes `query(opts)`;
++- prefetch becomes `query(opts).catch(noop)`, because a prefetch must not throw;
++- ensure becomes `query({ ...opts, staleTime: 'static' })`.
++
++Write the new form in new code. Flag existing call sites for migration rather
++than changing them inside unrelated work. If unsure, search `@deprecated` in
++the installed `query-core` type declarations. Older docs still show
++`ensureQueryData`.
++
++`staleTime: 'static'` overrides invalidation for active observers. Keep it to
++one-off imperative calls, never hooks whose data a mutation must refresh.
++`Infinity` still honours invalidation.
+diff --git a/library/tanstack/references/verification.md b/library/tanstack/references/verification.md
+new file mode 100644
+--- /dev/null
++++ b/library/tanstack/references/verification.md
+@@ -0,0 +1,9 @@
++# Query and table verification
++
++Table tests render the component and assert on rows, header sort state and
++selection, not on `table` internals. Tests get a fresh `QueryClient` with
++`retry: false` and go through the public hook or component.
++
++`@tanstack/eslint-plugin-query` provides `exhaustive-deps`,
++`stable-query-client`, `no-rest-destructuring`, `no-unstable-deps` and
++`prefer-query-options`. Suggest it where it is missing; do not add it unasked.

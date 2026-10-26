@@ -2,7 +2,7 @@
 Owner: provenant
 Anchor: tools/front-door/src/gc_agent.rs
 
-Preview collection before inspecting the named removals:
+Preview collection, inspect the named removals, then apply it:
 
 ```sh
 provenant --project /absolute/path/to/repo gc --dry-run --json

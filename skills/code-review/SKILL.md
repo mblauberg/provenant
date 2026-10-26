@@ -5,10 +5,9 @@ description: "Use for read-only source review of PRs, diffs, commits, migrations
 
 # Code review
 
-Review is source-read-only unless the user separately authorises fixes. A
-reviewer may write compressed findings and traces only to an assigned
-artifact directory. The diff is the entry point, not the boundary. Judge the
-resulting system, not the changed lines alone.
+Review is source-read-only unless fixes are separately authorised. Write
+findings and traces only to the assigned artifact directory. Trace beyond the
+diff and judge the resulting system.
 
 ## Review
 
@@ -25,13 +24,11 @@ resulting system, not the changed lines alone.
    is mandatory; add security/privacy, data/concurrency,
    performance/reliability, tests, architecture, readability, UX/accessibility
    or operations only when activated by the dependency cone.
-5. Select independent reviewers under the `HARNESS.md` Review ladder;
-   `orchestrate` owns their families and scheduling. Routine work needs only
-   the chair and objective checks. Substantial work adds one independent
-   review; crucial work needs two with distinct lenses, and terminal adds an
-   adversarial lens. Record blockers when the required cross-family coverage
-   is unavailable. For a council review, challenge anonymised claims before
-   a fresh reduction. Never rank prose or majority-vote findings.
+5. Follow the `HARNESS.md` Review ladder: routine needs chair and checks;
+   substantial adds one independent review; crucial needs two distinct lenses;
+   terminal adds an adversarial lens. `orchestrate` owns families/scheduling.
+   Record unavailable cross-family coverage. Councils challenge anonymised
+   claims before fresh reduction; never rank prose or majority-vote.
    `provenant config show` sets `review.*` above that floor.
 6. Review the design delta. Look for duplicated ownership, scattered flags,
    nullable modes, casts hiding invariants, thin wrappers, parallel flows, and
@@ -43,7 +40,7 @@ resulting system, not the changed lines alone.
    trajectory: relevant deterministic checks ran and their results are
    available. Never infer coverage from a green summary alone.
 9. Report only high-confidence, actionable findings. Return `clean` when no
-   genuine defect exists and required review coverage is complete.
+   defect exists and required review coverage is complete.
 
 Load [review-lenses.md](references/review-lenses.md) for the detailed inspection
 questions, [multi-agent-review.md](references/multi-agent-review.md) for lens
@@ -58,18 +55,15 @@ before writing findings.
 - `implement` owns authorised fixes and bounded re-review; `tdd` or `refactor`
   may supply the method. Do not mutate source or Git state during review: no
   Git write verbs (`orchestrate` lists them); read other refs with `git show`.
-- Artifact-only authority permits named outputs under the assigned run
-  directory; it does not permit arbitrary repo-root scratch. Use the session
-  scratchpad when no run directory exists. Never redirect a command
-  over a wildcard/list that can include its own growing output; keep
-  captures bounded.
-- Language, framework, UI, security, and project skills add specialised lenses;
-  do not repeat their doctrine here. For a rendered-UI change, look at light
-  and dark desktop captures of the changed surfaces before the verdict
-  (`ui-ux-design`).
+- Artifact-only authority permits assigned run outputs, not repo-root scratch.
+  Without a run directory, use the session scratchpad. Bound captures; never
+  redirect over a wildcard/list that could include its own output.
+- Domain/project skills supply specialised lenses. For rendered-UI changes,
+  inspect light and dark desktop captures of changed surfaces before the
+  verdict (`ui-ux-design`).
 - Before aligning a looser validator with a stricter one, search tests for the
   permissive values; they may be a designed route into a rejection path.
-- A structural alternative blocks only when tied to a present defect or
+- A structural alternative blocks only when tied to a defect or
   material regression with a safer, validated design. Attractive redesign
   alone is not a finding.
 

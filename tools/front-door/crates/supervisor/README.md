@@ -26,10 +26,9 @@ never treats capture failure or silence as a reason to stop. `custody` owns
 generation-scoped records, reservation fencing, recovery and release. `internal supervise` is
 private descriptor handoff, not a raw launch API. Run composes provider decoding
 and its children journal through `GuardianHooks` in its same-binary entry point.
-The hidden invocation carries five validated descriptor numbers in argv, rather
-than the design's literal no-argument form. Its private socket carries the bounded
-launch message; provider arguments, prompt and environment values never enter the
-guardian argv. Fixed descriptor slots would add a collision-prone remapping step.
+The hidden invocation carries five validated descriptor numbers in argv.
+Its private socket carries the bounded launch message; provider arguments, prompt and environment values never enter the
+guardian argv.
 
 ## Custody and recovery
 
@@ -52,9 +51,8 @@ writer, and reconcile never grants numeric-PID signalling.
 Run-private `release.json`, `terminal-commit.json` and `quarantine/manifest.json`
 attestations. All are version 1 and scoped; the release contains both raw-file
 digests. Run must write these only after its canonical terminal transaction and
-quarantine commit. This explicit release-attestation contract fills a design gap;
-The crate neither reads SQLite nor manufactures canonical Run truth. Run must protect
-these files from providers. Scratch admission likewise requires a private generated
+quarantine commit. The crate neither reads SQLite nor manufactures canonical
+Run truth. Run must protect these files from providers. Scratch admission likewise requires a private generated
 directory outside the provider sandbox and Run/writer/attempt exclusion against
 all legitimate mutators. Mode 0700 alone does not exclude same-UID peers; unknown
 or externally writable trees must not be admitted. Only classified unchanged
@@ -68,7 +66,7 @@ nested custody therefore remains unknown and prevents descendant delivery there.
 A future native proof needs an explicit reviewed mechanism, not a guessed flag.
 
 The `WaitBudget`/`Clock`, streams, executor, filesystem and reaper
-APIs are reused. No dependency on Run, providers or confinement is introduced.
+APIs are reused. The crate does not depend on Run, providers or confinement.
 
 After bounded explicit cleanup, a durable unresolved reservation and immutable
 exit permit a one-way fenced-leader retirement. The child capability is consumed
@@ -102,9 +100,8 @@ the existing cleanup deadline, recording a warning rather than giving up once.
 Pipe pumping polls at 5 ms. CPU, cancellation and safety census observations
 run at 100 ms; process checkpoints publish on the first loop turn and then
 at 1 s intervals. Unchanged
-checkpoint/reservation bytes skip durable replacement. Full census still runs
-on the pipe thread: moving or slowing safety tracking needs a validated design
-and remains deferred. Descendant-journal write
+checkpoint/reservation bytes skip durable replacement. Full census runs
+on the pipe thread. Descendant-journal write
 failures warn once per failure episode and mark the current census evidence
 incomplete. A subsequent successful census replaces that flag with its own
 completeness; the bounded exit warnings retain the journal-failure history.
@@ -117,15 +114,10 @@ Durable reservation/exit retry loops intentionally retain custody without a time
 limit; signals cannot waive publication. `process.json` exposes pending exit
 publication when storage permits.
 
-`CapturePlan.terminal_ms` is removed from the private same-binary handoff and
-launch summary: terminal grace already uses `root_flush_ms`. There is
-no old-state or mixed-version reader contract. Capture and cleanup defaults use
+Terminal grace uses `root_flush_ms`. Capture and cleanup defaults use
 the executor/machine constants. Darwin PID listing over-allocates within its
 entry bound and retries a full buffer before claiming truncation. Native boot
 identity is cached only after a successful read.
 
-Strict `provenant_os::exec::run_text` remains available. The convenience tee
-queue is fixture-only. Further pump
-and exit-builder extraction, capture-loop consolidation, exit-record shape
-consolidation, scratch partial-write handling and staging-file recovery need
-separate focused changes; they are not mechanical changes in this audit lane.
+Strict `provenant_os::exec::run_text` is available. The convenience tee
+queue is fixture-only.

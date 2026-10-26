@@ -165,9 +165,9 @@ with an upstream so `gh pr create` finds the branch:
 git push -u origin fix/repo-runbook-mechanics
 ```
 
-A Fabric writer lane cannot write the shared Git `config`, so `-u` pushes but
-cannot record the upstream. From a lane, push with `git push origin HEAD` and
-pass `--head <branch>` to `gh pr create`.
+A Fabric writer lane has no Git credentials. Use host delivery with
+`provenant dispatch --deliver-remote origin --deliver-branch BRANCH --open-pr`
+to push its verified commit and open the pull request.
 
 ### Pull request
 
@@ -233,7 +233,7 @@ Before queueing merge for a substantial software change, confirm its delivery re
 Merge authority is repo-based. Review pressure follows the
 [`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
 recorded-blocker fallback when cross-family review is unavailable. This
-repository is a personal harness, not production: by user directive (2026-07-16), repository auto-merge is enabled
+repository is a personal harness, not production: by user directive, repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
 its tier's review pressure (routine: chair plus objective checks; substantial+
 uses the canonical ladder on the exact head) and
@@ -310,7 +310,7 @@ exact-head evidence), then merge it.
 
 ### Rust build cache
 
-Both Rust cache steps cache `tools/front-door/target`, including Cargo's
+Both Rust cache steps cache the workspace's `target/` directory, including Cargo's
 nested build-dir layout. A `build.build-dir` outside that tree is not cached
 unless its path is added to the action's `cache-directories`.
 
@@ -381,7 +381,7 @@ Afterwards:
    not run the merge-commit and squash-merge paths as one sequence.
 
 4. The user-authorised repository setting `delete_branch_on_merge=true`
-   (enabled 2026-07-19) automatically deletes a merged pull request's remote
+   automatically deletes a merged pull request's remote
    head branch, so the remote ref is usually already gone by the time you prune;
    `git remote prune origin` clears the stale remote-tracking ref. This
    automatic merged-head cleanup needs no separate per-branch authority. Forced
