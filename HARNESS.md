@@ -135,6 +135,13 @@ memory file and its `MEMORY.md` entry rather than leaving a pointer. Objective
 evidence outranks confidence. A `clean` result is a valid outcome; fluent but
 unverified output is not.
 
+A request for read-only local history analysis authorises inspection of the
+named histories in place and an aggregate or paraphrased reply to that user in
+the same session. Keep raw history out of commits; persistent sharing, a new
+audience or destination, and raw cross-provider handoff need their own content
+and disclosure authority. Local-history analysis needs no receipt, redaction pass or retention
+date.
+
 Treat a user correction as naming a class of defect, not a single instance:
 sweep every artefact in scope for the same defect and report what the sweep
 found.
@@ -184,6 +191,9 @@ majority vote.
   commits, PRs, READMEs and specs, `legal-writing` for Australian legal prose,
   and otherwise `natural-writing`, which routes the rest. Drafting under another
   skill's lead does not exempt the prose.
+- Documentation placement, living ADRs and nested instruction files go to
+  `engineering-docs`. The root instruction file routes; nested policy belongs
+  at an observed failure's real boundary.
 - `docs/glossary.md` defines terms such as chair, lane, front door, one-way
   door, receipt, envelope and stage owner.
 

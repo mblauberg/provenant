@@ -1,66 +1,37 @@
-# ADR 0020 — Retire the daemon fabric for a daemonless SQLite bus
+# ADR 0020: Daemonless project coordination in SQLite
 
-**Status:** Accepted 2026-08-02 (user); supersedes [ADR
-0002](0002-capability-compiled-execution-authority.md), [ADR
-0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) and [ADR
-0018](0018-accept-portal-stdio-v1-launch-custody.md); amended by [ADR
-0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01
+**Status:** Accepted
+
+Changed: 2026-10-26, #1754.
 
 ## Context
 
-The coordination runtime had grown to roughly 350,000 lines across five
-packages: a daemon, a wire protocol, an operator console, a Herdr adapter and a
-Rust review-portal supervisor. Between a fresh directory and its first message
-stood eighteen preconditions — workspace trust, seat provisioning, generation
-and lease validity, capability compilation, socket liveness, protocol
-handshake, adapter activation and the rest.
-
-The reported symptom was not slowness. It was that agents could not use it. In
-ordinary personal projects the first call failed, and the failure was a
-governance refusal rather than a bug, so retrying never helped.
-
-The trust boundary that justified the daemon does not exist on a single-user
-machine. Every agent runs as the same uid and can read every other agent's
-capability file, so a capability token can only inconvenience an honest caller.
-Once that is accepted, the daemon's remaining technical job is serialising
-writes. The decision-time measurement recorded sixteen concurrent processes and
-3,200 messages with none lost and a 657 ms contention window; it is not a
-current regression claim.
+The former daemon made ordinary coordination depend on provisioning, expiring
+capabilities and protocol handshakes. On one user's machine, same-UID agents
+could read each other's capability files; the ceremony supplied little
+isolation while obstructing normal use.
 
 ## Decision
 
-Delete the five packages. `runtime/fabric` replaces them: one SQLite file, a
-small MCP surface, a shell CLI, and identity derived from the working directory rather
-than issued to the caller.
+Fabric is a project-scoped SQLite coordination store with CLI and MCP surfaces,
+not a provider daemon. The fabric-store crate owns mail, tasks and events;
+fabric-runtime owns identity and host coordination. SQLite serialises writes.
 
-Nothing is trusted, bootstrapped, provisioned, renewed or leased. An agent is
-`(project, agent_id)`, where ordinary registered worktrees share their primary
-checkout and other Git or non-Git roots stand alone. The agent id comes from
-the environment the provider already sets. Identity does not expire or need renewal. Delivery
-claims are the narrow exception: an unacknowledged claim expires and redelivers
-the message, without creating a provider lease, liveness proof or renewal flow.
+Identity derives from the working directory. Registered worktrees share their
+primary checkout's project identity; other Git or non-Git roots stand alone.
+The agent label can split inboxes. Mail uses per-recipient read cursors, with no
+claim, acknowledgement token or redelivery.
 
-There are no in-process adapters. ADR 0022 later permits Fabric MCP to start the
-existing external dispatch owners without moving provider mechanics, process
-receipts or lifecycle state into Fabric. Direct command-line dispatch remains
-supported, and Fabric carries messages, shared tasks and activity around it. The doctrine
-that direct CLIs were a degraded fallback is reversed, because the path they
-were a fallback to no longer exists.
+Provider execution belongs to run, providers and supervisor. Fabric's thin MCP
+surface delegates to those owners under
+[ADR 0022](0022-thin-fabric-mcp-execution-facade.md). Delivery acceptance belongs
+to workflow, separately from execution evidence. There is no daemon capability
+compiler, review-portal custody protocol or persistent provider session pool.
 
 ## Consequences
 
-The capability-compiled write profiles of ADR 0002 and the `portal-stdio-v1`
-launch custody of ADR 0018 have no runtime left to enforce them. Both are
-superseded rather than amended: the boundary they protected was the daemon's,
-and the daemon is gone.
-
-Provider sessions are no longer held open between calls. Skills already
-dispatch `codex exec`, `agy` and `cursor-agent` per lane, so nothing that was
-working loses a capability.
-
-The cost is that anything wanting genuine multi-tenant isolation would have to
-reintroduce a mediating process. That is accepted deliberately: this is a
-personal harness on one machine, and an attacker already able to read another
-agent's files has won regardless.
-
-The old tree is preserved on the `legacy/agent-fabric` branch.
+Coordination works without provisioning a second trust system. Same-user
+coordination does not promise multi-tenant isolation. Cross-host federation
+uses the explicit ownership boundary in
+[ADR 0026](0026-federate-fabric-across-own-hosts-over-ssh.md), not a shared
+network-mounted database.

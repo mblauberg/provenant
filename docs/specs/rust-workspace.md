@@ -3,8 +3,8 @@
 Durable engineering rules for the Rust workspace under `tools/front-door/`.
 The [area specs](README.md) own each subsystem contract; this file owns what
 they share. [ADR 0028](../adr/0028-rust-port-dependencies.md) decision 3 sets
-the direct dependency list and [ADR 0029](../adr/0029-rust-rewrite-in-one-pass.md)
-records the one-pass rewrite.
+the direct dependency list and [ADR 0027](../adr/0027-rust-front-door.md)
+records the sole Rust runtime.
 
 ## Crate layering
 

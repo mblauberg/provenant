@@ -121,9 +121,9 @@ verbatim through a rewrite; a shorter README must not drop an obligation.
 
 ## ADR
 
-Use when recording a durable architectural decision. Quick shape below; full guidance (status lifecycle, supersession, Nygard format) in `architecture-and-presentations.md`.
+Use when recording a durable architectural decision. Quick shape below; full guidance (Nygard format) in `architecture-and-presentations.md`.
 
-Structure: title (a decision), status, context (forces), decision (active voice, present tense), consequences (positive, negative, and neutral). One decision per record. Do not mix proposed and accepted decisions unless the status makes that explicit; supersede rather than edit an accepted ADR.
+Structure: title (a decision), status, context (forces), decision (active voice, present tense), consequences (positive, negative, and neutral). One decision per record. Do not mix proposed and accepted decisions unless the status makes that explicit; amend accepted ADRs in place with one `Changed:` line; git keeps history; see `engineering-docs`.
 
 ## Implementation Plan
 
