@@ -2250,8 +2250,9 @@ fn render_lanes(
                 .and_then(|r| r.provider.as_deref())
                 .zip(lane.session.as_deref())
                 .map(|(adapter, session)| {
-                    let path = run::locate_transcript(&artifact(root, lane, ""), session)
-                        .map(|relative| artifact(root, lane, &relative.to_string_lossy()));
+                    let attempt = artifact(root, lane, "");
+                    let path = run::locate_transcript(&attempt, session, &lane.write_grants)
+                        .map(|path| attempt.join(path));
                     json!({ "adapter": adapter, "session": session, "path": path })
                 });
             json!({
@@ -5320,7 +5321,7 @@ mod tests {
     #[test]
     fn render_lanes_points_at_the_provider_transcript() -> Result<(), Box<dyn std::error::Error>> {
         let now = WallTime::from_micros(100)?;
-        let lane: run::AttemptRecord = serde_json::from_value(json!({
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([1; 16]),
             "run_id": RunId::from_bytes([2; 16]),
@@ -5351,7 +5352,7 @@ mod tests {
         let transcript = attempt.join("provider-state/candidate-0/claude-config/projects/k");
         std::fs::create_dir_all(&transcript)?;
         std::fs::write(transcript.join("sess-1848.jsonl"), "{}\n")?;
-        let (data, _) = render_lanes(&[lane], &[], None, &state);
+        let (data, _) = render_lanes(&[lane.clone()], &[], None, &state);
         let found = &data["lanes"][0]["transcript"];
         assert_eq!(found["adapter"], "claude");
         assert_eq!(found["session"], "sess-1848");
@@ -5361,6 +5362,23 @@ mod tests {
                 .join("sess-1848.jsonl")
                 .to_string_lossy()
                 .as_ref()
+        );
+        // Read-only Claude records its selected account's exact state-write path.
+        let account = root.path().join("accounts/claude/projects/project-key");
+        std::fs::create_dir_all(&account)?;
+        let path = account.join("sess-1848.jsonl");
+        std::fs::write(&path, "{}\n")?;
+        lane.write_grants = vec![run::WriteGrantRecord {
+            source: run::WriteSource::StateWrite,
+            scope: run::PathScope::Exact,
+            path: provenant_records::AbsolutePath::new(&path)?,
+        }];
+        let other = tempfile::tempdir()?;
+        std::fs::create_dir_all(artifact(other.path(), &lane, ""))?;
+        let (data, _) = render_lanes(&[lane], &[], None, other.path());
+        assert_eq!(
+            data["lanes"][0]["transcript"]["path"],
+            path.to_string_lossy().as_ref()
         );
         Ok(())
     }

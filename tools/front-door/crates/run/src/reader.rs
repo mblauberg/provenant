@@ -503,8 +503,8 @@ impl RunStore {
             ArtifactPart::Transcript => {
                 let session = record.session.as_deref().ok_or(RunError::NotFound)?;
                 let dir = self.attempt_dir(record.run_id, id, false)?;
-                let (dir, name, _) =
-                    crate::transcript::find(&dir, session).ok_or(RunError::NotFound)?;
+                let (dir, name, _) = crate::transcript::find(&dir, session, &record.write_grants)
+                    .ok_or(RunError::NotFound)?;
                 let (bytes, complete) =
                     crate::transcript::tail(&dir, &name).ok_or(RunError::UnsafePath)?;
                 let digest = provenant_records::CanonicalV1::file_digest(&bytes);

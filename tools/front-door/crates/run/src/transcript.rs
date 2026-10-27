@@ -2,6 +2,7 @@
 //! The run records a pointer (adapter and session); the file stays with the
 //! provider and is read in place, never copied.
 use provenant_os::fs::{Directory, FileKind};
+use provenant_records::run::{PathScope, WriteGrantRecord, WriteSource};
 use std::{
     ffi::{OsStr, OsString},
     io::{Seek, SeekFrom},
@@ -13,10 +14,14 @@ pub(crate) const WINDOW: u64 = 4 << 20;
 const DEPTH: u8 = 8;
 const ENTRIES: u32 = 20_000;
 
-/// The `.jsonl` file named for `session` under the attempt's provider state,
-/// as a directory handle, its name, and the path relative to the attempt.
+/// The `.jsonl` file named for `session`, as a directory handle, its name,
+/// and a path relative to the attempt or absolute for an account transcript.
 /// Bounded, never follows a link and stays on one device.
-pub(crate) fn find(attempt: &Directory, session: &str) -> Option<(Directory, OsString, PathBuf)> {
+pub(crate) fn find(
+    attempt: &Directory,
+    session: &str,
+    grants: &[WriteGrantRecord],
+) -> Option<(Directory, OsString, PathBuf)> {
     fn walk(
         dir: &Directory,
         session: &str,
@@ -53,6 +58,30 @@ pub(crate) fn find(attempt: &Directory, session: &str) -> Option<(Directory, OsS
     if session.is_empty() {
         return None;
     }
+    // Read-only Claude writes into the selected account. Its adapter records
+    // the exact transcript state-write grant, so never search that account.
+    for grant in grants {
+        if grant.source != WriteSource::StateWrite || grant.scope != PathScope::Exact {
+            continue;
+        }
+        let path = grant.path.to_path_buf().ok()?;
+        let name = path.file_name()?;
+        let parent = path.parent()?;
+        if name != OsStr::new(&format!("{session}.jsonl"))
+            || parent.parent()?.file_name()? != OsStr::new("projects")
+        {
+            continue;
+        }
+        // Open each component beneath / without following symlinks.
+        let mut dir = Directory::root(true).ok()?;
+        for component in parent.strip_prefix("/").ok()?.components() {
+            dir = dir.open_verified_directory(component.as_os_str()).ok()?;
+        }
+        if dir.metadata_at(name, false).ok()?.kind != FileKind::Regular {
+            return None;
+        }
+        return Some((dir, name.to_owned(), path));
+    }
     let state = attempt
         .open_verified_directory(OsStr::new("provider-state"))
         .ok()?;
@@ -67,10 +96,10 @@ pub(crate) fn find(attempt: &Directory, session: &str) -> Option<(Directory, OsS
     )
 }
 
-/// Where the transcript of `session` sits under an attempt directory.
-pub fn locate(attempt: &Path, session: &str) -> Option<PathBuf> {
+/// Locate a provider-state transcript or a recorded account transcript.
+pub fn locate(attempt: &Path, session: &str, grants: &[WriteGrantRecord]) -> Option<PathBuf> {
     let attempt = Directory::open_anchor(attempt).ok()?;
-    find(&attempt, session).map(|(_, _, path)| path)
+    find(&attempt, session, grants).map(|(_, _, path)| path)
 }
 
 /// The last `WINDOW` bytes of the transcript, starting at a line boundary, and
@@ -94,4 +123,72 @@ pub(crate) fn tail(dir: &Directory, name: &OsStr) -> Option<(Vec<u8>, bool)> {
         bytes.drain(..start);
     }
     Some((bytes, !clipped))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn codex_rollout_path() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let path = Path::new(
+            "provider-state/candidate-0/codex-home/sessions/2026/10/27/rollout-2026-10-27-sess-1848.jsonl",
+        );
+        std::fs::create_dir_all(temp.path().join(path.parent().ok_or("parent")?))?;
+        std::fs::write(temp.path().join(path), "{}\n")?;
+        assert_eq!(locate(temp.path(), "sess-1848", &[]), Some(path.into()));
+        Ok(())
+    }
+
+    #[test]
+    fn claude_account_path_and_symlinks() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let project = root.join("account/projects/project-key");
+        std::fs::create_dir_all(&project)?;
+        let path = project.join("sess-1848.jsonl");
+        std::fs::write(&path, "{}\n")?;
+        let mut grant = WriteGrantRecord {
+            source: WriteSource::StateWrite,
+            scope: PathScope::Exact,
+            path: provenant_records::AbsolutePath::new(&path)?,
+        };
+        assert_eq!(locate(&root, "sess-1848", &[grant.clone()]), Some(path));
+        let (dir, name, _) = find(
+            &Directory::open_anchor(&root)?,
+            "sess-1848",
+            &[grant.clone()],
+        )
+        .ok_or("account transcript missing")?;
+        assert_eq!(tail(&dir, &name), Some((b"{}\n".to_vec(), true)));
+        assert!(locate(&root, "other-session", &[grant.clone()]).is_none());
+        let link = root.join("linked-account");
+        std::os::unix::fs::symlink(root.join("account"), &link)?;
+        grant.path = provenant_records::AbsolutePath::new(
+            &link.join("projects/project-key/sess-1848.jsonl"),
+        )?;
+        assert!(locate(&root, "sess-1848", &[grant.clone()]).is_none());
+        let linked_file = project.join("linked-session.jsonl");
+        std::os::unix::fs::symlink(project.join("sess-1848.jsonl"), &linked_file)?;
+        grant.path = provenant_records::AbsolutePath::new(&linked_file)?;
+        assert!(locate(&root, "linked-session", &[grant]).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_larger_than_window_starts_at_a_line_boundary() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let mut bytes = vec![b'x'; usize::try_from(WINDOW)? + 10];
+        bytes.extend_from_slice(b"\n{\"last\":true}\n");
+        std::fs::write(temp.path().join("session.jsonl"), bytes)?;
+        let dir = Directory::open_anchor(temp.path())?;
+        assert_eq!(
+            tail(&dir, OsStr::new("session.jsonl")),
+            Some((b"{\"last\":true}\n".to_vec(), false))
+        );
+        Ok(())
+    }
 }
