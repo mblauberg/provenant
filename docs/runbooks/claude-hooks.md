@@ -34,6 +34,11 @@ The digest is read-only and at most 3 KiB; the whole hook output stays under
   the PRs you delivered into the checkpoint that way. When `pr status` is
   absent, slow or failing, the line says so and gives the command to run.
 
+Each lane listing reads one page of 100. When more exist, the count shows a
+`+` (for example `Lanes settled since the last chair save (3+)`) and the
+section ends with `this count is partial; run <command>`, where the command
+lists the next page. A partial count is never shown as complete.
+
 A section the hook could not read is listed as unavailable, never as empty.
 The hook budget is 4 seconds in total, with the lane, PR and worktree reads
 running in parallel; a read that overruns leaves its section unavailable.

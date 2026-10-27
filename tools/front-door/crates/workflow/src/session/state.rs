@@ -82,8 +82,10 @@ pub struct WorktreeLine {
 pub struct SessionState {
     pub active: Vec<LaneLine>,
     pub settled: Vec<LaneLine>,
-    /// Lanes the listing reported beyond the page the collector read.
-    pub lanes_truncated: bool,
+    /// When the listing held lanes beyond the page the collector read, the
+    /// command that lists the next page. The count shown is then partial.
+    pub active_more: Option<String>,
+    pub settled_more: Option<String>,
     pub prs: Vec<PrLine>,
     /// PR numbers the chair named whose status could not be read.
     pub prs_unread: Vec<u64>,
@@ -95,24 +97,33 @@ struct Section {
     title: String,
     lines: Vec<String>,
     more: usize,
+    /// Set when the section's source held more than was read.
+    partial: Option<String>,
 }
 impl SessionState {
     fn sections(&self, worktrees: bool) -> Vec<Section> {
         let mut sections = Vec::new();
-        let lanes = |title: &str, lanes: &[LaneLine]| Section {
-            title: format!("{title} ({}{})", lanes.len(), plus(self.lanes_truncated)),
+        let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>| Section {
+            title: format!("{title} ({}{})", lanes.len(), plus(next.is_some())),
             lines: lanes
                 .iter()
                 .take(SECTION_LINES)
                 .map(LaneLine::render)
                 .collect(),
             more: lanes.len().saturating_sub(SECTION_LINES),
+            partial: next.as_ref().map(|command| {
+                format!(
+                    "more lanes exist beyond the page read, so this count is partial; run `{}`",
+                    clean(command, 512)
+                )
+            }),
         };
         if !self.unavailable.iter().any(|name| name == "lanes") {
-            sections.push(lanes("Lanes in flight", &self.active));
+            sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
             sections.push(lanes(
                 "Lanes settled since the last chair save",
                 &self.settled,
+                &self.settled_more,
             ));
         }
         if !self.prs.is_empty() || !self.prs_unread.is_empty() {
@@ -129,6 +140,7 @@ impl SessionState {
                 title: "Pull requests named in the checkpoint".into(),
                 lines,
                 more: 0,
+                partial: None,
             });
         }
         if worktrees && !self.unavailable.iter().any(|name| name == "worktrees") {
@@ -149,6 +161,7 @@ impl SessionState {
                     })
                     .collect(),
                 more: self.worktrees.len().saturating_sub(SECTION_LINES),
+                partial: None,
             });
         }
         for name in &self.unavailable {
@@ -156,6 +169,7 @@ impl SessionState {
                 title: format!("{} unavailable", clean(name, 32)),
                 lines: vec![],
                 more: 0,
+                partial: None,
             });
         }
         sections
@@ -239,6 +253,16 @@ fn render(title: &str, sections: &[Section], limit: usize) -> String {
             if out.len() + more.len() <= limit {
                 out.push_str(&more);
             }
+        }
+        if let Some(partial) = &section.partial {
+            // Never dropped silently: when it does not fit, the output says it
+            // was bounded instead.
+            let note = format!("- {partial}\n");
+            if out.len() + note.len() > limit {
+                full = true;
+                break;
+            }
+            out.push_str(&note);
         }
     }
     if full {

@@ -149,11 +149,12 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             .collect();
         match (active.join(), settled.join()) {
             (Ok(Ok(active)), Ok(Ok(settled))) => {
-                let (lanes, more) = parse_lanes(&active, None);
+                let (lanes, next) = parse_lanes(&active, None);
                 state.active = lanes;
-                let (lanes, settled_more) = parse_lanes(&settled, Some(want.settled_after_unix));
+                state.active_more = next.map(|cursor| next_page(&cursor, false));
+                let (lanes, next) = parse_lanes(&settled, Some(want.settled_after_unix));
                 state.settled = lanes;
-                state.lanes_truncated = more || settled_more;
+                state.settled_more = next.map(|cursor| next_page(&cursor, true));
             }
             _ => state.unavailable.push("lanes".into()),
         }
@@ -207,9 +208,32 @@ fn route(lane: &Value) -> String {
         .or_else(|| requested("name"))
         .unwrap_or_else(|| "unresolved".into())
 }
+/// The command that lists the page after `cursor`, for the same listing the
+/// hook read. Only the digits of a cursor are kept, since it reaches a command.
+fn next_page(cursor: &str, settled: bool) -> String {
+    let cursor: String = cursor.chars().filter(char::is_ascii_digit).collect();
+    let mut command = if settled {
+        format!("provenant lanes --all --limit {LANE_PAGE}")
+    } else {
+        format!("provenant lanes --limit {LANE_PAGE}")
+    };
+    if settled {
+        for outcome in TERMINAL {
+            command.push_str(" --state ");
+            command.push_str(outcome);
+        }
+    }
+    if !cursor.is_empty() {
+        command.push_str(" --cursor ");
+        command.push_str(&cursor);
+    }
+    command
+}
 /// Lanes from a `lanes` listing. With `settled_after_unix`, only lanes that
-/// finished later count. The flag reports a further page the read did not take.
-fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>, bool) {
+/// finished later count. The cursor, when present, names a further page the
+/// read did not take; settled lanes can finish out of queue order, so a later
+/// page may still hold some, and the cursor is reported for both listings.
+fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>, Option<String>) {
     let mut lanes = Vec::new();
     let rows = data["lanes"].as_array().map_or(&[][..], Vec::as_slice);
     for lane in rows {
@@ -237,8 +261,7 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
             reason: lane["reason"].as_str().map(str::to_owned),
         });
     }
-    let more = data["next_cursor"].is_string() && settled_after_unix.is_none();
-    (lanes, more)
+    (lanes, data["next_cursor"].as_str().map(str::to_owned))
 }
 /// Registered worktrees other than the primary checkout, which `git` lists first.
 fn parse_worktrees(data: &Value) -> Vec<WorktreeLine> {
@@ -300,8 +323,8 @@ mod tests {
             {"run_id":"r","task_id":"t","attempt_id":"b","state":"queued",
              "requested_route":{"kind":"named","name":"utility"}}
         ],"next_cursor":"7"});
-        let (lanes, more) = parse_lanes(&data, None);
-        assert!(more);
+        let (lanes, next) = parse_lanes(&data, None);
+        assert_eq!(next.as_deref(), Some("7"));
         assert_eq!(lanes[0].id, "r/t/a");
         assert_eq!(lanes[0].route, "m");
         assert_eq!(lanes[0].worktree.as_deref(), Some("/w/x"));
@@ -325,6 +348,49 @@ mod tests {
         let (lanes, _) = parse_lanes(&data, Some(after));
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].reason.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn a_truncated_settled_listing_says_so_and_names_the_next_page() {
+        use super::*;
+        use provenant_workflow::session::SessionState;
+        use serde_json::json;
+        // More than a page of lanes: the settled listing is newest-queued
+        // first, so a lane on a later page can still have finished recently.
+        let data = json!({"lanes":[
+            {"run_id":"r","task_id":"t","attempt_id":"a","state":"failed","finished_at":"2026-10-27T01:00:00Z"}
+        ],"next_cursor":"1042"});
+        let (lanes, next) = parse_lanes(&data, Some(0));
+        let command = next_page(&next.unwrap_or_default(), true);
+        assert!(
+            command.starts_with("provenant lanes --all --limit 100 --state succeeded"),
+            "{command}"
+        );
+        assert!(command.ends_with("--cursor 1042"), "{command}");
+        assert_eq!(
+            next_page("1; rm -rf /", false),
+            "provenant lanes --limit 100 --cursor 1"
+        );
+        let state = SessionState {
+            settled: lanes,
+            settled_more: Some(command),
+            ..Default::default()
+        };
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(
+            digest.contains("settled since the last chair save (1+)"),
+            "{digest}"
+        );
+        assert!(
+            digest.contains("this count is partial; run `provenant lanes --all"),
+            "{digest}"
+        );
+        // A complete listing shows a plain count and no note.
+        let complete = SessionState::default().digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(
+            !complete.contains("partial") && !complete.contains("(0+)"),
+            "{complete}"
+        );
     }
 
     #[test]
