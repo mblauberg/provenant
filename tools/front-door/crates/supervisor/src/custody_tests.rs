@@ -523,17 +523,7 @@ fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> Test
             boot: Some("darwin:11111111-1111-1111-1111-111111111111"),
         };
         let result = recovery.after_reboot_with(attempt, target, &world);
-        match refusal {
-            Refusal::Scope | Refusal::Attempt => {
-                assert!(matches!(result, Err(CustodyError::InvalidRecord)));
-            }
-            Refusal::Custody => {
-                assert!(matches!(
-                    result,
-                    Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
-                ));
-            }
-        }
+        assert!(result?.is_none(), "unavailable evidence is not proof");
         assert_eq!(std::fs::read(root.path().join("reservation.json"))?, before);
     }
     Ok(())

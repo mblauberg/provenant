@@ -108,6 +108,46 @@ impl std::fmt::Display for UncertainReason {
 const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(test)]
+mod reboot_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_exit_is_not_reboot_proof() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let path = context.state_root.as_path().join(format!(
+            "runs/{}/attempts/{id}/process-exit.json",
+            run.run_id
+        ));
+        std::fs::create_dir(path)?;
+        assert!(!store.settle_rebooted(&store.record(id, &call)?, &call)?);
+        assert!(matches!(
+            store.cancel(id, "stop", &call)?,
+            CancelReceipt::Unobservable { .. }
+        ));
+        assert_eq!(store.record(id, &call)?.state, AttemptState::Running);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod lineage_tests {
     use super::*;
     use provenant_confinement::worktrees::{
@@ -575,7 +615,10 @@ impl RunStore {
             return Ok(false);
         };
         if !matches!(record.state, AttemptState::Terminal { .. })
-            && read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+            && !matches!(
+                read_sealed(&attempt, "process-exit.json", RECORD_LIMIT),
+                Ok(None)
+            )
         {
             // A durable exit retains its canonical completion path and facts.
             return Ok(false);
@@ -589,10 +632,18 @@ impl RunStore {
             .into_iter()
             .find(|fence| fence.scope == Self::scope(record));
         let directory = match fence {
-            Some(fence) => provenant_os::fs::Directory::open_anchor(
-                fence.reservation.parent().ok_or(RunError::UnsafePath)?,
-            )?,
-            None => self.attempt_dir(record.run_id, record.attempt_id, false)?,
+            Some(fence) => match fence
+                .reservation
+                .parent()
+                .and_then(|parent| provenant_os::fs::Directory::open_anchor(parent).ok())
+            {
+                Some(directory) => directory,
+                None => return Ok(false),
+            },
+            None => match attempt.try_clone() {
+                Ok(directory) => directory,
+                Err(_) => return Ok(false),
+            },
         };
         let Ok(recovery) = custody::acquire_recovery(
             directory,
@@ -602,10 +653,7 @@ impl RunStore {
         ) else {
             return Ok(false);
         };
-        let Some(proof) = recovery
-            .after_reboot(&attempt, Self::scope(record))
-            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
-        else {
+        let Ok(Some(proof)) = recovery.after_reboot(&attempt, Self::scope(record)) else {
             return Ok(false);
         };
         self.commit_reboot_lost(&proof, call)?;

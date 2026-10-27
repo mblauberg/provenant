@@ -1343,21 +1343,24 @@ impl Recovery {
         scope: Scope,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<RebootRecovery>> {
-        self.reservation.validate()?;
-        if self.reservation.attempt_device.is_none() {
+        if self.reservation.validate().is_err() || self.reservation.attempt_device.is_none() {
             return Ok(None);
         }
-        let metadata = attempt.metadata()?;
+        let Ok(metadata) = attempt.metadata() else {
+            return Ok(None);
+        };
         if self.scope() != scope
             || self.reservation.attempt_device != Some(metadata.device)
             || self.reservation.attempt_inode != Some(metadata.inode)
         {
-            return Err(CustodyError::InvalidRecord);
+            return Ok(None);
         }
         if !previous_boot(&self.reservation, observer) {
             return Ok(None);
         }
-        let custody = attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+        let Ok(custody) = attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive) else {
+            return Ok(None);
+        };
         Ok(Some(RebootRecovery {
             recovery: self,
             _custody: custody,
