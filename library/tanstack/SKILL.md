@@ -1,6 +1,6 @@
 ---
 name: tanstack
-description: "Use for TanStack Query v5, Router (file routes), Table v9, Virtual, Form, Store, Pacer, Hotkeys, Charts, Devtools and DB: keys, queryOptions, loaders, useTable, useForm, selectors. Not for local UI state, render speed (react-performance) or backend caches."
+description: "Use for TanStack Query v5, Router (file routes), Table v9, Virtual, Form, Store, Pacer, Hotkeys, Charts, Devtools and DB: keys, queryOptions, loaders, useTable, useForm, selectors. Not for ordinary component state (TanStack Store work stays here), render speed (react-performance) or backend caches."
 ---
 
 # TanStack ecosystem: judgement layer
@@ -19,8 +19,11 @@ installed versions, so confirm them first. Project conventions win over this fil
    version, not the patch): `npx -y @tanstack/cli@0.72.0 search-docs "<q>"
    --library <id> --framework react`, and `... doc <id> <path>` with the same
    env vars. Use `libraries` to list ids.
-4. Never run `intent install`, `intent hooks`, `intent setup`, or CLI `create`,
-   `add`, `pin-versions`, `clean-demos` or `telemetry`. They write files.
+4. Forbidden: writes to the project tree, agent instruction files
+   (AGENTS.md, CLAUDE.md) and package manifests, and telemetry. So never run
+   `intent install`, `intent hooks`, `intent setup`, or CLI `create`, `add`,
+   `pin-versions`, `clean-demos` or `telemetry`. `npx` itself caches packages
+   in the user's npm cache, outside the project; that is allowed.
 
 Details and limits: [version-matched](references/version-matched.md).
 
@@ -42,7 +45,8 @@ Details and limits: [version-matched](references/version-matched.md).
   reused by hook, loader, prefetch and cache reads.
 - **Failed requests that resolve:** `fetch` resolves on 4xx and 5xx. The
   `queryFn` throws for them and forwards `signal`.
-- **Status:** `isPending` is no data; `isFetching` is a running request. List
+- **Status:** `isPending` means no data and no error yet (a failed first fetch is
+  not pending); `isFetching` is a running request. List
   key changes use `placeholderData: keepPreviousData`.
 - **Freshness:** choose `staleTime` from the data; never disable focus
   refetching to hide a bad value.
@@ -57,16 +61,18 @@ Details and limits: [version-matched](references/version-matched.md).
 ## Routing by library
 
 - Router loaders with Query: [router integration](references/router.md).
-  File routes, the bundler plugin and generated tree:
-  [file routes](references/file-routes.md).
 - Tables and virtual rows: [table](references/table.md). Never ship
   `stockFeatures`. Server tables set the `manual*` options and hold state in
   the query key. Virtualise only hundreds of rendered rows.
 - Debounce, throttle, queue: [pacer](references/pacer.md) (beta).
-- Shortcuts: [hotkeys](references/hotkeys.md). Devtools:
-  [devtools](references/devtools.md). Collections and live queries:
-  [db](references/db.md) (experimental). Charts: use version-matched docs;
-  no reference here.
+- File routes, router-plugin, Hotkeys and Devtools: load the Intent skills
+  shipped with the installed packages (`router-core` children, `router-plugin`,
+  `hotkeys-core`, `devtools-production`). Keep devtools dev-only and
+  tree-shaken from production; check the bundle only if that lane may run the
+  project's own build. Devtools packages need compatible versions, per their
+  peer ranges.
+- Collections and live queries: [db](references/db.md) (experimental).
+  Charts: use version-matched docs; no reference here.
 
 ## Verification
 
