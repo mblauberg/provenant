@@ -4775,11 +4775,12 @@ fn cancel_queued_work_without_an_attempt_directory() -> TestResult {
 
 #[test]
 fn reconcile_recovers_a_writer_from_a_previous_boot() -> TestResult {
-    recover_rebooted_writer(false, false, true)
+    recover_rebooted_writer(false, false, true, NEW_BOOT)
 }
 
 #[test]
 fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
+    let observer = RebootObserver(NEW_BOOT);
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -4829,7 +4830,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     let manifest = std::fs::read(&manifest_path)?;
     std::fs::write(&manifest_path, b"invalid manifest")?;
     assert!(
-        matches!(store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
+        matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
         [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
     );
     assert!(
@@ -4839,7 +4840,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     assert_eq!(store.record(id, &call)?, record);
     std::fs::write(manifest_path, manifest)?;
     assert_eq!(
-        store.reconcile(run.run_id, &Fake::default(), &call)?,
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
         vec![(id, Reconciled::Finished)]
     );
     assert!(
@@ -4857,25 +4858,60 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
 
 #[test]
 fn cancel_recovers_a_writer_from_a_previous_boot() -> TestResult {
-    recover_rebooted_writer(true, false, true)
+    recover_rebooted_writer(true, false, true, NEW_BOOT)
 }
 
 #[test]
 fn reconcile_retries_reboot_release_after_the_terminal_commit() -> TestResult {
-    recover_rebooted_writer(false, true, true)
+    recover_rebooted_writer(false, true, true, NEW_BOOT)
 }
 
 #[test]
 fn cancel_retries_reboot_release_after_the_terminal_commit() -> TestResult {
-    recover_rebooted_writer(true, true, true)
+    recover_rebooted_writer(true, true, true, NEW_BOOT)
 }
 
 #[test]
 fn reconcile_retries_reboot_release_for_a_reader() -> TestResult {
-    recover_rebooted_writer(false, true, false)
+    recover_rebooted_writer(false, true, false, NEW_BOOT)
 }
 
-fn recover_rebooted_writer(cancel_run: bool, interrupted: bool, writer: bool) -> TestResult {
+const OLD_BOOT: &str = "darwin:00000000-0000-0000-0000-000000000000";
+const NEW_BOOT: &str = "darwin:11111111-1111-1111-1111-111111111111";
+
+struct RebootObserver(&'static str);
+impl provenant_supervisor::census::ProcessObserver for RebootObserver {
+    fn boot_identity(
+        &self,
+    ) -> std::result::Result<String, provenant_supervisor::census::CensusError> {
+        Ok(self.0.into())
+    }
+    fn observe(&self, _: i64) -> provenant_supervisor::census::ProcessObservation {
+        unreachable!("reboot proof needs only the boot identity")
+    }
+    fn census(
+        &self,
+        _: usize,
+    ) -> std::result::Result<
+        provenant_supervisor::census::Census,
+        provenant_supervisor::census::CensusError,
+    > {
+        unreachable!("reboot proof needs only the boot identity")
+    }
+}
+
+#[test]
+fn same_boot_with_free_locks_stays_uncertain() -> TestResult {
+    recover_rebooted_writer(false, false, true, OLD_BOOT)
+}
+
+fn recover_rebooted_writer(
+    cancel_run: bool,
+    interrupted: bool,
+    writer: bool,
+    boot: &'static str,
+) -> TestResult {
+    let observer = RebootObserver(boot);
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -4974,6 +5010,25 @@ fn recover_rebooted_writer(cancel_run: bool, interrupted: bool, writer: bool) ->
         .join(format!("runs/{}/attempts/{id}/provider-state", run.run_id));
     std::fs::write(history.join("session"), "history")?;
 
+    if boot == OLD_BOOT {
+        // Both exclusions are free. That alone cannot prove a reboot or exit.
+        drop(attempt.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?);
+        drop(Directory::open_anchor(&custody)?.try_lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?);
+        assert!(
+            matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+            [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
+        );
+        assert_eq!(store.record(id, &call)?, before);
+        assert!(reservation.exists());
+        assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
+        return Ok(());
+    }
     if interrupted {
         let recovery = provenant_supervisor::custody::acquire_recovery(
             Directory::open_anchor(&custody)?,
@@ -4982,21 +5037,34 @@ fn recover_rebooted_writer(cancel_run: bool, interrupted: bool, writer: bool) ->
             &clock,
         )?;
         let proof = recovery
-            .after_reboot(&attempt, scope)?
+            .after_reboot_with(&attempt, scope, &observer)?
             .ok_or("reboot not proven")?;
         store.commit_reboot_lost(&proof, &call)?;
         drop(proof);
         assert!(reservation.exists());
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
     }
+    if cancel_run && !interrupted {
+        let custody_lock = attempt.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        assert_eq!(
+            store.cancel_with_observer(id, "stop", &call, &observer)?,
+            CancelReceipt::Requested
+        );
+        assert_eq!(store.record(id, &call)?, before);
+        assert!(reservation.exists());
+        drop(custody_lock);
+    }
     if cancel_run {
         assert_eq!(
-            store.cancel(id, "stop", &call)?,
+            store.cancel_with_observer(id, "stop", &call, &observer)?,
             CancelReceipt::AlreadyTerminal
         );
     } else {
         assert_eq!(
-            store.reconcile(run.run_id, &Fake::default(), &call)?,
+            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
             vec![(id, Reconciled::Finished)]
         );
     }
@@ -5014,14 +5082,14 @@ fn recover_rebooted_writer(cancel_run: bool, interrupted: bool, writer: bool) ->
     assert!(!reservation.exists());
     assert!(
         store
-            .reconcile(run.run_id, &Fake::default(), &call)?
+            .reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?
             .is_empty()
     );
     // Also retry a crash after fence release but before clearing the marker.
     store.set_temporary_retained(id, true, &call)?;
     assert!(
         store
-            .reconcile(run.run_id, &Fake::default(), &call)?
+            .reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?
             .is_empty()
     );
     for (name, bytes) in telemetry {

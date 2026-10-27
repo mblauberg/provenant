@@ -3,6 +3,7 @@
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, OperationId, RunId, WallTime};
 use provenant_supervisor::{
+    census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, Scope, StopReceipt},
     machine::StopReason,
 };
@@ -137,7 +138,11 @@ mod reboot_tests {
             run.run_id
         ));
         std::fs::create_dir(path)?;
-        assert!(!store.settle_rebooted(&store.record(id, &call)?, &call)?);
+        assert!(!store.settle_rebooted(
+            &store.record(id, &call)?,
+            &call,
+            &SystemProcessObserver
+        )?);
         assert!(matches!(
             store.cancel(id, "stop", &call)?,
             CancelReceipt::Unobservable { .. }
@@ -607,7 +612,12 @@ impl Reconciled {
 impl RunStore {
     /// A previous boot ended every member of this attempt's process tree.
     /// Keep both exclusions until the canonical commit precedes fence release.
-    fn settle_rebooted(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
+    fn settle_rebooted(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<bool> {
         if record.state == AttemptState::Queued {
             return Ok(false);
         }
@@ -653,7 +663,8 @@ impl RunStore {
         ) else {
             return Ok(false);
         };
-        let Ok(Some(proof)) = recovery.after_reboot(&attempt, Self::scope(record)) else {
+        let Ok(Some(proof)) = recovery.after_reboot_with(&attempt, Self::scope(record), observer)
+        else {
             return Ok(false);
         };
         if matches!(record.state, AttemptState::Terminal { .. })
@@ -787,8 +798,17 @@ impl RunStore {
         errors
     }
     // Cancellation coordinates with a real guardian handoff under a hard cap.
-    #[allow(clippy::disallowed_methods)]
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
+        self.cancel_with_observer(id, reason, call, &SystemProcessObserver)
+    }
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn cancel_with_observer(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<CancelReceipt> {
         // Half the budget for waiting on the handoff; the rest for the store.
         let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
         let deadline = std::time::Instant::now() + std::time::Duration::from_micros(remaining / 2);
@@ -818,7 +838,7 @@ impl RunStore {
         }
         loop {
             let record = self.record(id, call)?;
-            if self.settle_rebooted(&record, call)? {
+            if self.settle_rebooted(&record, call, observer)? {
                 return Ok(CancelReceipt::AlreadyTerminal);
             }
             match record.state {
@@ -1202,6 +1222,15 @@ impl RunStore {
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
+        self.reconcile_with_observer(run, providers, call, &SystemProcessObserver)
+    }
+    pub(crate) fn reconcile_with_observer(
+        &self,
+        run: RunId,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<Vec<(AttemptId, Reconciled)>> {
         let mut ids: Vec<String> = call.retry(|| {
             let mut query = self
                 .db
@@ -1221,7 +1250,7 @@ impl RunStore {
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
             let state = self
-                .reconcile_attempt(id, providers, call)
+                .reconcile_attempt(id, providers, call, observer)
                 .unwrap_or_else(|error| {
                     Some(Reconciled::uncertain(UncertainReason::ReconcileFailed {
                         error: error.to_string(),
@@ -1333,8 +1362,9 @@ impl RunStore {
         &self,
         record: &AttemptRecord,
         call: &Request<'_>,
+        observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
-        if self.settle_rebooted(record, call)? {
+        if self.settle_rebooted(record, call, observer)? {
             return Ok(Some(Reconciled::Finished));
         }
         let id = record.attempt_id;
@@ -1476,12 +1506,13 @@ impl RunStore {
         id: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
+        observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
         if matches!(record.state, AttemptState::Terminal { .. }) {
-            return self.reconcile_terminal_temporary(&record, call);
+            return self.reconcile_terminal_temporary(&record, call, observer);
         }
-        self.reconcile_live_attempt(&record, providers, call)
+        self.reconcile_live_attempt(&record, providers, call, observer)
             .map(Some)
     }
 
@@ -1490,13 +1521,14 @@ impl RunStore {
         record: &AttemptRecord,
         providers: &dyn Providers,
         call: &Request<'_>,
+        observer: &dyn ProcessObserver,
     ) -> Result<Reconciled> {
         let id = record.attempt_id;
         let scope = Self::scope(record);
         if record.state == AttemptState::Queued {
             return Ok(Reconciled::Queued);
         }
-        if self.settle_rebooted(record, call)? {
+        if self.settle_rebooted(record, call, observer)? {
             return Ok(Reconciled::Finished);
         }
         let dir = || self.attempt_dir(record.run_id, id, false);
@@ -1528,7 +1560,7 @@ impl RunStore {
                             Ok(report) if report.survivors.is_empty() => {
                                 drop(recovery);
                                 // The exit is settled: commit it as any other.
-                                self.reconcile_attempt(id, providers, call)
+                                self.reconcile_attempt(id, providers, call, observer)
                                     .map(|state| state.unwrap_or(Reconciled::Finished))
                             }
                             Ok(report) => Ok(Reconciled::Escaped {

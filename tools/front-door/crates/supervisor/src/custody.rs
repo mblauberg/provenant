@@ -1182,7 +1182,7 @@ pub struct Recovery {
     pub(crate) directory: Directory,
     pub(crate) lease: LockGuard,
     pub(crate) reservation: Reservation,
-    // Only the guardian can mint this after its durable exit and cleanup.
+    // The guardian's durable cleanup or native reboot proof establishes this.
     pub(crate) guardian_quiescent: bool,
 }
 
@@ -1203,7 +1203,8 @@ impl RebootRecovery {
     }
     /// Keep writer exclusion for normal terminal settlement, which reacquires
     /// attempt custody while verifying the canonical release artefacts.
-    pub fn into_recovery(self) -> Recovery {
+    pub fn into_recovery(mut self) -> Recovery {
+        self.recovery.guardian_quiescent = true;
         self.recovery
     }
 }
@@ -1342,7 +1343,7 @@ impl Recovery {
     pub fn after_reboot(self, attempt: &Directory, scope: Scope) -> Result<Option<RebootRecovery>> {
         self.after_reboot_with(attempt, scope, &SystemProcessObserver)
     }
-    pub(crate) fn after_reboot_with(
+    pub fn after_reboot_with(
         self,
         attempt: &Directory,
         scope: Scope,
