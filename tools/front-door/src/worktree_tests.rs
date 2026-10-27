@@ -156,6 +156,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_protected_changes_wait_for_review_and_ignore_upstream",
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
+            "recreated_worktree_accepts_writer_after_settlement",
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
@@ -218,6 +219,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "writer_reconcile_refuses_unfinished_cherry_pick_and_releases" => {
                     writer_reconcile_refuses_unfinished_cherry_pick_and_releases()
+                }
+                "recreated_worktree_accepts_writer_after_settlement" => {
+                    recreated_worktree_accepts_writer_after_settlement()
                 }
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
@@ -1962,6 +1966,52 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(!orphan.exists(), "gc must still sweep orphaned caches");
     rig.assert_legacy_unchanged()
+}
+
+fn recreated_worktree_accepts_writer_after_settlement() -> Result {
+    use provenant_os::fs::Directory;
+    use provenant_supervisor::custody::{Scope, WriterBinding};
+
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "reused", "--json"])?;
+    let path = rig.project.join(".worktrees/reused");
+    let (_, context) = writer_context(&rig)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let scope = Scope {
+        run: provenant_core::RunId::from_bytes([31; 16]),
+        attempt: provenant_core::AttemptId::from_bytes([32; 16]),
+        generation: 1,
+    };
+    let state = rig.state.join("worktrees").join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&path));
+    let acquire = |scope| -> Result<_> {
+        let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+        let writer = provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+        let binding = WriterBinding::from_verified(
+            writer.worktree.repo().root_dir(), writer.worktree.repo().private_dir(),
+            writer.branch.as_str(), provenant_core::GitOid::parse(&git(&rig, &["rev-parse", "HEAD"])?)?,
+        )?;
+        Ok(provenant_supervisor::fixture::acquire_writer_with_binding(
+            Directory::open_anchor(&state)?, scope, binding,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()), &cancel, &clock,
+        )?)
+    };
+    let old_tree = Directory::open_anchor(&path)?;
+    drop(acquire(scope)?);
+    assert!(acquire(scope).is_err_and(|error| error.to_string().contains("writer reservation requires recovery")));
+    provenant_supervisor::custody::acquire_recovery(
+        Directory::open_anchor(&state)?,
+        provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?.withdraw_prepared()?;
+    ok(&rig, &["worktree", "remove", "reused", "--json"])?;
+    ok(&rig, &["worktree", "create", "reused", "--json"])?;
+    let lease = acquire(Scope { run: provenant_core::RunId::from_bytes([33; 16]), ..scope })?;
+    lease.withdraw_unlaunched()?;
+    drop(old_tree);
+    Ok(())
 }
 
 fn remove_a_managed_worktree_deletes_its_legacy_lane_cache() -> Result {
