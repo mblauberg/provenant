@@ -1993,6 +1993,7 @@ const CASES: &[Case] = &[
         "the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal",
         the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal,
     ),
+    #[cfg(target_os = "macos")]
     (
         "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
         escapee_is_ended_only_when_the_host_reports_no_nested_runs,
