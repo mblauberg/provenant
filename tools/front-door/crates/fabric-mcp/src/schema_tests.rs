@@ -581,9 +581,8 @@ fn walk(
 }
 
 #[test]
-fn generated_schema_values_match_strict_serde_for_representative_operations() {
+fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
     let mut counts = (0, 0);
-    let mut sampled_operations = 0;
     for tool in strict_catalogue() {
         let name = tool["name"].as_str().expect("tool name");
         let root = &tool["inputSchema"];
@@ -591,19 +590,18 @@ fn generated_schema_values_match_strict_serde_for_representative_operations() {
             .as_array()
             .cloned()
             .unwrap_or_else(|| vec![root.clone()]);
-        let operation = &operations[0];
-        let mut request = sample(root, operation)
-            .unwrap_or_else(|| panic!("cannot generate valid operation for {name}: {operation}"));
-        normalise(&mut request);
-        compare(name, root, &request, "operation", true, &mut counts);
-        walk(name, root, operation, &request, "", true, &mut counts);
-        sampled_operations += 1;
+        for operation in &operations {
+            let mut request = sample(root, operation).unwrap_or_else(|| {
+                panic!("cannot generate valid operation for {name}: {operation}")
+            });
+            normalise(&mut request);
+            compare(name, root, &request, "operation", true, &mut counts);
+            walk(name, root, operation, &request, "", true, &mut counts);
+        }
     }
     assert!(
-        sampled_operations == strict_catalogue().len()
-            && counts.0 >= sampled_operations
-            && counts.1 >= counts.0,
-        "insufficient generated probes for {sampled_operations} operations: {counts:?}"
+        counts.0 > 0 && counts.1 > counts.0,
+        "insufficient generated probes: {counts:?}"
     );
 }
 
