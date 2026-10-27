@@ -7,7 +7,9 @@ use std::ffi::OsStr;
 use thiserror::Error;
 
 mod hooks;
+mod state;
 pub use hooks::*;
+pub use state::*;
 
 pub const CHECKPOINT_LIMIT: u64 = 32 * 1024;
 pub const HOST_SESSION_ID_LIMIT: usize = 128;
@@ -156,6 +158,61 @@ impl SessionStore {
             Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+    /// Read, edit and replace the checkpoint under one exclusive lock, so a
+    /// concurrent `save` is never overwritten from a stale read. `edit` gets the
+    /// current Markdown and returns the replacement, or `None` to leave the file
+    /// alone. Directories are created only when `create` is set and the
+    /// checkpoint is missing; returns whether a replacement was written.
+    pub fn update(
+        &self,
+        create: bool,
+        edit: impl FnOnce(Option<&str>) -> Result<Option<String>, SessionError>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool, SessionError> {
+        let dir = match self.directory(create) {
+            Ok(dir) => dir,
+            Err(error) if !create && error.is_not_found() => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let _lock = dir.lock(
+            OsStr::new("checkpoint.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )?;
+        let current = match dir.open_read(OsStr::new("checkpoint.md")) {
+            Ok(mut file) => {
+                let text = file.read_bounded(CHECKPOINT_LIMIT)?;
+                Some(std::str::from_utf8(&text)?.to_owned())
+            }
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        };
+        let Some(next) = edit(current.as_deref())? else {
+            return Ok(false);
+        };
+        if next.len() as u64 > CHECKPOINT_LIMIT {
+            return Err(SessionError::TooLarge);
+        }
+        check_wait(budget, cancel, clock).map_err(|stop| match stop {
+            WaitStop::Cancelled => SessionError::from(FsError::Cancelled {
+                path: self.root.as_path().into(),
+            }),
+            WaitStop::Deadline => SessionError::Deadline,
+        })?;
+        dir.atomic_write(
+            OsStr::new("checkpoint.md"),
+            ".checkpoint.",
+            next.as_bytes(),
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(SessionError::Durability)?;
+        Ok(true)
     }
 }
 #[cfg(test)]
@@ -352,6 +409,83 @@ mod tests {
         assert_eq!(selected.read().unwrap().unwrap().markdown, "original");
         // An unrelated key is not held by the first key's lock.
         save(&store(&root, project, "other"), b"independent").unwrap();
+    }
+    #[test]
+    fn update_edits_under_the_checkpoint_lock_and_creates_only_when_asked() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let clock = clock(0);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let cancel = CancelToken::new();
+        // Without `create`, a missing checkpoint is neither created nor edited.
+        let wrote = selected
+            .update(
+                false,
+                |_| panic!("no checkpoint to edit"),
+                budget,
+                &cancel,
+                &clock,
+            )
+            .unwrap();
+        assert!(!wrote && !path(&root, project, "host-1").exists());
+        let wrote = selected
+            .update(
+                true,
+                |current| {
+                    assert_eq!(current, None);
+                    Ok(Some("first".into()))
+                },
+                budget,
+                &cancel,
+                &clock,
+            )
+            .unwrap();
+        assert!(wrote);
+        // A concurrent save cannot interleave: the lock is held while editing.
+        let expired = TestClock::new(
+            UtcMicros::from_micros(0).unwrap(),
+            MonoTime::from_micros(1_000_000),
+        );
+        selected
+            .update(
+                true,
+                |current| {
+                    assert_eq!(current, Some("first"));
+                    assert!(matches!(
+                        selected.save(b"racing", budget, &CancelToken::new(), &expired),
+                        Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
+                    ));
+                    Ok(Some("second".into()))
+                },
+                budget,
+                &cancel,
+                &clock,
+            )
+            .unwrap();
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "second");
+        // Declining, failing and oversize edits keep the previous bytes.
+        assert!(
+            !selected
+                .update(true, |_| Ok(None), budget, &cancel, &clock)
+                .unwrap()
+        );
+        assert!(
+            selected
+                .update(
+                    true,
+                    |_| Err(SessionError::Deadline),
+                    budget,
+                    &cancel,
+                    &clock
+                )
+                .is_err()
+        );
+        let big = "x".repeat(CHECKPOINT_LIMIT as usize + 1);
+        assert!(matches!(
+            selected.update(true, |_| Ok(Some(big)), budget, &cancel, &clock),
+            Err(SessionError::TooLarge)
+        ));
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "second");
     }
     #[test]
     fn deadline_expiring_after_lock_keeps_previous_complete_bytes() {

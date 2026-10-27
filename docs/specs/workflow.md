@@ -110,7 +110,7 @@ session key, saved atomically with its bytes preserved. Session IDs are 1 to
 
 ### Session hooks are advisory
 
-`pre-compact` and `compact` exit 0 on missing or invalid state with a
+`pre-compact`, `compact`, `session-start` and `stop` exit 0 on missing or invalid state with a
 diagnostic naming a cause kind, never a path. SessionStart emits only the
 checkpoint for its own key, or a missing or stale status. It never emits the
 latest file, withholds stale content and caps output at 8 KiB.
@@ -118,6 +118,46 @@ latest file, withholds stale content and caps output at 8 KiB.
 - Test: `crates/workflow/src/session.rs::malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback`;
   `::native_host_fixtures_select_only_their_key_and_emit_native_json`
 - Owner: `crates/workflow/src/session.rs`
+
+### Session state is derived, bounded and never authority
+
+`session-start` and `compact` add a digest of this project's in-flight
+lanes, the lanes settled since the chair last saved, and `pr status` for the
+pull requests the chair named in the checkpoint. The digest is at most 3 KiB,
+read-only and shares the 8 KiB output cap, so the checkpoint excerpt shrinks
+first. Lane, PR and worktree facts come from the read commands (`lanes`,
+`pr status`, `worktree list`) under one 4 second deadline. A command that is
+missing, slow or failing marks its section unavailable and never reads as
+empty. Record fields are stripped of markers, backticks and control
+characters before they are shown.
+- Why: a restarted chair must see real lane state quickly, and absence of
+  evidence must not read as an empty queue.
+- Test: `crates/workflow/src/session/state.rs::output_is_bounded_and_says_when_it_was`;
+  `::unreadable_sections_are_named_not_shown_empty`;
+  `::hostile_fields_cannot_forge_markers_or_headings`;
+  `tests/hooks_session.rs::restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair`
+- Owner: `crates/workflow/src/session/state.rs`, `src/hook_state.rs`, `src/hooks.rs`
+
+### Autosave keeps the chair's text
+
+`pre-compact` saves, and `stop` refreshes a checkpoint quiet for ten minutes,
+one marked state block after the chair's text. Only that block is replaced;
+the read, edit and write run under the checkpoint lock, so a concurrent chair
+save is merged. The block records when the chair last saved. The text outside
+it is kept as written, and the save is refused rather than trimming it when
+under 512 bytes of the limit remain. `stop` never creates a checkpoint, a
+checkpoint holding only the block is reported as such, and lane sessions never
+write.
+- Why: automatic state must not erase the authority references the chair wrote
+  or hide that the chair has not saved notes.
+- Test: `crates/workflow/src/session/state.rs::splice_preserves_chair_text_and_replaces_only_the_block`;
+  `::unmatched_markers_never_swallow_chair_text`;
+  `::autosave_refuses_to_trim_chair_text_and_keeps_the_first_save_time`;
+  `crates/workflow/src/session.rs::update_edits_under_the_checkpoint_lock_and_creates_only_when_asked`;
+  `tests/hooks_session.rs::pre_compact_keeps_the_chair_text_and_replaces_only_its_own_block`;
+  `::stop_hook_refreshes_only_an_existing_quiet_checkpoint`;
+  `::lane_sessions_report_but_never_write_checkpoint_state`
+- Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
 
 ## Session handoff
 

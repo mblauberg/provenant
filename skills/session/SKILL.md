@@ -36,9 +36,13 @@ provenant workflow session save <session-id> --file <checkpoint.md>
 
 Use the actual ID supplied by the host or its injected save command. Do not
 substitute a guessed ID, scan transcripts, or fall back to another session's
-file. PreCompact reports whether this checkpoint needs saving; it does not read
-transcripts. Hook output is capped at 8 KiB, so keep the checkpoint useful and
-compact. Managed hook registration changes belong to final install.
+file. PreCompact reports whether this checkpoint needs saving and appends the
+current lane, PR and worktree state as a marked block after your text; it does
+not read transcripts and never edits what you wrote. SessionStart prints a fresh
+digest of lanes and the PRs you named (write them as `PR #N`), so notes need not
+copy that state. Hook output is capped at 8 KiB, so keep the checkpoint useful
+and compact. Managed hook registration changes belong to final install; see
+the Claude hooks runbook, `docs/runbooks/claude-hooks.md`.
 
 ## Handoff and close
 

@@ -24,6 +24,8 @@ pub enum CheckpointStatus {
     Present,
     Missing,
     Stale,
+    /// Present, but holding only the automatically saved state block.
+    StateOnly,
     InvalidInput,
     Unavailable,
 }
@@ -72,6 +74,23 @@ pub fn hook_context(
     clock: &dyn Clock,
     max_age: DurationMicros,
 ) -> HookContext {
+    hook_context_with(root, project, event, input, clock, max_age, "")
+}
+
+/// As [`hook_context`], with a freshly derived `digest` of lane and pull
+/// request state placed before the checkpoint. The digest is the caller's
+/// bounded text; the checkpoint excerpt shrinks first when output is capped.
+/// A saved state block is withheld from the excerpt, since the digest
+/// supersedes it.
+pub fn hook_context_with(
+    root: &StateRoot,
+    project: ProjectId,
+    event: HookEvent,
+    input: impl Read,
+    clock: &dyn Clock,
+    max_age: DurationMicros,
+    digest: &str,
+) -> HookContext {
     let mut bytes = Vec::new();
     let parsed = input
         .take(HOOK_INPUT_LIMIT + 1)
@@ -83,7 +102,7 @@ pub fn hook_context(
         .and_then(|host| host.session_id)
         .and_then(|id| HostSessionId::parse(&id).ok());
     let Some(session) = parsed else {
-        return render(event, None, CheckpointStatus::InvalidInput,
+        return render(event, None, CheckpointStatus::InvalidInput, digest,
             "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None);
     };
     let store = SessionStore::new(root.clone(), project, session.clone());
@@ -95,7 +114,14 @@ pub fn hook_context(
                 if age < 0 || age > i128::from(max_age.as_micros()) {
                     (CheckpointStatus::Stale, None, None)
                 } else {
-                    (CheckpointStatus::Present, Some(checkpoint.markdown), None)
+                    {
+                        let chair = super::state::split(&checkpoint.markdown).chair;
+                        if super::state::has_chair_text(&chair) {
+                            (CheckpointStatus::Present, Some(chair), None)
+                        } else {
+                            (CheckpointStatus::StateOnly, None, None)
+                        }
+                    }
                 }
             }
             Err(error) => (CheckpointStatus::Unavailable, None, Some(error.to_string())),
@@ -108,6 +134,9 @@ pub fn hook_context(
             "present; no save needed by freshness policy (save again if progress changed)"
         }
         CheckpointStatus::Missing => "missing; saving needed",
+        CheckpointStatus::StateOnly => {
+            "holds only automatically saved lane and PR state; chair notes and authority references still need saving"
+        }
         CheckpointStatus::Stale => "stale; saving needed; stale content withheld",
         _ => "unavailable (invalid state or I/O); saving needed after checking state",
     };
@@ -119,7 +148,7 @@ pub fn hook_context(
         session.as_str(),
         session.as_str()
     );
-    render(event, Some(session), status, message, markdown)
+    render(event, Some(session), status, digest, message, markdown)
 }
 
 /// Bounded read cause for the diagnostic: OS kind and code, never paths.
@@ -134,6 +163,7 @@ fn render(
     event: HookEvent,
     session_id: Option<HostSessionId>,
     status: CheckpointStatus,
+    digest: &str,
     diagnostic: String,
     markdown: Option<String>,
 ) -> HookContext {
@@ -142,7 +172,13 @@ fn render(
     } else {
         String::new()
     };
-    let mut stdout = encode(event, &diagnostic, &retained, ExcerptState::Complete);
+    let mut stdout = encode(
+        event,
+        &diagnostic,
+        digest,
+        &retained,
+        ExcerptState::Complete,
+    );
     if stdout.len() > HOOK_OUTPUT_LIMIT {
         // Search UTF-8 boundaries against encoded bytes. Raw bytes and escaped
         // JSON bytes are different measures; subtracting the excess can erase
@@ -160,6 +196,7 @@ fn render(
             let candidate = encode(
                 event,
                 &diagnostic,
+                digest,
                 retained.get(..end).unwrap_or_default(),
                 ExcerptState::Truncated,
             );
@@ -173,6 +210,7 @@ fn render(
         stdout = encode(
             event,
             &diagnostic,
+            digest,
             retained.get(..end).unwrap_or_default(),
             ExcerptState::Truncated,
         );
@@ -186,8 +224,18 @@ fn render(
     }
 }
 
-fn encode(event: HookEvent, diagnostic: &str, retained: &str, excerpt: ExcerptState) -> Vec<u8> {
+fn encode(
+    event: HookEvent,
+    diagnostic: &str,
+    digest: &str,
+    retained: &str,
+    excerpt: ExcerptState,
+) -> Vec<u8> {
     let mut text = diagnostic.to_owned();
+    if !digest.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(digest);
+    }
     if matches!(excerpt, ExcerptState::Truncated) {
         text.push_str("\n[Checkpoint excerpt; use workflow session show with this ID for the complete Markdown.]");
     }

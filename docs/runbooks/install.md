@@ -119,7 +119,10 @@ owned hooks and relinquishes modified ones, reporting them. Explicit
 `--hooks on` refuses an edited Claude hook; use `--hooks off` to relinquish its
 ownership before reinstalling.
 `--hooks on` registers hooks for each selected harness that has a
-fixture-backed hook specification (Claude today). At least one selected
+fixture-backed hook specification (Claude today). The Claude set includes the
+session and worktree hooks described in the
+[Claude hooks runbook](claude-hooks.md); rerun with `--hooks on` after an
+upgrade to register new handlers. At least one selected
 harness must have a specification. Unmanaged paths are preserved, and
 conflicts are refused unless
 `--adopt-existing` is given for files that match exactly.
