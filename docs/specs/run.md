@@ -277,7 +277,8 @@ Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
 [--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
 confinement's existing registered-worktree path. Reuse requires the same branch,
 a clean tree and free writer custody; an explicit base applies at creation.
-Reuse preserves the existing lane owner's creation base. Operation replay
+Reuse preserves the existing lane owner's creation base and refuses adopted
+owners without changing their records. Operation replay
 returns its original run, including after owned cleanup, and checks changed
 inputs before any worktree creation.
 The private Git admin directory holds `provenant-owner.json` as a bounded,
@@ -291,14 +292,18 @@ reserved writers and publishes the ordinary custody identity plus an adopted
 owner. Ownership never grants deletion authority by itself. Existing explicit
 `--worktree` dispatches keep their existing lifecycle.
 
-Owned lane settlement may prune its own clean checkout and local branch only
-when its exact recorded head is reachable from the pinned delivered ref or its
-creation base. It rechecks ownership, terminal state, absent live lanes,
+Owned lane settlement may prune its own clean checkout only after success
+without requested delivery, or after successful delivery, and when its exact
+recorded head is reachable from the pinned delivered ref or its creation base.
+Local branch deletion additionally requires proof of landed integration;
+pushes and open PRs retain local branches. Settlement rechecks ownership, terminal state, absent live lanes,
 registration, writer custody, Git sequencer state and head under the existing
 removal locks. Ignored output uses GC's existing declared-regenerable walker
-and keep paths. Owned lanes declare ignored Cargo target directories regenerable by default; other undeclared ignored files retain the tree. Other worktrees keep
-the existing GC/removal policy. A host lifecycle receipt names pruning or the
-retention reason in `worktree-settlement.json` beside the attempt result.
+and keep paths. Only the project's declared regenerable output may be removed;
+other ignored files retain the tree. Other worktrees keep the existing
+GC/removal policy. A host lifecycle receipt records intent before removal,
+then pruning or the retention reason in `worktree-settlement.json` beside the
+attempt result. An interrupted intent whose checkout is gone replays as pruned.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
@@ -329,7 +334,8 @@ receipt head. It persists a keyed host pickup receipt separately from the
 immutable terminal record. Successful pickup replays without repeating
 external effects, while failures remain explicitly retryable. A worktree
 already pruned by its own lifecycle may replay its successful receipt.
-PR bodies use the retained lane result, supplied to `gh` through stdin;
+PR bodies use commit subjects and bodies with run and attempt IDs, capped at
+60,000 bytes with an explicit truncation note and supplied to `gh` through stdin;
 existing PR reuse requires an open PR at the exact delivered head.
 - Why: delivery is host authority attached to a verified result, and a later
   pickup must not silently deliver unrelated edits.
@@ -351,13 +357,17 @@ base, delivery and authority; it skips provider continuation and records
 canonical request. It does not mutate the terminal source record.
 
 The fresh prompt contains the original prompt (following bounded retry
-lineage), prior result digest and a bounded tail, bounded `git log main..HEAD`
+lineage), prior result digest and a bounded tail, bounded Git history since
+the owner's recorded base
 with any unavailable-history diagnostic, and the new prompt. Existing secret
 scanning and prompt limits apply to the combined text. The continuation
 admission fence still permits one successor, and operation replay retains the
 original choice and prompt even after provider-state expiry. Uncertain custody
 never triggers a new writer; refusal names the fresh fallback when it cannot
 launch safely.
+Before admission and again under writer custody, continuations verify the
+worktree owner's lane lineage. Missing or reassigned worktrees require a new
+owned checkout for fresh fallback; `--no-fallback` refuses them.
 - Why: a missing provider handle should not require the chair to reconstruct
   context or bypass immutable attempt records and writer custody.
 - Test: `crates/run/src/dispatch_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;

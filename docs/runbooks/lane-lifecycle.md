@@ -31,17 +31,22 @@ provenant lane deliver ATTEMPT --deliver pr
 ```
 
 This refuses a dirty checkout, a changed head or live custody. Repeating a
-successful delivery returns its receipt. PR bodies come from the retained
-result. Owned checkout cleanup follows delivery or settlement only when the
-recorded head is retained by the delivered ref or creation base. It uses the
-existing GC output walker, declares ignored Cargo `target` output regenerable,
-and honours project keep paths. `worktree-settlement.json` beside `result.md`
-records pruning or the retention reason. Explicitly supplied and adopted
+successful delivery returns its receipt, including after checkout cleanup.
+PR bodies contain bounded commit messages and run and attempt IDs. Default
+and primary checkout branches require PR delivery. Owned checkout cleanup
+requires a succeeded lane and successful requested delivery, with the recorded
+head retained by the delivered ref or creation base. Local branches remain
+until integration is proved. Cleanup uses the project's declared regenerable
+and keep paths. `worktree-settlement.json` beside `result.md` records a pruning
+intent before removal, then pruning or the retention reason. Failed and
+cancelled lanes retain their worktrees. Explicitly supplied and adopted
 worktrees retain their existing GC policy.
 
 `resume ATTEMPT --operation-id ID --prompt-file followup.md` starts fresh by
-default when continuation state is unavailable, preserving the worktree and
-authority with original context and the previous result attached. Its receipt
+default when continuation state is unavailable, preserving authority with
+original context and the previous result attached. Ownership must match the
+lane lineage; a missing or reassigned checkout uses a fresh owned worktree
+when fallback is allowed. Its receipt
 records `continuation: fresh`. Add `--no-fallback` to require provider resume.
 Custody, policy or launch refusals still need their named cause addressed.
 
