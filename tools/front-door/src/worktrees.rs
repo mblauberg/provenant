@@ -391,6 +391,17 @@ fn gc_data_summary(data: &GcData) -> String {
             log.tail_bytes
         ));
     }
+    if data.provider_state.expired_events > 0 {
+        human.push_str(&format!(
+            "{} {} event rows\n",
+            if data.report.dry_run {
+                "would expire"
+            } else {
+                "expired"
+            },
+            data.provider_state.expired_events
+        ));
+    }
     for path in &data.skipped_transient {
         human.push_str(&format!("skipped transient project {}\n", path.display()));
     }
@@ -1009,6 +1020,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         && provider_state.removed.is_empty()
         && provider_state.attempt_tmp.is_empty()
         && provider_state.attempt_logs.is_empty()
+        && provider_state.expired_events == 0
         && provider_state.errors.is_empty()
         && worktree_cleanup
             .iter()
@@ -1154,6 +1166,20 @@ fn child(
 mod gc_preview_tests {
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
+    #[test]
+    fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {
+        let mut data = GcData::default();
+        data.provider_state.expired_events = 3;
+        for (dry_run, expected) in [
+            (true, "would expire 3 event rows\n"),
+            (false, "expired 3 event rows\n"),
+        ] {
+            data.report.dry_run = dry_run;
+            assert!(gc_data_summary(&data).contains(expected));
+            let json = serde_json::to_value(&data).unwrap_or_default();
+            assert_eq!(json["provider_state"]["expired_events"], 3);
+        }
+    }
     #[test]
     fn gc_preview_does_not_initialise_absent_state() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

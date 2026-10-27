@@ -89,7 +89,8 @@ attempts, writer locks and retained reservations prevent deletion. GC JSON
 reports the paths and observed allocated bytes in `provider_state.attempt_tmp`;
 text output lists each path and byte count. `--dry-run` previews these removals.
 `retention.logs_days = 30` (range 1 to 3650) expires stdout and stderr
-captures larger than 64 KiB from runs whose attempts are all terminal.
+captures larger than 64 KiB, and intermediate event log rows, from runs whose
+attempts are all terminal.
 The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
 results, exit evidence, recorded digests and small captures survive. The same
 rule applies inside child stores, whose databases and retained evidence stay.
