@@ -125,14 +125,17 @@ fn prepare(
     }
     // OpenCode discovers repositories through /usr/bin/git. Its shim uses
     // xcode-select to find the canonical host-selected Git. Keep each grant exact.
-    let mut tool_exec_roots = vec![
+    let process_executables = vec![
+        exact(input.executable),
         exact("/usr/bin/git"),
         exact("/usr/bin/xcode-select"),
         exact(input.provenant.git),
     ];
-    if access == Access::WorktreeWrite {
-        tool_exec_roots.extend([subtree("/bin"), subtree("/usr/bin"), subtree(package)]);
-    }
+    let tool_exec_roots = if access == Access::WorktreeWrite {
+        vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
+    } else {
+        Vec::new()
+    };
     env.extend([
         (
             "XDG_CONFIG_HOME".into(),
@@ -167,7 +170,7 @@ fn prepare(
         setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables: vec![exact(input.executable)],
+                process_executables,
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
                 runtime_reads,
@@ -376,24 +379,21 @@ mod tests {
                 OpenCode.stream(None).unwrap(),
             )
             .unwrap();
-            let expected = vec![
-                exact("/usr/bin/git"),
-                exact("/usr/bin/xcode-select"),
-                exact(input.provenant.git),
-            ];
-            if access == Access::ReadOnly {
-                assert_eq!(spec.profile.spec.tool_exec_roots, expected);
-            }
+            let profile = provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &spec.profile,
+                input.home,
+            )
+            .unwrap();
             for path in [
                 std::path::Path::new("/usr/bin/git"),
                 std::path::Path::new("/usr/bin/xcode-select"),
                 input.provenant.git,
             ] {
-                assert!(
-                    spec.profile.spec.tool_exec_roots.contains(&exact(path)),
-                    "{access:?} lacks exact Git exec grant for {}",
-                    path.display()
-                );
+                let literal = format!("(allow process-exec (literal \"{}\"))", path.display());
+                assert!(profile.contains(&literal), "{access:?} lacks {literal}");
+                let subtree = format!("(allow process-exec (subpath \"{}\"))", path.display());
+                assert!(!profile.contains(&subtree), "{access:?} grants {subtree}");
             }
         }
     }
