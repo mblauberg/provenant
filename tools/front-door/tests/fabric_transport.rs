@@ -2731,6 +2731,75 @@ fn peer_terminal_missing_output_is_not_found() -> Result {
 }
 
 #[test]
+fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let bin = rig.root.join("provider/bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(
+        bin.join("agy"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'agy 1.0.0'; exit 0; fi\necho 'peer large prompt fixture' >&2\n",
+    )?;
+    std::fs::set_permissions(bin.join("agy"), std::fs::Permissions::from_mode(0o755))?;
+    std::fs::create_dir_all(rig.home.join("Library/Keychains"))?;
+    std::fs::write(
+        rig.home.join("Library/Keychains/login.keychain-db"),
+        "fixture",
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let peer = loopback_peer(&mut rig)?;
+    let prompt = rig.root.join("prompt.txt");
+    let text = "x".repeat(117 * 1024);
+    std::fs::write(&prompt, &text)?;
+    let dispatch = [
+        "dispatch",
+        "--host",
+        "workshop",
+        "--mode",
+        "read-only",
+        "--model",
+        "agy/gemini-3.8-flash",
+        "--effort",
+        "high",
+        "--operation-id",
+        "peer-large-prompt",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "30",
+        "--json",
+    ];
+    let (_, placed) = json_command(&rig, &dispatch)?;
+    assert_eq!(
+        placed["data"]["host"],
+        peer.to_string(),
+        "{placed} {}",
+        std::fs::read_to_string(rig.root.join("peer-stderr")).unwrap_or_default()
+    );
+    let lane = &placed["data"]["lanes"][0];
+    assert_ne!(lane["state"], "rejected", "{placed}");
+    let run = placed["data"]["run_id"].as_str().ok_or("run")?;
+    let attempt = lane["attempt_id"].as_str().ok_or("attempt")?;
+    let sealed = std::fs::read_to_string(rig.root.join(format!(
+        "peer-state/runs/{run}/attempts/{attempt}/prompt.md"
+    )))?;
+    assert!(sealed.ends_with(&text));
+    let (_, replayed) = json_command(&rig, &dispatch)?;
+    assert_eq!(replayed["data"]["run_id"], run, "{replayed}");
+    assert_eq!(
+        replayed["data"]["lanes"][0]["attempt_id"], attempt,
+        "{replayed}"
+    );
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
