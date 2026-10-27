@@ -39,8 +39,16 @@ const CREDENTIALS: &[&str] = &[
 pub struct ProviderStateGc {
     pub removed: Vec<PathBuf>,
     pub attempt_tmp: Vec<AttemptTmpRemoval>,
+    pub attempt_logs: Vec<AttemptLogRemoval>,
     pub kept: Vec<ProviderStateIssue>,
     pub errors: Vec<ProviderStateIssue>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttemptLogRemoval {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub tail_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +100,60 @@ impl RunStore {
         dry_run: bool,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
+        self.gc_provider_state_with_logs(expected, days, 30, now, dry_run, call)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gc_provider_state_with_logs(
+        &self,
+        expected: &Directory,
+        days: u64,
+        logs_days: u64,
+        now: WallTime,
+        dry_run: bool,
+        call: &Request<'_>,
+    ) -> Result<ProviderStateGc> {
+        self.gc_retention(expected, days, logs_days, now, dry_run, false, None, call)
+    }
+
+    /// Pressure collection is limited to expired temporary payloads.
+    pub fn gc_temporary(
+        &self,
+        expected: &Directory,
+        now: WallTime,
+        dry_run: bool,
+        call: &Request<'_>,
+    ) -> Result<ProviderStateGc> {
+        self.gc_retention(expected, 7, 30, now, dry_run, true, None, call)
+    }
+
+    /// Pressure collection restricted to the selected project identities.
+    pub fn gc_temporary_for_projects(
+        &self,
+        expected: &Directory,
+        now: WallTime,
+        dry_run: bool,
+        projects: &[provenant_core::ProjectId],
+        call: &Request<'_>,
+    ) -> Result<ProviderStateGc> {
+        self.gc_retention(expected, 7, 30, now, dry_run, true, Some(projects), call)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gc_retention(
+        &self,
+        expected: &Directory,
+        days: u64,
+        logs_days: u64,
+        now: WallTime,
+        dry_run: bool,
+        temporary_only: bool,
+        projects: Option<&[provenant_core::ProjectId]>,
+        call: &Request<'_>,
+    ) -> Result<ProviderStateGc> {
+        if !(1..=3650).contains(&logs_days) {
+            return Err(RunError::Validation("logs_days_range"));
+        }
         if !self.root.metadata()?.same_identity(&expected.metadata()?) {
             return Err(RunError::UnsafePath);
         }
@@ -109,6 +171,10 @@ impl RunStore {
         })?;
         let mut report = ProviderStateGc::default();
         for (id, run, project, raw) in rows {
+            if projects.is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
+            {
+                continue;
+            }
             let path = self
                 .context
                 .state_root
@@ -211,10 +277,32 @@ impl RunStore {
                         record_issue(&mut report, temporary, &error);
                     }
                 }
+                if temporary_only {
+                    return Ok(());
+                }
                 if continuing {
                     return Err(RunError::Validation(
                         "a continuation still needs this provider state",
                     ));
+                }
+                if age >= DAY_MICROS.saturating_mul(logs_days as i64) {
+                    // A terminal attempt in an open run still contributes to live
+                    // diagnostics. Expiry requires every sibling to be terminal.
+                    let open: bool = observation.retry(|| {
+                        Ok(self.db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)",
+                            [record.run_id.to_string()],
+                            |row| row.get(0),
+                        )?)
+                    })?;
+                    if !open {
+                        collect_logs(
+                            &attempt,
+                            path.parent().ok_or(RunError::UnsafePath)?,
+                            dry_run,
+                            &mut report,
+                        )?;
+                    }
                 }
                 if age >= DAY_MICROS {
                     credentials(&attempt, dry_run, &mut report)?;
@@ -256,6 +344,74 @@ fn record_issue(report: &mut ProviderStateGc, path: PathBuf, error: &RunError) {
     } else {
         report.errors.push(issue);
     }
+}
+
+/// Retain captures of at most 64 KiB and all sealed result/exit/digest records.
+/// Large captures move to a distinct tail name so old capture digests are never
+/// silently presented as describing the truncated content.
+fn collect_logs(
+    attempt: &Directory,
+    path: &std::path::Path,
+    dry_run: bool,
+    report: &mut ProviderStateGc,
+) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 64 * 1024;
+    for name in [AttemptFile::Stdout.name(), AttemptFile::Stderr.name()] {
+        let result = (|| -> Result<()> {
+            let name_os = OsStr::new(name);
+            let before = match attempt.metadata_at(name_os, false) {
+                Ok(meta) => meta,
+                Err(error) if error.is_not_found() => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            if before.kind != FileKind::Regular
+                || before.links != 1
+                || before.uid != provenant_os::fs::effective_uid()
+            {
+                return Err(RunError::UnsafePath);
+            }
+            if before.size <= TAIL {
+                return Ok(());
+            }
+            if !dry_run {
+                let mut file = attempt.open_read(name_os)?;
+                if !before.unchanged(&file.metadata()?) {
+                    return Err(RunError::UnsafePath);
+                }
+                file.seek(SeekFrom::End(-(TAIL as i64)))?;
+                let mut tail = Vec::new();
+                file.take(TAIL).read_to_end(&mut tail)?;
+                if !before.unchanged(&attempt.metadata_at(name_os, false)?) {
+                    return Err(RunError::UnsafePath);
+                }
+                attempt
+                    .atomic_write(
+                        OsStr::new(&format!("{name}.tail")),
+                        ".log-tail-",
+                        &tail,
+                        provenant_os::fs::PublishMode::Replace,
+                    )?
+                    .require_durable()
+                    .map_err(|_| RunError::UnsafePath)?;
+                if !before.unchanged(&attempt.metadata_at(name_os, false)?) {
+                    return Err(RunError::UnsafePath);
+                }
+                attempt.unlink(name_os)?;
+                attempt.sync()?;
+            }
+            report.attempt_logs.push(AttemptLogRemoval {
+                path: path.join(name),
+                bytes: before.size.saturating_sub(TAIL),
+                tail_bytes: TAIL,
+            });
+            Ok(())
+        })();
+        if let Err(error) = result {
+            record_issue(report, path.join(name), &error);
+        }
+    }
+    Ok(())
 }
 
 fn collect_temporary(
@@ -801,6 +957,224 @@ mod tests {
             dry_run,
             call,
         )
+    }
+
+    #[test]
+    fn gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut capture = vec![1; 200_000];
+        capture[200_000 - 65_536..].fill(2);
+        fs::write(attempt.join("stdout.log"), &capture)?;
+        fs::write(attempt.join("stderr.log"), "small capture")?;
+
+        assert!(
+            sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?
+                .attempt_logs
+                .is_empty()
+        );
+        withdraw(&store, &input, &call)?;
+        fs::write(attempt.join("result.md"), "result evidence")?;
+        fs::write(attempt.join("process-exit.json"), "exit evidence")?;
+        assert!(
+            sweep(&store, &context, 7, 30 * DAY_MICROS - 1, false, &call)?
+                .attempt_logs
+                .is_empty()
+        );
+        let preview = sweep(&store, &context, 7, 30 * DAY_MICROS, true, &call)?;
+        assert_eq!(preview.attempt_logs.len(), 1);
+        assert_eq!(preview.attempt_logs[0].bytes, 200_000 - 65_536);
+        assert_eq!(fs::read(attempt.join("stdout.log"))?, capture);
+        assert!(!attempt.join("stdout.log.tail").exists());
+        let directory = Directory::open_anchor(&attempt)?;
+        let lease = directory.lock(
+            OsStr::new("writer.lock"),
+            LockMode::Exclusive,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?;
+        assert!(
+            sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?
+                .attempt_logs
+                .is_empty()
+        );
+        drop(lease);
+        let report = sweep(&store, &context, 7, 30 * DAY_MICROS, false, &call)?;
+        assert_eq!(report.attempt_logs.len(), 1);
+        assert!(!attempt.join("stdout.log").exists());
+        assert_eq!(fs::read(attempt.join("stdout.log.tail"))?, vec![2; 65_536]);
+        assert_eq!(
+            fs::read_to_string(attempt.join("stderr.log"))?,
+            "small capture"
+        );
+        assert_eq!(
+            fs::read_to_string(attempt.join("result.md"))?,
+            "result evidence"
+        );
+        assert_eq!(
+            fs::read_to_string(attempt.join("process-exit.json"))?,
+            "exit evidence"
+        );
+        assert!(
+            sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?
+                .attempt_logs
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_stderr_tail_remains_readable_and_reports_truncation() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let directory = Directory::open_anchor(&attempt)?;
+        let capture = vec![b'x'; 200_000];
+        crate::artifacts::seal(&directory, "stderr.log", &capture, 300_000)?;
+        crate::artifacts::seal(&directory, "stderr.log.tail", b"older tail", 65_536)?;
+        let read = || {
+            store.read_output(
+                input.attempts[0].attempt_id,
+                crate::ArtifactPart::Stderr,
+                crate::ByteRange {
+                    offset: 0,
+                    max_bytes: 65_536,
+                },
+                &context,
+                &call,
+            )
+        };
+        let original = read()?;
+        assert!(original.complete);
+        assert_eq!(original.len, 200_000);
+        assert_eq!(original.bytes, vec![b'x'; 65_536]);
+        let report = sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?;
+        assert_eq!(report.attempt_logs.len(), 1, "{report:?}");
+        let tail = read()?;
+        assert!(!tail.complete);
+        assert!(tail.eof);
+        assert_eq!(tail.len, 65_536);
+        assert_eq!(tail.bytes, vec![b'x'; 65_536]);
+        assert_eq!(
+            tail.digest,
+            provenant_records::CanonicalV1::file_digest(&tail.bytes)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pressure_only_collects_temporary_and_keeps_captures_and_provider_state() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(attempt.join("tmp"))?;
+        fs::write(attempt.join("tmp/payload"), vec![1; 8192])?;
+        fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
+        let scoped = store.gc_temporary_for_projects(
+            &Directory::open_anchor(context.state_root.as_path())?,
+            WallTime::from_micros(200 + 31 * DAY_MICROS)?,
+            false,
+            &[provenant_core::ProjectId::from_bytes([99; 16])],
+            &call,
+        )?;
+        assert!(scoped.attempt_tmp.is_empty());
+        assert!(attempt.join("tmp/payload").is_file());
+        let report = store.gc_temporary(
+            &Directory::open_anchor(context.state_root.as_path())?,
+            WallTime::from_micros(200 + 31 * DAY_MICROS)?,
+            false,
+            &call,
+        )?;
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.attempt_tmp.len(), 1);
+        assert!(report.attempt_logs.is_empty());
+        assert!(
+            attempt
+                .join("provider-state/candidate-0/auth.json")
+                .exists()
+        );
+        assert_eq!(fs::metadata(attempt.join("stdout.log"))?.len(), 200_000);
+        assert!(!attempt.join("tmp").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_logs_use_configured_age_and_keep_an_open_runs_captures() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut input = input();
+        let sibling_id = AttemptId::from_bytes([91; 16]);
+        let sibling_task = provenant_core::TaskId::from_bytes([92; 16]);
+        let mut task = input.request.tasks[0].clone();
+        task.task_id = sibling_task;
+        input.request.tasks.push(task);
+        input.attempts.push(NewAttempt {
+            attempt_id: sibling_id,
+            task_id: sibling_task,
+            prompt: input.attempts[0].prompt.clone(),
+        });
+        store.create(&input, &call)?;
+        let attempt = context.state_root.as_path().join(format!(
+            "runs/{}/attempts/{}",
+            input.run_id, input.attempts[0].attempt_id
+        ));
+        withdraw(&store, &input, &call)?;
+        fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let now = WallTime::from_micros(200 + 2 * DAY_MICROS)?;
+        assert!(
+            store
+                .gc_provider_state_with_logs(&root, 7, 1, now, false, &call)?
+                .attempt_logs
+                .is_empty()
+        );
+        store.withdraw(
+            sibling_id,
+            AttemptState::Queued,
+            Outcome::Cancelled,
+            "fixture",
+            WallTime::from_micros(200)?,
+            &call,
+        )?;
+        assert_eq!(
+            store
+                .gc_provider_state_with_logs(&root, 7, 1, now, false, &call)?
+                .attempt_logs
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_logs_refuse_symlinks() -> TestResult {
+        {
+            let (temp, context, store, input, attempt) = seeded()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            withdraw(&store, &input, &call)?;
+            let outside = temp.path().join("outside");
+            fs::write(&outside, vec![3; 200_000])?;
+            std::os::unix::fs::symlink(&outside, attempt.join("stdout.log"))?;
+            let report = sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?;
+            assert!(report.attempt_logs.is_empty());
+            assert!(!report.errors.is_empty());
+            assert!(
+                !attempt.join("provider-state").exists(),
+                "log refusal must not block provider expiry"
+            );
+            assert_eq!(fs::read(outside)?, vec![3; 200_000]);
+        }
+        Ok(())
     }
 
     #[test]

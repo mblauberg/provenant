@@ -189,6 +189,8 @@ pub enum GitRead {
         limit: u64,
     },
     WorktreeList,
+    /// Read repository config, excluding the utility's core.bare override.
+    LocalBare,
     BranchTips,
     FirstParentHistory {
         tip: GitOid,
@@ -1016,6 +1018,17 @@ fn git_args(
             "--porcelain".into(),
             "-z".into(),
         ],
+        GitRead::LocalBare => [
+            "config",
+            "--local",
+            "--no-includes",
+            "--bool",
+            "--get",
+            "core.bare",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect(),
         GitRead::BranchTips => vec![
             "for-each-ref".into(),
             "--format=%(refname)%00%(objectname)%00".into(),

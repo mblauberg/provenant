@@ -2490,6 +2490,8 @@ fn settle_owned_worktree(
                     regenerable: &settings.regenerable,
                     keep: &settings.keep,
                     written_before_ns: i128::MAX,
+                    foreign_merged_clean: false,
+                    foreign_idle_before_ns: None,
                     dry_run: false,
                 };
                 let intent = serde_json::json!({

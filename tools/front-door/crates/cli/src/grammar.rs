@@ -97,7 +97,7 @@ pub enum Command {
     /// Watch pull request CI and merge a verified head
     #[command(subcommand)]
     Pr(Pr),
-    /// Remove lane caches and expired terminal provider state
+    /// Collect lane caches, ignored output, merged worktrees and expired captures
     Gc(Gc),
     /// Warn, collect caches and pause this user's builds under disk pressure
     DiskGuard(DiskGuard),
@@ -671,7 +671,7 @@ pub enum Worktree {
     },
     /// List worktrees
     List,
-    /// Remove a worktree, or all merged ones
+    /// Remove a worktree or merged ones, allowing declared ignored output
     Remove(Remove),
 }
 #[derive(Debug, Subcommand)]
@@ -684,16 +684,19 @@ pub struct Gc {
     /// Run for registered projects from the scheduled per-user agent
     #[arg(long, hide = true)]
     pub scheduled: bool,
+    /// Collect pressure classes without fetching or removing worktrees
+    #[arg(long, hide = true)]
+    pub pressure: bool,
     /// Keep at least this much free space (20G, or plain GiB)
     #[arg(long, value_name = "SIZE", value_parser = provenant_config::parse_cache_size)]
     pub free_floor: Option<u64>,
     /// Report what would be removed without deleting anything
     #[arg(long, conflicts_with = "apply")]
     pub dry_run: bool,
-    /// Also delete merged worktrees and declared output (otherwise previewed)
+    /// Also delete merged worktrees and ignored declared output (otherwise previewed)
     #[arg(long)]
     pub apply: bool,
-    /// Also remove caches with no file written for this many days
+    /// Minimum idle age for caches, ignored output and opt-in foreign worktrees
     #[arg(long, default_value = "7", value_parser = clap::value_parser!(u64).range(1..=3650))]
     pub idle_days: u64,
 }

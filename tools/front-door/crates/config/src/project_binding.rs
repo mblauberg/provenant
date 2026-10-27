@@ -74,6 +74,9 @@ pub fn bind_project(
     location: ProjectLocation,
 ) -> Result<ProjectBinding, ConfigError> {
     validate_location(&location.canonical_common_dir)?;
+    if transient_location(roots, location.common_dir()) {
+        return transient_or_existing(roots, location);
+    }
 
     let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
     verify_directory(&state, false)?;
@@ -174,17 +177,109 @@ pub fn lookup_project(
     roots: &Roots,
     location: &ProjectLocation,
 ) -> Result<Option<ProjectBinding>, ConfigError> {
+    if transient_location(roots, location.common_dir()) {
+        return transient_or_existing(roots, location.clone()).map(Some);
+    }
     match existing_projects(roots)? {
         Some(projects) => find_binding(&projects, location.common_dir()),
         None => Ok(None),
     }
 }
 
-/// Lookup only: every registered binding, Git-backed or not.
+/// Lookup only: every durable registered binding. Scheduled maintenance must
+/// select Git-backed locations with registered_gc_projects instead.
 pub fn registered_projects(roots: &Roots) -> Result<Vec<ProjectBinding>, ConfigError> {
     match existing_projects(roots)? {
         Some(projects) => bindings(&projects),
         None => Ok(Vec::new()),
+    }
+}
+
+/// GC has no authority over non-Git workspaces or transient roots. Keep old
+/// identity records for indexed runs, but never enumerate them as GC projects.
+pub fn registered_gc_projects(roots: &Roots) -> Result<Vec<ProjectBinding>, ConfigError> {
+    Ok(registered_gc_project_selection(roots)?.projects)
+}
+
+/// Scheduled projects and transient registrations excluded from collection.
+#[derive(Debug, Default)]
+pub struct GcProjectSelection {
+    pub projects: Vec<ProjectBinding>,
+    /// Canonical common directories, preserving the registry's location.
+    pub skipped_transient: Vec<PathBuf>,
+}
+
+pub fn registered_gc_project_selection(roots: &Roots) -> Result<GcProjectSelection, ConfigError> {
+    let mut selection = GcProjectSelection::default();
+    for binding in registered_projects(roots)? {
+        if transient_location(roots, binding.common_dir()) {
+            selection
+                .skipped_transient
+                .push(binding.common_dir().to_owned());
+        } else if git_location(binding.common_dir()) {
+            selection.projects.push(binding);
+        }
+    }
+    Ok(selection)
+}
+
+fn git_location(path: &Path) -> bool {
+    let Ok(directory) = Directory::open_anchor(path) else {
+        return false;
+    };
+    matches!(directory.metadata_at(OsStr::new("HEAD"), false), Ok(meta) if meta.kind == FileKind::Regular)
+        && directory
+            .open_verified_directory(OsStr::new("objects"))
+            .is_ok()
+}
+
+/// Whether a location is excluded from persistent scheduled collection.
+pub fn transient_location(roots: &Roots, path: &Path) -> bool {
+    let state = roots.state.as_path();
+    if path.starts_with(state.join("runs")) || path.starts_with(state.join("children")) {
+        return true;
+    }
+    if path
+        .strip_prefix(state)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|component| component.as_os_str().as_bytes().starts_with(b"probe-"))
+    {
+        return true;
+    }
+    if path.components().any(|component| {
+        let name = component.as_os_str().as_bytes();
+        name.starts_with(b".provenant-staging.") || name == b"scratchpads"
+    }) {
+        return true;
+    }
+    // Non-Git invocation roots (including the home directory and /tmp) need
+    // a run identity without adding a persistent scheduled project.
+    !git_location(path) && path.file_name() != Some(OsStr::new(".git"))
+}
+
+// Existing run evidence keeps its project identity when a checkout becomes
+// transient. Only new locations use a non-persisted identity.
+fn transient_or_existing(
+    roots: &Roots,
+    location: ProjectLocation,
+) -> Result<ProjectBinding, ConfigError> {
+    if let Some(projects) = existing_projects(roots)?
+        && let Some(binding) = find_binding(&projects, location.common_dir())?
+    {
+        return Ok(binding);
+    }
+    Ok(transient_binding(location))
+}
+
+fn transient_binding(location: ProjectLocation) -> ProjectBinding {
+    let digest =
+        provenant_records::CanonicalV1::file_digest(location.common_dir().as_os_str().as_bytes());
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest.bytes()[..16]);
+    ProjectBinding {
+        project: ProjectId::from_bytes(id),
+        canonical_common_dir: location.canonical_common_dir,
     }
 }
 
@@ -233,6 +328,15 @@ fn bindings(projects: &Directory) -> Result<Vec<ProjectBinding>, ConfigError> {
             return Err(ConfigError::InvalidProjectBinding);
         }
         let name = entry.to_str().ok_or(ConfigError::InvalidProjectBinding)?;
+        // In-progress binding publication is not a project record. Readers
+        // must not repair it or block unrelated registered projects.
+        if let Some(id) = name.strip_prefix(STAGE_PREFIX)
+            && id
+                .parse::<ProjectId>()
+                .is_ok_and(|project| format!("{STAGE_PREFIX}{project}") == name)
+        {
+            continue;
+        }
         let project = name
             .parse::<ProjectId>()
             .map_err(|_| ConfigError::InvalidProjectBinding)?;
@@ -452,12 +556,104 @@ mod tests {
         let checkout = base.join("checkout");
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir_all(&checkout).unwrap();
         let mut inputs = RootInputs::new(home, checkout);
         inputs.state_dir = Some(state);
         inputs
             .resolve(&provenant_os::fs::SystemPathResolver)
             .unwrap()
+    }
+
+    #[test]
+    fn a_checkout_that_stops_being_git_keeps_its_existing_run_identity() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let common = canonical_base(&temp).join("bare");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let location = ProjectLocation::new(&common).unwrap();
+        let before = bind_project(&roots, location.clone()).unwrap();
+        fs::remove_file(common.join("HEAD")).unwrap();
+        assert_eq!(bind_project(&roots, location.clone()).unwrap(), before);
+        assert_eq!(lookup_project(&roots, &location).unwrap(), Some(before));
+        assert!(registered_gc_projects(&roots).unwrap().is_empty());
+    }
+
+    #[test]
+    fn registry_readers_skip_in_progress_stages_without_repair() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let common = canonical_base(&temp).join("repo/.git");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let binding = bind_project(&roots, ProjectLocation::new(&common).unwrap()).unwrap();
+        let stage = roots
+            .state
+            .as_path()
+            .join(PROJECTS_DIR)
+            .join(format!("{STAGE_PREFIX}{}", ProjectId::from_bytes([31; 16])));
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join(RECORD), "partial").unwrap();
+        assert_eq!(registered_gc_projects(&roots).unwrap(), vec![binding]);
+        assert_eq!(fs::read_to_string(stage.join(RECORD)).unwrap(), "partial");
+    }
+
+    #[test]
+    fn transient_roots_have_identity_without_persistent_registration() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        for path in [
+            roots.state.as_path().join("probe-one"),
+            roots.state.as_path().join("runs/run"),
+            canonical_base(&temp).join(".provenant-staging.one/.git"),
+            canonical_base(&temp).join("scratchpads/x"),
+            canonical_base(&temp).join("not-git"),
+        ] {
+            fs::create_dir_all(&path).unwrap();
+            let location = ProjectLocation::new(&path).unwrap();
+            let first = bind_project(&roots, location.clone()).unwrap();
+            assert_eq!(
+                lookup_project(&roots, &location).unwrap(),
+                Some(first.clone())
+            );
+            assert_eq!(bind_project(&roots, location).unwrap(), first);
+        }
+        assert!(!roots.state.as_path().join(PROJECTS_DIR).exists());
+        assert!(registered_gc_projects(&roots).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scheduled_projects_exclude_missing_non_git_and_old_transient_bindings() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+        let valid = base.join("repository/.git");
+        fs::create_dir_all(valid.join("objects")).unwrap();
+        fs::write(valid.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let good = bind_project(&roots, ProjectLocation::new(&valid).unwrap()).unwrap();
+        let stale = base.join("stale/.git");
+        fs::create_dir_all(&stale).unwrap();
+        bind_project(&roots, ProjectLocation::new(&stale).unwrap()).unwrap();
+        fs::remove_dir(&stale).unwrap();
+        let mut excluded = Vec::new();
+        let projects = existing_projects(&roots).unwrap().unwrap();
+        for relative in ["scratchpads/repo/.git", ".provenant-staging.repo/.git"] {
+            let common = base.join(relative);
+            fs::create_dir_all(common.join("objects")).unwrap();
+            fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+            // Simulate a record created before transient registration filtering.
+            create_binding(&projects, common.clone()).unwrap();
+            excluded.push(common);
+        }
+        // Existing identity records are preserved for indexed run evidence.
+        assert_eq!(registered_projects(&roots).unwrap().len(), 4);
+        assert_eq!(registered_gc_projects(&roots).unwrap(), vec![good.clone()]);
+        let mut selection = registered_gc_project_selection(&roots).unwrap();
+        assert_eq!(selection.projects, vec![good]);
+        selection.skipped_transient.sort();
+        excluded.sort();
+        assert_eq!(selection.skipped_transient, excluded);
     }
 
     #[test]

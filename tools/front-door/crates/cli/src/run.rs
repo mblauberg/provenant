@@ -200,7 +200,13 @@ impl run::Providers for Registry<'_> {
         let home = self.home.ok_or("home directory is unavailable")?;
         let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
-        check_writer_disk(&config.gc, roots.state.as_path(), &writer.worktree, home)
+        check_writer_disk(
+            &config.gc,
+            roots.state.as_path(),
+            &writer.worktree,
+            &writer.project,
+            home,
+        )
     }
 
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
@@ -830,31 +836,93 @@ fn check_writer_disk(
     settings: &provenant_config::GcSettings,
     state: &Path,
     worktree: &Path,
+    project: &Path,
     home: &Path,
 ) -> Result<(), String> {
-    check_writer_disk_with(settings, state, worktree, home, |mut path| {
-        loop {
-            match provenant_os::fs::Directory::open_anchor(path) {
-                Ok(directory) => {
-                    return directory
-                        .available_bytes()
-                        .map_err(|error| error.to_string());
+    check_writer_disk_with_collection(
+        settings,
+        state,
+        worktree,
+        home,
+        |mut path| {
+            loop {
+                match provenant_os::fs::Directory::open_anchor(path) {
+                    Ok(directory) => {
+                        return directory
+                            .available_bytes()
+                            .map_err(|error| error.to_string());
+                    }
+                    Err(error) if error.is_not_found() => {
+                        path = path.parent().ok_or_else(|| error.to_string())?;
+                    }
+                    Err(error) => return Err(error.to_string()),
                 }
-                Err(error) if error.is_not_found() => {
-                    path = path.parent().ok_or_else(|| error.to_string())?;
-                }
-                Err(error) => return Err(error.to_string()),
             }
-        }
-    })
+        },
+        || pressure_collection(state, home, project),
+    )
 }
 
+/// Run the same pressure classes as GC in a separate bounded process. A killed
+/// collector leaves identity-bearing tombstones for the next sweep.
+fn pressure_collection(state: &Path, home: &Path, project: &Path) -> u64 {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    let collect = || -> Result<u64, Box<dyn std::error::Error>> {
+        let program = std::env::current_exe()?;
+        let argv = vec![
+            program.into_os_string(),
+            "--state-dir".into(),
+            state.as_os_str().to_owned(),
+            "--project".into(),
+            project.as_os_str().to_owned(),
+            "gc".into(),
+            "--pressure".into(),
+            "--apply".into(),
+            "--json".into(),
+        ];
+        let mut options = ExecOptions::new(&argv, home, Duration::from_secs(5));
+        options.stdin = Some(b"");
+        options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        if output.stdout.truncated || output.drain_truncated || output.stdout.sink_lost_bytes != 0 {
+            return Ok(0);
+        }
+        let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let data = &value["data"];
+        let temporary = data["provider_state"]["attempt_tmp"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["bytes"].as_u64())
+            .fold(0_u64, u64::saturating_add);
+        Ok(data["bytes_freed"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(temporary))
+    };
+    collect().unwrap_or(0)
+}
+
+#[cfg(test)]
 fn check_writer_disk_with(
     settings: &provenant_config::GcSettings,
     state: &Path,
     worktree: &Path,
     home: &Path,
+    available: impl FnMut(&Path) -> Result<u64, String>,
+) -> Result<(), String> {
+    check_writer_disk_with_collection(settings, state, worktree, home, available, || 0)
+}
+
+fn check_writer_disk_with_collection(
+    settings: &provenant_config::GcSettings,
+    state: &Path,
+    worktree: &Path,
+    home: &Path,
     mut available: impl FnMut(&Path) -> Result<u64, String>,
+    mut collect: impl FnMut() -> u64,
 ) -> Result<(), String> {
     let floor = settings
         .free_floor_bytes(state)
@@ -868,10 +936,20 @@ fn check_writer_disk_with(
         }
     }
     if minimum < floor {
-        return Err(format!(
-            "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; run `provenant gc` before dispatching a writer",
-            limiting.display()
-        ));
+        let reclaimed = if settings.schedule { collect() } else { 0 };
+        minimum = u64::MAX;
+        for path in [worktree, state, cache.as_path()] {
+            let bytes = available(path)?;
+            if bytes < minimum {
+                (limiting, minimum) = (path, bytes);
+            }
+        }
+        if minimum < floor {
+            return Err(format!(
+                "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                limiting.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -897,6 +975,7 @@ pub fn submit_with_host(
                     &config.gc,
                     edge.roots.state.as_path(),
                     &writer.worktree,
+                    &writer.project,
                     edge.home,
                 )
                 .map_err(|message| {
@@ -2884,7 +2963,10 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         chunk.bytes.drain(..start);
     }
     align_utf8_tail(&mut chunk);
-    let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+    let mut text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+    if matches!(command.part, Part::Stderr) && !chunk.complete {
+        text.insert_str(0, "[stderr truncated; retained tail]\n");
+    }
     // The text alone cannot tell a clean success from one that needs the chair.
     let (state, reason) = state_and_reason(&record.state);
     let mut data = json!({
@@ -3509,6 +3591,8 @@ pub fn continue_attempt_mode(
                         regenerable: &[],
                         keep: &[],
                         written_before_ns: i128::MAX,
+                        foreign_merged_clean: false,
+                        foreign_idle_before_ns: None,
                         dry_run: false,
                     },
                     call.cancel,
@@ -4100,6 +4184,74 @@ mod writer_disk_tests {
     }
 
     #[test]
+    fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result<(), String> {
+        use std::cell::Cell;
+        let settings = provenant_config::GcSettings {
+            free_floor: Some("100B".into()),
+            ..Default::default()
+        };
+        for remaining in [99, 100] {
+            let collected = Cell::new(false);
+            let samples = Cell::new(0);
+            let result = check_writer_disk_with_collection(
+                &settings,
+                Path::new("/state"),
+                Path::new("/tree"),
+                Path::new("/home"),
+                |_| {
+                    samples.set(samples.get() + 1);
+                    Ok(if collected.get() { remaining } else { 50 })
+                },
+                || {
+                    assert!(!collected.replace(true));
+                    49
+                },
+            );
+            assert_eq!(samples.get(), 6);
+            if remaining == 100 {
+                result?;
+            } else {
+                let error = result.err().ok_or("writer accepted low disk")?;
+                assert!(error.contains("reported 49 bytes reclaimed"), "{error}");
+            }
+        }
+        let calls = Cell::new(0);
+        check_writer_disk_with_collection(
+            &settings,
+            Path::new("/state"),
+            Path::new("/tree"),
+            Path::new("/home"),
+            |_| Ok(100),
+            || {
+                calls.set(calls.get() + 1);
+                0
+            },
+        )?;
+        assert_eq!(calls.get(), 0);
+        let disabled = provenant_config::GcSettings {
+            schedule: false,
+            ..settings
+        };
+        assert!(
+            check_writer_disk_with_collection(
+                &disabled,
+                Path::new("/state"),
+                Path::new("/tree"),
+                Path::new("/home"),
+                |_| Ok(1),
+                || {
+                    calls.set(calls.get() + 1);
+                    99
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(calls.get(), 0);
+
+        Ok(())
+    }
+
+    #[test]
     fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn std::error::Error>>
     {
         let temp = tempfile::tempdir()?;
@@ -4110,7 +4262,7 @@ mod writer_disk_tests {
         };
         let state = base.join("missing/state");
         let home = base.join("missing/home");
-        check_writer_disk(&settings, &state, &base, &home)?;
+        check_writer_disk(&settings, &state, &base, &base, &home)?;
         assert!(!base.join("missing").exists());
         Ok(())
     }

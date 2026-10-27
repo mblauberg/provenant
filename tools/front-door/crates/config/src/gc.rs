@@ -72,6 +72,15 @@ fn default_free_floor(total_bytes: u64) -> u64 {
 pub struct ProjectGcSettings {
     pub regenerable: Vec<String>,
     pub keep: Vec<String>,
+    pub foreign_worktrees: ForeignWorktrees,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForeignWorktrees {
+    #[default]
+    Keep,
+    MergedClean,
 }
 
 impl ProjectGcSettings {
@@ -123,6 +132,22 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn foreign_collection_requires_the_explicit_merged_clean_value() {
+        let defaults: super::ProjectGcSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.foreign_worktrees, super::ForeignWorktrees::Keep);
+        let opted: super::ProjectGcSettings =
+            serde_json::from_str(r#"{"foreign_worktrees":"merged-clean"}"#).unwrap();
+        assert_eq!(
+            opted.foreign_worktrees,
+            super::ForeignWorktrees::MergedClean
+        );
+        assert!(
+            serde_json::from_str::<super::ProjectGcSettings>(r#"{"foreign_worktrees":"all"}"#)
+                .is_err()
+        );
+    }
+
     #[test]
     fn free_floor_defaults_to_ten_percent_with_a_fifty_gib_minimum() {
         let gib = 1024_u64.pow(3);

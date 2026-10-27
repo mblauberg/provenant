@@ -476,11 +476,20 @@ impl RunStore {
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
                 let dir = self.attempt_dir(record.run_id, id, false)?;
-                let bytes =
-                    crate::artifacts::read_sealed(&dir, AttemptFile::Stderr.name(), CAPTURE_LIMIT)?
-                        .ok_or(missing_output)?;
+                let (bytes, complete) = match crate::artifacts::read_sealed(
+                    &dir,
+                    AttemptFile::Stderr.name(),
+                    CAPTURE_LIMIT,
+                )? {
+                    Some(bytes) => (bytes, true),
+                    None => (
+                        crate::artifacts::read_sealed(&dir, "stderr.log.tail", CAPTURE_LIMIT)?
+                            .ok_or(missing_output)?,
+                        false,
+                    ),
+                };
                 let digest = provenant_records::CanonicalV1::file_digest(&bytes);
-                (bytes, true, digest)
+                (bytes, complete, digest)
             }
             ArtifactPart::Prompt | ArtifactPart::Result => {
                 let (artifact, limit) = match part {

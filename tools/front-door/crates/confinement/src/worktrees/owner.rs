@@ -192,15 +192,22 @@ pub fn prune_owned(
         }
         _ => Disposition::Keep(RetainReason::NotMerged),
     };
-    let removed = remove_tree_when(context, entry, head, cancel, &|| {
-        (policy.terminal)(path)
-            && (policy.no_live_lanes)(path)
-            && verify_worktree(context.repo, path)
-                .ok()
-                .and_then(|tree| load_owner(&tree).ok().flatten())
-                .as_ref()
-                == Some(&owner)
-    })?;
+    let removed = remove_tree_when(
+        context,
+        entry,
+        head,
+        cancel,
+        &|| {
+            (policy.terminal)(path)
+                && (policy.no_live_lanes)(path)
+                && verify_worktree(context.repo, path)
+                    .ok()
+                    .and_then(|tree| load_owner(&tree).ok().flatten())
+                    .as_ref()
+                    == Some(&owner)
+        },
+        None,
+    )?;
     let mut result = RemoveOutcome::default();
     result.removed.push(removed.info.clone());
     if let Err(error) = settle_branch(context, branch, head, disposition, cancel, &mut result) {

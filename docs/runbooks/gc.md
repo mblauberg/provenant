@@ -41,8 +41,13 @@ journal companions. Claude's private `claude-config/projects/` survives.
 Unclassified providers, including agy, keep their remaining private payload
 as history until their transcript locations are established.
 
-The attempt's result, stdout, stderr, exit evidence, records and digests stay
-in place. Resume then returns `PROVIDER_STATE_EXPIRED`; start a fresh lane
+The attempt's result, exit evidence, records and digests stay in place.
+After `retention.logs_days` (default 30), captures larger than 64 KiB from
+closed runs expire. Their last 64 KiB stays in `stdout.log.tail` and
+`stderr.log.tail`, preserving the distinction from the original capture
+digests. Small captures stay unchanged. The rule also applies inside child
+stores; child databases and result evidence remain. Inspect
+`data.provider_state.attempt_logs` for planned or applied capture expiry. Resume then returns `PROVIDER_STATE_EXPIRED`; start a fresh lane
 with the retained result or transcripts as context.
 
 Inspect `data.provider_state.removed`, `kept` and `errors` in the GC JSON.
@@ -62,9 +67,36 @@ sweep retries an interrupted deletion only for the authorised path and
 matching device and inode. Do not manually rename a refused tree into a
 tombstone.
 
-On macOS, the installed default-state agent runs at load and hourly.
+On macOS, the installed default-state agent runs at load and daily.
 `[gc] schedule = false` disables scheduled sweeps; manual GC and settlement
 cache pruning remain available. See
 [configuration](configuration.md#lane-cache-collection) for agent installation
 and logs. Other installations need an explicit scheduler invoking
 `provenant gc`.
+
+The disk guard and writer admission use pressure collection without network
+fetches or worktree removal. Admission caps its single attempt at five seconds
+and rechecks every output volume once. Applied full and pressure sweeps share
+`<state>/gc/collection.lock`; a busy collector is skipped, not queued.
+Manual `gc --pressure` prints a notice when scheduling is disabled, the project
+is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
+Provider-cache and temporary cleanup at settlement, and lane-cache cleanup on
+worktree removal, remain scoped to their owner. Event wiring for settlement
+lane caches and delivery landing belongs to their respective callers.
+
+Declared ignored output in an idle linked worktree no longer needs a terminal
+lane. It still needs free writer custody and no live lane. Undeclared ignored
+files such as `.env` block explicit removal, whose error names up to five
+paths. Configure `regenerable`, `keep` and the opt-in
+`foreign_worktrees = "merged-clean"` policy as described in the
+[configuration runbook](configuration.md#lane-cache-collection).
+Applied foreign collection removes any temporary writer state it created,
+after removal or refusal. Existing worktree state stays in place.
+Temporary-state cleanup can wait up to five seconds for repository custody
+after collection stops; a cleanup failure is reported as a refusal.
+GC requires a primary checkout. Bare repositories and their linked checkouts
+are refused as collection roots; scheduled scans report them as unobserved.
+
+A preview uses existing project custody only. An unregistered selected checkout
+or missing custody hierarchy returns an observation error without initialising
+it. Scheduled previews list such roots in `unobserved_projects`.

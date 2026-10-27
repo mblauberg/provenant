@@ -34,10 +34,11 @@ companions of an existing store while reading its live index.
    legacy, refused and unmarked caches require owner investigation.
    An `attempt_tmp` entry with `leak: true` belongs to an indexed
    terminal attempt. `provider_state` measures resumable provider state
-   separately; [GC](gc.md) applies its terminal retention policy. Scratch,
-   archived provider history, quarantine and logs remain retained output.
-   Retained output, other run metadata and child stores are rolled up into one
-   row per class. Each
+   separately; [GC](gc.md) applies its terminal retention policy. The `attempt_logs` class measures
+   stdout/stderr captures and retained tails separately from other evidence.
+   Scratch, archived provider history and quarantine remain retained output.
+   Captures, retained output, other run metadata and child stores are rolled up
+   into one row per class. Each
    aggregate's `count` records the number of inventory rows it represents.
    Temporary directories, caches and worktrees keep their individual paths.
 
@@ -45,8 +46,10 @@ companions of an existing store while reading its live index.
    `provenant gc --apply --json`. In addition to lane caches, GC removes clean
    merged worktrees using fetched upstream ancestry. Projects can declare
    regenerable directory names and keep paths in `[gc.projects.PROJECT_ID]`.
-   Only known terminal lanes qualify for output pruning, and writes within
-   24 hours are kept. See the [configuration runbook](configuration.md#lane-cache-collection).
+   Idle ignored declared output can qualify without a terminal lane when
+   writer custody is free and no lane is live. Nested repositories protect
+   their containing output directory. Unknown writers remain protected
+   unless the project opts into `foreign_worktrees = "merged-clean"`. See the [configuration runbook](configuration.md#lane-cache-collection).
    Set `gc.alert_below` for a Fabric event and gc log message once per low-space
    dip. GC does not sweep arbitrary `/private/tmp/provenant-*` paths.
 
@@ -72,3 +75,26 @@ inventory scope.
 No rollback is needed because reporting changes no durable state. Preserve the
 JSON in your own chosen destination if evidence is required; investigate
 remaining errors with the owner of each reported path.
+
+Automatic pressure collection honours `gc.schedule=false`. Writer admission
+collects only the launching project; the disk guard uses scheduled enumeration.
+Pressure sweeps prune declared idle output, with a one-day floor below the
+configured free-space floor, while retaining worktrees and skipping fetches.
+
+Explicit removal does not require idle output. Foreign collection uses declared
+ignored output directory mtimes and scans the remaining tree within its idle
+proof budget; repository boundaries remain protected in both paths.
+
+Submitted queued writers protect their worktrees before launch. Keep a writer
+reservation for tasks that have not yet been submitted into the run store.
+
+Applied foreign cleanup may leave a private writer lock without an ownership
+record. This provides exclusion through removal and does not adopt the tree.
+
+After capture retention, `output --part stderr` reads the retained tail and
+marks it truncated (`complete=false` in JSON).
+
+Inspect `gc.data.skipped_transient` for excluded common directories under
+`scratchpads`, `.provenant-staging.` or runtime scratch roots. Scheduled
+scans report only registered locations; explicit GC also reports an unregistered
+selected transient checkout. `unobserved_projects` remains an array of paths.

@@ -32,7 +32,9 @@ pub use launch::{
     capture_plan, concurrency,
 };
 pub use plan::read_only_plan;
-pub use retention::{AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE};
+pub use retention::{
+    AttemptLogRemoval, AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE,
+};
 pub use writer::{
     LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer,
     resolve_writer_proposal,
