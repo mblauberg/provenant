@@ -171,10 +171,10 @@ pub(super) type Fetch<'a> = dyn FnMut(Duration) -> Result<Vec<run::AttemptRecord
 
 pub(super) enum Tick {
     Lanes(Vec<run::AttemptRecord>),
-    /// A transient peer failure, to retry while the budget lasts.
+    /// A peer or I/O failure, to retry while the budget lasts.
     Retry(Fail),
 }
-/// One fetch, given what is left of the budget. A transient peer failure is
+/// One fetch, given what is left of the budget. A peer or I/O failure is
 /// retried within the budget, and the last cause is reported only if the
 /// budget runs out on it.
 // A reader deadline is a real transport boundary.
@@ -182,7 +182,10 @@ pub(super) enum Tick {
 pub(super) fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fail> {
     match fetch(deadline.saturating_duration_since(Instant::now())) {
         Ok(lanes) => Ok(Tick::Lanes(lanes)),
-        Err(fail) if fail.kind == ErrorKind::PeerUnavailable && Instant::now() < deadline => {
+        Err(fail)
+            if matches!(fail.kind, ErrorKind::PeerUnavailable | ErrorKind::Io)
+                && Instant::now() < deadline =>
+        {
             Ok(Tick::Retry(fail))
         }
         Err(fail) => Err(fail),
@@ -223,7 +226,7 @@ fn arm(
 }
 
 /// Sleep out the poll, then, if the deadline has not passed, read the lanes
-/// again. A transient peer failure leaves `lanes` as they were and is kept in
+/// again. A peer or I/O failure leaves `lanes` as they were and is kept in
 /// `stale` until a later read succeeds, so a wait that ends on it reports it.
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
