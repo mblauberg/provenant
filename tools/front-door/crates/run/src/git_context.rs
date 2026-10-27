@@ -7,6 +7,27 @@ use provenant_os::{
 use std::{ffi::OsString, path::Path, time::Duration};
 
 const CONTEXT_LIMIT: usize = 1024 * 1024;
+
+pub fn continuation_history(cwd: &Path, base: &str) -> Result<String> {
+    let git = provenant_os::git::git_executable().ok_or(RunError::Validation("Git unavailable"))?;
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    let env = repository_environment(&executor, &git, cwd)?;
+    let base = resolve(&executor, &git, cwd, base, &env)?;
+    let range = format!("{base}..HEAD");
+    let (out, timed_out) = read_git_with_env(
+        &executor,
+        &git,
+        cwd,
+        &["log", "--max-count=50", "--format=%h %s", &range, "--"],
+        16_384,
+        &env,
+    )?;
+    let mut text = String::from_utf8_lossy(&out.bytes).into_owned();
+    if timed_out || out.truncated {
+        text.push_str("\n[history truncated or timed out]\n");
+    }
+    Ok(text)
+}
 // Keep command-scoped overrides above repository/worktree configuration, as
 // confinement's utility reader does. Protocol denial also covers Git < 2.44,
 // which does not honour GIT_NO_LAZY_FETCH.
@@ -619,6 +640,22 @@ mod tests {
             executor,
             base,
         })
+    }
+
+    #[test]
+    fn continuation_history_uses_the_recorded_base_without_main() -> TestResult {
+        let fixture = small_history()?;
+        git(
+            &fixture.executor,
+            &fixture.binary,
+            &fixture.root,
+            &["branch", "-M", "custom-base"],
+        )?;
+        let history = continuation_history(&fixture.root, &fixture.base)?;
+        assert_eq!(history.lines().count(), 1, "{history}");
+        assert!(history.contains("fixture"));
+        assert!(continuation_history(&fixture.root, "main").is_err());
+        Ok(())
     }
 
     #[test]

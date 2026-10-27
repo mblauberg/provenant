@@ -997,6 +997,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             operation_id: OperationId::parse("edge-read")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: tasks
                     .iter()
@@ -3537,6 +3538,7 @@ fn seed_attempt(
             operation_id: OperationId::parse("page-seed")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![TaskRequest {
                     base: None,

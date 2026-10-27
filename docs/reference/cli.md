@@ -1726,6 +1726,7 @@ bounds are null. Positional arguments have no long flag.
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
 | `--task-id` | `{"name": "task_id"}` |
 | `--delivery-id` | `{"name": "delivery_id"}` |
+| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "name": "deliver"}` |
 | `--deliver-remote` | `{"name": "deliver_remote"}` |
 | `--deliver-branch` | `{"name": "deliver_branch"}` |
 | `--open-pr` | `{"defaults": ["false"], "name": "open_pr", "values": ["true", "false"]}` |
@@ -1746,13 +1747,14 @@ bounds are null. Positional arguments have no long flag.
 | `--knob` | `{"name": "knobs", "repeatable": true}` |
 | `--host` | `{"name": "host"}` |
 | `--branch` | `{"name": "branch"}` |
+| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1812,7 +1814,8 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "worktree",
-        "branch"
+        "branch",
+        "worktree_branch"
       ],
       "multiple": false,
       "name": "writer_target",
@@ -1948,6 +1951,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
+| `--no-fallback` | `{"defaults": ["false"], "name": "no_fallback", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
@@ -1978,6 +1982,44 @@ bounds are null. Positional arguments have no long flag.
       "multiple": false,
       "name": "resume_prompt",
       "required": true
+    }
+  ]
+}
+```
+
+## `provenant lane`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant lane deliver`
+
+| Argument | Contract |
+|---|---|
+| `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
+| `--deliver` | `{"name": "deliver"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "attempt",
+        "deliver"
+      ],
+      "multiple": true,
+      "name": "Deliver",
+      "required": false
     }
   ]
 }
@@ -2236,6 +2278,34 @@ bounds are null. Positional arguments have no long flag.
 | `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+## `provenant worktree adopt`
+
+| Argument | Contract |
+|---|---|
+| `path` | `{"name": "path", "positional": true, "required": true}` |
+| `--owner` | `{"defaults": ["manual"], "name": "owner"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "path",
+        "owner"
+      ],
+      "multiple": true,
+      "name": "Adopt",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant worktree create`
 

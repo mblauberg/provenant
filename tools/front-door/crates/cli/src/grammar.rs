@@ -77,6 +77,9 @@ pub enum Command {
     Cancel(Cancel),
     /// Resume an attempt with a new prompt
     Resume(Resume),
+    /// Deliver a settled writer attempt
+    #[command(subcommand)]
+    Lane(Lane),
     /// Settle open runs and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
@@ -285,7 +288,7 @@ pub struct DispatchInput {
     pub manifest: Option<PathBuf>,
 }
 #[derive(Debug, Args)]
-#[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch"])))]
+#[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     #[command(flatten)]
     pub input: DispatchInput,
@@ -298,6 +301,9 @@ pub struct Dispatch {
     /// Delivery this lane belongs to
     #[arg(long)]
     pub delivery_id: Option<DeliveryId>,
+    /// Host delivery: none, push, integrate:<branch> (local), or pr (origin)
+    #[arg(long, conflicts_with_all = ["deliver_remote", "deliver_branch", "open_pr"])]
+    pub deliver: Option<provenant_records::run::DeliveryMode>,
     /// Fetch and deliver this writer's final head on the host.
     #[arg(long, requires_all = ["deliver_branch", "writer_target"])]
     pub deliver_remote: Option<String>,
@@ -329,6 +335,9 @@ pub struct Dispatch {
     /// New branch for a peer writer; the peer creates its worktree
     #[arg(long, requires_all = ["host", "base"])]
     pub branch: Option<String>,
+    /// Create or reuse a clean local writer worktree owned by this lane
+    #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
+    pub worktree_branch: Option<String>,
     /// Git base for attempt history and, with --branch, the peer writer's branch
     #[arg(long)]
     pub base: Option<String>,
@@ -577,6 +586,9 @@ pub struct Resume {
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
     pub operation_id: OperationId,
+    /// Refuse instead of starting fresh when provider continuation is unavailable
+    #[arg(long)]
+    pub no_fallback: bool,
     #[command(flatten)]
     pub prompt: Prompt,
     /// Wait up to this many seconds for the attempt to settle
@@ -588,6 +600,16 @@ pub struct Reconcile {
     /// Reconcile only this run (repeatable)
     #[arg(long)]
     pub id: Vec<RunId>,
+}
+#[derive(Debug, Subcommand)]
+pub enum Lane {
+    /// Re-run host delivery, requiring the settled receipt's clean, exact head
+    Deliver {
+        attempt: Attempt,
+        /// Override the recorded delivery mode (default push when none recorded)
+        #[arg(long)]
+        deliver: Option<provenant_records::run::DeliveryMode>,
+    },
 }
 #[derive(Debug, Subcommand)]
 pub enum Telemetry {
@@ -631,6 +653,14 @@ pub struct Stats {
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
+    /// Record custody and ownership for an existing linked worktree
+    Adopt {
+        /// Existing linked worktree in this project
+        path: PathBuf,
+        /// Human or session owner label
+        #[arg(long, default_value = "manual")]
+        owner: Option<String>,
+    },
     /// Create a worktree on a new branch
     Create {
         /// New branch name

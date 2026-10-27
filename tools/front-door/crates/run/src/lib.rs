@@ -25,11 +25,11 @@ pub use admission::{
 };
 pub use controls::{CancelReceipt, Reconciled, Resume, UncertainReason};
 pub use delivery::HostDeliveryContext;
-pub use git_context::{GitContext, resolve_git_base};
+pub use git_context::{GitContext, continuation_history, resolve_git_base};
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
-    Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
-    concurrency,
+    Decoded, LaunchPaths, PreparedLaunch, PreparedStart, Providers, RefusalKind, Started,
+    capture_plan, concurrency,
 };
 pub use plan::read_only_plan;
 pub use retention::{AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE};

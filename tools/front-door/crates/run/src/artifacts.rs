@@ -61,7 +61,7 @@ fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<
     Ok(())
 }
 
-fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_os::fs::Result<()> {
+pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_os::fs::Result<()> {
     let metadata = match parent.metadata_at(name, false) {
         Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => return Ok(()),

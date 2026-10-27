@@ -682,6 +682,37 @@ fn open_local_directory(
 /// named for `session`, searched within `RETAINED_STATE`. The prior lane
 /// wrote this tree, so the path must already be canonical and every directory
 /// is opened from its parent's handle, never through a link or a mount.
+pub(super) fn continuation_available(
+    prior: &run::AttemptRecord,
+    state_root: &Path,
+) -> Result<(), String> {
+    let provider = prior
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.provider.as_deref())
+        .ok_or("the attempt never launched a provider")?;
+    let session = prior
+        .session
+        .as_deref()
+        .ok_or("the attempt recorded no provider session")?;
+    if AdapterSpec::get(provider).is_some_and(|spec| spec.user_sessions) {
+        return Ok(());
+    }
+    let state = state_root
+        .join("runs")
+        .join(prior.run_id.to_string())
+        .join("attempts")
+        .join(prior.attempt_id.to_string())
+        .join("provider-state");
+    match find_session_state(&state, session) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("retained provider continuation is missing or expired".into()),
+        Err(_) => {
+            Err("provider continuation search exceeded its bound; fresh fallback required".into())
+        }
+    }
+}
+
 fn find_session_state(
     provider_state: &Path,
     session: &str,
@@ -2226,6 +2257,7 @@ mod tests {
                 run_id,
                 operation_id: paths.operation_id.clone(),
                 request: run::CanonicalRequest {
+                    fresh_continuation: None,
                     schema_version: 1,
                     tasks: vec![task.clone()],
                     concurrency: 1,

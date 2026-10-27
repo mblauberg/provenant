@@ -204,6 +204,15 @@ refused, and the attempt records every granted path.
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
 
+## Writer hard-link refusal
+
+On macOS, launch refuses a writable tree containing an existing hard-linked
+regular file and names the offending path. An operator can inspect it and
+remove or rebuild it if it is disposable output before retrying.
+- Why: a writable hard link could modify data outside the granted tree.
+- Test: `crates/confinement/src/permissions.rs::writable_tree_hard_link_refusal_names_nested_file`
+- Owner: `crates/confinement/src/permissions.rs`
+
 ## Reconcile and temporary cleanup
 
 `reconcile` recovers queued and orphaned work idempotently and never replays
@@ -261,3 +270,137 @@ in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 - Watchdog silence as an outcome, `fallback:any` or silent effort downgrade.
 - Alias coercion, old-root scans, record migration or a state deletion
   command.
+
+## Lane-owned worktrees and adoption
+
+Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
+[--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
+confinement's existing registered-worktree path. Reuse requires the same branch,
+a clean tree and free writer custody; an explicit base applies at creation.
+Reuse preserves the existing lane owner's creation base and refuses adopted
+owners without changing their records. Operation replay
+returns its original run, including after owned cleanup, and checks changed
+inputs before any worktree creation.
+The private Git admin directory holds `provenant-owner.json` as a bounded,
+atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
+pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
+owner label. `load_owner` and `save_owner` require a verified linked worktree.
+
+`worktree adopt PATH [--owner LABEL]` proves common-repository registration
+and the Git backlink, acquires repository and writer locks, refuses live or
+reserved writers and publishes the ordinary custody identity plus an adopted
+owner. Ownership never grants deletion authority by itself. Existing explicit
+`--worktree` dispatches keep their existing lifecycle.
+
+Owned lane settlement may prune its own clean checkout only after success
+without requested delivery, or after successful delivery, and when its exact
+recorded head is reachable from the pinned delivered ref or its creation base.
+Local branch deletion additionally requires proof of landed integration;
+pushes and open PRs retain local branches. Settlement rechecks ownership, terminal state, absent live lanes,
+registration, writer custody, Git sequencer state and head under the existing
+removal locks. Resumed attempts may settle a worktree whose owner is in their
+recorded continuation lineage, using the same bounded ancestry proof as resume.
+Ignored output uses GC's existing declared-regenerable walker
+and keep paths. Only the project's declared regenerable output may be removed;
+other ignored files retain the tree. Other worktrees keep the existing
+GC/removal policy. A host lifecycle receipt records intent before removal,
+then pruning or the retention reason in `worktree-settlement.json` beside the
+attempt result. An interrupted intent whose checkout is gone replays as pruned.
+- Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
+- Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
+  `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
+  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`.
+- Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
+
+## Delivery modes and settled pickup
+
+`dispatch --deliver none|push|integrate:BRANCH|pr` resolves to the existing
+explicit writer destination contract. Omission keeps delivery off. Push and
+PR modes use `origin` and the lane branch; `integrate:BRANCH` selects an
+existing local branch, and `integrate:origin/BRANCH` selects an existing
+remote integration branch. The legacy remote, branch and open-PR flags remain
+aliases and conflict with `--deliver`. Read-only lanes may select only none.
+Direct push and integration refuse publication to the default branch recorded
+by any configured remote and the primary checkout branch. If no remote HEAD
+is available, both `main` and `master` are protected. PR delivery publishes a
+feature branch and may target a protected branch as its PR base; its published
+head branch is subject to the same protection.
+Dispatch checks publication targets before admission for concise modes,
+legacy flags and manifests, so a refused target leaves no admitted run.
+Destinations supplied in flags are also checked before creating an owned tree.
+Accepted operations compare and replay their immutable inputs before checking
+current branch protection; later protection changes do not invalidate replay.
+Actual delivery still rechecks protection.
+
+Integration serialises by destination using a stable lock in the common Git
+directory. It fast-forwards when possible, otherwise uses `merge-tree` and
+`commit-tree` to prepare a merge commit without switching checkouts. A conflict
+or configured custom merge driver refuses before publishing a ref. A local
+integration branch checked out in any worktree is refused. Publication uses
+expected-old ref comparison locally or an explicit remote lease after an
+ancestry proof. Remote delivery refreshes and verifies its tracking ref.
+
+`lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
+origin push when the settled lane recorded none. It requires a succeeded
+writer, released custody, no new reservation, a clean tree and the exact
+receipt head. It persists a keyed host pickup receipt separately from the
+immutable terminal record. Successful pickup replays without repeating
+external effects, while failures remain explicitly retryable. A worktree
+already pruned by its own lifecycle may replay its successful receipt.
+PR bodies use commit subjects and bodies with run and attempt IDs, capped at
+60,000 bytes with an explicit truncation note and supplied to `gh` through stdin;
+existing PR reuse requires an open PR at the exact delivered head.
+- Why: delivery is host authority attached to a verified result, and a later
+  pickup must not silently deliver unrelated edits.
+- Test: `crates/run/src/delivery_tests.rs::local_integration_fast_forwards_merges_and_replays`;
+  `::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
+  `::remote_integration_refreshes_the_leased_destination`;
+  `::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
+  `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
+- Owner: `crates/run/src/delivery.rs`, `crates/records/src/run.rs`, `crates/cli/src/run.rs`
+
+## Fresh continuation fallback
+
+Resume defaults to a fresh attempt when no provider/session was launched or
+retained continuation state is missing, expired or cannot be searched within
+its bound. `--no-fallback` gives a typed continuation refusal instead. The
+new attempt preserves the parent, route, account, access, writer worktree,
+base, delivery and authority; it skips provider continuation and records
+`continuation: fresh` in the attempt and the bounded reason in its sealed
+canonical request. It does not mutate the terminal source record.
+
+The fresh prompt contains the original prompt (following bounded retry
+lineage), prior result digest and a bounded tail, bounded Git history since
+the owner's recorded base
+with any unavailable-history diagnostic, and the new prompt. When the prior
+worktree is displaced, the prompt states that its history is unavailable;
+it never substitutes primary-checkout history. Existing secret
+scanning and prompt limits apply to the combined text. The continuation
+admission fence still permits one successor, and operation replay retains the
+original choice and prompt even after provider-state expiry. Uncertain custody
+never triggers a new writer; refusal names the fresh fallback when it cannot
+launch safely.
+On the host, policy, provider preparation and write-grant validation run before
+recording the fallback operation or spending the continuation. A preparation
+refusal leaves no successor or staging, and the same operation can be retried
+after repairing the environment. Admission retains that exact prepared plan.
+Later custody or handoff failures are reported as execution outcomes of the
+accepted attempt, as for dispatch.
+Before admission and again under writer custody, continuations verify the
+worktree owner's lane lineage. Launch snapshots durably record whether the tree
+was lane-owned. Explicit unowned and adopted trees resume in place unless a
+current lane owner names another lineage. Previously lane-owned trees still
+require a matching lane owner even if that owner record is later removed or
+replaced by adoption. Older attempts without launch evidence retain compatibility
+with explicit worktrees, but a current foreign lane owner always refuses. Missing or
+reassigned worktrees require a new owned checkout for fresh fallback;
+`--no-fallback` refuses them.
+- Why: a missing provider handle should not require the chair to reconstruct
+  context or bypass immutable attempt records and writer custody.
+- Test: `crates/run/src/dispatch_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
+  `::resume_continues_a_terminal_attempt_once_with_its_route`;
+  `crates/run/src/controls.rs::lineage_tests::resume_preserves_explicit_unowned_and_adopted_worktrees`;
+  `::resume_refuses_a_pruned_worktree_reused_by_another_lane`;
+  `crates/cli/src/run.rs::tests::displaced_fallback_reports_unavailable_history`;
+  `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
+- Owner: `crates/run/src/controls.rs`, `crates/run/src/launch.rs`, `crates/cli/src/run.rs`

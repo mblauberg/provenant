@@ -178,8 +178,10 @@ pub enum PermissionError {
     AnchorMismatch,
     #[error("required held path anchor is missing or changed at {path:?} during {stage}")]
     AnchorMismatchAt { path: PathBuf, stage: &'static str },
-    #[error("writable tree contains a hard-linked regular file")]
-    HardLinkedWritableFile,
+    #[error(
+        "writable tree contains a hard-linked regular file: {0:?}; inspect it and remove or rebuild it if it is disposable build output, then retry"
+    )]
+    HardLinkedWritableFile(PathBuf),
     #[error("path is not valid UTF-8 for the SBPL source format")]
     NonUtf8Path,
     #[error("profile or fixture record is malformed")]
@@ -1661,7 +1663,7 @@ fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), Permis
         return Err(PermissionError::AnchorMismatch);
     }
     let mut entries = 0;
-    inspect_writable_directory(&root.directory, 0, &mut entries)?;
+    inspect_writable_directory(&root.directory, path, 0, &mut entries)?;
     let after = root
         .directory
         .metadata()
@@ -1676,6 +1678,7 @@ fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), Permis
 #[cfg(target_os = "macos")]
 fn inspect_writable_directory(
     directory: &Directory,
+    path: &Path,
     depth: usize,
     count: &mut usize,
 ) -> Result<(), PermissionError> {
@@ -1692,7 +1695,7 @@ fn inspect_writable_directory(
             .metadata_at(&name, false)
             .map_err(PermissionError::Filesystem)?;
         if before.kind == FileKind::Regular && before.links != 1 {
-            return Err(PermissionError::HardLinkedWritableFile);
+            return Err(PermissionError::HardLinkedWritableFile(path.join(&name)));
         }
         if before.kind == FileKind::Directory {
             let child = directory
@@ -1702,7 +1705,7 @@ fn inspect_writable_directory(
             if !before.unchanged(&opened) {
                 return Err(PermissionError::AnchorMismatch);
             }
-            inspect_writable_directory(&child, depth + 1, count)?;
+            inspect_writable_directory(&child, &path.join(&name), depth + 1, count)?;
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
@@ -1717,7 +1720,7 @@ fn inspect_writable_directory(
                 return Err(PermissionError::AnchorMismatch);
             }
             if after.kind == FileKind::Regular && after.links != 1 {
-                return Err(PermissionError::HardLinkedWritableFile);
+                return Err(PermissionError::HardLinkedWritableFile(path.join(&name)));
             }
         }
     }
@@ -2395,6 +2398,37 @@ mod tests {
 
     use super::*;
     use provenant_os::exec::SystemExecutor;
+
+    #[test]
+    fn hard_link_refusal_renders_path_and_recovery() {
+        let error = PermissionError::HardLinkedWritableFile("/repo/target/object.o".into());
+        let message = error.to_string();
+        assert!(message.contains("/repo/target/object.o"));
+        assert!(message.contains("disposable build output"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    // CI-required fixture: lane sandboxes may deny hard_link with EPERM.
+    // Keep enabled for the macOS confinement job; the pure diagnostic test
+    // above runs even when the launch sandbox cannot construct this fixture.
+    fn writable_tree_hard_link_refusal_names_nested_file() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let nested = temp.path().join("target/debug");
+        std::fs::create_dir_all(&nested)?;
+        let original = temp.path().join("original");
+        std::fs::write(&original, b"object")?;
+        let alias = nested.join("object.o");
+        std::fs::hard_link(&original, &alias)?;
+        let directory = Directory::open_anchor(&nested)?;
+        let error = inspect_writable_directory(&directory, &nested, 0, &mut 0).unwrap_err();
+        assert!(matches!(&error, PermissionError::HardLinkedWritableFile(path) if path == &alias));
+        assert!(error.to_string().contains("disposable build output"));
+        std::fs::remove_file(alias)?;
+        inspect_writable_directory(&directory, &nested, 0, &mut 0)?;
+        Ok(())
+    }
 
     #[test]
     fn invalid_path_error_names_the_refused_path() {
@@ -4020,7 +4054,7 @@ mod tests {
             std::fs::hard_link(&protected_file, &alias)?;
             assert!(matches!(
                 backend.compile(&plan, &profile, &anchors),
-                Err(PermissionError::HardLinkedWritableFile)
+                Err(PermissionError::HardLinkedWritableFile(path)) if path == alias
             ));
             std::fs::remove_file(alias)?;
         }

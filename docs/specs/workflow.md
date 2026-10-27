@@ -250,3 +250,22 @@ authority.
 - Transcript reinjection and workflow MCP tools.
 - Merging, syncing or conflict-free replication of checkpoint revisions; the
   history is one writer's bounded chain.
+
+## Lane delivery evidence
+
+Lane delivery modes and later `lane deliver` pickup use the run owner's sealed
+terminal result and exact Git head. PR bodies are supplied from that result,
+and graph PRs combine bounded node result excerpts with their attempt IDs.
+A host delivery or worktree cleanup receipt is separate from the chair's
+workflow acceptance receipt. Successful push or local integration grants no
+additional review, protected-branch merge or release authority.
+Direct push and integration modes refuse protected publication targets before
+admission and again at delivery: the primary checkout branch, each configured
+remote's recorded default, or `main` and `master` when no remote default is
+recorded. PR mode may use a protected branch as its base while publishing an
+unprotected head branch. This also applies to legacy delivery flags and manifests.
+- Why: lifecycle automation must preserve the distinction between publishing
+  evidence and accepting a change under the repository's workflow.
+- Test: `crates/run/src/delivery_tests.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
+  `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`.
+- Owner: `crates/run/src/delivery.rs`, `src/fabric.rs`; acceptance remains with `crates/workflow`

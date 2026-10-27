@@ -68,7 +68,7 @@ pub enum Fabric {
 pub enum Graph {
     /// Run a task graph document
     Run {
-        /// Task graph document file
+        /// Project-local graph file; bare names default to .provenant/scratch/graphs (or .agent-run/graphs)
         #[arg(long)]
         document: PathBuf,
     },

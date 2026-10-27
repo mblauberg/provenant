@@ -32,6 +32,11 @@ worktrees keep per-lane targets (`provenant worktree remove` and
 `provenant gc` prune the lane caches), because a target shared across
 worktrees can run another checkout's stale test binaries.
 
+On macOS, launch refuses existing hard-linked files in writable trees and
+names the first offending path. Inspect the file before removing it. If it is
+disposable build output, remove or rebuild that output, then retry the lane.
+Keep important files and links whose ownership is unclear.
+
 A writer's `TMPDIR` lives in the attempt's `tmp/candidate-N`, which terminal
 commit and unreserved reconciliation collect. Account probes still use `scratch/`.
 Writer profiles permit reading and executing fixtures only in that candidate's

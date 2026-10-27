@@ -154,7 +154,7 @@ detect tampering. Cancelling a graph persists the admission fence first.
 Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
 moves a node to the next route. Task failure, input requirements and uncertain
 launches never fall back; after launch only read-only nodes may fall back. A failed
-writer keeps its worktree, and graph writers never deliver.
+writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
 - Why: retrying a writer elsewhere would duplicate edits.
 - Test: `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`;
   `::terminal_task_failure_does_not_try_a_fallback_route`
@@ -165,10 +165,12 @@ writer keeps its worktree, and graph writers never deliver.
 After a run settles and its supervisor releases custody and writer locks,
 the supervisor advances pending graphs from the journal's retained document. A
 failed advance is recorded as `advance_error` until the next success;
-`resume` is the manual path.
+`resume` is the manual path. A lane settlement error is recorded only on graphs
+containing that attempt and does not stop other graphs from advancing.
 - Why: dependants progress without a daemon.
 - Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory`;
-  `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`
+  `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
+  `src/fabric.rs::settlement_failure_in_one_graph_does_not_stop_another_graph`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ## Landing
@@ -278,3 +280,55 @@ Peer changes need exact-head CI and a chair-run smoke between two real hosts.
 - Host auto-placement, moving a running lane, or local fallback after an
   explicit host choice.
 - Shared or replicated SQLite, a daemon or listener, and the async `rmcp` SDK.
+
+### Project-local scratch
+
+Operator graph documents default to `.provenant/scratch/graphs/`; an existing
+`.agent-run/` is reused as the scratch root. Bare document names resolve there
+when no explicitly named file exists in the current directory. Explicit project-local
+paths remain supported. Scratch setup appends its anchored directory pattern to
+Git's common `info/exclude` under a stable lock, preserving existing bytes and
+never editing tracked `.gitignore`. Symlinked scratch roots and exclude files
+are refused. The graph path error and CLI help name these directories. Scratch
+is disposable operator data, separate from authoritative run state; expiry is
+owned by GC rather than graph execution.
+- Why: graph documents and lane briefs need a discoverable project-local home
+  without creating tracked configuration changes.
+- Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`.
+- Owner: `crates/confinement/src/scratch.rs`, `src/fabric.rs`
+
+### Graph delivery
+
+Nodes accept the same optional string `delivery` as dispatch: `none`, `push`,
+`integrate:BRANCH` or `pr`. Read-only nodes cannot deliver. A graph may declare
+`integration_branch` and `delivery: "pr"`; this excludes node PR deliveries.
+Writer integration happens on the shared host delivery path under its per-ref
+lock. A failed or unattempted delivery fails the node and blocks dependants.
+
+Before dispatch, every integration target is checked against the default and
+primary checkout branches, and node targets must match the graph's declared
+integration branch. The graph uses the integration base OID pinned in its host
+execution record before the first node is admitted. Replays preserve that base;
+final PR commit messages
+cover only `base..integration-head`, regardless of the primary checkout's HEAD.
+A legacy graph without a recorded base must use a new graph ID for PR delivery.
+Once every node succeeds and custody is released, the graph publishes local
+integration through a separately created graph branch,
+recovering an interrupted publication when its unmarked ref still points at
+the exact graph head. A matching sealed marker also permits recreating an absent
+publication ref at that same head. A different marker, a different ref head or
+a symbolic ref refuses. Alternatively,
+the graph uses its existing remote integration branch, and opens one PR. Its body
+contains bounded commit messages and run and attempt IDs. The checkpoint
+records the PR URL and successful final delivery;
+replay observes it. A failed final delivery keeps its advance error and remains
+eligible for advancement or manual resume. Neither conflicts nor unknown
+launches are auto-resolved.
+- Why: lanes can feed one integration branch while the graph owns the single
+  review boundary and reuses run's delivery checks.
+- Test: `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
+  `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
+  `src/fabric.rs::graph_submission_pins_the_integration_base_across_replay`;
+  `crates/run/src/delivery_tests.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
+  `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
+- Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`

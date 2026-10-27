@@ -52,7 +52,7 @@ fn lanes_watch_and_session_selection_report_an_empty_store() -> Result {
 
 #[test]
 fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
     let state = rig.state.to_string_lossy().into_owned();
@@ -66,7 +66,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         "dispatch",
         "--prompt-stdin",
         "--model",
-        "codex/id",
+        "codex/gpt-6-luna",
         "--operation-id",
         "fixture",
         "--json",
@@ -312,9 +312,19 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         value["data"]["receipts"][0]["receipt"]["state"],
         "already_terminal"
     );
-    // Providers expose no sessions yet, so resume refuses before it spends
-    // the attempt's one continuation.
-    let resume = [
+    // This rejected attempt launched no provider, and the fixture has no
+    // provider executable for fresh fallback. Refusal must neither add an
+    // attempt nor spend the continuation, including operation retries.
+    let before = rig.command(&["lanes", "--all", "--json"])?;
+    assert_eq!(code(&before), 0);
+    let before: serde_json::Value = serde_json::from_slice(&before.stdout.bytes)?;
+    let run_directories = || -> Result<std::collections::BTreeSet<std::ffi::OsString>> {
+        std::fs::read_dir(rig.state.join("runs"))?
+            .map(|entry| Ok(entry?.file_name()))
+            .collect()
+    };
+    let directories_before = run_directories()?;
+    let mut resume = [
         "--state-dir",
         &state,
         "resume",
@@ -324,10 +334,51 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         "again",
         "--json",
     ];
-    let out = rig.execute(binary, &resume, Some(b"more"))?;
-    assert_eq!(code(&out), 1);
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "CONTINUATION_UNSUPPORTED");
+    for operation in ["again", "again", "again-new"] {
+        resume[6] = operation;
+        let out = rig.execute(binary, &resume, Some(b"more"))?;
+        assert_eq!(code(&out), 1);
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(value["error"]["code"], "CONTINUATION_UNSUPPORTED");
+        let after = rig.command(&["lanes", "--all", "--json"])?;
+        assert_eq!(code(&after), 0);
+        let after: serde_json::Value = serde_json::from_slice(&after.stdout.bytes)?;
+        assert_eq!(after["data"]["lanes"], before["data"]["lanes"], "{value}");
+        assert_eq!(run_directories()?, directories_before);
+    }
+    // An executable alone does not make an unregistered account launchable.
+    // Refusing account preparation must also leave no operation or staging.
+    let bin = rig.root.join("provider/bin");
+    std::fs::create_dir_all(&bin)?;
+    rig.copy_executable(std::path::Path::new("/usr/bin/true"), &bin.join("codex"))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    resume[3] = pinned["data"]["lanes"][0]["attempt_id"]
+        .as_str()
+        .ok_or("pinned attempt")?;
+    for operation in ["account-resume", "account-resume", "account-resume-new"] {
+        resume[6] = operation;
+        let out = rig.execute(binary, &resume, Some(b"more"))?;
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(code(&out), 1, "{value}");
+        assert_eq!(
+            value["error"]["code"], "CONTINUATION_UNSUPPORTED",
+            "{value}"
+        );
+        assert!(
+            value["error"]["message"].as_str().is_some_and(
+                |message| message.contains("account fixture-account is not registered")
+            ),
+            "{value}"
+        );
+        let after = rig.command(&["lanes", "--all", "--json"])?;
+        let after: serde_json::Value = serde_json::from_slice(&after.stdout.bytes)?;
+        assert_eq!(after["data"]["lanes"], before["data"]["lanes"], "{value}");
+        assert_eq!(run_directories()?, directories_before);
+    }
     let reconcile = rig.command(&["reconcile", "--json"])?;
     assert_eq!(code(&reconcile), 0);
     let value: serde_json::Value = serde_json::from_slice(&reconcile.stdout.bytes)?;
@@ -350,6 +401,63 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     );
     let value: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
     assert_eq!(value["data"]["totals"]["attempts"], 4);
+    if cfg!(target_os = "macos") {
+        // Repair the environment, then reuse the refused operation. Successful
+        // admission prepares once and hands off that exact plan, including on replay.
+        for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+            std::fs::create_dir_all(rig.home.join(path))?;
+        }
+        std::fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+        std::fs::write(
+            rig.root.join("codex/auth.json"),
+            br#"{"tokens":{"account_id":"fixture-one"}}"#,
+        )?;
+        std::fs::write(
+            bin.join("codex"),
+            r#"#!/bin/sh
+case "$1" in
+  --version)
+    printf x >> "$HOME/version-probes"
+    printf 'codex-cli 0.163.0\n'
+    ;;
+  exec)
+    cat >/dev/null
+    printf '%s\n' '{"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+        )?;
+        resume[3] = &attempt;
+        resume[6] = "again";
+        let mut waiting = resume.to_vec();
+        waiting.extend(["--wait", "5"]);
+        let out = rig.execute(binary, &waiting, Some(b"more"))?;
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(code(&out), 0, "{value}");
+        let successor = &value["data"]["lanes"][0];
+        assert_eq!(successor["continuation"], "fresh", "{value}");
+        assert_eq!(successor["attempt_number"], 2, "{value}");
+        // Write grants come from the consumed plan before OS handoff, which
+        // can itself reject execution where the sandbox backend is unavailable.
+        assert!(
+            successor["write_grants"]
+                .as_array()
+                .is_some_and(|grants| !grants.is_empty()),
+            "{value}"
+        );
+        assert_eq!(std::fs::read(rig.home.join("version-probes"))?, b"x");
+        let replay = rig.execute(binary, &waiting, Some(b"more"))?;
+        let replay: serde_json::Value = serde_json::from_slice(&replay.stdout.bytes)?;
+        assert_eq!(
+            replay["data"]["run_id"], value["data"]["run_id"],
+            "{replay}"
+        );
+        assert_eq!(std::fs::read(rig.home.join("version-probes"))?, b"x");
+        let after = rig.command(&["telemetry", "stats", "--json"])?;
+        let after: serde_json::Value = serde_json::from_slice(&after.stdout.bytes)?;
+        assert_eq!(after["data"]["totals"]["attempts"], 5, "{after}");
+    }
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())

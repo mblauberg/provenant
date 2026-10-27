@@ -277,6 +277,7 @@ fn build_model(passive: bool) -> clap::Command {
                         "fallback",
                         "mode",
                         "worktree",
+                        "deliver",
                         "read_root",
                         "write_root",
                         "network",
@@ -374,10 +375,12 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
             if (access.mode == Mode::WorktreeWrite)
-                != (access.worktree.is_some() || dispatch.branch.is_some())
+                != (access.worktree.is_some()
+                    || dispatch.branch.is_some()
+                    || dispatch.worktree_branch.is_some())
             {
                 return invalid(
-                    "--worktree, or a peer writer's --branch, is required with, and only valid \
+                    "--worktree, --worktree-branch, or a peer writer's --branch, is required with, and only valid \
                      for, --mode worktree-write",
                 );
             }
@@ -904,6 +907,72 @@ mod tests {
         let mut words = base.to_vec();
         words.extend(["--fallback", "a/id", "--fallback", "b/id"]);
         invalid(&words);
+    }
+
+    #[test]
+    fn lifecycle_flags_parse_and_refuse_ambiguous_authority() {
+        let base = [
+            "dispatch",
+            "--prompt-stdin",
+            "--operation-id",
+            "owned",
+            "--model",
+            "codex/id",
+            "--mode",
+            "worktree-write",
+            "--worktree-branch",
+            "feat/owned",
+        ];
+        let mut words = base.to_vec();
+        words.extend(["--base", "main", "--deliver", "integrate:integration"]);
+        let Command::Dispatch(dispatch) = valid(&words).command else {
+            panic!("dispatch");
+        };
+        assert_eq!(dispatch.worktree_branch.as_deref(), Some("feat/owned"));
+        assert_eq!(
+            dispatch.deliver,
+            Some(provenant_records::run::DeliveryMode::Integrate(
+                "integration".into()
+            ))
+        );
+        for flags in [
+            vec!["--worktree", "existing"],
+            vec!["--host", "peer"],
+            vec![
+                "--deliver",
+                "push",
+                "--deliver-remote",
+                "origin",
+                "--deliver-branch",
+                "lane",
+            ],
+            vec!["--deliver", "integrate:../main"],
+        ] {
+            let mut words = base.to_vec();
+            words.extend(flags);
+            invalid(&words);
+        }
+        valid(&["worktree", "adopt", "../native", "--owner", "manual"]);
+        valid(&[
+            "lane",
+            "deliver",
+            "11111111111111111111111111111111",
+            "--deliver",
+            "pr",
+        ]);
+        let Command::Resume(resume) = valid(&[
+            "resume",
+            "11111111111111111111111111111111",
+            "--operation-id",
+            "fresh",
+            "--prompt-stdin",
+            "--no-fallback",
+        ])
+        .command
+        else {
+            panic!("resume");
+        };
+        assert!(resume.no_fallback);
     }
     #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {

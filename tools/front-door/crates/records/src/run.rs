@@ -15,6 +15,10 @@ pub const OUTPUT_LIMIT: u64 = 65536;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalRequest {
+    /// A fresh continuation retains the parent for lineage and admission, but
+    /// starts the provider without its previous session. The reason is sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_continuation: Option<String>,
     pub schema_version: u64,
     pub tasks: Vec<TaskRequest>,
     pub concurrency: u64,
@@ -144,12 +148,75 @@ pub struct WriterRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriterDeliveryRequest {
+    /// Push is the legacy behaviour; integration never checks out either head.
+    #[serde(default, skip_serializing_if = "DeliveryMode::is_push")]
+    pub mode: DeliveryMode,
     /// A configured remote name, never a URL supplied by a provider.
     pub remote: String,
     /// Short destination branch name; the host pushes an explicit full refspec.
     pub branch: String,
     #[serde(default)]
     pub open_pr: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum DeliveryMode {
+    None,
+    #[default]
+    Push,
+    Integrate(String),
+    Pr,
+}
+impl DeliveryMode {
+    pub fn is_push(&self) -> bool {
+        matches!(self, Self::Push)
+    }
+}
+impl std::str::FromStr for DeliveryMode {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "push" => Ok(Self::Push),
+            "pr" => Ok(Self::Pr),
+            value => value
+                .strip_prefix("integrate:")
+                .filter(|branch| {
+                    !branch.is_empty()
+                        && !branch.starts_with('-')
+                        && branch.len() <= 240
+                        && !branch
+                            .contains([' ', '\n', '\r', '\0', ':', '~', '^', '?', '*', '[', '\\'])
+                        && !branch.contains("..")
+                        && !branch.contains("@{")
+                        && !branch.ends_with(['/', '.'])
+                })
+                .map(|branch| Self::Integrate(branch.to_owned()))
+                .ok_or_else(|| "expected none, push, integrate:<branch> or pr".into()),
+        }
+    }
+}
+impl TryFrom<String> for DeliveryMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+impl From<DeliveryMode> for String {
+    fn from(mode: DeliveryMode) -> Self {
+        match mode {
+            DeliveryMode::None => "none".into(),
+            DeliveryMode::Push => "push".into(),
+            DeliveryMode::Pr => "pr".into(),
+            DeliveryMode::Integrate(branch) => format!("integrate:{branch}"),
+        }
+    }
+}
+impl std::fmt::Display for DeliveryMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&String::from(self.clone()))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +230,7 @@ pub enum WriterDeliveryStage {
     Verify,
     PullRequest,
     Interrupted,
+    Integrate,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +519,9 @@ pub enum WriteSource {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
+    /// `fresh` when a resume could not use provider continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
     pub schema_version: u64,
@@ -605,6 +676,7 @@ mod tests {
     fn request_with_a_removed_task_class_retains_its_sealed_digest()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
+            fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
                 profile: HarnessProfile {

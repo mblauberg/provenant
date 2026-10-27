@@ -201,7 +201,7 @@ fn build_strict() -> Vec<Value> {
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit":page},"status":{"target":reference("AttemptTarget")},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId")},
-                "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone()}
+                "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone(),"no_fallback?":{"type":"boolean"}}
             }),
         ),
         (

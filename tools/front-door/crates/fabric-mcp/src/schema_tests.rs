@@ -89,6 +89,7 @@ fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
         "array" => !value.is_array(),
         "string" => !value.is_string(),
         "integer" => !value.as_number().is_some_and(|n| n.is_i64() || n.is_u64()),
+        "boolean" => !value.is_boolean(),
         "null" => !value.is_null(),
         _ => true,
     }) {
@@ -231,6 +232,7 @@ fn sample(root: &Value, schema: &Value) -> Option<Value> {
             .map(Value::String)
             .find(|v| accepts(root, schema, v)),
         "integer" => Some(json!(schema["minimum"].as_u64().unwrap_or(0))),
+        "boolean" => Some(Value::Bool(false)),
         "null" => Some(Value::Null),
         _ => None,
     }
@@ -365,6 +367,10 @@ fn candidates(root: &Value, schema: &Value, _value: &Value, valid: bool) -> Vec<
                     out.push(json!([item, item]));
                 }
             }
+        }
+        (Some("boolean"), true) => out.extend([json!(false), json!(true)]),
+        (Some("boolean"), false) => {
+            out.extend([Value::Null, json!(0), json!("false"), json!([]), json!({})]);
         }
         (Some("object"), false) => out.push(json!("wrong type")),
         (Some("null"), true) => out.push(Value::Null),
@@ -585,7 +591,9 @@ fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
             .cloned()
             .unwrap_or_else(|| vec![root.clone()]);
         for operation in &operations {
-            let mut request = sample(root, operation).expect("generated valid operation");
+            let mut request = sample(root, operation).unwrap_or_else(|| {
+                panic!("cannot generate valid operation for {name}: {operation}")
+            });
             normalise(&mut request);
             compare(name, root, &request, "operation", true, &mut counts);
             walk(name, root, operation, &request, "", true, &mut counts);

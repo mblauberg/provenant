@@ -106,6 +106,8 @@ bounded_input! {
             operation_id: OperationId,
             prompt: String,
             expected_generation: u64,
+            #[serde(default)]
+            no_fallback: bool,
         },
     }
 }
@@ -378,6 +380,37 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn resume_preserves_no_fallback_and_defaults_for_older_senders()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut input = serde_json::json!({
+            "op": "resume",
+            "target": { "attempt": "00000000000000000000000000000001" },
+            "operation_id": "resume-fixture",
+            "prompt": "Continue",
+            "expected_generation": 0
+        });
+        let legacy: super::RunInput = serde_json::from_value(input.clone())?;
+        assert!(matches!(
+            legacy,
+            super::RunInput::Resume {
+                no_fallback: false,
+                ..
+            }
+        ));
+        input["no_fallback"] = true.into();
+        let explicit: super::RunInput = serde_json::from_value(input)?;
+        assert!(matches!(
+            explicit,
+            super::RunInput::Resume {
+                no_fallback: true,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(explicit)?["no_fallback"], true);
+        Ok(())
+    }
 
     #[test]
     fn filesystem_diagnostic_omits_paths_with_unknown_anchors() {

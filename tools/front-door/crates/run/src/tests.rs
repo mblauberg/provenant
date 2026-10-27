@@ -45,6 +45,7 @@ pub(super) fn input() -> PreparedRun {
         operation_id: OperationId::parse("run-test").unwrap(),
         created_at: WallTime::from_micros(100).unwrap(),
         request: CanonicalRequest {
+            fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
                 base: None,
@@ -163,6 +164,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         worktree: temp.path().join("lane"),
     });
     input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        mode: Default::default(),
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
@@ -231,6 +233,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
         worktree: temp.path().join("lane"),
     });
     input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        mode: Default::default(),
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
@@ -1136,7 +1139,7 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
 fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
     seal_observation(store, input, &exit())
 }
-fn seal_observation(
+pub(super) fn seal_observation(
     store: &RunStore,
     input: &PreparedRun,
     observation: &ExitObservation,

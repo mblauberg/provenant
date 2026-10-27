@@ -472,7 +472,17 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
         }
         Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::dispatch(*cmd, edge)
+            let mut reply = provenant_cli::run::dispatch(*cmd, edge);
+            if let Err(error) =
+                fabric::settle_dispatched_attempts(edge, &mut reply, process.workers())
+            {
+                reply
+                    .human
+                    .push_str(&format!("worktree retained: {error}\n"));
+                reply.result.data["worktree_settlement_error"] =
+                    serde_json::json!(error.to_string());
+            }
+            reply
         }),
         Command::Lanes(cmd) if cmd.watch.is_some() => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::lanes_streaming(
@@ -493,6 +503,19 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }),
         Command::Resume(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::resume(cmd, edge)
+        }),
+        Command::Lane(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            let mut reply = provenant_cli::run::lane(cmd, edge);
+            if let Err(error) =
+                fabric::settle_delivered_attempt(edge, &mut reply, process.workers())
+            {
+                reply
+                    .human
+                    .push_str(&format!("worktree retained: {error}\n"));
+                reply.result.data["worktree_settlement_error"] =
+                    serde_json::json!(error.to_string());
+            }
+            reply
         }),
         Command::Reconcile(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::reconcile(cmd, edge)

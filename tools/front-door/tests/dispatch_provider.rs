@@ -457,7 +457,7 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(&json!({"schema_version":1,"graph_id":"settlement","nodes":[
-            {"id":"write","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/graph-writer","route":route},
+            {"id":"write","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/graph-writer","delivery":"none","route":route},
             {"id":"review","prompt":"reply OK","access":"read_only","depends_on":["write"],"route":route}
         ]}))?,
     )?;
@@ -519,6 +519,68 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
         assert_eq!(lane["state"], "succeeded", "{lane}");
         assert_eq!(lane["account"], "pro", "{lane}");
     }
+    // Recreate a checkpoint saved before the terminal observation, after the
+    // successful writer's checkout has already been pruned.
+    assert_eq!(
+        code(&rig.command(&["worktree", "remove", "graph-writer", "--json",])?),
+        0
+    );
+    assert!(!rig.project.join(".worktrees/graph-writer").exists());
+    {
+        use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+        use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal, NodeState};
+        let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let project = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+        )?
+        .project_id();
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = CancelToken::new();
+        let mut journal = FileJournal::open(
+            &roots.state,
+            project,
+            "settlement",
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+            &clock,
+        )?;
+        let mut checkpoint = journal.load("settlement")?.ok_or("checkpoint")?;
+        checkpoint.nodes[0].state = NodeState::Running;
+        let attempt = checkpoint.nodes[0].attempts.last_mut().ok_or("attempt")?;
+        attempt.state = AttemptState::Starting;
+        attempt.outcome = None;
+        journal.save(&checkpoint)?;
+    }
+    let replay = rig.command(&[
+        "fabric",
+        "graph",
+        "resume",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&replay),
+        0,
+        "{}",
+        String::from_utf8_lossy(&replay.stdout.bytes)
+    );
+    let replay: Value = serde_json::from_slice(&replay.stdout.bytes)?;
+    assert_eq!(replay["data"]["status"], "complete", "{replay}");
+    assert_eq!(
+        replay["data"]["checkpoint"]["nodes"][0]["state"], "succeeded",
+        "{replay}"
+    );
+    assert_eq!(
+        replay["data"]["checkpoint"]["nodes"][0]["attempts"]
+            .as_array()
+            .ok_or("attempts")?
+            .len(),
+        1
+    );
     cleanup.disarm();
     Ok(())
 }
@@ -614,6 +676,7 @@ fn persisted_attempt(
         run_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
+            fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
                 base: None,
@@ -950,6 +1013,255 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     Ok(())
 }
 
+fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    for args in [
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["commit", "--allow-empty", "-qm", "base"],
+        vec!["branch", "-M", "main"],
+    ] {
+        let output = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&output), 0);
+    }
+    let prompt = rig.root.join("owned-prompt.md");
+    fs::write(&prompt, "Do not change files.")?;
+    let args = [
+        "dispatch",
+        "--operation-id",
+        "owned-replay",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/owned",
+        "--base",
+        "main",
+        "--deliver",
+        "push",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--json",
+    ];
+    // A failed attempt retains its checkout even when it is clean.
+    let first = rig.command(&args)?;
+    let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
+    let data = &first["data"];
+    assert_eq!(data["worktree"]["owned"], true, "{first}");
+    assert_eq!(
+        data["worktree_settlements"][0]["state"], "retained",
+        "{first}"
+    );
+    let path = data["worktree"]["path"].as_str().ok_or("worktree path")?;
+    assert!(std::path::Path::new(path).exists());
+    // Later repository protection governs new admissions and delivery, not
+    // replay of this already accepted operation.
+    for args in [
+        vec![
+            "remote",
+            "add",
+            "origin",
+            rig.project.to_str().ok_or("project")?,
+        ],
+        vec![
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/fixture/owned",
+        ],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
+    let second = rig.command(&args)?;
+    let second: Value = serde_json::from_slice(&second.stdout.bytes)?;
+    assert_eq!(second["data"]["run_id"], data["run_id"], "{second}");
+    assert!(std::path::Path::new(path).exists());
+    // Explicit worktrees use the ordinary admission path, which must also
+    // preserve replay after a publication target becomes protected.
+    let explicit_args = [
+        "dispatch",
+        "--operation-id",
+        "explicit-replay",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree",
+        path,
+        "--base",
+        "main",
+        "--deliver-remote",
+        "origin",
+        "--deliver-branch",
+        "published-explicit",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--json",
+    ];
+    let explicit = rig.command(&explicit_args)?;
+    let explicit: Value = serde_json::from_slice(&explicit.stdout.bytes)?;
+    assert!(explicit["data"]["run_id"].is_string(), "{explicit}");
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/published-explicit",
+            ],
+            None
+        )?),
+        0
+    );
+    let explicit_replay = rig.command(&explicit_args)?;
+    let explicit_replay: Value = serde_json::from_slice(&explicit_replay.stdout.bytes)?;
+    assert_eq!(
+        explicit_replay["data"]["run_id"], explicit["data"]["run_id"],
+        "{explicit_replay}"
+    );
+    fs::write(&prompt, "Changed prompt")?;
+    let conflict = rig.command(&args)?;
+    assert_ne!(code(&conflict), 0);
+    let explicit_conflict = rig.command(&explicit_args)?;
+    assert_ne!(code(&explicit_conflict), 0);
+    assert!(std::path::Path::new(path).exists());
+    Ok(())
+}
+
+fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    for args in [
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["commit", "--allow-empty", "-qm", "base"],
+        vec!["branch", "-M", "main"],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
+    let branch = "fixture/adopted";
+    assert_eq!(
+        code(&rig.command(&["worktree", "create", branch, "--base", "main", "--json",])?),
+        0
+    );
+    let tree = rig.project.join(".worktrees/fixture-adopted");
+    let admin = rig.execute(
+        &git,
+        &[
+            "-C",
+            tree.to_str().ok_or("tree")?,
+            "rev-parse",
+            "--absolute-git-dir",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&admin), 0);
+    let owner_path =
+        PathBuf::from(String::from_utf8(admin.stdout.bytes)?.trim()).join("provenant-owner.json");
+    let base_head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    assert_eq!(code(&base_head), 0);
+    let mut owner = json!({
+        "attempt_id": null,
+        "operation_id": null,
+        "branch": branch,
+        "base": String::from_utf8(base_head.stdout.bytes)?.trim(),
+        "host": provenant_core::HostId::from_bytes([1; 16]),
+        "created_at": provenant_core::WallTime::from_micros(1)?,
+        "origin": "adopted",
+        "label": "human-session"
+    });
+    let base = owner["base"].clone();
+    let prompt = rig.root.join("owned-prompt.md");
+    fs::write(&prompt, "Do not change files.")?;
+    for same_operation in [false, true] {
+        owner["operation_id"] = if same_operation {
+            json!("adopted-refused")
+        } else {
+            Value::Null
+        };
+        fs::write(&owner_path, serde_json::to_vec(&owner)?)?;
+        let before = fs::read(&owner_path)?;
+        let out = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "adopted-refused",
+            "--model",
+            "codex/gpt-6-luna",
+            "--mode",
+            "worktree-write",
+            "--worktree-branch",
+            branch,
+            "--base",
+            "main",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ])?;
+        assert_ne!(code(&out), 0);
+        let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("adopted or foreign owner"),
+            "{result}"
+        );
+        assert_eq!(fs::read(&owner_path)?, before);
+        assert_eq!(owner["base"], base);
+        assert_eq!(owner["label"], "human-session");
+    }
+    // A new checkout made before prompt loading fails must be removed.
+    let missing = rig.root.join("missing-prompt.md");
+    let out = rig.command(&[
+        "dispatch",
+        "--operation-id",
+        "creation-refused",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/refused",
+        "--base",
+        "main",
+        "--prompt-file",
+        missing.to_str().ok_or("missing")?,
+        "--json",
+    ])?;
+    assert_ne!(code(&out), 0);
+    let refused_tree = rig.project.join(".worktrees/fixture-refused");
+    if refused_tree.exists() {
+        // A native census that cannot prove the tree free must retain its
+        // durable lane owner for GC rather than force removal.
+        let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("new managed worktree retained for gc"),
+            "{result}"
+        );
+        let admin = rig.execute(
+            &git,
+            &[
+                "-C",
+                refused_tree.to_str().ok_or("tree")?,
+                "rev-parse",
+                "--absolute-git-dir",
+            ],
+            None,
+        )?;
+        let owner: Value = serde_json::from_slice(&fs::read(
+            PathBuf::from(String::from_utf8(admin.stdout.bytes)?.trim())
+                .join("provenant-owner.json"),
+        )?)?;
+        assert_eq!(owner["origin"], "lane");
+        assert_eq!(owner["operation_id"], "creation-refused");
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = if args
@@ -961,6 +1273,8 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                "owned_dispatch_retains_failed_attempt_and_replays",
+                "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
                 "claude_dispatch_refreshes_registered_account",
                 "graph_settlement_advances_writer_and_account_routed_review",
@@ -972,6 +1286,12 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    "owned_dispatch_retains_failed_attempt_and_replays" => {
+                        owned_dispatch_retains_failed_attempt_and_replays()
+                    }
+                    "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation" => {
+                        owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
+                    }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()
