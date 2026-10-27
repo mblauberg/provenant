@@ -632,29 +632,32 @@ pub(crate) fn fetch_missing_remote_branch(
         remote.into(),
         refspec.into(),
     ])?;
-    if let Termination::Exit(status) = fetched.termination
-        && status != 0
-    {
-        let remote_ref = format!("refs/heads/{branch}");
-        let advertised = run(&[
-            "ls-remote".into(),
-            "--exit-code".into(),
-            "--heads".into(),
-            "--".into(),
-            remote.into(),
-            remote_ref.into(),
-        ]);
-        // ls-remote uses status 2 when the remote answered but advertised no
-        // matching ref. Let the caller's resolution return BaseNotFound.
-        if advertised.is_ok_and(|outcome| outcome.termination == Termination::Exit(2)) {
-            return Ok(());
-        }
-        return Err(UtilityError::FetchFailed {
-            status,
-            stderr: fetch_stderr_excerpt(&fetched.stderr.bytes),
-        });
+    let fetch_status = match fetched.termination {
+        Termination::Exit(0) => return Ok(()),
+        Termination::Exit(status) => status,
+        Termination::Signal(signal) => return Err(UtilityError::Signalled { signal }),
+    };
+    let remote_ref = format!("refs/heads/{branch}");
+    let advertised = run(&[
+        "ls-remote".into(),
+        "--exit-code".into(),
+        "--heads".into(),
+        "--".into(),
+        remote.into(),
+        remote_ref.into(),
+    ]);
+    // ls-remote uses status 2 when the remote answered but advertised no
+    // matching ref. Let the caller's resolution return BaseNotFound.
+    match advertised {
+        Ok(outcome) if outcome.termination == Termination::Exit(2) => return Ok(()),
+        Err(error @ (UtilityError::TimedOut | UtilityError::Cancelled)) => return Err(error),
+        Err(UtilityError::Execution(ExecError::Cancelled)) => return Err(UtilityError::Cancelled),
+        _ => {}
     }
-    Ok(())
+    Err(UtilityError::FetchFailed {
+        status: fetch_status,
+        stderr: fetch_stderr_excerpt(&fetched.stderr.bytes),
+    })
 }
 
 fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
@@ -662,7 +665,13 @@ fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
         .unwrap_or_else(|_| b"fetch stderr could not be sanitised".to_vec());
     let mut stderr: String = String::from_utf8_lossy(&safe)
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() || is_format_character(character) {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect();
     if stderr.len() > MAX_FETCH_STDERR {
         let mut end = MAX_FETCH_STDERR - '…'.len_utf8();
@@ -673,6 +682,33 @@ fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
         stderr.push('…');
     }
     stderr
+}
+
+fn is_format_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
 }
 
 /// Run a read for the release scan, where shallow boundaries must not hide
@@ -1359,17 +1395,65 @@ pub(crate) mod tests {
             let is_fetch = options.argv.iter().any(|arg| arg == "fetch");
             let mut outcome = self.0.execute(options)?;
             if is_fetch && outcome.termination != Termination::Exit(0) {
-                outcome.stderr.bytes = b"fatal: https://user:secret@example.invalid/repo denied\n"
-                    .to_vec();
+                outcome.stderr.bytes =
+                    "fatal: https://user:secret@example.invalid/repo denied\u{202e}\n"
+                        .as_bytes()
+                        .to_vec();
                 outcome.stderr.total_bytes = outcome.stderr.bytes.len() as u64;
             }
             Ok(outcome)
         }
     }
 
-    #[test]
-    fn missing_remote_fetch_reports_bounded_sanitised_stderr() -> Result<(), Box<dyn Error>> {
-        let mut fixture = Fixture::new()?;
+    #[derive(Clone, Copy)]
+    enum ProbeBehavior {
+        Exit(i64),
+        Cancelled,
+        TimedOut,
+    }
+
+    struct ControlledFetch<'a> {
+        executor: &'a SystemExecutor,
+        fetch_termination: Termination,
+        probe_behavior: ProbeBehavior,
+    }
+
+    impl Executor for ControlledFetch<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let is_fetch = options.argv.iter().any(|arg| arg == "fetch");
+            let is_probe = options.argv.iter().any(|arg| arg == "ls-remote");
+            if is_probe && matches!(self.probe_behavior, ProbeBehavior::Cancelled) {
+                return Err(ExecError::Cancelled);
+            }
+            if is_probe {
+                return Ok(ExecOutcome {
+                    termination: match self.probe_behavior {
+                        ProbeBehavior::Exit(status) => Termination::Exit(status),
+                        ProbeBehavior::Cancelled => unreachable!(),
+                        ProbeBehavior::TimedOut => Termination::Exit(0),
+                    },
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: matches!(self.probe_behavior, ProbeBehavior::TimedOut),
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                });
+            }
+            let mut outcome = self.executor.execute(options)?;
+            if is_fetch {
+                outcome.termination = self.fetch_termination;
+                if self.fetch_termination != Termination::Exit(0) {
+                    outcome.stderr.bytes = b"fetch failed".to_vec();
+                    outcome.stderr.total_bytes = outcome.stderr.bytes.len() as u64;
+                }
+            }
+            Ok(outcome)
+        }
+    }
+
+    fn add_missing_test_remote(fixture: &mut Fixture) -> Result<(), Box<dyn Error>> {
         let missing_remote = fixture._temp.path().join("missing-remote.git");
         let url = format!("file://{}", missing_remote.display());
         fixture.run(&["remote", "add", "origin", &url])?;
@@ -1379,6 +1463,13 @@ pub(crate) mod tests {
             fixture.budget()?,
             &CancelToken::new(),
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_remote_fetch_reports_bounded_sanitised_stderr() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        add_missing_test_remote(&mut fixture)?;
 
         let error = fetch_missing_remote_branch(
             &fixture.executor,
@@ -1425,6 +1516,89 @@ pub(crate) mod tests {
         assert!(!stderr.contains("secret"));
         assert!(stderr.contains("[REDACTED]"));
         assert!(!stderr.chars().any(char::is_control));
+        assert!(!stderr.contains('\u{202e}'));
+        let long_secret = format!("{}https://user:secret@example.invalid/", "x".repeat(970));
+        let excerpt = fetch_stderr_excerpt(long_secret.as_bytes());
+        assert!(!excerpt.contains("secret"));
+        assert!(excerpt.contains("[REDACTED]"));
+        assert!(excerpt.len() <= MAX_FETCH_STDERR);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_remote_fetch_propagates_probe_cancel_and_timeout() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        add_missing_test_remote(&mut fixture)?;
+        for (behavior, expected) in [
+            (ProbeBehavior::Cancelled, "cancelled"),
+            (ProbeBehavior::TimedOut, "timed out"),
+        ] {
+            let executor = ControlledFetch {
+                executor: &fixture.executor,
+                fetch_termination: Termination::Exit(1),
+                probe_behavior: behavior,
+            };
+            let error = fetch_missing_remote_branch(
+                &executor,
+                &fixture.repo,
+                &fixture.runtime,
+                &fixture.home,
+                "origin/main",
+                fixture.budget()?,
+                &CancelToken::new(),
+            )
+            .expect_err("probe failure must be propagated");
+            match (expected, error) {
+                ("cancelled", UtilityError::Cancelled) | ("timed out", UtilityError::TimedOut) => {}
+                (_, error) => return Err(format!("unexpected error: {error}").into()),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_remote_fetch_signal_is_reported() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        add_missing_test_remote(&mut fixture)?;
+        let executor = ControlledFetch {
+            executor: &fixture.executor,
+            fetch_termination: Termination::Signal(15),
+            probe_behavior: ProbeBehavior::Exit(2),
+        };
+        let error = fetch_missing_remote_branch(
+            &executor,
+            &fixture.repo,
+            &fixture.runtime,
+            &fixture.home,
+            "origin/main",
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+        .expect_err("signalled fetch must fail");
+        assert!(matches!(error, UtilityError::Signalled { signal: 15 }));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_remote_fetch_probe_success_does_not_hide_failure() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        add_missing_test_remote(&mut fixture)?;
+        let executor = ControlledFetch {
+            executor: &fixture.executor,
+            fetch_termination: Termination::Exit(1),
+            probe_behavior: ProbeBehavior::Exit(0),
+        };
+        let error = fetch_missing_remote_branch(
+            &executor,
+            &fixture.repo,
+            &fixture.runtime,
+            &fixture.home,
+            "origin/main",
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+        .expect_err("probe success must not hide fetch failure");
+        assert!(matches!(error, UtilityError::FetchFailed { status: 1, .. }));
         Ok(())
     }
 
