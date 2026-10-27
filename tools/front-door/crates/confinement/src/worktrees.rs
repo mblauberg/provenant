@@ -1,7 +1,14 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
+mod context;
 mod gc;
+mod owner;
+pub use context::with_context;
 pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
+pub use owner::{
+    WorktreeOrigin, WorktreeOwner, adopt, load_owner, prune_owned, save_lane_owner_when_free,
+    save_owner,
+};
 
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
@@ -134,6 +141,9 @@ pub enum WorktreeRemove {
         /// Integration ref to check containment against; the primary's branch
         /// when absent.
         integration: Option<String>,
+        /// The HEAD the caller verified. Removal refuses, under the worktree
+        /// lock, when the worktree is no longer at it.
+        expected_head: Option<GitOid>,
     },
     Merged {
         integration: String,
@@ -1984,6 +1994,7 @@ pub fn remove_with_output(
                 name,
                 discard,
                 integration,
+                expected_head,
             } => {
                 let (integration, integration_tip) = match integration {
                     Some(text) => pin_integration(context, &text, cancel)?,
@@ -1997,6 +2008,11 @@ pub fn remove_with_output(
                     .copied()
                     .filter(|tip| *tip == entry.head)
                     .ok_or(WorktreeError::IdentityChanged)?;
+                // `remove_tree` rechecks this tip under the worktree lock, so
+                // a commit made after the caller's check cannot be removed.
+                if expected_head.is_some_and(|expected| expected != tip) {
+                    return Err(WorktreeError::IdentityChanged);
+                }
                 let disposition = keep_disposition(
                     context,
                     &branch,
@@ -2170,6 +2186,286 @@ mod lifecycle_tests {
     use std::os::unix::fs::PermissionsExt;
 
     struct FreeWorkers;
+
+    #[test]
+    fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "lane-owner".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let tree = verify_worktree(&fixture.repo, &info.path)?;
+        let mut owner = WorktreeOwner {
+            attempt_id: None,
+            operation_id: Some("first-owner".parse()?),
+            branch: "lane-owner".into(),
+            base: info.head.to_string(),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: context.clock.wall_now()?,
+            origin: WorktreeOrigin::Lane,
+            label: None,
+        };
+        save_lane_owner_when_free(&context, &tree, &owner, &cancel())?;
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&info.path))?;
+        let held = state.lock(
+            OsStr::new(WRITER_LOCK),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(context.clock.mono_now()),
+            &cancel(),
+            context.clock,
+        )?;
+        let next = WorktreeOwner {
+            operation_id: Some("next-owner".parse()?),
+            ..owner.clone()
+        };
+        assert!(matches!(
+            save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+            Err(WorktreeError::LiveWriter)
+        ));
+        assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+        drop(held);
+        fs::write(info.path.join("dirty"), "keep")?;
+        assert!(matches!(
+            save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+            Err(WorktreeError::Dirty)
+        ));
+        fs::remove_file(info.path.join("dirty"))?;
+        owner.origin = WorktreeOrigin::Adopted;
+        owner.label = Some("manual".into());
+        save_owner(&tree, &owner)?;
+        assert!(save_lane_owner_when_free(&context, &tree, &next, &cancel()).is_err());
+        assert_eq!(load_owner(&tree)?, Some(owner));
+        Ok(())
+    }
+
+    #[test]
+    fn adopted_owner_proves_membership_and_enables_custody() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let native = fixture.root.join(".worktrees/native");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "native",
+            native.to_str().ok_or("path")?,
+        ])?;
+        let tree = verify_worktree(&fixture.repo, &native)?;
+        assert!(load_owner(&tree)?.is_none());
+        let owner = WorktreeOwner {
+            attempt_id: None,
+            operation_id: None,
+            branch: "native".into(),
+            base: fixture.head()?.to_string(),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: context.clock.wall_now()?,
+            origin: WorktreeOrigin::Adopted,
+            label: Some("manual".into()),
+        };
+        let lane_owner = WorktreeOwner {
+            origin: WorktreeOrigin::Lane,
+            operation_id: Some("not-adopted".parse()?),
+            ..owner.clone()
+        };
+        assert!(matches!(
+            adopt(&context, &native, &lane_owner, &cancel()),
+            Err(WorktreeError::InvalidRequest)
+        ));
+        assert!(load_owner(&tree)?.is_none());
+        // A failed owner publication must not register custody identity.
+        let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
+        fs::create_dir(&owner_path)?;
+        assert!(adopt(&context, &native, &owner, &cancel()).is_err());
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&native))?;
+        assert!(
+            state
+                .read_bounded(OsStr::new(IDENTITY), MAX_STATE_RECORD)
+                .is_err_and(|error| error.is_not_found())
+        );
+        fs::remove_dir(owner_path)?;
+        adopt(&context, &native, &owner, &cancel())?;
+        assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+        assert_eq!(
+            list(&context, &cancel())?
+                .into_iter()
+                .find(|tree| tree.path == native)
+                .ok_or("native missing")?
+                .writer,
+            WriterState::Free
+        );
+        let foreign = Fixture::new()?;
+        let foreign_path = foreign.root.join(".worktrees/foreign");
+        foreign.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "foreign",
+            foreign_path.to_str().ok_or("path")?,
+        ])?;
+        assert!(adopt(&context, &foreign_path, &owner, &cancel()).is_err());
+        assert!(adopt(&context, &fixture.root, &owner, &cancel()).is_err());
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&native))?;
+        state
+            .atomic_write(
+                OsStr::new(RESERVATION),
+                ".test-",
+                b"{}",
+                PublishMode::Replace,
+            )?
+            .require_durable()?;
+        assert!(adopt(&context, &native, &owner, &cancel()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let base = fixture.head()?;
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "owned".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let tree = verify_worktree(&fixture.repo, &info.path)?;
+        let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
+        let mut owner = WorktreeOwner {
+            attempt_id: Some(attempt),
+            operation_id: Some("owned-create".parse()?),
+            branch: "owned".into(),
+            base: base.to_string(),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: context.clock.wall_now()?,
+            origin: WorktreeOrigin::Lane,
+            label: None,
+        };
+        save_owner(&tree, &owner)?;
+        let policy = WorktreeGcPolicy {
+            upstream: Some(base),
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            foreign_merged_clean: false,
+            foreign_idle_before_ns: None,
+            dry_run: false,
+        };
+        fs::write(info.path.join("dirty"), "keep")?;
+        assert!(
+            prune_owned(
+                &context,
+                &info.path,
+                attempt,
+                base,
+                base,
+                &policy,
+                &cancel()
+            )
+            .is_err()
+        );
+        fs::remove_file(info.path.join("dirty"))?;
+        owner.origin = WorktreeOrigin::Adopted;
+        save_owner(&tree, &owner)?;
+        assert!(
+            prune_owned(
+                &context,
+                &info.path,
+                attempt,
+                base,
+                base,
+                &policy,
+                &cancel()
+            )
+            .is_err()
+        );
+        owner.origin = WorktreeOrigin::Lane;
+        save_owner(&tree, &owner)?;
+        let denied = WorktreeGcPolicy {
+            no_live_lanes: &|_| false,
+            ..policy
+        };
+        assert!(
+            prune_owned(
+                &context,
+                &info.path,
+                attempt,
+                base,
+                base,
+                &denied,
+                &cancel()
+            )
+            .is_err()
+        );
+        assert!(info.path.exists());
+        fixture.run(&[
+            "-C",
+            info.path.to_str().ok_or("path")?,
+            "commit",
+            "--allow-empty",
+            "-m",
+            "unmerged lane commit",
+        ])?;
+        let head = list(&context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == info.path)
+            .ok_or("lane missing")?
+            .head;
+        assert!(
+            prune_owned(
+                &context,
+                &info.path,
+                attempt,
+                head,
+                base,
+                &policy,
+                &cancel()
+            )
+            .is_err()
+        );
+        let pushed_policy = WorktreeGcPolicy {
+            upstream: None,
+            ..policy
+        };
+        let removed = prune_owned(
+            &context,
+            &info.path,
+            attempt,
+            head,
+            head,
+            &pushed_policy,
+            &cancel(),
+        )?;
+        assert_eq!(removed.removed.len(), 1);
+        assert!(!info.path.exists());
+        assert!(removed.pruned_refs.is_empty());
+        assert!(
+            removed
+                .retained
+                .iter()
+                .any(|retained| retained.branch == "owned")
+        );
+        assert!(read_branch_tips(&context, &cancel())?.contains_key(&GitRefName::branch("owned")?));
+        Ok(())
+    }
 
     impl WorkerObserver for FreeWorkers {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
@@ -2557,6 +2853,7 @@ mod lifecycle_tests {
                     name: "remove-output".into(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancel(),
                 &provenant_config::ProjectGcSettings {
@@ -3625,6 +3922,7 @@ mod lifecycle_tests {
                     name: name.to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancel(),
             )
@@ -3817,6 +4115,7 @@ mod lifecycle_tests {
                             name: "feature/sequencer".into(),
                             discard: false,
                             integration: None,
+                            expected_head: None,
                         },
                         &cancellation,
                     ),
@@ -3844,6 +4143,7 @@ mod lifecycle_tests {
                 name: "feature/sequencer".into(),
                 discard: false,
                 integration: None,
+                expected_head: None,
             },
             &cancellation,
         )?;
@@ -3889,6 +4189,7 @@ mod lifecycle_tests {
                     name: "main".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation
             ),
@@ -3906,6 +4207,7 @@ mod lifecycle_tests {
                 name: "feature/lifecycle".to_owned(),
                 discard: false,
                 integration: None,
+                expected_head: None,
             },
             &cancellation,
         )?;
@@ -3947,6 +4249,7 @@ mod lifecycle_tests {
                     name: "feature/ignored".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation,
             ),
@@ -4026,6 +4329,7 @@ mod lifecycle_tests {
                     name: "feature/busy".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation
             ),
@@ -4046,6 +4350,7 @@ mod lifecycle_tests {
                     name: "feature/busy".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation
             ),
@@ -4058,9 +4363,71 @@ mod lifecycle_tests {
                 name: "feature/busy".to_owned(),
                 discard: false,
                 integration: None,
+                expected_head: None,
             },
             &cancellation,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn named_removal_refuses_a_head_that_moved_after_the_callers_check()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let cancellation = cancel();
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/raced".to_owned(),
+                base: None,
+            },
+            &cancellation,
+        )?;
+        // The caller verified the worktree at its creation head, then a clean
+        // commit landed before removal started.
+        let verified = created.head;
+        run_in_worktree(
+            &fixture,
+            &created.path,
+            &[
+                "-c",
+                "user.name=raced",
+                "-c",
+                "user.email=raced@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "after the check",
+            ],
+        )?;
+        let branch = GitRefName::branch("feature/raced")?;
+        let moved = read_branch_tips(&context, &cancellation)?
+            .get(&branch)
+            .copied()
+            .ok_or("branch tip")?;
+        assert_ne!(moved, verified);
+        let request = |expected_head| WorktreeRemove::Name {
+            name: "feature/raced".to_owned(),
+            discard: false,
+            integration: None,
+            expected_head,
+        };
+        assert!(matches!(
+            remove(&context, request(Some(verified)), &cancellation),
+            Err(WorktreeError::IdentityChanged)
+        ));
+        assert!(created.path.exists(), "the checkout must survive");
+        assert_eq!(
+            read_branch_tips(&context, &cancellation)?.get(&branch),
+            Some(&moved)
+        );
+        // Verifying the head it is really at lets the removal proceed.
+        let outcome = remove(&context, request(Some(moved)), &cancellation)?;
+        assert_eq!(outcome.removed.len(), 1);
+        assert!(!created.path.exists());
         Ok(())
     }
 
@@ -4253,6 +4620,7 @@ mod lifecycle_tests {
                     name: "feature/direct-gitlink".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation,
             ),

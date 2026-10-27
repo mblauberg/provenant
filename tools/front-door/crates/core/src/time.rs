@@ -12,6 +12,8 @@ pub enum TimeError {
     WallSpelling,
     #[error("wait budget must be between 1 and {maximum_seconds} seconds")]
     WaitLimit { maximum_seconds: u64 },
+    #[error("the host monotonic clock or boot identity cannot be read")]
+    HostClock,
 }
 
 /// A UTC timestamp of exact microsecond precision. No system clock is read.
@@ -182,6 +184,17 @@ pub trait Clock {
     fn mono_now(&self) -> MonoTime;
     /// Wait until a monotonic deadline according to this clock's time source.
     fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError>;
+    /// Microseconds on the host's monotonic clock since boot: one coordinate
+    /// every process on the host shares, unlike `mono_now`, and one no
+    /// wall-clock step moves. Only comparable with another reading taken under
+    /// the same `boot_identity`. A clock that cannot say refuses.
+    fn host_monotonic_micros(&self) -> Result<u64, TimeError> {
+        Err(TimeError::HostClock)
+    }
+    /// Names the current boot. A clock that cannot say refuses.
+    fn boot_identity(&self) -> Result<String, TimeError> {
+        Err(TimeError::HostClock)
+    }
 }
 /// Explicit, locally-owned clock for deterministic simulations and tests.
 #[derive(Debug)]
@@ -246,11 +259,41 @@ impl Clock for TestClock {
         }
         Ok(())
     }
+    /// The one simulated monotonic coordinate stands for the host's.
+    fn host_monotonic_micros(&self) -> Result<u64, TimeError> {
+        Ok(self.mono_now().as_micros())
+    }
+    fn boot_identity(&self) -> Result<String, TimeError> {
+        Ok("test-boot".to_owned())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_time_refuses_unless_a_clock_provides_it() {
+        struct Plain;
+        impl Clock for Plain {
+            fn wall_now(&self) -> Result<WallTime, TimeError> {
+                WallTime::from_micros(0)
+            }
+            fn mono_now(&self) -> MonoTime {
+                MonoTime::from_micros(0)
+            }
+            fn wait_until(&self, _: MonoTime) -> Result<(), TimeError> {
+                Ok(())
+            }
+        }
+        assert!(matches!(
+            Plain.host_monotonic_micros(),
+            Err(TimeError::HostClock)
+        ));
+        assert!(matches!(Plain.boot_identity(), Err(TimeError::HostClock)));
+        let test = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(7));
+        assert_eq!(test.host_monotonic_micros().unwrap(), 7);
+        assert_eq!(test.boot_identity().unwrap(), "test-boot");
+    }
     #[test]
     fn wall_time_is_exact_and_has_only_one_wire_spelling() {
         let before_epoch = UtcMicros::from_micros(-1).unwrap();

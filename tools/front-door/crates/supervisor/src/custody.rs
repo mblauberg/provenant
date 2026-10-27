@@ -39,6 +39,10 @@ pub enum CustodyError {
     Cancelled,
     #[error("wait budget expired; custody is retained")]
     Timeout,
+    /// Admission could not judge startup spacing. The reason is fixed text, so
+    /// it can reach the user without any path.
+    #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
+    AdmissionClock,
     #[error("custody I/O failed")]
     Io(#[from] io::Error),
     #[error(transparent)]

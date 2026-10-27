@@ -40,6 +40,42 @@ fn receipt_request(critical: &str, decision: Value) -> Value {
 const DELIVERY: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 
 #[test]
+fn long_checkpoints_save_up_to_the_documented_bound() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("long.md");
+    let save = |bytes: usize, expected: i64| -> Result<Value> {
+        std::fs::write(&file, "x".repeat(bytes - 1) + "\n")?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                "s-long",
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            expected,
+        )
+    };
+    // Past the old 32 KiB cap, up to and including 256 KiB.
+    let saved = save(200 * 1024, 0)?;
+    assert_eq!(saved["data"]["saved_bytes"], 200 * 1024);
+    assert_eq!(saved["data"]["limit_bytes"], 256 * 1024);
+    save(256 * 1024, 0)?;
+    let shown = call(&rig, &["workflow", "session", "show", "s-long"], 0)?;
+    assert_eq!(
+        shown["data"]["markdown"].as_str().map(str::len),
+        Some(256 * 1024)
+    );
+    // One byte over is refused and leaves the saved checkpoint intact.
+    save(256 * 1024 + 1, 2)?;
+    let again = call(&rig, &["workflow", "session", "show", "s-long"], 0)?;
+    assert_eq!(again["data"]["markdown"], shown["data"]["markdown"]);
+    Ok(())
+}
+
+#[test]
 fn session_checkpoints_round_trip_and_reject_unsafe_keys() -> Result {
     let rig = TestRig::new()?;
     let file = rig.root.join("checkpoint.md");
@@ -67,6 +103,106 @@ fn session_checkpoints_round_trip_and_reject_unsafe_keys() -> Result {
         &["workflow", "session", "save", "../x", "--file", &file],
         2,
     )?;
+    Ok(())
+}
+
+#[test]
+fn session_checkpoints_keep_bounded_revisions_and_show_what_changed() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("checkpoint.md");
+    let save = |text: &str| -> Result<Value> {
+        std::fs::write(&file, text)?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                "s-rev",
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            0,
+        )
+    };
+    let first = save("# Goal\nship it\n")?;
+    assert_eq!(first["data"]["revision"], 1);
+    assert_eq!(first["data"]["parent"], Value::Null);
+    assert_eq!(first["data"]["keep"], 8);
+    let second = save("# Goal\nship it fast\nnext: review\n")?;
+    assert_eq!(second["data"]["revision"], 2);
+    assert_eq!(second["data"]["parent"], 1);
+    assert_eq!(second["data"]["retained"], 2);
+    // The earlier checkpoint is still there, whole, and so is the current one.
+    let old = call(
+        &rig,
+        &["workflow", "session", "show", "s-rev", "--rev", "1"],
+        0,
+    )?;
+    assert_eq!(old["data"]["markdown"], "# Goal\nship it\n");
+    assert_eq!(old["data"]["revision"]["revision"], 1);
+    assert!(
+        old["data"]["revision"]["sha256"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("sha256:"))
+    );
+    let current = call(&rig, &["workflow", "session", "show", "s-rev"], 0)?;
+    assert_eq!(current["data"]["revision"], 2);
+    // Plain text: the revision as written, the list and the diff.
+    let text = rig.command(&["workflow", "session", "show", "s-rev", "--rev", "1"])?;
+    assert_eq!(String::from_utf8(text.stdout.bytes)?, "# Goal\nship it\n");
+    let list = rig.command(&["workflow", "session", "show", "s-rev", "--revisions"])?;
+    let list = String::from_utf8(list.stdout.bytes)?;
+    assert_eq!(list.lines().count(), 2, "{list}");
+    assert!(list.starts_with("1 parent=none sha256:"), "{list}");
+    assert!(
+        list.lines()
+            .nth(1)
+            .is_some_and(|l| l.starts_with("2 parent=1 ")),
+        "{list}"
+    );
+    let diff = rig.command(&["workflow", "session", "diff", "s-rev", "1"])?;
+    assert_eq!(
+        String::from_utf8(diff.stdout.bytes)?,
+        "--- revision 1\n+++ revision 2 (current)\n@@ -1,2 +1,3 @@\n # Goal\n-ship it\n+ship it fast\n+next: review\n"
+    );
+    let same = rig.command(&["workflow", "session", "diff", "s-rev", "2"])?;
+    assert_eq!(String::from_utf8(same.stdout.bytes)?, "no differences\n");
+    // Unknown revisions are not found, and the session is bounded by retention.
+    call(
+        &rig,
+        &["workflow", "session", "show", "s-rev", "--rev", "9"],
+        1,
+    )?;
+    call(&rig, &["workflow", "session", "diff", "s-rev", "9"], 1)?;
+    call(&rig, &["workflow", "session", "diff", "s-rev", "0"], 2)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[retention]\nsession_revisions=2\n",
+    )?;
+    let third = save("three\n")?;
+    assert_eq!(
+        (
+            third["data"]["revision"].clone(),
+            third["data"]["keep"].clone()
+        ),
+        (json!(3), json!(2))
+    );
+    assert_eq!(third["data"]["retained"], 2);
+    call(
+        &rig,
+        &["workflow", "session", "show", "s-rev", "--rev", "1"],
+        1,
+    )?;
+    let kept = call(
+        &rig,
+        &["workflow", "session", "show", "s-rev", "--rev", "2"],
+        0,
+    )?;
+    assert_eq!(
+        kept["data"]["markdown"],
+        "# Goal\nship it fast\nnext: review\n"
+    );
     Ok(())
 }
 

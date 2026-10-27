@@ -6,8 +6,8 @@ use crate::{
     Target, Trace,
 };
 use provenant_core::{
-    AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
-    WallTime,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId,
+    WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
@@ -22,13 +22,14 @@ use serde_json::{Value, json};
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 mod children;
 mod provider;
 mod remote;
 mod targets;
+mod watch;
 pub use children::HostHolder;
 pub(crate) use provider::resolve_executable as provider_executable;
 #[cfg(feature = "fixture")]
@@ -49,6 +50,7 @@ pub struct Reply {
     pub human: String,
 }
 /// A refused or failed owner call: envelope status, stable code and message.
+#[derive(Debug)]
 pub struct Fail {
     pub status: Status,
     pub kind: ErrorKind,
@@ -361,7 +363,21 @@ impl run::Providers for Registry<'_> {
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
         }
-        if let Some(ProviderEvent::QuotaLimited {
+        if let Some(ProviderEvent::Denied { action }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::Denied { .. }))
+        {
+            if decoded.outcome == run::Outcome::Failed
+                && decoded.reason.as_deref() == Some("provider failed")
+                && code == Some(0)
+                && !timed_out
+                && !events
+                    .iter()
+                    .any(|event| matches!(event, ProviderEvent::Error))
+            {
+                decoded.reason = Some(format!("provider denied: {action}"));
+            }
+        } else if let Some(ProviderEvent::QuotaLimited {
             message,
             pool,
             resets_in_seconds,
@@ -426,6 +442,16 @@ impl run::Providers for Registry<'_> {
             }
             reason.truncate(end);
             decoded.reason = Some(reason);
+        }
+        if let Some(ProviderEvent::DeniedNote { action }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::DeniedNote { .. }))
+        {
+            let note = format!("provider denied: {action}");
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
         }
         Ok(decoded)
     }
@@ -535,8 +561,20 @@ fn open_read_only(
     call: &run::Request<'_>,
 ) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
     let context = execution_context(edge)?;
-    let store = run::RunStore::open_read_only(&context, call)?;
+    let store = read_only_store(&context, edge.roots.state.as_path(), call)?;
     Ok((context, store))
+}
+/// The read-only open of `context`'s store. Like the writable open, it reads
+/// the host admission ledger from the host state root: in a nested lane
+/// the store is a child directory with no ledger of its own, and without the
+/// host root `lanes` reads no spacing and calls every spacing wait host capacity.
+fn read_only_store(
+    context: &run::ExecutionContext,
+    host_state: &Path,
+    call: &run::Request<'_>,
+) -> Result<Option<run::RunStore>, Fail> {
+    Ok(run::RunStore::open_read_only(context, call)?
+        .map(|store| store.with_writer_registry(host_state)))
 }
 fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
@@ -956,7 +994,13 @@ pub fn submit_with_host(
     let profile = config
         .dispatch_profile(&submission.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let concurrency = run::concurrency(submission.concurrency, &profile);
+    let read_only = submission.tasks.iter().all(|task| task.worktree.is_none());
+    let bound = (read_only
+        && config.knob_is_set("lanes.max_concurrency", &submission.knobs)
+        && !config.knob_is_set("lanes.max_concurrency_read_only", &submission.knobs))
+    .then(|| profile.knob_u64("lanes.max_concurrency"))
+    .flatten();
+    let concurrency = run::concurrency(submission.concurrency, &profile, read_only, bound);
     let tasks = submission
         .tasks
         .into_iter()
@@ -988,10 +1032,42 @@ pub fn submit_with_host(
         edge.cwd,
         call,
     )?;
+    if parent_attempt.is_none() {
+        let canonical = session.store.request(record.run_id, call)?;
+        let pending = session.store.pending_attempts(record.run_id, call)?;
+        for task in &canonical.tasks {
+            if let Some(writer) = &task.writer {
+                provenant_confinement::worktrees::with_context(
+                    edge.roots,
+                    edge.home,
+                    &writer.project,
+                    call.clock,
+                    call.cancel,
+                    |context| {
+                        use provenant_confinement::worktrees;
+                        let tree =
+                            provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
+                        if let Some(mut owner) = worktrees::load_owner(&tree)?
+                            && owner.origin == worktrees::WorktreeOrigin::Lane
+                            && owner.operation_id.as_ref() == Some(&record.operation_id)
+                            && let Some(attempt) = pending
+                                .iter()
+                                .find(|attempt| attempt.task_id == task.task_id)
+                        {
+                            owner.attempt_id = Some(attempt.attempt_id);
+                            worktrees::save_owner(&tree, &owner)?;
+                        }
+                        Ok(())
+                    },
+                )
+                .map_err(run::RunError::from)?;
+            }
+        }
+    }
     let started = if parent_attempt.is_some() {
         Vec::new()
     } else if let Some(host) = host {
-        launch_on_host(session, record.run_id, edge, call, Some(host), None)?
+        launch_on_host(session, record.run_id, edge, call, Some(host), None, None)?
     } else {
         launch(session, record.run_id, edge, call)?
     };
@@ -999,9 +1075,97 @@ pub fn submit_with_host(
 }
 
 pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
-    reply_waited("dispatch", dispatch_inner(command, edge))
+    dispatch_with_workers(
+        command,
+        edge,
+        &provenant_confinement::worktrees::SystemWorkerObserver,
+    )
 }
-fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
+
+fn dispatch_with_workers(
+    command: Dispatch,
+    edge: &Edge<'_>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Reply {
+    let operation_id = command.operation_id.clone();
+    let mut created = None;
+    let mut result = dispatch_inner(command, edge, &mut created, workers);
+    if let (Err(fail), Some((path, branch))) = (&mut result, created) {
+        // A failed launch can follow admission. Those trees belong to the
+        // accepted run and must remain available for resume.
+        let cleanup = (|| -> Result<(), Fail> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel)?;
+            let session = open(edge, &call)?;
+            if session.store.operation(&operation_id, &call)?.is_some() {
+                return Ok(());
+            }
+            provenant_confinement::worktrees::with_context(
+                edge.roots,
+                edge.home,
+                edge.cwd,
+                &clock,
+                &cancel,
+                |context| {
+                    use provenant_confinement::worktrees;
+                    let context = &worktrees::WorktreeContext {
+                        workers,
+                        ..*context
+                    };
+                    let info = worktrees::list(context, &cancel)?
+                        .into_iter()
+                        .find(|tree| tree.path == path)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    if info.dirty != worktrees::WorktreeCondition::Clean
+                        || info.writer != worktrees::WriterState::Free
+                    {
+                        return Err(worktrees::WorktreeError::Dirty);
+                    }
+                    let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+                    if worktrees::load_owner(&tree)?.is_none_or(|owner| {
+                        owner.origin != worktrees::WorktreeOrigin::Lane
+                            || owner.operation_id.as_ref() != Some(&operation_id)
+                    }) {
+                        return Err(worktrees::WorktreeError::UnknownWriter);
+                    }
+                    worktrees::remove(
+                        context,
+                        worktrees::WorktreeRemove::Name {
+                            name: branch,
+                            discard: false,
+                            integration: None,
+                            expected_head: Some(info.head),
+                        },
+                        &cancel,
+                    )?;
+                    Ok(())
+                },
+            )
+            .map_err(run::RunError::from)?;
+            Ok(())
+        })();
+        if let Err(error) = cleanup {
+            fail.message.push_str(&format!(
+                "; new managed worktree retained for gc at {}: {}",
+                path.display(),
+                error.message
+            ));
+        }
+    }
+    reply_waited("dispatch", result)
+}
+fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
+    run::HostDeliveryContext::check_delivery_branch(project, branch)
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
+}
+
+fn dispatch_inner(
+    mut command: Dispatch,
+    edge: &Edge<'_>,
+    created: &mut Option<(PathBuf, String)>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Result<(Value, String, bool), Fail> {
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
     if command.host.is_some() && crate::fabric::in_lane() {
@@ -1010,6 +1174,129 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             ErrorKind::LaneCoordinationRefused,
             "coordination mutations are not allowed inside a lane",
         ));
+    }
+    if let Some(branch) = &command.worktree_branch {
+        if !matches!(command.access.mode, Mode::WorktreeWrite) || crate::fabric::in_lane() {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Refused,
+                "--worktree-branch requires a host worktree-write dispatch",
+            ));
+        }
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        // Initialise the state before entering the shared confinement context.
+        let call = request(&clock, &cancel)?;
+        let session = open(edge, &call)?;
+        if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call)? {
+            return Ok(replayed);
+        }
+        if let Some(mode) = &command.deliver {
+            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), branch)? {
+                check_delivery_branch(edge.cwd, &delivery.branch)?;
+            }
+        } else if let Some(target) = &command.deliver_branch {
+            check_delivery_branch(edge.cwd, target)?;
+        }
+        let host = provenant_config::bind_host(edge.roots)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+        let created_at = now(&clock)?;
+        let mut owner_refused = false;
+        let info = provenant_confinement::worktrees::with_context(
+            edge.roots,
+            edge.home,
+            edge.cwd,
+            &clock,
+            &cancel,
+            |context| {
+                use provenant_confinement::worktrees::{
+                    self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+                    WriterState,
+                };
+                let context = &worktrees::WorktreeContext { workers, ..*context };
+                let existing = worktrees::list(context, &cancel)?.into_iter().find(|tree| {
+                    tree.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
+                });
+                let info = match existing {
+                    Some(info) => {
+                        let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                        if worktrees::load_owner(&tree)?
+                            .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
+                        {
+                            owner_refused = true;
+                            return Err(worktrees::WorktreeError::UnknownWriter);
+                        }
+                        if info.dirty != WorktreeCondition::Clean || info.writer != WriterState::Free {
+                            return Err(worktrees::WorktreeError::InvalidRequest);
+                        }
+                        info
+                    }
+                    None => {
+                        let info = worktrees::create(
+                            context,
+                            WorktreeCreate {
+                                branch: branch.clone(),
+                                base: command.base.clone(),
+                            },
+                            &cancel,
+                        )?;
+                        *created = Some((info.path.clone(), branch.clone()));
+                        info
+                    }
+                };
+                let verified = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                let prior = worktrees::load_owner(&verified)?;
+                if prior.as_ref().is_some_and(|owner| owner.origin != WorktreeOrigin::Lane) {
+                    owner_refused = true;
+                    return Err(worktrees::WorktreeError::UnknownWriter);
+                }
+                let base = if let Some(owner) = prior
+                    .as_ref()
+                    .filter(|owner| owner.origin == WorktreeOrigin::Lane)
+                {
+                    owner.base.clone()
+                } else {
+                    let git = provenant_os::git::git_executable()
+                        .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                    run::resolve_git_base(
+                        &git,
+                        context.repo.root_path(),
+                        command.base.as_deref().unwrap_or("HEAD"),
+                    )
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?
+                };
+                let owner = match prior {
+                    Some(owner) if owner.operation_id.as_ref() == Some(&command.operation_id) => {
+                        owner
+                    }
+                    _ => WorktreeOwner {
+                        attempt_id: None,
+                        operation_id: Some(command.operation_id.clone()),
+                        branch: branch.clone(),
+                        base,
+                        host,
+                        created_at,
+                        origin: WorktreeOrigin::Lane,
+                        label: None,
+                    },
+                };
+                if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
+                    worktrees::save_owner(&verified, &owner)?;
+                } else {
+                    worktrees::save_lane_owner_when_free(context, &verified, &owner, &cancel)?;
+                }
+                Ok(info)
+            },
+        )
+        .map_err(|error| {
+            if owner_refused {
+                Fail::new(Status::Refused, ErrorKind::Refused,
+                    "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged")
+            } else {
+                run::RunError::from(error).into()
+            }
+        })?;
+        command.access.worktree = Some(info.path);
     }
     let access = &command.access;
     let unsupported = |what: &str| {
@@ -1060,15 +1347,41 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             .collect::<Vec<_>>(),
     );
     let mut tasks = Vec::new();
-    let flag_delivery =
+    let mut flag_delivery =
         command
             .deliver_remote
             .zip(command.deliver_branch)
             .map(|(remote, branch)| run::WriterDeliveryRequest {
+                mode: Default::default(),
                 remote,
                 branch,
                 open_pr: command.open_pr,
             });
+    if let Some(mode) = &command.deliver {
+        let branch = if let Some(path) = &command.access.worktree {
+            let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+            run::prepare_writer(
+                &writer,
+                edge.roots.state.as_path(),
+                execution_context(edge)?.project_id,
+            )?
+            .branch
+            .as_str()
+            .trim_start_matches("refs/heads/")
+            .to_owned()
+        } else if let Some(branch) = &command.branch {
+            branch.clone()
+        } else if matches!(mode, run::DeliveryMode::None) {
+            String::new()
+        } else {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Refused,
+                "delivery needs a writer worktree",
+            ));
+        };
+        flag_delivery = run::HostDeliveryContext::destination(mode.clone(), &branch)?;
+    }
     if let Some(path) = &command.input.manifest {
         let manifest: Manifest = provenant_records::decode_v1(
             read_bounded(path)?.as_bytes(),
@@ -1201,6 +1514,20 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             command.wait,
         );
     }
+    let session = open(edge, &call)?;
+    // Protection governs new admission. Service::dispatch still compares the
+    // immutable inputs when an existing operation is replayed.
+    if session
+        .store
+        .operation(&command.operation_id, &call)?
+        .is_none()
+    {
+        for (_, _, _, _, _, _, delivery, _) in &tasks {
+            if let Some(delivery) = delivery {
+                check_delivery_branch(edge.cwd, &delivery.branch)?;
+            }
+        }
+    }
     let tasks = tasks
         .into_iter()
         .map(
@@ -1219,7 +1546,6 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             },
         )
         .collect();
-    let session = open(edge, &call)?;
     let (record, started) = submit(
         &session,
         edge,
@@ -1231,7 +1557,12 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         },
         &call,
     )?;
-    report(&session, &record, &started, command.wait, edge, &call)
+    let (mut data, human, timed_out) =
+        report(&session, &record, &started, command.wait, edge, &call)?;
+    if let Some(branch) = command.worktree_branch {
+        data["worktree"] = json!({"path": access.worktree, "branch": branch, "owned": true});
+    }
+    Ok((data, human, timed_out))
 }
 
 fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
@@ -1259,6 +1590,139 @@ fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fa
             .as_deref()
             .map(Path::new),
     )
+}
+
+fn worktree_was_pruned(receipt: &Value, path: &Path) -> bool {
+    receipt["state"] == "pruned"
+        || receipt["state"] == "pruning"
+            && path
+                .to_str()
+                .is_some_and(|path| receipt["worktree"] == path)
+            && std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn replay_owned_dispatch(
+    command: &Dispatch,
+    edge: &Edge<'_>,
+    session: &Session,
+    call: &run::Request<'_>,
+) -> Result<Option<(Value, String, bool)>, Fail> {
+    let Some(operation) = session.store.operation(&command.operation_id, call)? else {
+        return Ok(None);
+    };
+    let canonical = session.store.request(operation.run_id, call)?;
+    let task = canonical
+        .tasks
+        .first()
+        .filter(|_| canonical.tasks.len() == 1)
+        .ok_or(run::RunError::OperationConflict)?;
+    let branch = command
+        .worktree_branch
+        .as_deref()
+        .ok_or(run::RunError::OperationConflict)?;
+    let writer = task
+        .writer
+        .as_ref()
+        .ok_or(run::RunError::OperationConflict)?;
+    let prompt = match &command.input.prompt_file {
+        Some(path) => read_bounded(path)?,
+        None => read_text(std::io::stdin().lock())?,
+    };
+    let route = requested(
+        command.route.model.as_ref().map(|model| model.0.as_str()),
+        command.route.route.as_deref(),
+        command.route.effort.clone(),
+    )?;
+    let delivery = match &command.deliver {
+        Some(mode) => run::HostDeliveryContext::destination(mode.clone(), branch)?,
+        None => command
+            .deliver_remote
+            .clone()
+            .zip(command.deliver_branch.clone())
+            .map(|(remote, branch)| run::WriterDeliveryRequest {
+                mode: Default::default(),
+                remote,
+                branch,
+                open_pr: command.open_pr,
+            }),
+    };
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    let profile = config
+        .dispatch_profile(&command.knobs)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    if task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
+        || task.route != route
+        || task.account != command.account
+        || task.base_ref != command.base
+        || task.deliver != delivery
+        || task.access != lane_access(&command.access, edge.roots.state.as_path())?
+        || task.profile != profile
+        || task.provider_timeout_seconds != command.provider_timeout
+        || task.delivery_id != command.delivery_id
+        || command.task_id.is_some_and(|id| id != task.task_id)
+    {
+        return Err(run::RunError::OperationConflict.into());
+    }
+    let mut settlement = None;
+    let owned = if writer.worktree.exists() {
+        provenant_confinement::worktrees::with_context(
+            edge.roots,
+            edge.home,
+            &writer.project,
+            call.clock,
+            call.cancel,
+            |context| {
+                let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
+                Ok(
+                    provenant_confinement::worktrees::load_owner(&tree)?.is_some_and(|owner| {
+                        owner.branch == branch
+                            && owner.operation_id.as_ref() == Some(&command.operation_id)
+                    }),
+                )
+            },
+        )
+        .map_err(run::RunError::from)?
+    } else {
+        let page = session.store.lanes(
+            &run::LaneQuery {
+                targets: vec![run::LaneTarget {
+                    run: operation.run_id,
+                    task: None,
+                    attempt: None,
+                }],
+                all: true,
+                limit: 2,
+                after: 0,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            call,
+        )?;
+        if let Some(attempt) = page.lanes.first() {
+            settlement = session
+                .store
+                .worktree_settlement(attempt.attempt_id, call)?;
+        }
+        settlement.as_ref().is_some_and(|receipt| {
+            worktree_was_pruned(receipt, &writer.worktree)
+                && (receipt["result"]["removed"][0]["branch"] == format!("refs/heads/{branch}")
+                    || receipt["branch"] == format!("refs/heads/{branch}"))
+        })
+    };
+    if !owned {
+        return Err(run::RunError::OperationConflict.into());
+    }
+    let run = session.store.run(operation.run_id, call)?;
+    let started = launch(session, run.run_id, edge, call)?;
+    let (mut data, human, timed_out) = report(session, &run, &started, command.wait, edge, call)?;
+    data["worktree"] = json!({"path": writer.worktree, "branch": branch, "owned":true});
+    if let Some(settlement) = settlement {
+        data["worktree_settlement"] = settlement;
+    }
+    Ok(Some((data, human, timed_out)))
 }
 
 fn environment_text(name: &str) -> Result<Option<String>, Fail> {
@@ -1358,12 +1822,68 @@ pub fn launch(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
+    launch_prepared(session, run, edge, call, None)
+}
+fn launch_prepared(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    ready: Option<&run::PreparedStart>,
+) -> Result<Vec<run::Started>, Fail> {
     // Every lane-facing launch path is submission-only. Only its host holder
     // prepares providers, including credentials and the child's OS profile.
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host(session, run, edge, call, None, None)
+    launch_on_host(session, run, edge, call, None, None, ready)
+}
+
+struct PreparedProvider<'a> {
+    fallback: &'a dyn run::Providers,
+    ready: Option<&'a run::PreparedStart>,
+}
+impl run::Providers for PreparedProvider<'_> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+        if let Some(ready) = self.ready {
+            if ready.task != *task {
+                return Err("prepared continuation task changed".into());
+            }
+            return Ok(());
+        }
+        self.fallback.check_policy(task)
+    }
+    fn prepare(
+        &self,
+        task: &run::TaskRequest,
+        prompt: &str,
+        paths: &run::LaunchPaths,
+        resume: Option<&run::AttemptRecord>,
+    ) -> Result<run::PreparedLaunch, String> {
+        if let Some(ready) = self.ready {
+            if ready.attempt != paths.attempt_id || ready.task != *task || resume.is_some() {
+                return Err("prepared continuation identity changed".into());
+            }
+            return ready
+                .plan
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "prepared continuation consumed".into());
+        }
+        self.fallback.prepare(task, prompt, paths, resume)
+    }
+    fn decode(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+    ) -> Result<run::Decoded, String> {
+        self.fallback.decode(route, stdout, exit, provider_state)
+    }
+    fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
+        self.fallback.failure_diagnostic(route, stderr)
+    }
 }
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
@@ -1374,6 +1894,7 @@ fn launch_on_host(
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
     validated: Option<&run::CanonicalRequest>,
+    ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
     let host = match host {
         Some(host) => host.clone(),
@@ -1419,6 +1940,29 @@ fn launch_on_host(
             .and_then(|task| task.writer.as_ref())
         {
             host.cwd = writer.worktree.clone();
+            provenant_confinement::worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &writer.project,
+                call.clock,
+                call.cancel,
+                |context| {
+                    use provenant_confinement::worktrees;
+                    let tree =
+                        provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
+                    if let Some(mut owner) = worktrees::load_owner(&tree)?
+                        && owner.origin == worktrees::WorktreeOrigin::Lane
+                        && (owner.operation_id.as_ref() == Some(&attempt.operation_id)
+                            || owner.attempt_id.is_some() && owner.attempt_id == attempt.retry_of)
+                    {
+                        owner.attempt_id = Some(attempt.attempt_id);
+                        owner.operation_id = Some(attempt.operation_id.clone());
+                        worktrees::save_owner(&tree, &owner)?;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(run::RunError::from)?;
         }
         run::HolderContext {
             schema_version: 1,
@@ -1450,13 +1994,17 @@ fn launch_on_host(
         project_id: Some(session.context.project_id),
         host: Some(&host),
     };
+    let providers = PreparedProvider {
+        fallback: &registry,
+        ready,
+    };
     // Fixture guardians observe a recorded boot key, so the reservation must be
     // taken against the same key as on the lane-launch path of the test host.
     #[cfg(feature = "fixture")]
     if host.fixture_state_write {
         let started = session.store.start_with_writer_lease(
             run,
-            &registry,
+            &providers,
             &holder,
             &|directory, scope, binding| {
                 provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -1476,7 +2024,7 @@ fn launch_on_host(
     }
     let started = session
         .service()
-        .start(run, &registry, &holder, validated, call)?;
+        .start(run, &providers, &holder, validated, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }
@@ -1535,8 +2083,13 @@ fn report(
             let page = session
                 .service()
                 .lanes(&lane_query(session, &[target], true, 100, 0, call)?, call)?;
-            let (data, human) =
-                render_lanes(&page.lanes, None, session.context.state_root.as_path());
+            let waits = session.store.lane_waits(&page.lanes, call);
+            let (data, human) = render_lanes(
+                &page.lanes,
+                &waits,
+                None,
+                session.context.state_root.as_path(),
+            );
             (data, human, false)
         }
     };
@@ -1598,7 +2151,12 @@ pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
     };
     (state_name(state), reason)
 }
-fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) -> (Value, String) {
+fn render_lanes(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    next: Option<u64>,
+    root: &Path,
+) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
         .iter()
@@ -1631,6 +2189,9 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
                 .unwrap_or_default();
             let route_text = plain_text(&route, usize::MAX);
+            // A lane that has not started says what it is waiting for.
+            let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
+            let reason = reason.or_else(|| wait.map(|w| w.waiting_for.clone()));
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
@@ -1690,6 +2251,8 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 "state": state,
                 "exit_code": exit_code,
                 "reason": reason,
+                "lane_class": wait.map(|w| w.lane_class),
+                "waiting_for": wait.map(|w| &w.waiting_for),
                 "requested_route": lane.requested_route,
                 "applied_route": lane.applied_route,
                 "skipped_routes": lane.skipped_routes,
@@ -1706,6 +2269,7 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 "head": lane.head,
                 "protected_paths": lane.protected_paths,
                 "delivery": lane.delivery,
+                "continuation": lane.continuation,
                 "result_path": result,
             })
         })
@@ -1739,12 +2303,13 @@ fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
         }
 }
 /// Snapshot every attempt the targets name. Without targets, the selection is
-/// this actor's nonterminal work; host caps bound it. With `seen`, terminal
+/// `owner`'s nonterminal work; host caps bound it. With `seen`, terminal
 /// lanes at or before that event cursor are already acknowledged and dropped.
 fn select(
     session: &Session,
     targets: &[Target],
     seen: Option<u64>,
+    owner: ActorId,
     call: &run::Request<'_>,
 ) -> Result<Vec<AttemptId>, Fail> {
     let mut selected = Vec::new();
@@ -1758,7 +2323,7 @@ fn select(
             after,
             call,
         )?;
-        query.owner = targets.is_empty().then_some(session.context.actor_id);
+        query.owner = targets.is_empty().then_some(owner);
         query.unseen_after = seen;
         let page = session.service().lanes(&query, call)?;
         selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
@@ -1775,184 +2340,546 @@ fn select(
         }
     }
 }
-/// The seen-cursor key for a wait selection.
-fn selection_key(targets: &[Target]) -> String {
-    let mut keys: Vec<String> = targets
-        .iter()
-        .map(|t| {
-            let part = |v: Option<String>| v.unwrap_or_else(|| "*".into());
-            format!(
-                "{}/{}/{}",
-                part(t.run.map(|v| v.to_string())),
-                part(t.task.map(|v| v.to_string())),
-                part(t.attempt.map(|v| v.to_string()))
-            )
+/// The seen-cursor key for a default wait selection.
+fn selection_key(label: Option<&str>) -> String {
+    label.map_or_else(|| "default".into(), |label| format!("session:{label}"))
+}
+/// What a wait or watch selects: the lanes of named targets, or those of one
+/// session when none are named.
+struct Picks<'a> {
+    targets: &'a [Target],
+    /// The session whose lanes count; this session unless `--session` names one.
+    owner: ActorId,
+    /// Set when `--session` names the session, which then also narrows targets.
+    label: Option<&'a str>,
+    since: Option<WallTime>,
+}
+impl Picks<'_> {
+    fn scope(&self) -> Result<watch::Scope, Fail> {
+        Ok(watch::Scope {
+            exact: self.targets.iter().filter_map(|t| t.attempt).collect(),
+            since: self.since,
+            entered: watch::entered()?,
+            explicit: !self.targets.is_empty(),
+            snapshot: !self.targets.is_empty(),
         })
-        .collect();
-    keys.sort();
-    if keys.is_empty() {
-        "default".into()
-    } else {
-        keys.join(",")
     }
 }
-/// Snapshot the selection at entry and poll until the condition holds or the
-/// reader deadline expires. Expiry never stops a provider. A default or `Any`
-/// wait skips terminal lanes the actor has already seen and acknowledges the
-/// ones it returns, so repeated waits neither miss nor replay a completion.
-// A CLI wait deadline is a real transport boundary independent of store progress.
-#[allow(clippy::disallowed_methods)]
+/// The agent label's actor on this host: the identity that submitted its lanes.
+fn session_actor(edge: &Edge<'_>, label: &str) -> Result<ActorId, Fail> {
+    let identity = |error: String| Fail::new(Status::Error, ErrorKind::Identity, error);
+    let host = provenant_config::bind_host(edge.roots).map_err(|e| identity(e.to_string()))?;
+    provenant_fabric_runtime::identity::Address::new(host, label)
+        .map(|address| address.actor)
+        .map_err(|e| identity(e.to_string()))
+}
+/// Lanes still unsettled, or settled at or after `--since`, found by scanning
+/// the session's lanes newest-queued first. A lane queued before the window can
+/// still settle inside it, so the scan reads every retained lane up to its cap
+/// rather than stopping at the first older queue time.
+fn select_since(
+    session: &Session,
+    owner: ActorId,
+    since: WallTime,
+    call: &run::Request<'_>,
+) -> Result<Vec<AttemptId>, Fail> {
+    let ids = select(session, &[], None, owner, call)?;
+    watch::settled_since(
+        ids,
+        |after| {
+            let mut query = lane_query(session, &[], true, 100, after, call)?;
+            query.newest_first = true;
+            query.owner = Some(owner);
+            let page = session.service().lanes(&query, call)?;
+            Ok((page.lanes, page.next))
+        },
+        since,
+    )
+}
+/// The candidate lanes for a wait or watch, read afresh on each call. With
+/// `seen`, an unnamed selection holds the unsettled lanes and those settled
+/// after that event cursor.
+fn candidates<'a>(
+    session: &'a Session,
+    picks: &'a Picks<'a>,
+    seen: Option<u64>,
+) -> impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail> + 'a {
+    move |_| {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel)?;
+        let ids = match picks.since {
+            Some(since) if picks.targets.is_empty() => {
+                select_since(session, picks.owner, since, &call)?
+            }
+            _ => select(session, picks.targets, seen, picks.owner, &call)?,
+        };
+        let mut lanes = Vec::with_capacity(ids.len());
+        for id in ids {
+            let lane = session.service().status(id, &call)?;
+            if picks.label.is_none() || lane.verified_owner == Some(picks.owner) {
+                lanes.push(lane);
+            }
+        }
+        Ok(lanes)
+    }
+}
+const LOCAL_POLL: Duration = Duration::from_millis(500);
+/// The lanes a wait or watch ended on, each unstarted one with what it waits for.
+fn render_settled(
+    session: &Session,
+    lanes: &[run::AttemptRecord],
+) -> Result<(Value, String), Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let waits = session.store.lane_waits(lanes, &call);
+    Ok(render_lanes(
+        lanes,
+        &waits,
+        None,
+        session.context.state_root.as_path(),
+    ))
+}
+fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
+    let (mut data, human) = render_settled(session, &waited.lanes)?;
+    data["condition_met"] = json!(waited.met);
+    if waited.ignored > 0 {
+        data["ignored_settled"] = json!(waited.ignored);
+    }
+    Ok((data, human, !waited.met))
+}
+/// Wait for every lane a run, task or attempt names, settled or not: the
+/// whole named set, for commands that act on a lane they just created.
 fn wait_lanes(
     session: &Session,
     targets: &[Target],
+    condition: Condition,
+    seconds: u64,
+    _edge: &Edge<'_>,
+) -> Result<(Value, String, bool), Fail> {
+    let picks = Picks {
+        targets,
+        owner: session.context.actor_id,
+        label: None,
+        since: None,
+    };
+    let scope = watch::Scope {
+        explicit: false,
+        snapshot: false,
+        ..picks.scope()?
+    };
+    let waited = watch::wait(
+        candidates(session, &picks, None),
+        scope,
+        condition,
+        Duration::from_secs(seconds),
+        LOCAL_POLL,
+    )?;
+    waited_reply(session, waited)
+}
+/// `lanes --wait`: settlements after the wait starts, or after `--since`. Exact
+/// attempt IDs count whenever they settled. Without named lanes, a session's
+/// wait resumes after the settlements it last acknowledged.
+fn wait_command(
+    session: &Session,
+    picks: &Picks<'_>,
     condition: Condition,
     seconds: u64,
     edge: &Edge<'_>,
 ) -> Result<(Value, String, bool), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let deadline = Instant::now() + Duration::from_secs(seconds);
-    // Explicit `All` waits report the whole named set, seen or not.
-    let selection =
-        (targets.is_empty() || matches!(condition, Condition::Any)).then(|| selection_key(targets));
     let entry = request(&clock, &cancel)?;
-    let seen = selection
-        .as_deref()
-        .map(|key| session.store.seen_cursor(key, targets.is_empty(), &entry))
+    let key = selection_key(picks.label);
+    let cursor = picks.targets.is_empty() && picks.since.is_none();
+    let seen = cursor
+        .then(|| session.store.seen_cursor(&key, true, &entry))
         .transpose()?;
-    let selected = select(session, targets, seen, &entry)?;
-    loop {
-        let call = request(&clock, &cancel)?;
-        let lanes = selected
-            .iter()
-            .map(|id| session.service().status(*id, &call))
-            .collect::<Result<Vec<_>, _>>()?;
-        let met = condition_met(&lanes, condition);
-        let expired = Instant::now() >= deadline;
-        if met || expired {
-            if let Some(key) = selection.as_deref().filter(|_| met) {
-                let mut latest = 0;
-                for lane in lanes.iter().filter(|l| settled(&l.state).0) {
-                    latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &call)?);
-                }
-                if latest > 0 {
-                    open(edge, &call)?.store.ack_seen(key, latest, &call)?;
-                }
-            }
-            let (mut data, human) =
-                render_lanes(&lanes, None, session.context.state_root.as_path());
-            data["condition_met"] = json!(met);
-            return Ok((data, human, !met));
+    let waited = watch::wait(
+        candidates(session, picks, seen),
+        picks.scope()?,
+        condition,
+        Duration::from_secs(seconds),
+        LOCAL_POLL,
+    )?;
+    if cursor && waited.met {
+        let mut latest = 0;
+        for lane in waited.lanes.iter().filter(|l| settled(&l.state).0) {
+            latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &entry)?);
         }
-        std::thread::park_timeout(
-            Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
-        );
+        if latest > 0 {
+            open(edge, &entry)?.store.ack_seen(&key, latest, &entry)?;
+        }
     }
+    waited_reply(session, waited)
+}
+/// One line per call, already newline-terminated, for a watch to stream.
+type Emit<'a> = &'a mut dyn FnMut(&str) -> Result<(), Fail>;
+fn watched_reply(
+    session: &Session,
+    watched: &watch::Watched,
+    json: bool,
+) -> Result<(Value, String, bool), Fail> {
+    let (mut data, _) = render_settled(session, &watched.lanes)?;
+    data["condition_met"] = json!(watched.settled);
+    let human = if json {
+        String::new()
+    } else {
+        watch::end_line(watched)
+    };
+    Ok((data, human, !watched.settled))
+}
+/// `lanes --watch`: a line for each state a counted lane enters, until all
+/// have settled or the budget passes.
+fn watch_command(
+    session: &Session,
+    picks: &Picks<'_>,
+    seconds: u64,
+    json: bool,
+    emit: Emit<'_>,
+) -> Result<(Value, String, bool), Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let entry = request(&clock, &cancel)?;
+    // A watch reports from its start, so it never reads the acknowledged cursor.
+    let base = (picks.targets.is_empty() && picks.since.is_none())
+        .then(|| {
+            let key = format!("watch:{}", selection_key(picks.label));
+            session.store.seen_cursor(&key, true, &entry)
+        })
+        .transpose()?;
+    let watched = watch::watch(
+        candidates(session, picks, base),
+        picks.scope()?,
+        Duration::from_secs(seconds),
+        LOCAL_POLL,
+        &mut |lane| {
+            let text = if json {
+                watch::json_line(lane, None)
+            } else {
+                watch::line(lane, None)
+            };
+            emit(&format!("{text}\n"))
+        },
+    )?;
+    watched_reply(session, &watched, json)
 }
 
+/// Write one watch line to standard output and flush it, so a pipe or monitor
+/// sees each event as it happens.
+pub fn write_line(line: &str) -> Result<(), Fail> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    out.write_all(line.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|_| Fail::new(Status::Error, ErrorKind::Io, "cannot write watch output"))
+}
+/// `lanes`, buffering any watch lines into the reply for callers that cannot
+/// stream them.
 pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
-    reply_waited(
-        "lanes",
-        (|| {
-            if let Some(host) = command.host.as_deref()
-                && !remote::names_local_host(edge, host)?
-            {
-                return remote::host_lanes(&command, host, edge);
+    let mut lines = String::new();
+    let mut reply = lanes_streaming(command, edge, false, &mut |line| {
+        lines.push_str(line);
+        Ok(())
+    });
+    reply.human.insert_str(0, &lines);
+    reply
+}
+/// `lanes` with a watch writing each line to `out` and flushing it as it
+/// happens. With `json` each line is a JSON object and the reply is the last.
+pub fn lanes_streaming(
+    command: Lanes,
+    edge: &Edge<'_>,
+    json: bool,
+    out: &mut dyn FnMut(&str) -> Result<(), Fail>,
+) -> Reply {
+    reply_waited("lanes", lanes_inner(&command, edge, json, out))
+}
+fn lanes_inner(
+    command: &Lanes,
+    edge: &Edge<'_>,
+    json: bool,
+    emit: Emit<'_>,
+) -> Result<(Value, String, bool), Fail> {
+    if let Some(host) = command.host.as_deref()
+        && !remote::names_local_host(edge, host)?
+    {
+        return remote::host_lanes(command, host, edge, json, emit);
+    }
+    if let Some(placed) = remote::lanes(command, edge, json, emit)? {
+        return Ok(placed);
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let Some(store) = store else {
+        let root = execution_state(edge.roots, edge.home, edge.assets)?;
+        let (mut data, human) = render_lanes(&[], &[], None, root.as_path());
+        if command.wait.is_some() || command.watch.is_some() {
+            // No store means no lanes, so there is nothing left to wait for.
+            data["condition_met"] = json!(true);
+        }
+        let human = if command.watch.is_some() && !json {
+            "end settled lanes=0\n".into()
+        } else {
+            human
+        };
+        return Ok((data, human, false));
+    };
+    let session = Session { store, context };
+    let owner = match command.session.as_deref() {
+        Some(label) => session_actor(edge, label)?,
+        None => session.context.actor_id,
+    };
+    let since = command
+        .since
+        .map(|since| WallTime::from_micros(since.as_microsecond()))
+        .transpose()
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
+    let picks = Picks {
+        targets: &command.id,
+        owner,
+        label: command.session.as_deref(),
+        since,
+    };
+    if let Some(seconds) = command.watch {
+        return watch_command(&session, &picks, seconds, json, emit);
+    }
+    if let Some(seconds) = command.wait {
+        return wait_command(&session, &picks, command.condition, seconds, edge);
+    }
+    let after = match &command.cursor {
+        Some(cursor) => cursor
+            .parse()
+            .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor"))?,
+        None => 0,
+    };
+    let mut query = lane_query(
+        &session,
+        &command.id,
+        command.all,
+        command.limit,
+        after,
+        &call,
+    )?;
+    if command.session.is_some() && command.id.is_empty() {
+        query.owner = Some(owner);
+    }
+    let by_session =
+        |lane: &run::AttemptRecord| command.session.is_none() || lane.verified_owner == Some(owner);
+    let filtered = !command.states.is_empty() || command.since.is_some();
+    query.newest_first = filtered;
+    let (lanes, next) = if filtered {
+        query.limit = 100;
+        let mut matches = Vec::new();
+        let mut next = None;
+        loop {
+            let page = session.service().lanes(&query, &call)?;
+            for lane in page.lanes {
+                let state_matches = command.states.is_empty()
+                    || command
+                        .states
+                        .iter()
+                        .any(|state| state.as_str() == state_name(&lane.state));
+                let since_matches = since.is_none_or(|since| lane.queued_at >= since);
+                if state_matches && since_matches && by_session(&lane) {
+                    matches.push(lane);
+                }
+                if matches.len() > command.limit as usize {
+                    let last = matches.get(command.limit as usize - 1).ok_or_else(|| {
+                        Fail::new(Status::Error, ErrorKind::Internal, "lane page invariant")
+                    })?;
+                    next = Some(session.store.attempt_sequence(last.attempt_id, &call)?);
+                    matches.truncate(command.limit as usize);
+                    break;
+                }
             }
-            if let Some(placed) = remote::lanes(&command, edge)? {
-                return Ok(placed);
+            if next.is_some() {
+                break;
             }
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = request(&clock, &cancel)?;
-            let (context, store) = open_read_only(edge, &call)?;
-            let Some(store) = store else {
-                let root = execution_state(edge.roots, edge.home, edge.assets)?;
-                let (data, human) = render_lanes(&[], None, root.as_path());
-                return Ok((data, human, false));
+            match page.next {
+                Some(cursor) => query.after = cursor,
+                None => break,
+            }
+        }
+        (matches, next)
+    } else {
+        let page = session.service().lanes(&query, &call)?;
+        let lanes: Vec<_> = page.lanes.into_iter().filter(by_session).collect();
+        (lanes, page.next)
+    };
+    let waits = session.store.lane_waits(&lanes, &call);
+    let (data, human) = render_lanes(&lanes, &waits, next, session.context.state_root.as_path());
+    Ok((data, human, false))
+}
+
+/// What a pull request body needs from one local attempt's own record.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttemptFacts {
+    pub attempt_id: AttemptId,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub state: String,
+    pub exit_code: Option<i64>,
+    /// `adapter/model@effort`, as the attempt ran.
+    pub route: String,
+    pub head: Option<provenant_core::GitOid>,
+    /// The branch the attempt's host delivery pushed.
+    pub branch: Option<String>,
+    pub delivery_id: Option<DeliveryId>,
+    /// The attempt's receipt directory, relative to the state root.
+    pub receipt_path: String,
+    /// The attempt's delivery receipt: risk tier and review attempts.
+    pub risk: Option<String>,
+    pub reviews: Vec<AttemptId>,
+}
+fn route_label(record: &run::AttemptRecord) -> String {
+    let ran = record
+        .observed_route
+        .as_ref()
+        .or(record.applied_route.as_ref())
+        .or(record.resolved_route.as_ref());
+    let (requested_model, requested_effort) = match &record.requested_route {
+        run::RequestedRoute::Model { model, effort, .. } => (Some(model.clone()), effort.clone()),
+        run::RequestedRoute::Named { effort, .. } => (None, effort.clone()),
+    };
+    let Some(model) = ran
+        .and_then(|route| {
+            let model = route.model.clone()?;
+            Some(match &route.provider {
+                Some(provider) if !model.starts_with(&format!("{provider}/")) => {
+                    format!("{provider}/{model}")
+                }
+                _ => model,
+            })
+        })
+        .or(requested_model)
+    else {
+        return "unresolved".into();
+    };
+    match ran
+        .and_then(|route| route.effort.clone())
+        .or(requested_effort)
+    {
+        Some(effort) => format!("{model}@{effort}"),
+        None => model,
+    }
+}
+/// The recorded facts of local attempts, for the pull request body. An attempt
+/// that ran on a peer is refused: its record lives on that host.
+pub fn attempt_facts(
+    edge: &Edge<'_>,
+    attempts: &[crate::Attempt],
+) -> Result<Vec<AttemptFacts>, Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let store = store.ok_or(Fail::new(
+        Status::Invalid,
+        ErrorKind::NotFound,
+        "run store is not initialised",
+    ))?;
+    let session = Session { store, context };
+    attempts
+        .iter()
+        .map(|attempt| {
+            if targets::placement(edge, &attempt.0, false)?.is_some() {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Unsupported,
+                    "that attempt ran on a peer; its record is read on that host",
+                ));
+            }
+            let id = targets::local(&session, &attempt.0, &call)?
+                .attempt
+                .ok_or(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "attempt required",
+                ))?;
+            let record = session.service().status(id, &call)?;
+            let (state, _) = state_and_reason(&record.state);
+            let exit_code = match &record.state {
+                run::AttemptState::Terminal { exit_code, .. } => *exit_code,
+                _ => None,
             };
-            let session = Session { store, context };
-            if let Some(seconds) = command.wait {
-                return wait_lanes(&session, &command.id, command.condition, seconds, edge);
-            }
-            let after = match &command.cursor {
-                Some(cursor) => cursor.parse().map_err(|_| {
-                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor")
-                })?,
-                None => 0,
-            };
-            let mut query = lane_query(
-                &session,
-                &command.id,
-                command.all,
-                command.limit,
-                after,
-                &call,
-            )?;
-            let filtered = !command.states.is_empty() || command.since.is_some();
-            query.newest_first = filtered;
-            let threshold = command
-                .since
-                .map(|since| WallTime::from_micros(since.as_microsecond()))
-                .transpose()
-                .map_err(|_| {
-                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value")
-                })?;
-            let (lanes, next) = if filtered {
-                query.limit = 100;
-                let mut matches = Vec::new();
-                let mut next = None;
-                loop {
-                    let page = session.service().lanes(&query, &call)?;
-                    for lane in page.lanes {
-                        let state_matches = command.states.is_empty()
-                            || command
-                                .states
-                                .iter()
-                                .any(|state| state.as_str() == state_name(&lane.state));
-                        let since_matches = threshold.is_none_or(|since| lane.queued_at >= since);
-                        if state_matches && since_matches {
-                            matches.push(lane);
-                        }
-                        if matches.len() > command.limit as usize {
-                            let last =
-                                matches.get(command.limit as usize - 1).ok_or_else(|| {
-                                    Fail::new(
-                                        Status::Error,
-                                        ErrorKind::Internal,
-                                        "lane page invariant",
-                                    )
-                                })?;
-                            next = Some(session.store.attempt_sequence(last.attempt_id, &call)?);
-                            matches.truncate(command.limit as usize);
-                            break;
-                        }
-                    }
-                    if next.is_some() {
-                        break;
-                    }
-                    match page.next {
-                        Some(cursor) => query.after = cursor,
-                        None => break,
+            let (risk, reviews) = match record.delivery_id {
+                Some(delivery) => {
+                    let receipt = provenant_workflow::store::ReceiptStore::new(
+                        session.context.state_root.clone(),
+                        session.context.project_id,
+                        delivery,
+                    )
+                    .read()
+                    .map_err(|error| {
+                        Fail::new(Status::Error, ErrorKind::StateCorrupt, error.to_string())
+                    })?;
+                    match receipt {
+                        Some(receipt) => (
+                            serde_json::to_value(receipt.risk().tier())
+                                .ok()
+                                .and_then(|tier| tier.as_str().map(str::to_owned)),
+                            receipt.review_attempts().to_vec(),
+                        ),
+                        None => (None, Vec::new()),
                     }
                 }
-                (matches, next)
-            } else {
-                let page = session.service().lanes(&query, &call)?;
-                (page.lanes, page.next)
+                None => (None, Vec::new()),
             };
-            let (data, human) = render_lanes(&lanes, next, session.context.state_root.as_path());
-            Ok((data, human, false))
-        })(),
-    )
+            Ok(AttemptFacts {
+                attempt_id: record.attempt_id,
+                run_id: record.run_id,
+                task_id: record.task_id,
+                state,
+                exit_code,
+                route: route_label(&record),
+                head: record
+                    .head
+                    .or_else(|| record.delivery.as_ref().and_then(|d| d.head)),
+                branch: record.delivery.as_ref().map(|d| d.branch.clone()),
+                delivery_id: record.delivery_id,
+                receipt_path: format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+                risk,
+                reviews,
+            })
+        })
+        .collect()
 }
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }
-fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
-    if let Some(placement) = targets::placement(edge, &command.attempt.0, false)? {
+/// The most lines `output --tail` returns; a larger request is clamped.
+const TAIL_MAX: u64 = 500;
+
+fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    let site = match command.host.as_deref() {
+        Some(host) => Some(remote::site(edge, host)?),
+        None => None,
+    };
+    if let Some(remote::Site::Peer(host)) = site {
+        return remote::output_on_peer(&command, host, edge);
+    }
+    if site.is_none()
+        && let Some(placement) = targets::placement(edge, &command.attempt.0, false)?
+    {
         return remote::output(&command, &placement, edge);
+    }
+    // `HOST/ATTEMPT` is the form a graph `attempt_ref` has; a host qualifier
+    // is not a run, so it never has to match the record.
+    if command.attempt.is_qualified_pair()
+        && let Some(qualifier) = command.attempt.0.run
+    {
+        match remote::qualifier_site(edge, qualifier) {
+            Some(remote::Site::Peer(host)) if site.is_none() => {
+                return remote::output_on_peer(&command, host, edge);
+            }
+            Some(remote::Site::Local) => command.attempt.0.run = None,
+            _ => {}
+        }
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -2019,7 +2946,8 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         max_bytes: command.max_bytes,
     };
     let mut chunk = session.service().output(id, part, range, &call)?;
-    if let Some(lines) = command.tail {
+    let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
+    if let Some(lines) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
         chunk = session.service().output(id, part, range, &call)?;
         let text = &chunk.bytes;
@@ -2041,8 +2969,7 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     }
     // The text alone cannot tell a clean success from one that needs the chair.
     let (state, reason) = state_and_reason(&record.state);
-    Ok((
-        json!({
+    let mut data = json!({
             "attempt_id": id,
             "state": state,
             "reason": reason,
@@ -2055,9 +2982,12 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
             "complete": chunk.complete,
             "digest": chunk.digest,
             "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
-        }),
-        text,
-    ))
+    });
+    if let Some(lines) = tail {
+        data["tail"] = json!(lines);
+        data["tail_clamped"] = json!(command.tail != tail);
+    }
+    Ok((data, text))
 }
 
 /// The attempt's trace, then each parent's, nearest first. The chain ends at an
@@ -2193,7 +3123,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             let session = open(edge, &call)?;
             let reason = command.reason.as_deref().unwrap_or("cancelled by request");
             let targets = [command.target];
-            let selected = select(&session, &targets, None, &call)?;
+            let selected = select(&session, &targets, None, session.context.actor_id, &call)?;
             if selected.is_empty() {
                 return Err(Fail::new(
                     Status::Invalid,
@@ -2322,6 +3252,102 @@ fn reconcile_summary(state: &run::Reconciled) -> String {
 pub fn resume(command: Resume, edge: &Edge<'_>) -> Reply {
     reply_waited("resume", resume_inner(command, edge))
 }
+pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
+    reply(
+        "lane deliver",
+        (|| {
+            if crate::fabric::in_lane() {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    "delivery is host-only",
+                ));
+            }
+            let crate::Lane::Deliver { attempt, deliver } = command;
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel)?;
+            let session = open(edge, &call)?;
+            let id = attempt.0.attempt.ok_or_else(|| {
+                Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required")
+            })?;
+            let record = session.store.record(id, &call)?;
+            if attempt.0.run.is_some_and(|run| run != record.run_id)
+                || attempt.0.task.is_some_and(|task| task != record.task_id)
+            {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::NotFound,
+                    "attempt is not in that run/task",
+                ));
+            }
+            if matches!(deliver, Some(run::DeliveryMode::None)) {
+                return Ok((
+                    json!({"delivery": "none"}),
+                    "No delivery requested.\n".into(),
+                ));
+            }
+            let task = session
+                .store
+                .request(record.run_id, &call)?
+                .tasks
+                .into_iter()
+                .find(|task| task.task_id == record.task_id)
+                .ok_or(run::RunError::NotFound)?;
+            let writer = task
+                .writer
+                .as_ref()
+                .ok_or(run::RunError::Validation("delivery needs a writer"))?;
+            if !writer.worktree.exists()
+                && session
+                    .store
+                    .worktree_settlement(id, &call)?
+                    .is_some_and(|receipt| worktree_was_pruned(&receipt, &writer.worktree))
+                && let Some((request, receipt)) = session.store.delivered(id, &call)?
+                && deliver.as_ref().is_none_or(|mode| {
+                    mode == &request.mode
+                        || matches!(mode, run::DeliveryMode::Pr) && request.open_pr
+                })
+            {
+                return Ok((
+                    json!({"attempt_id": id, "delivery": receipt, "replayed":true}),
+                    format!("{id} already delivered; owned worktree pruned\n"),
+                ));
+            }
+            let launch =
+                run::prepare_writer(writer, edge.roots.state.as_path(), record.project_id)?;
+            let branch = launch.branch.as_str().trim_start_matches("refs/heads/");
+            let destination = match deliver {
+                Some(mode) => run::HostDeliveryContext::destination(mode, branch)?,
+                None if task.deliver.is_none() => {
+                    run::HostDeliveryContext::destination(run::DeliveryMode::Push, branch)?
+                }
+                None => None,
+            };
+            let receipt = session.store.deliver(
+                id,
+                destination,
+                run::HostDeliveryContext::capture(),
+                &call,
+            )?;
+            if let run::WriterDeliveryState::Failed { stage } = &receipt.state {
+                return Err(run::RunError::Delivery(*stage).into());
+            }
+            Ok((
+                json!({"attempt_id": id, "delivery": receipt}),
+                format!("{id} delivered\n"),
+            ))
+        })(),
+    )
+}
+fn fallback_history(cwd: &Path, base: &str, displaced: bool) -> String {
+    if displaced {
+        return "[history unavailable: prior worktree is missing or reassigned]".into();
+    }
+    run::continuation_history(cwd, base)
+        .unwrap_or_else(|error| format!("[history unavailable: {error}]"))
+}
+
 /// Continue one terminal attempt, scanned and launched on the shared path.
 /// `expected_generation` counts the attempt's prior continuations.
 pub fn continue_attempt(
@@ -2333,22 +3359,413 @@ pub fn continue_attempt(
     expected_generation: u64,
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
-    scan(&prompt)?;
-    (Registry::default()).check_continuable(&session.service().status(prior, call)?)?;
-    let run = session.service().resume(
-        &run::Resume {
-            prior,
-            expected_generation,
-            operation_id,
-            run_id: fresh(RunId::from_bytes)?,
-            attempt_id: fresh(AttemptId::from_bytes)?,
-            prompt,
-            created_at: now(call.clock)?,
-        },
+    continue_attempt_mode(
+        session,
+        edge,
+        prior,
+        operation_id,
+        prompt,
+        expected_generation,
         call,
-    )?;
-    let started = launch(session, run.run_id, edge, call)?;
+        true,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub fn continue_attempt_mode(
+    session: &Session,
+    edge: &Edge<'_>,
+    prior: AttemptId,
+    operation_id: OperationId,
+    mut prompt: String,
+    expected_generation: u64,
+    call: &run::Request<'_>,
+    fallback: bool,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    scan(&prompt)?;
+    let record = session.service().status(prior, call)?;
+    if !matches!(record.state, run::AttemptState::Terminal { .. }) {
+        return Err(run::RunError::Nonterminal.into());
+    }
+    // Replay the already accepted choice before checking state that retention
+    // may have expired since the first submission.
+    if let Some(operation) = session.store.operation(&operation_id, call)? {
+        let existing = session.store.request(operation.run_id, call)?;
+        if existing.parent != Some(prior) {
+            return Err(run::RunError::OperationConflict.into());
+        }
+        let page = session.store.lanes(
+            &run::LaneQuery {
+                targets: vec![run::LaneTarget {
+                    run: operation.run_id,
+                    task: None,
+                    attempt: None,
+                }],
+                all: true,
+                limit: 2,
+                after: 0,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            call,
+        )?;
+        if let Some(accepted) = page.lanes.first() {
+            let retained = read_full_prompt(session, accepted.attempt_id, call)?;
+            let matches = if existing.fresh_continuation.is_some() {
+                retained.ends_with(&format!("\n\nNew prompt:\n{prompt}"))
+            } else {
+                retained == prompt
+            };
+            if !matches {
+                return Err(run::RunError::OperationConflict.into());
+            }
+            let run = session.store.run(operation.run_id, call)?;
+            let started = launch(session, run.run_id, edge, call)?;
+            return Ok((run, started));
+        }
+    }
+    let ownership = session.store.check_continuation_writer(prior, call);
+    let displaced = ownership.is_err();
+    let owner_base = ownership
+        .as_ref()
+        .ok()
+        .and_then(|owner| owner.as_ref())
+        .map(|owner| owner.base.clone());
+    let unavailable = ownership.err().map(|error| error.to_string()).or_else(|| {
+        Registry::default()
+            .check_continuable(&record)
+            .err()
+            .map(|fail| fail.message)
+            .or_else(|| {
+                provider::continuation_available(&record, session.context.state_root.as_path())
+                    .err()
+            })
+    });
+    if !fallback && let Some(reason) = &unavailable {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::ContinuationUnsupported,
+            format!("continuation unavailable; fresh fallback disabled by --no-fallback: {reason}"),
+        ));
+    }
+    if let Some(reason) = &unavailable {
+        let task = session
+            .store
+            .request(record.run_id, call)?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(run::RunError::NotFound)?;
+        let mut source = record.clone();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(parent) = source.retry_of {
+            if !seen.insert(parent) || seen.len() > 128 {
+                return Err(run::RunError::Validation("continuation parent chain").into());
+            }
+            source = session.store.record(parent, call)?;
+        }
+        let original = read_full_prompt(session, source.attempt_id, call)?;
+        let result = session
+            .service()
+            .output(
+                prior,
+                run::ArtifactPart::Result,
+                run::ByteRange::default(),
+                call,
+            )
+            .ok();
+        let tail = if let Some(result) = result {
+            let result = if result.len > 16_384 {
+                session.service().output(
+                    prior,
+                    run::ArtifactPart::Result,
+                    run::ByteRange {
+                        offset: result.len - 16_384,
+                        max_bytes: 16_384,
+                    },
+                    call,
+                )?
+            } else {
+                result
+            };
+            String::from_utf8_lossy(&result.bytes).into_owned()
+        } else {
+            "[prior attempt has no result]".into()
+        };
+        let cwd = task.writer.as_ref().map_or(edge.cwd, |writer| {
+            if displaced {
+                writer.project.as_path()
+            } else {
+                writer.worktree.as_path()
+            }
+        });
+        let history_base = owner_base
+            .as_deref()
+            .or(task.base.as_deref())
+            .map(str::to_owned)
+            .or_else(|| record.head.map(|head| head.to_string()))
+            .unwrap_or_else(|| "HEAD".into());
+        let log = fallback_history(cwd, &history_base, displaced);
+        let digest = record
+            .result
+            .as_ref()
+            .map(|artifact| provenant_core::hex(artifact.digest.bytes()))
+            .unwrap_or_else(|| "unavailable".into());
+        prompt = format!(
+            "Continuation: fresh\nFallback from {prior}: {reason}\n\nOriginal prompt:\n{original}\n\nPrior result digest: {digest}\nPrior result tail:\n{tail}\n\nGit log from recorded base {history_base}:\n{log}\n\nNew prompt:\n{prompt}"
+        );
+        scan(&prompt)?;
+    }
+    let input = run::Resume {
+        prior,
+        expected_generation,
+        operation_id,
+        run_id: fresh(RunId::from_bytes)?,
+        attempt_id: fresh(AttemptId::from_bytes)?,
+        prompt,
+        created_at: now(call.clock)?,
+    };
+    let fresh_writer = if displaced {
+        Some(fresh_continuation_worktree(
+            session, edge, &record, &input, call,
+        )?)
+    } else {
+        None
+    };
+    let mut ready = None;
+    let accepted = if let Some(reason) = &unavailable {
+        if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none() {
+            let registry = Registry {
+                roots: Some(edge.roots),
+                home: Some(edge.home),
+                assets: Some(edge.assets),
+                cwd: Some(edge.cwd),
+                state_root: Some(session.context.state_root.as_path()),
+                project_id: Some(session.context.project_id),
+                host: None,
+            };
+            session
+                .store
+                .resume_fresh_prepared(
+                    &input,
+                    reason,
+                    fresh_writer.as_ref().map(|(writer, _)| writer),
+                    &registry,
+                    call,
+                )
+                .map(|(run, prepared)| {
+                    ready = prepared;
+                    run
+                })
+        } else if let Some((writer, _)) = &fresh_writer {
+            session.store.resume_fresh_in(&input, reason, writer, call)
+        } else {
+            session.store.resume_fresh(&input, reason, call)
+        }
+    } else {
+        session.service().resume(&input, call)
+    };
+    let cleanup_failure = if accepted.is_err()
+        && let Some((writer, head)) = &fresh_writer
+    {
+        // A refused continuation has not launched. Roll back only the new,
+        // clean owned checkout, using the same ownership and custody fences.
+        provenant_confinement::worktrees::with_context(
+            edge.roots,
+            edge.home,
+            &writer.project,
+            call.clock,
+            call.cancel,
+            |context| {
+                use provenant_confinement::worktrees::{self, WorktreeGcPolicy};
+                worktrees::prune_owned(
+                    context,
+                    &writer.worktree,
+                    input.attempt_id,
+                    *head,
+                    *head,
+                    &WorktreeGcPolicy {
+                        upstream: None,
+                        terminal: &|_| true,
+                        no_live_lanes: &|_| true,
+                        regenerable: &[],
+                        keep: &[],
+                        written_before_ns: i128::MAX,
+                        foreign_merged_clean: false,
+                        foreign_idle_before_ns: None,
+                        dry_run: false,
+                    },
+                    call.cancel,
+                )
+            },
+        )
+        .err()
+        .map(|error| {
+            format!(
+                "; cleanup retained fresh worktree at {} for gc: {error}",
+                writer.worktree.display()
+            )
+        })
+    } else {
+        None
+    };
+    let run = accepted.map_err(|error| {
+        Fail::new(
+            Status::Refused,
+            ErrorKind::ContinuationUnsupported,
+            format!(
+                "continuation {}: {error}{}",
+                if unavailable.is_some() {
+                    "fresh fallback refused"
+                } else {
+                    "provider resume refused"
+                },
+                cleanup_failure.as_deref().unwrap_or("")
+            ),
+        )
+    })?;
+    let started =
+        launch_prepared(session, run.run_id, edge, call, ready.as_ref()).map_err(|fail| {
+            if unavailable.is_some() {
+                Fail::new(
+                    Status::Failed,
+                    fail.kind,
+                    format!("accepted fresh fallback launch failed: {}", fail.message),
+                )
+            } else {
+                fail
+            }
+        })?;
+    // Admission has succeeded. Later custody or handoff failures are execution
+    // outcomes of that accepted attempt, as they are for dispatch.
     Ok((run, started))
+}
+fn fresh_continuation_worktree(
+    session: &Session,
+    edge: &Edge<'_>,
+    prior: &run::AttemptRecord,
+    input: &run::Resume,
+    call: &run::Request<'_>,
+) -> Result<(run::WriterRequest, provenant_core::GitOid), Fail> {
+    let task = session
+        .store
+        .request(prior.run_id, call)?
+        .tasks
+        .into_iter()
+        .find(|task| task.task_id == prior.task_id)
+        .ok_or(run::RunError::NotFound)?;
+    let writer = task
+        .writer
+        .ok_or(run::RunError::Validation("fresh writer missing"))?;
+    let base = prior.head.map(|head| head.to_string()).or(task.base);
+    let base = match base {
+        Some(base) => base,
+        None => {
+            let git = provenant_os::git::git_executable()
+                .ok_or(run::RunError::Validation("Git unavailable"))?;
+            run::resolve_git_base(&git, &writer.project, "HEAD")?
+        }
+    };
+    let host = provenant_config::bind_host(edge.roots)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+    let mut retained = None;
+    let info = provenant_confinement::worktrees::with_context(
+        edge.roots,
+        edge.home,
+        &writer.project,
+        call.clock,
+        call.cancel,
+        |context| {
+            use provenant_confinement::worktrees::{
+                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+            };
+            let branch = format!("lane/resume-{}", input.attempt_id);
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: branch.clone(),
+                    base: Some(base.clone()),
+                },
+                call.cancel,
+            )?;
+            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+            let publication = worktrees::save_owner(
+                &tree,
+                &WorktreeOwner {
+                    attempt_id: Some(input.attempt_id),
+                    operation_id: Some(input.operation_id.clone()),
+                    branch,
+                    base: base.clone(),
+                    host,
+                    created_at: input.created_at,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            );
+            if let Err(error) = publication {
+                if worktrees::remove(
+                    context,
+                    worktrees::WorktreeRemove::Name {
+                        name: format!("lane/resume-{}", input.attempt_id),
+                        discard: false,
+                        integration: None,
+                        expected_head: Some(info.head),
+                    },
+                    call.cancel,
+                )
+                .is_err()
+                {
+                    retained = Some(info.path.clone());
+                }
+                return Err(error);
+            }
+            Ok(info)
+        },
+    )
+    .map_err(|error| {
+        let mut fail = Fail::from(run::RunError::from(error));
+        if let Some(path) = retained {
+            fail.message.push_str(&format!(
+                "; cleanup retained fresh worktree at {} for gc",
+                path.display()
+            ));
+        }
+        fail
+    })?;
+    Ok((
+        run::WriterRequest {
+            project: writer.project,
+            worktree: info.path,
+        },
+        info.head,
+    ))
+}
+fn read_full_prompt(
+    session: &Session,
+    id: AttemptId,
+    call: &run::Request<'_>,
+) -> Result<String, Fail> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = session.service().output(
+            id,
+            run::ArtifactPart::Prompt,
+            run::ByteRange {
+                offset: bytes.len() as u64,
+                max_bytes: run::OUTPUT_LIMIT,
+            },
+            call,
+        )?;
+        if chunk.len > PROMPT_LIMIT || chunk.bytes.is_empty() && !chunk.eof {
+            return Err(run::RunError::Validation("original prompt exceeds fallback bound").into());
+        }
+        bytes.extend(chunk.bytes);
+        if chunk.eof {
+            break;
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| run::RunError::Validation("original prompt is not UTF-8").into())
 }
 fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
     if crate::fabric::in_lane() {
@@ -2361,7 +3778,15 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let target = command.attempt.0;
+    let mut target = command.attempt.0.clone();
+    if command.attempt.is_qualified_pair()
+        && target
+            .run
+            .and_then(|qualifier| remote::qualifier_site(edge, qualifier))
+            == Some(remote::Site::Local)
+    {
+        target.run = None;
+    }
     let prior = target.attempt.ok_or(Fail::new(
         Status::Invalid,
         ErrorKind::Invalid,
@@ -2384,7 +3809,7 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     }
     // The CLI continues an attempt once; a second continuation of the same
     // attempt is a conflict, not a new branch.
-    let (run, started) = continue_attempt(
+    let (run, started) = continue_attempt_mode(
         &session,
         edge,
         prior,
@@ -2392,9 +3817,17 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
         prompt,
         0,
         &call,
+        !command.no_fallback,
     )?;
     let (mut data, human, timed_out) = report(&session, &run, &started, command.wait, edge, &call)?;
     data["resumed_from"] = json!(prior);
+    let continuation = session.store.request(run.run_id, &call)?.fresh_continuation;
+    data["continuation"] = json!(if continuation.is_some() {
+        "fresh"
+    } else {
+        "provider"
+    });
+    data["fallback_reason"] = json!(continuation);
     Ok((data, human, timed_out))
 }
 
@@ -2906,6 +4339,377 @@ mod lane_depth_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn displaced_fallback_reports_unavailable_history() {
+        let history = super::fallback_history(Path::new(env!("CARGO_MANIFEST_DIR")), "HEAD", true);
+        assert_eq!(
+            history,
+            "[history unavailable: prior worktree is missing or reassigned]"
+        );
+    }
+
+    #[test]
+    fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_confinement::worktrees::{
+            self, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+        };
+        use provenant_core::RootInputs;
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::ffi::{OsStr, OsString};
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, WorkerState::Free))
+                    .collect()
+            }
+        }
+        let executor = SystemExecutor::new(1)?;
+        if crate::fabric::in_lane() {
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree".into(),
+            ];
+            let removed = [
+                OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
+                OsStr::new(run::LANE_DEPTH_ENV),
+                OsStr::new(run::PARENT_ATTEMPT_ENV),
+            ];
+            let env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| !removed.contains(&key.as_os_str()))
+                .collect();
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let project = root.join("project");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ],
+        ] {
+            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.into_iter().map(OsString::from))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        }
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &project,
+            cwd: &project,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        // Opening dispatch's real session initialises the state root first.
+        let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+        let _session = open(&edge, &call).map_err(|fail| fail.message)?;
+        let host = provenant_config::bind_host(&roots)?;
+        let prompt = root.join("protected-prompt.md");
+        std::fs::write(&prompt, "reply OK")?;
+        let existing =
+            worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                worktrees::create(
+                    &worktrees::WorktreeContext {
+                        workers: &Free,
+                        ..*context
+                    },
+                    WorktreeCreate {
+                        branch: "protected-existing".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )
+            })?;
+        let primary = {
+            let argv = vec![
+                git.as_os_str().to_owned(),
+                "symbolic-ref".into(),
+                "--short".into(),
+                "HEAD".into(),
+            ];
+            let output =
+                executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
+            assert_eq!(output.termination, Termination::Exit(0));
+            String::from_utf8(output.stdout.bytes)?.trim().to_owned()
+        };
+        for (index, (target, placement, delivery)) in ["main", "master", primary.as_str()]
+            .into_iter()
+            .flat_map(|target| {
+                [
+                    (target, "owned", "integrate"),
+                    (target, "existing", "integrate"),
+                    (target, "manifest", "integrate"),
+                    (target, "owned", "legacy-push"),
+                    (target, "existing", "legacy-push"),
+                    (target, "manifest", "push"),
+                    (target, "owned", "push"),
+                ]
+            })
+            .enumerate()
+        {
+            let operation = format!("protected-integration-{index}");
+            let mut args: Vec<OsString> =
+                ["dispatch", "--operation-id", &operation, "--base", "HEAD"]
+                    .map(OsString::from)
+                    .into();
+            let mode = if delivery == "integrate" {
+                run::DeliveryMode::Integrate(target.into())
+            } else {
+                run::DeliveryMode::Push
+            };
+            if placement != "manifest" {
+                args.extend(
+                    ["--model", "codex/gpt-6-luna", "--mode", "worktree-write"].map(OsString::from),
+                );
+            }
+            if placement == "owned" {
+                args.extend(
+                    [
+                        "--worktree-branch",
+                        if delivery == "push" {
+                            target
+                        } else {
+                            "refused-lane"
+                        },
+                    ]
+                    .map(OsString::from),
+                );
+            } else if placement == "existing" {
+                args.extend([
+                    OsString::from("--worktree"),
+                    existing.path.as_os_str().to_owned(),
+                ]);
+            }
+            if placement == "manifest" {
+                let manifest = root.join("protected-manifest.json");
+                std::fs::write(
+                    &manifest,
+                    serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
+                        "prompt":"reply OK", "route":run::RequestedRoute::Model { provider:"codex".into(), model:"codex/gpt-6-luna".into(), effort:None },
+                        "deliver":run::HostDeliveryContext::destination(mode, target)?
+                    }]}))?,
+                )?;
+                args.extend([OsString::from("--manifest"), manifest.into_os_string()]);
+            } else {
+                if delivery == "legacy-push" {
+                    args.extend(
+                        ["--deliver-remote", "origin", "--deliver-branch", target]
+                            .map(OsString::from),
+                    );
+                } else {
+                    args.extend([
+                        OsString::from("--deliver"),
+                        if delivery == "integrate" {
+                            format!("integrate:{target}")
+                        } else {
+                            "push".into()
+                        }
+                        .into(),
+                    ]);
+                }
+                args.extend([
+                    OsString::from("--prompt-file"),
+                    prompt.as_os_str().to_owned(),
+                ]);
+            }
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
+                return Err("parse".into());
+            };
+            let crate::Command::Dispatch(command) = invocation.command else {
+                return Err("dispatch".into());
+            };
+            let reply = dispatch_with_workers(*command, &edge, &Free);
+            assert!(
+                _session
+                    .store
+                    .operation(&operation.parse()?, &call)?
+                    .is_none(),
+                "protected delivery was admitted"
+            );
+            assert_eq!(reply.result.status, Status::Refused);
+            assert!(
+                reply
+                    .result
+                    .error
+                    .ok_or("refusal")?
+                    .message
+                    .contains("default and primary checkout branches")
+            );
+            let branch = if delivery == "push" && placement == "owned" {
+                target
+            } else {
+                "refused-lane"
+            };
+            assert!(!project.join(".worktrees").join(branch).exists());
+        }
+        let pr =
+            run::HostDeliveryContext::destination(run::DeliveryMode::Pr, "protected-existing")?
+                .ok_or("PR destination")?;
+        check_delivery_branch(&project, &pr.branch).map_err(|error| error.message)?;
+        assert!(pr.open_pr);
+        for origin in [
+            None,
+            Some(WorktreeOrigin::Lane),
+            Some(WorktreeOrigin::Adopted),
+        ] {
+            let branch = match origin {
+                None => "unowned",
+                Some(WorktreeOrigin::Lane) => "lane",
+                Some(WorktreeOrigin::Adopted) => "adopted",
+            };
+            let (path, base) =
+                worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                    let context = &worktrees::WorktreeContext {
+                        workers: &Free,
+                        ..*context
+                    };
+                    let info = worktrees::create(
+                        context,
+                        WorktreeCreate {
+                            branch: branch.into(),
+                            base: Some("HEAD".into()),
+                        },
+                        &cancel,
+                    )?;
+                    let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                    if let Some(origin) = origin {
+                        worktrees::save_owner(
+                            &tree,
+                            &WorktreeOwner {
+                                attempt_id: None,
+                                operation_id: Some(
+                                    OperationId::parse("previous-lane")
+                                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                                ),
+                                branch: branch.into(),
+                                base: info.head.to_string(),
+                                host,
+                                created_at: WallTime::from_micros(1)
+                                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                                origin,
+                                label: Some("preserved-label".into()),
+                            },
+                        )?;
+                    }
+                    Ok((info.path, info.head.to_string()))
+                })?;
+            let missing = root.join("missing-prompt");
+            let args: Vec<OsString> = [
+                "dispatch",
+                "--operation-id",
+                "replacement-lane",
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "worktree-write",
+                "--worktree-branch",
+                branch,
+                "--base",
+                "HEAD",
+                "--prompt-file",
+                missing.to_str().ok_or("path")?,
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
+                return Err("parse".into());
+            };
+            let crate::Command::Dispatch(command) = invocation.command else {
+                return Err("dispatch".into());
+            };
+            let reply = dispatch_with_workers(*command, &edge, &Free);
+            assert_ne!(reply.result.status, Status::Ok);
+            let owner =
+                worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                    worktrees::load_owner(&provenant_confinement::verify_worktree(
+                        context.repo,
+                        &path,
+                    )?)
+                })?
+                .ok_or("owner")?;
+            assert_eq!(owner.base, base);
+            if origin == Some(WorktreeOrigin::Adopted) {
+                assert_eq!(owner.origin, WorktreeOrigin::Adopted);
+                assert_eq!(
+                    owner.operation_id,
+                    Some(OperationId::parse("previous-lane")?)
+                );
+                assert_eq!(owner.label.as_deref(), Some("preserved-label"));
+                assert!(
+                    reply
+                        .result
+                        .error
+                        .ok_or("error")?
+                        .message
+                        .contains("adopted or foreign owner")
+                );
+            } else {
+                assert_eq!(owner.origin, WorktreeOrigin::Lane);
+                assert_eq!(
+                    owner.operation_id,
+                    Some(OperationId::parse("replacement-lane")?)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pruning_intent_replays_only_for_its_missing_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let tree = temp.path().join("owned");
+        let receipt = serde_json::json!({"state": "pruning", "worktree": tree});
+        assert!(super::worktree_was_pruned(&receipt, &tree));
+        assert!(!super::worktree_was_pruned(
+            &receipt,
+            &temp.path().join("other")
+        ));
+        std::fs::create_dir(&tree)?;
+        assert!(!super::worktree_was_pruned(&receipt, &tree));
+        std::fs::remove_dir(&tree)?;
+        std::os::unix::fs::symlink(temp.path().join("missing-target"), &tree)?;
+        assert!(!super::worktree_was_pruned(&receipt, &tree));
+        Ok(())
+    }
+
     use super::*;
     use provenant_run::Providers;
     use provenant_supervisor::custody::CaptureTotals;
@@ -3116,6 +4920,7 @@ mod tests {
             operation_id: OperationId::parse(&format!("trace-{n}"))?,
             created_at,
             request: run::CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
                     base: None,
@@ -3166,6 +4971,33 @@ mod tests {
             read_prompts: true,
         };
         Ok(run::RunStore::open(&context, call)?)
+    }
+
+    #[test]
+    fn a_nested_lane_reads_the_host_ledger_when_it_opens_read_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let host = root.join("state");
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(host.join("children").join("lane"));
+        let context = run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        // The store must exist to be opened; the writable open creates it.
+        run::RunStore::open(&context, &call)?;
+        let store = read_only_store(&context, &host, &call)
+            .map_err(|f| f.message)?
+            .ok_or("nested store")?;
+        assert_eq!(store.writer_registry(), host);
+        assert_ne!(store.writer_registry(), context.state_root.as_path());
+        Ok(())
     }
 
     #[test]
@@ -3378,7 +5210,8 @@ mod tests {
             "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
             "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
         }))?;
-        let (data, human) = render_lanes(std::slice::from_ref(&lane), None, Path::new("/state"));
+        let (data, human) =
+            render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
         assert_eq!(
             human,
             format!(
@@ -3420,7 +5253,7 @@ mod tests {
             &provenant_core::RelativePath::parse(".github/unsafe\npath.yml")?,
         )?];
         lane.delivery = None;
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert_eq!(data["lanes"][0]["state"], "review_required");
         assert_eq!(data["lanes"][0]["head"], "a".repeat(40));
         assert_eq!(
@@ -3469,7 +5302,7 @@ mod tests {
             reason: None,
         };
         lane.protected_paths = vec![];
-        let (_, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (_, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert!(human.contains("  review head=unknown paths=\n"));
         Ok(())
     }
@@ -3507,7 +5340,7 @@ mod tests {
                 "redacted": false
             }
         }))?;
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert_eq!(
             human,
             format!(
@@ -3522,6 +5355,53 @@ mod tests {
         assert_eq!(data["lanes"][0]["state"], "rejected");
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert!(data["lanes"][0]["applied_route"].is_null());
+        Ok(())
+    }
+    #[test]
+    fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "wait-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state": "starting"},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 1,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        let wait = run::LaneWait {
+            attempt_id: lane.attempt_id,
+            lane_class: run::LaneClass::ReadOnly,
+            waiting_for: "read-only startup spacing: 1.2 s left of 2.0 s".into(),
+        };
+        let (data, human) = render_lanes(&[lane], &[wait], None, Path::new("/state"));
+        assert!(
+            human.contains("starting unresolved (read-only startup spacing: 1.2 s left of 2.0 s)"),
+            "{human}"
+        );
+        let row = &data["lanes"][0];
+        assert_eq!(row["lane_class"], "read_only");
+        assert_eq!(
+            row["waiting_for"],
+            "read-only startup spacing: 1.2 s left of 2.0 s"
+        );
+        assert_eq!(row["reason"], row["waiting_for"]);
         Ok(())
     }
     #[test]
@@ -3559,7 +5439,7 @@ mod tests {
             }
         }))?;
         assert_eq!(settled(&lane.state), (true, false));
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert!(
             human.contains(&format!(" uncommitted unresolved ({reason})\n")),
             "{human}"
@@ -3794,6 +5674,57 @@ mod tests {
             assert_eq!(decoded.reason.as_deref(), Some(expected.as_str()));
             assert!(decoded.reason.unwrap().len() <= 8192);
         }
+    }
+
+    #[test]
+    fn agy_denials_preserve_answers_and_prior_failures() {
+        let route = run::RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/gemini-3.8-flash".into()),
+            ..Default::default()
+        };
+        let fixture = include_str!("../../../tests/fixtures/providers/agy/denied-result.jsonl");
+        let recovered = fixture.replace("\"response\":\"\"", "\"response\":\"Recovered answer\"");
+        let registry = Registry::default();
+        let decoded = registry
+            .decode(
+                &route,
+                recovered.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(decoded.result, "Recovered answer");
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider denied: RunCommand")
+        );
+        let decoded = registry
+            .decode(
+                &route,
+                fixture.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Failed);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider denied: RunCommand")
+        );
+        let mut failed_exit = clean_exit();
+        failed_exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let decoded = registry
+            .decode(
+                &route,
+                fixture.as_bytes(),
+                &failed_exit,
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Failed);
+        assert_eq!(decoded.reason.as_deref(), Some("provider failed"));
     }
 
     #[test]

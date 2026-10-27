@@ -997,6 +997,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             operation_id: OperationId::parse("edge-read")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: tasks
                     .iter()
@@ -1221,6 +1222,36 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             .len(),
         2
     );
+
+    // The peer derives a queued lane's class and wait itself, so a lane listed
+    // from another host reads like a local one.
+    let mut waits_request = ingress_request.clone();
+    waits_request["action"] = json!({"action":"lane_waits","targets":attempts[1..3]
+        .iter()
+        .map(|attempt| json!({"host":local_host.to_string(),"attempt":attempt.to_string()}))
+        .collect::<Vec<_>>()});
+    let waits = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&waits_request)?),
+    )?;
+    assert_eq!(code(&waits), 0);
+    let waits: Value = serde_json::from_slice(&waits.stdout.bytes)?;
+    assert_eq!(waits["result"]["result"], "lane_waits", "{waits}");
+    let waits = waits["result"]["data"].as_array().ok_or("waits")?;
+    assert_eq!(waits.len(), 2, "{waits:?}");
+    for wait in waits {
+        assert_eq!(wait["lane_class"], "read_only", "{wait}");
+        assert_eq!(
+            wait["waiting_for"], "launch: not yet handed to a guardian",
+            "{wait}"
+        );
+    }
 
     let project_key: provenant_fabric_runtime::identity::CrossHostProjectKey =
         serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
@@ -2257,6 +2288,8 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             vec!["lanes.max_concurrency=2"],
             1,
         ),
+        // Four tasks and an explicit 16: above the task count, still accepted.
+        ("wide-capacity", Some(16), vec![], 16),
     ] {
         let (request, attempt) = submitted_policy(
             &rig,
@@ -2699,6 +2732,164 @@ fn peer_terminal_missing_output_is_not_found() -> Result {
 }
 
 #[test]
+fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
+    let mut rig = TestRig::new()?;
+    loopback_peer(&mut rig)?;
+    let prompt = rig.root.join("prompt.txt");
+    // The prompt fits the launch limit, but JSON escaping exceeds the frame cap.
+    std::fs::write(&prompt, "\"".repeat(600 * 1024))?;
+    for _ in 0..2 {
+        let (status, refused) = json_command(
+            &rig,
+            &[
+                "dispatch",
+                "--host",
+                "workshop",
+                "--mode",
+                "read-only",
+                "--model",
+                "agy/gemini-3.8-flash",
+                "--operation-id",
+                "peer-frame-limit",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt path")?,
+                "--json",
+            ],
+        )?;
+        assert_ne!(status, 0);
+        assert_eq!(refused["error"]["code"], "INVALID", "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("1 MiB")),
+            "{refused}"
+        );
+    }
+    assert!(!rig.root.join("peer-stderr").exists());
+    assert!(!rig.root.join("peer-state/runs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let backend = provenant_confinement::permissions::system_backend(
+        &provenant_confinement::permissions::BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            #[cfg(target_os = "macos")]
+            env: &[],
+        },
+    );
+    if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some()
+        && let Err(error) = &backend
+    {
+        return Err(error.to_string().into());
+    }
+    let bin = rig.root.join("provider/bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(
+        bin.join("agy"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'agy 1.0.0'; exit 0; fi\n\
+         while [ \"$#\" -gt 0 ] && [ \"$1\" != --print ]; do shift; done\n\
+         [ \"$#\" -gt 1 ] || exit 2\nshift\n\
+         task=${1#Read the file at }\n\
+         task=${task% first and treat its full contents as your task instructions.}\n\
+         [ \"$(wc -c <\"$task\")\" -gt 119808 ] || exit 3\n\
+         echo launched >>\"$HOME/launch-count\"\necho 'peer large prompt fixture' >&2\n",
+    )?;
+    std::fs::set_permissions(bin.join("agy"), std::fs::Permissions::from_mode(0o755))?;
+    std::fs::create_dir_all(rig.home.join("Library/Keychains"))?;
+    std::fs::write(
+        rig.home.join("Library/Keychains/login.keychain-db"),
+        "fixture",
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let peer = loopback_peer(&mut rig)?;
+    let prompt = rig.root.join("prompt.txt");
+    let text = "x".repeat(117 * 1024);
+    std::fs::write(&prompt, &text)?;
+    let dispatch = [
+        "dispatch",
+        "--host",
+        "workshop",
+        "--mode",
+        "read-only",
+        "--model",
+        "agy/gemini-3.8-flash",
+        "--effort",
+        "high",
+        "--operation-id",
+        "peer-large-prompt",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "30",
+        "--json",
+    ];
+    let (_, placed) = json_command(&rig, &dispatch)?;
+    assert_eq!(
+        placed["data"]["host"],
+        peer.to_string(),
+        "{placed} {}",
+        std::fs::read_to_string(rig.root.join("peer-stderr")).unwrap_or_default()
+    );
+    let lane = &placed["data"]["lanes"][0];
+    match &backend {
+        Ok(_) => {
+            assert_ne!(lane["state"], "rejected", "{placed}");
+            assert_eq!(lane["exit_code"], 0, "{placed}");
+        }
+        Err(error) => {
+            // Unsupported or nested sandboxes still create a definite receipt.
+            assert_eq!(lane["state"], "rejected", "{placed}");
+            assert!(
+                lane["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(&error.to_string())),
+                "{placed}"
+            );
+        }
+    }
+    let run = placed["data"]["run_id"].as_str().ok_or("run")?;
+    let attempt = lane["attempt_id"].as_str().ok_or("attempt")?;
+    let sealed = std::fs::read_to_string(rig.root.join(format!(
+        "peer-state/runs/{run}/attempts/{attempt}/prompt.md"
+    )))?;
+    assert!(sealed.ends_with(&text));
+    let (_, replayed) = json_command(&rig, &dispatch)?;
+    assert_eq!(replayed["data"]["run_id"], run, "{replayed}");
+    assert_eq!(
+        replayed["data"]["lanes"][0]["attempt_id"], attempt,
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["data"]["lanes"][0]["state"], lane["state"],
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["data"]["lanes"][0]["reason"], lane["reason"],
+        "{replayed}"
+    );
+    if backend.is_ok() {
+        let launches = rig.root.join(format!(
+            "peer-state/runs/{run}/attempts/{attempt}/provider-state/candidate-0/launch-count"
+        ));
+        assert_eq!(std::fs::read_to_string(launches)?, "launched\n");
+    }
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
@@ -2780,12 +2971,16 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     assert_eq!(status, 0, "{lanes}");
     assert_eq!(lanes["data"]["lanes"][0]["attempt_id"], attempt.as_str());
     assert_eq!(lanes["data"]["lanes"][0]["state"], lane["state"]);
-    let (status, waited) = json_command(&rig, &["lanes", "--id", &run, "--wait", "5", "--json"])?;
+    // A named attempt counts whenever it settled; a run would count only
+    // settlements after the wait starts.
+    let task = lane["task_id"].as_str().ok_or("task")?;
+    let target = format!("{run}/{task}/{attempt}");
+    let (status, waited) =
+        json_command(&rig, &["lanes", "--id", &target, "--wait", "5", "--json"])?;
     assert_eq!(status, 0, "{waited}");
     assert_eq!(waited["data"]["condition_met"], true);
 
-    let task = lane["task_id"].as_str().ok_or("task")?;
-    let target = format!("{run}/{task}/{attempt}");
+    let peer_text = peer.to_string();
     let (status, stderr) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
     if cfg!(target_os = "macos") {
         assert_eq!(status, 0, "{stderr} {placed}");
@@ -2810,9 +3005,29 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
             "{stderr}"
         );
     }
+    let status_of_stderr = status;
     let (status, tail) = json_command(&rig, &["output", &target, "--tail", "5", "--json"])?;
     assert_ne!(status, 0);
     assert_eq!(tail["error"]["code"], "UNSUPPORTED", "{tail}");
+    // The peer's own attempt is reachable without a placement: `--host`, and
+    // the `HOST/ATTEMPT` form of a graph `attempt_ref` (#1837).
+    let by_host = format!("{peer}/{attempt}");
+    for words in [
+        vec!["output", &attempt, "--host", "workshop"],
+        vec!["output", &attempt, "--host", &peer_text],
+        vec!["output", &by_host],
+    ] {
+        let mut words = words;
+        words.extend(["--part", "stderr", "--json"]);
+        let (direct_status, direct) = json_command(&rig, &words)?;
+        assert_eq!(direct_status, status_of_stderr, "{words:?} {direct}");
+        if cfg!(target_os = "macos") {
+            assert_eq!(direct["data"]["host"], peer_text, "{words:?} {direct}");
+            assert_eq!(direct["data"]["bytes"], stderr["data"]["bytes"], "{direct}");
+        } else {
+            assert_eq!(direct["error"]["code"], "NOT_FOUND", "{words:?} {direct}");
+        }
+    }
 
     let (status, cancelled) = json_command(
         &rig,
@@ -3481,6 +3696,7 @@ fn seed_attempt(
             operation_id: OperationId::parse("page-seed")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![TaskRequest {
                     base: None,

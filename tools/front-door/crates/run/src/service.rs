@@ -181,6 +181,7 @@ impl<'a> Service<'a> {
             run_id: fresh(RunId::from_bytes)?,
             operation_id: input.operation_id,
             request: CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: requests,
                 concurrency: input.concurrency,

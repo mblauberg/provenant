@@ -183,6 +183,27 @@ impl Context {
     ) -> Result<PeerResult, PeerFailure> {
         self.peer_with(&self.executor, clock, host, action, budget, cancel)
     }
+    /// [`Context::peer`] that is over within `within`, SSH termination and
+    /// reap included, however the whole-second `budget` rounds.
+    pub fn peer_within(
+        &self,
+        clock: &dyn Clock,
+        host: HostId,
+        action: PeerAction,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        within: Duration,
+    ) -> Result<PeerResult, PeerFailure> {
+        self.peer_bounded(
+            &self.executor,
+            clock,
+            host,
+            action,
+            budget,
+            cancel,
+            Some(within),
+        )
+    }
     /// [`Context::peer`] through a caller-owned executor.
     pub fn peer_with(
         &self,
@@ -192,6 +213,19 @@ impl Context {
         action: PeerAction,
         budget: WaitBudget,
         cancel: &CancelToken,
+    ) -> Result<PeerResult, PeerFailure> {
+        self.peer_bounded(executor, clock, host, action, budget, cancel, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn peer_bounded(
+        &self,
+        executor: &dyn Executor,
+        clock: &dyn Clock,
+        host: HostId,
+        action: PeerAction,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        within: Option<Duration>,
     ) -> Result<PeerResult, PeerFailure> {
         let peer = self
             .config
@@ -222,8 +256,11 @@ impl Context {
             executable,
             seconds: self.config.limits.peer_seconds,
         };
-        match transport
-            .exchange(peer, &request, budget, cancel)
+        let exchanged = match within {
+            Some(within) => transport.exchange_within(peer, &request, budget, cancel, within),
+            None => transport.exchange(peer, &request, budget, cancel),
+        };
+        match exchanged
             .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
@@ -319,6 +356,7 @@ pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
         PeerError::Failed(cause) => Some(format!("{destination}: {cause}")),
         PeerError::Unavailable => Some(format!("{destination}: peer is unavailable")),
         PeerError::Frame => Some(format!("{destination}: invalid peer frame")),
+        PeerError::RequestTooLarge => Some(format!("{destination}: {error}")),
         _ => None,
     };
     PeerFailure {

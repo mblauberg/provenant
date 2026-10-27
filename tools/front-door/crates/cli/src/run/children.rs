@@ -273,7 +273,15 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             &reason,
             &call,
             |id, validated| {
-                launch_on_host(&session, id, &edge, &call, Some(launch), Some(validated))
+                launch_on_host(
+                    &session,
+                    id,
+                    &edge,
+                    &call,
+                    Some(launch),
+                    Some(validated),
+                    None,
+                )
             },
         )?;
         accepted.extend(scan.accepted);
@@ -640,6 +648,7 @@ mod tests {
             run::RunStore::open(&context, &call)?.with_sealed_requester(context.actor_id);
         store.set_admission_policy(run::AdmissionPolicy {
             startup_spacing_ms: 0,
+            read_only_spacing_ms: 0,
             ..Default::default()
         });
         let task_id = child.request.tasks[0].task_id;
@@ -776,6 +785,7 @@ mod tests {
             operation_id: OperationId::parse("deferred-child")?,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
                     base: None,

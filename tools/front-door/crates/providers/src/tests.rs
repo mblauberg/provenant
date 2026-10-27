@@ -156,6 +156,57 @@ fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_stream_denial_is_failure() -> Result<(), ProviderError> {
+    let (events, outcome) = replay(&agy::Agy, fixture!("agy/denied-result.jsonl"), EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Failed);
+    assert!(events.contains(&ProviderEvent::Denied {
+        action: "RunCommand".into(),
+    }));
+    let unsafe_name = fixture!("agy/denied-result.jsonl").replace("RunCommand", "bad\\nname");
+    let (events, outcome) = replay(&agy::Agy, &unsafe_name, EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Failed);
+    assert!(events.contains(&ProviderEvent::Denied {
+        action: "unknown action".into(),
+    }));
+    Ok(())
+}
+#[test]
+fn agy_recovered_denial_is_non_fatal() -> Result<(), ProviderError> {
+    let raw = fixture!("agy/denied-result.jsonl")
+        .replace("\"response\":\"\"", "\"response\":\"Recovered answer\"");
+    let (events, outcome) = replay(&agy::Agy, &raw, EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Success);
+    assert!(events.contains(&ProviderEvent::Text("Recovered answer".into())));
+    assert!(events.contains(&ProviderEvent::DeniedNote {
+        action: "RunCommand".into()
+    }));
+    Ok(())
+}
+#[test]
+fn agy_denials_accept_unexpected_shapes() -> Result<(), ProviderError> {
+    for (denials, expected) in [
+        (serde_json::json!(null), None),
+        (serde_json::json!({"display_name": "RunCommand"}), None),
+        (serde_json::json!([42]), Some("unknown action")),
+    ] {
+        let raw = serde_json::json!({"event":"result","result":{
+            "conversation_id":"", "status":"SUCCESS", "response":"",
+            "denied_actions":denials, "usage":{"input_tokens":0,"output_tokens":0}
+        }})
+        .to_string();
+        let (events, outcome) = replay(&agy::Agy, &format!("{raw}\n"), EXIT)?;
+        if let Some(action) = expected {
+            assert_eq!(outcome.status(), OutcomeStatus::Failed);
+            assert!(events.contains(&ProviderEvent::Denied {
+                action: action.into()
+            }));
+        } else {
+            assert_eq!(outcome.status(), OutcomeStatus::Success);
+        }
+    }
+    Ok(())
+}
+#[test]
 fn agy_denied_command_preserves_failed_response() -> Result<(), ProviderError> {
     // Synthetic stdout paired with the issue's recorded stderr diagnostic.
     let raw = serde_json::json!({"event":"result","result":{
@@ -909,8 +960,7 @@ fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<()
             }
             if id == "agy" && access == Access::ReadOnly {
                 assert!(
-                    !spec
-                        .argv
+                    spec.argv
                         .iter()
                         .any(|arg| arg == "--dangerously-skip-permissions")
                 );
@@ -1431,8 +1481,23 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
         assert_eq!(spec.profile.spec.process_executables.len(), 2);
         let exec = &spec.profile.spec.tool_exec_roots;
         if access == Access::ReadOnly {
-            // Like Claude's read-only lanes, which run no commands either.
-            assert!(exec.is_empty());
+            assert_eq!(
+                exec,
+                &vec![
+                    crate::launch::subtree("/bin"),
+                    crate::launch::subtree("/usr/bin"),
+                    crate::launch::subtree("/usr/libexec")
+                ]
+            );
+            assert!(spec.profile.spec.tool_writes.is_empty());
+            assert!(plan.permissions().write_roots.is_empty());
+            for (key, value) in [
+                ("PATH", "/usr/bin:/bin"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ] {
+                assert!(spec.env.iter().any(|(k, v)| k == key && v == value));
+            }
             continue;
         }
         let plan = fixture_access_plan(access, Some("login"), false);
@@ -1487,6 +1552,56 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
         .map(|pair| pair[1].clone())
         .collect();
     assert_eq!(added, [OsString::from("/fixture/build")]);
+    Ok(())
+}
+
+#[test]
+fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), ProviderError> {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let prompt = Prompt::new("fixture prompt".into());
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let token = fixture_token();
+    let reader = fixture_access_plan(Access::ReadOnly, None, false);
+    let mut permissions = reader.permissions().clone();
+    for path in ["/fixture/diffs", "/fixture/repo/crates/sub"] {
+        permissions.read_roots.push(PathGrant {
+            path: path.into(),
+            scope: PathScope::Subtree,
+        });
+    }
+    let plan = ConfinedPlan::new(PlanRequest {
+        scope: reader.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture read-only plan");
+    let spec = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo/crates"),
+        Some(&token),
+    ))?;
+    let added: Vec<_> = spec
+        .argv
+        .windows(2)
+        .filter(|pair| pair[0] == "--add-dir")
+        .map(|pair| pair[1].clone())
+        .collect();
+    // The fixture's own /fixture/repo root holds the working directory but
+    // reaches beyond it, so it needs a flag; /fixture/repo/crates/sub sits
+    // inside the working directory, so it does not.
+    assert_eq!(
+        added,
+        [
+            OsString::from("/fixture/repo"),
+            OsString::from("/fixture/diffs")
+        ]
+    );
     Ok(())
 }
 
@@ -1595,10 +1710,6 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                 assert!(config["permission"]["external_directory"].is_null());
                 assert!(config["permission"]["read"].is_null());
             }
-            assert_eq!(
-                spec.profile.spec.tool_exec_roots.is_empty(),
-                access == Access::ReadOnly
-            );
         }
     }
     Ok(())
@@ -2508,6 +2619,52 @@ fn cargo_build_dir_is_pinned_to_lane_target_for_each_access() -> Result<(), Prov
 }
 
 #[test]
+fn writer_lint_target_is_a_lane_cache_sibling_of_the_build_target() -> Result<(), ProviderError> {
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let cache = "/fixture/home/Library/Caches/provenant-lane-cargo/fixture";
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let launch = crate::codex::Codex.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    // Lint-only cargo runs take their own build directory, so they do not
+    // queue on the lock that test and build runs hold.
+    let lint = format!("{cache}/target-lint");
+    assert!(
+        launch
+            .env
+            .iter()
+            .any(|(k, v)| k == "PROVENANT_LANE_CARGO_LINT_TARGET" && v == lint.as_str()),
+        "PROVENANT_LANE_CARGO_LINT_TARGET must be {lint}"
+    );
+    assert!(
+        Path::new(&lint).starts_with(cache),
+        "the lint target must sit inside the granted lane cache"
+    );
+    let read_only = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let launch = crate::codex::Codex.prepare(fixture_input(
+        &route,
+        &read_only,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    assert!(
+        launch
+            .env
+            .iter()
+            .all(|(k, _)| k != "PROVENANT_LANE_CARGO_LINT_TARGET"),
+        "read-only lanes have no lane cache to hold a lint target"
+    );
+    Ok(())
+}
+
+#[test]
 fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let shared = [
@@ -2733,11 +2890,10 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
         let plan = fixture_access_plan(access, Some("keychain"), false);
         let spec = agy::Agy.prepare(fixture_input(&route, &plan, &prompt, cwd, None))?;
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
-        // Headless mode auto-denies tools; only writers auto-approve them.
-        assert_eq!(
+        // Headless lanes auto-approve tools within the outer profile.
+        assert!(
             argv.iter()
-                .any(|arg| arg == "--dangerously-skip-permissions"),
-            edits
+                .any(|arg| arg == "--dangerously-skip-permissions")
         );
         assert!(!argv.iter().any(|arg| arg == "--sandbox"));
         assert_eq!(spec.stdin, Stdin::Null);
@@ -2821,6 +2977,134 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
             resets_in_seconds: None,
         }));
     }
+    Ok(())
+}
+
+#[test]
+fn opencode_free_limit_decodes_retry_after_ms() -> Result<(), Box<dyn std::error::Error>> {
+    let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
+    for (retry_after_val, expected_resets) in [
+        (serde_json::json!(240_000), Some(240)),
+        (serde_json::json!(240_000.0), Some(240)),
+        (serde_json::json!(1_500), Some(2)),
+        (serde_json::json!(999_999_999), Some(86_400)),
+        (serde_json::json!(null), None),
+        (serde_json::json!(-1000), None),
+        (serde_json::json!(0), None),
+        (serde_json::json!("soon"), None),
+        (serde_json::json!(true), None),
+    ] {
+        for wrapped in [false, true] {
+            let body = serde_json::json!({
+                "error": {
+                    "type": "FreeUsageLimitError",
+                    "message": message,
+                }
+            });
+            let mut event = serde_json::json!({
+                "type": "provider.quota",
+                "status": 429,
+                "response": {"body": body},
+                "retryAfterMs": retry_after_val,
+            });
+            if wrapped {
+                event = serde_json::json!({
+                    "type": "error",
+                    "error": event,
+                });
+            }
+            let (events, outcome) = replay(
+                &opencode::OpenCode,
+                &(event.to_string() + "\n"),
+                ExitObservation {
+                    code: Some(1),
+                    timed_out: false,
+                },
+            )?;
+            assert_eq!(outcome.status(), OutcomeStatus::Refused);
+            assert!(
+                events.contains(&ProviderEvent::QuotaLimited {
+                    message: message.into(),
+                    pool: Some("opencode-free".into()),
+                    resets_in_seconds: expected_resets,
+                }),
+                "failed for retry_after_val: {retry_after_val:?}, wrapped: {wrapped}"
+            );
+        }
+    }
+
+    let body = serde_json::json!({
+        "error": {
+            "type": "FreeUsageLimitError",
+            "message": message,
+            "retryAfterMs": 120_000,
+        }
+    });
+    let event = serde_json::json!({
+        "type": "provider.quota",
+        "status": 429,
+        "response": {"body": body},
+    });
+    let (events, outcome) = replay(
+        &opencode::OpenCode,
+        &(event.to_string() + "\n"),
+        ExitObservation {
+            code: Some(1),
+            timed_out: false,
+        },
+    )?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: message.into(),
+        pool: Some("opencode-free".into()),
+        resets_in_seconds: Some(120),
+    }));
+
+    let body = serde_json::json!({
+        "error": {
+            "type": "FreeUsageLimitError",
+            "message": message,
+        }
+    });
+    let event = serde_json::json!({
+        "type": "error",
+        "retryAfterMs": 180_000,
+        "error": {
+            "type": "provider.quota",
+            "status": 429,
+            "response": {"body": body},
+        }
+    });
+    let (events, outcome) = replay(
+        &opencode::OpenCode,
+        &(event.to_string() + "\n"),
+        ExitObservation {
+            code: Some(1),
+            timed_out: false,
+        },
+    )?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: message.into(),
+        pool: Some("opencode-free".into()),
+        resets_in_seconds: Some(180),
+    }));
+
+    let (events, outcome) = replay(
+        &opencode::OpenCode,
+        fixture!("opencode/free-limit.jsonl"),
+        ExitObservation {
+            code: Some(1),
+            timed_out: false,
+        },
+    )?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: "FIXTURE_USER_OR_PROVIDER_TEXT_021".into(),
+        pool: Some("opencode-free".into()),
+        resets_in_seconds: Some(240),
+    }));
+
     Ok(())
 }
 

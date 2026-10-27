@@ -111,6 +111,7 @@ jobs:
     timeout-minutes: 20
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      CARGO_INCREMENTAL: "0"
     permissions:
       contents: read
     steps:
@@ -201,14 +202,14 @@ jobs:
         working-directory: tools/front-door
         run: cargo shear
 
-  # #1339: stripping proc-macro dylibs broke macOS release builds at install
-  # time. Exercise the front door's release build.
-  rust-macos-release:
-    name: Rust macOS release smoke
+  rust-macos-tests:
+    name: Rust macOS tests
     runs-on: macos-15
     timeout-minutes: 20
     needs: macos-scope
     if: needs.macos-scope.outputs.run_macos == 'true'
+    env:
+      CARGO_INCREMENTAL: "0"
     permissions:
       contents: read
     steps:
@@ -262,12 +263,36 @@ jobs:
       - name: Run menu bar tests
         working-directory: apps/quota-menubar
         run: swift test
+
+  # #1339: stripping proc-macro dylibs broke macOS release builds at install
+  # time. Exercise the front door's release build without LTO for speed; the
+  # full-LTO build runs only at install (docs/runbooks/install.md).
+  rust-macos-release:
+    name: Rust macOS release smoke
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_macos == 'true'
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
       # Use a separate uncached target: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
         working-directory: tools/front-door
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
+          CARGO_PROFILE_RELEASE_LTO: "false"
         run: |
           cargo build --release --locked -p provenant --bin provenant
 
@@ -275,6 +300,7 @@ jobs:
         working-directory: tools/front-door
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
+          CARGO_PROFILE_RELEASE_LTO: "false"
         run: |
           cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
           mkdir -p "$RUNNER_TEMP/home"
@@ -388,6 +414,7 @@ jobs:
       - macos-scope
       - generated-reference
       - rust
+      - rust-macos-tests
       - rust-macos-release
       - rust-dependencies
       - generic-checks
@@ -402,7 +429,7 @@ jobs:
           blocking="$(echo "$NEEDS_JSON" | jq -r --arg run_macos "$RUN_MACOS" \
             'to_entries[]
              | select(.value.result != "success"
-                 and (.key != "rust-macos-release"
+                 and ((.key != "rust-macos-tests" and .key != "rust-macos-release")
                    or .value.result != "skipped"
                    or $run_macos != "false"))
              | "\(.key)=\(.value.result)"')"

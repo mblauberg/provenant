@@ -273,6 +273,7 @@ impl RunStore {
             for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {
+                    continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
                     profile: task.profile.clone(),
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
@@ -291,7 +292,8 @@ impl RunStore {
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
                 let waves = index as u64 / input.request.concurrency.max(1);
-                self.queue_ticket(tx, &attempt, input.request.concurrency, waves.saturating_mul(task.provider_timeout_seconds))?;
+                let class = if task.writer.is_some() { LaneClass::Writer } else { LaneClass::ReadOnly };
+                self.queue_ticket(tx, &attempt, class, input.request.concurrency,waves.saturating_mul(task.provider_timeout_seconds))?;
             }
             Ok(())
         })?;
@@ -738,8 +740,20 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
     if input.request.parent.is_some() && input.request.tasks.len() != 1 {
         return Err(RunError::Validation("a continuation has one task"));
     }
+    if input
+        .request
+        .fresh_continuation
+        .as_ref()
+        .is_some_and(|reason| {
+            reason.is_empty() || reason.len() > 4096 || input.request.parent.is_none()
+        })
+    {
+        return Err(RunError::Validation(
+            "fresh continuation needs a bounded reason and parent",
+        ));
+    }
     if !(1..=64).contains(&input.request.tasks.len())
-        || !(1..=8).contains(&input.request.concurrency)
+        || !(1..=16).contains(&input.request.concurrency)
         || input.attempts.len() != input.request.tasks.len()
     {
         return Err(RunError::Validation("task/concurrency bounds"));

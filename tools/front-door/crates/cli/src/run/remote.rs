@@ -3,6 +3,7 @@
 //! forward by ID. Routing, confinement and execution stay on the peer. This
 //! host keeps only a placement record under `fabric/remote-runs/`, never a
 //! copy of the peer's run state.
+use super::watch::{self, Scope};
 use super::{Condition, Edge, Fail, Reply, Status, condition_met, render_lanes, reply, state_name};
 use crate::{
     Cancel, Dispatch, Lanes, Output, Part,
@@ -19,7 +20,7 @@ use provenant_fabric_runtime::{
     },
     graph::AccessMode,
     hosts::{PeerAction, PeerResult},
-    identity::CrossHostProjectKey,
+    identity::{Address, CrossHostProjectKey},
     runs::RunResult,
 };
 use provenant_os::{
@@ -31,7 +32,8 @@ use run::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     time::{Duration, Instant},
 };
@@ -78,10 +80,22 @@ struct Placed {
 }
 impl Placement {
     fn select_target(&self, target: &crate::Target) -> Result<Vec<(HostId, AttemptId)>, Fail> {
-        let attempt = target.attempt.filter(|id| {
+        let (mut task, mut attempt) = (target.task, target.attempt);
+        // `RUN/ATTEMPT`: the second part names a placed attempt, not a task.
+        if let (Some(second), None) = (task, attempt) {
+            let candidate = AttemptId::from_bytes(*second.as_bytes());
+            if self
+                .attempts
+                .iter()
+                .any(|placed| placed.attempt_id == candidate)
+            {
+                (task, attempt) = (None, Some(candidate));
+            }
+        }
+        let attempt = attempt.filter(|id| {
             target.run.is_some() || self.attempts.iter().any(|placed| placed.attempt_id == *id)
         });
-        self.select(target.task, attempt)
+        self.select(task, attempt)
     }
     /// Attempts the target names, in dispatch order.
     fn select(
@@ -297,53 +311,76 @@ impl Peer {
         Ok(peer)
     }
     fn call(&self, host: HostId, action: PeerAction) -> Result<PeerResult, Fail> {
+        self.call_within(host, action, Duration::MAX)
+    }
+    /// One peer request that takes no longer than `remaining`, the time a wait
+    /// or watch has left, nor than the configured peer limit. The SSH child's
+    /// termination and reap come out of `remaining` too. Only the first read of
+    /// a zero-second wait has nothing left, and it keeps the one-second minimum.
+    fn call_within(
+        &self,
+        host: HostId,
+        action: PeerAction,
+        remaining: Duration,
+    ) -> Result<PeerResult, Fail> {
         let budget = WaitBudget::cli(
             self.clock.mono_now(),
-            self.context.config.limits.peer_seconds,
+            call_seconds(remaining, self.context.config.limits.peer_seconds),
         )
         .map_err(io_fail)?;
+        if remaining.is_zero() || remaining == Duration::MAX {
+            return self
+                .context
+                .peer(&self.clock, host, action, budget, &self.cancel)
+                .map_err(peer_failure_fail);
+        }
         self.context
-            .peer(&self.clock, host, action, budget, &self.cancel)
+            .peer_within(&self.clock, host, action, budget, &self.cancel, remaining)
             .map_err(peer_failure_fail)
     }
     /// Current owner records, one batched status read per host.
     fn records(&self, selected: &[(HostId, AttemptId)]) -> Result<Vec<run::AttemptRecord>, Fail> {
-        let mut by_host: BTreeMap<HostId, Vec<usize>> = BTreeMap::new();
-        for (index, (host, _)) in selected.iter().enumerate() {
-            by_host.entry(*host).or_default().push(index);
-        }
-        let mut records: Vec<Option<run::AttemptRecord>> = std::iter::repeat_with(|| None)
-            .take(selected.len())
-            .collect();
-        for (host, indices) in by_host {
-            for chunk in indices.chunks(100) {
-                let targets = chunk
-                    .iter()
-                    .map(|i| AttemptTarget {
-                        attempt: selected[*i].1,
-                        host: Some(host),
-                    })
-                    .collect();
-                let PeerResult::RunStatuses(page) =
-                    self.call(host, PeerAction::RunStatuses { targets })?
-                else {
-                    return Err(corrupt());
-                };
-                if page.len() != chunk.len() {
-                    return Err(corrupt());
-                }
-                for (index, record) in chunk.iter().zip(page) {
-                    if record.attempt_id != selected[*index].1 {
-                        return Err(corrupt());
-                    }
-                    records[*index] = Some(record);
-                }
-            }
-        }
-        records
-            .into_iter()
-            .collect::<Option<_>>()
-            .ok_or_else(corrupt)
+        self.records_within(selected, Duration::MAX)
+    }
+    /// Every read together takes no longer than `remaining`.
+    fn records_within(
+        &self,
+        selected: &[(HostId, AttemptId)],
+        remaining: Duration,
+    ) -> Result<Vec<run::AttemptRecord>, Fail> {
+        read_records(
+            selected,
+            &Window::new(remaining),
+            &mut |host, action, left| self.call_within(host, action, left),
+        )
+    }
+    /// The peer's newest lanes that `keep` accepts, plus every lane `tracked`
+    /// has seen running that those no longer include. Both reads together take
+    /// no longer than `remaining`.
+    fn newest(
+        &self,
+        host: HostId,
+        remaining: Duration,
+        tracked: &mut watch::Tracked,
+        keep: &dyn Fn(&run::AttemptRecord) -> bool,
+    ) -> Result<Vec<run::AttemptRecord>, Fail> {
+        read_newest(
+            host,
+            &Window::new(remaining),
+            tracked,
+            keep,
+            &mut |host, action, left| self.call_within(host, action, left),
+        )
+    }
+    /// What each queued or starting lane waits for, read from its owner. A
+    /// peer that cannot say, or does not know the question, leaves a lane with
+    /// no wait rather than failing the listing.
+    fn waits(
+        &self,
+        lanes: &[run::AttemptRecord],
+        selected: &[(HostId, AttemptId)],
+    ) -> Vec<run::LaneWait> {
+        fetch_waits(lanes, selected, |host, action| self.call(host, action))
     }
     /// Poll the owner until the condition holds or the reader deadline passes.
     /// Expiry never stops a provider. A transient peer failure is retried within
@@ -355,7 +392,7 @@ impl Peer {
         seconds: u64,
     ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
         poll_until(
-            || self.records(selected),
+            |remaining| self.records_within(selected, remaining),
             condition,
             Duration::from_secs(seconds),
             POLL,
@@ -363,43 +400,221 @@ impl Peer {
     }
 }
 
-/// Poll `fetch` until the condition holds or `budget` passes.
+/// The one deadline every transport call of a fetch shares. It is fixed when
+/// the fetch starts, so each call sees what the earlier ones left, not the
+/// fetch's whole budget.
+struct Window {
+    /// Unbounded when the budget is too large to represent.
+    deadline: Option<Instant>,
+    called: Cell<bool>,
+}
+impl Window {
+    // A reader deadline is a real transport boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn new(remaining: Duration) -> Self {
+        Self {
+            deadline: Instant::now().checked_add(remaining),
+            called: Cell::new(false),
+        }
+    }
+    /// The time the next transport call may take. The first call of a fetch
+    /// always runs, because a wait of zero seconds is one read. Every later
+    /// call refuses to start at or after the deadline, as a transient failure
+    /// the wait reports like any other that outlasts its budget.
+    // A reader deadline is a real transport boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn next(&self) -> Result<Duration, Fail> {
+        let first = !self.called.replace(true);
+        let Some(deadline) = self.deadline else {
+            return Ok(Duration::MAX);
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() && !first {
+            return Err(Fail::new(
+                Status::Error,
+                ErrorKind::PeerUnavailable,
+                "the wait's time ran out before the next peer read",
+            ));
+        }
+        Ok(left)
+    }
+}
+
+/// One peer request: the host, the action, and the time it may take.
+type Call<'a> = dyn FnMut(HostId, PeerAction, Duration) -> Result<PeerResult, Fail> + 'a;
+
+/// Current owner records, one batched status read per host and per 100 lanes.
+fn read_records(
+    selected: &[(HostId, AttemptId)],
+    window: &Window,
+    call: &mut Call<'_>,
+) -> Result<Vec<run::AttemptRecord>, Fail> {
+    let mut by_host: BTreeMap<HostId, Vec<usize>> = BTreeMap::new();
+    for (index, (host, _)) in selected.iter().enumerate() {
+        by_host.entry(*host).or_default().push(index);
+    }
+    let mut records: Vec<Option<run::AttemptRecord>> = std::iter::repeat_with(|| None)
+        .take(selected.len())
+        .collect();
+    for (host, indices) in by_host {
+        for chunk in indices.chunks(100) {
+            let targets = chunk
+                .iter()
+                .map(|i| AttemptTarget {
+                    attempt: selected[*i].1,
+                    host: Some(host),
+                })
+                .collect();
+            let PeerResult::RunStatuses(page) =
+                call(host, PeerAction::RunStatuses { targets }, window.next()?)?
+            else {
+                return Err(corrupt());
+            };
+            if page.len() != chunk.len() {
+                return Err(corrupt());
+            }
+            for (index, record) in chunk.iter().zip(page) {
+                if record.attempt_id != selected[*index].1 {
+                    return Err(corrupt());
+                }
+                records[*index] = Some(record);
+            }
+        }
+    }
+    records
+        .into_iter()
+        .collect::<Option<_>>()
+        .ok_or_else(corrupt)
+}
+
+/// A peer's newest lanes that `keep` accepts, then the tracked lanes they
+/// dropped. The lookup of those draws on the same window as the first read.
+fn read_newest(
+    host: HostId,
+    window: &Window,
+    tracked: &mut watch::Tracked,
+    keep: &dyn Fn(&run::AttemptRecord) -> bool,
+    call: &mut Call<'_>,
+) -> Result<Vec<run::AttemptRecord>, Fail> {
+    let PeerResult::RunStatuses(records) = call(
+        host,
+        PeerAction::Lanes {
+            all: true,
+            limit: PEER_LANES,
+        },
+        window.next()?,
+    )?
+    else {
+        return Err(corrupt());
+    };
+    if records.len() > usize::from(PEER_LANES) {
+        return Err(corrupt());
+    }
+    let page = records.into_iter().filter(|lane| keep(lane)).collect();
+    tracked.complete(page, |missing| {
+        let targets: Vec<_> = missing.iter().map(|attempt| (host, *attempt)).collect();
+        read_records(&targets, window, call)
+    })
+}
+
+/// Whole seconds one peer request may take: what is left of the wait, rounded
+/// up to the one-second minimum a budget has, and never more than the peer
+/// limit.
+fn call_seconds(remaining: Duration, peer_seconds: u64) -> u64 {
+    remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+        .clamp(1, peer_seconds.max(1))
+}
+
+/// Ask each lane's host what its queued or starting lanes wait for.
+fn fetch_waits(
+    lanes: &[run::AttemptRecord],
+    selected: &[(HostId, AttemptId)],
+    mut call: impl FnMut(HostId, PeerAction) -> Result<PeerResult, Fail>,
+) -> Vec<run::LaneWait> {
+    let mut by_host: BTreeMap<HostId, Vec<AttemptId>> = BTreeMap::new();
+    for lane in lanes.iter().filter(|lane| {
+        matches!(
+            lane.state,
+            run::AttemptState::Queued | run::AttemptState::Starting
+        )
+    }) {
+        if let Some((host, _)) = selected.iter().find(|(_, id)| *id == lane.attempt_id) {
+            by_host.entry(*host).or_default().push(lane.attempt_id);
+        }
+    }
+    let mut waits = Vec::new();
+    for (host, attempts) in by_host {
+        for chunk in attempts.chunks(100) {
+            let targets = chunk
+                .iter()
+                .map(|attempt| AttemptTarget {
+                    attempt: *attempt,
+                    host: Some(host),
+                })
+                .collect();
+            if let Ok(PeerResult::LaneWaits(found)) = call(host, PeerAction::LaneWaits { targets })
+            {
+                // Only a wait for a lane that was asked about is believed.
+                waits.extend(
+                    found
+                        .into_iter()
+                        .filter(|wait| chunk.contains(&wait.attempt_id)),
+                );
+            }
+        }
+    }
+    waits
+}
+
+/// Poll `fetch`, given the time left, until the condition holds or `budget`
+/// passes. No fetch starts after the deadline.
 // Remote peer polling uses a hard real-time budget.
 #[allow(clippy::disallowed_methods)]
 fn poll_until(
-    mut fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    mut fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
     condition: Condition,
     budget: Duration,
     poll: Duration,
 ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
     let deadline = Instant::now() + budget;
     loop {
-        match fetch() {
-            Ok(lanes) => {
+        let last = match watch::tick(&mut fetch, deadline)? {
+            watch::Tick::Lanes(lanes) => {
                 let met = condition_met(&lanes, condition);
                 if met || Instant::now() >= deadline {
                     return Ok((lanes, met));
                 }
+                Ok(lanes)
             }
-            Err(fail) if fail.kind == ErrorKind::PeerUnavailable => {
-                if Instant::now() >= deadline {
-                    return Err(fail);
-                }
-            }
-            Err(fail) => return Err(fail),
+            watch::Tick::Retry(fail) => Err(fail),
+        };
+        watch::pause(poll, deadline);
+        if Instant::now() >= deadline {
+            return last.map(|lanes| (lanes, false));
         }
-        std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
     }
 }
 
 /// Local lane rendering plus each row's owning host. Result paths are the
 /// peer's; read them with `output`.
 fn render(
+    peer: &Peer,
     lanes: &[run::AttemptRecord],
     selected: &[(HostId, AttemptId)],
     edge: &Edge<'_>,
 ) -> (Value, String) {
-    let (mut data, human) = render_lanes(lanes, None, edge.roots.state.as_path());
+    let waits = peer.waits(lanes, selected);
+    render_with_waits(lanes, &waits, selected, edge.roots.state.as_path())
+}
+fn render_with_waits(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    selected: &[(HostId, AttemptId)],
+    state: &std::path::Path,
+) -> (Value, String) {
+    let (mut data, human) = render_lanes(lanes, waits, None, state);
     if let Some(rows) = data["lanes"].as_array_mut() {
         for (row, lane) in rows.iter_mut().zip(lanes) {
             let host = selected
@@ -425,6 +640,44 @@ pub(super) fn names_local_host(edge: &Edge<'_>, host: &str) -> Result<bool, Fail
     let local = peer.context.identity.host;
     Ok(HostId::parse(host).is_ok_and(|id| id == local)
         || peer.context.peer_host(host) == Some(local))
+}
+
+/// Where a host named on the command line runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Site {
+    Local,
+    Peer(HostId),
+}
+
+/// Resolve `--host`: this machine, or a configured peer by label or host ID.
+pub(super) fn site(edge: &Edge<'_>, host: &str) -> Result<Site, Fail> {
+    if names_local_host(edge, host)? {
+        return Ok(Site::Local);
+    }
+    let peer = Peer::open(edge)?;
+    peer.project()?;
+    peer.context
+        .peer_host(host)
+        .map(Site::Peer)
+        .ok_or_else(|| unknown_host(host))
+}
+
+/// The host a two-part `HOST/ATTEMPT` qualifier names, when it is a host ID
+/// of this machine or a configured peer rather than a run. A qualifier that
+/// cannot be checked (no Fabric identity here) is a run.
+pub(super) fn qualifier_site(edge: &Edge<'_>, qualifier: RunId) -> Option<Site> {
+    let id = HostId::from_bytes(*qualifier.as_bytes());
+    let peer = Peer::open(edge).ok()?;
+    if peer.context.identity.host == id {
+        Some(Site::Local)
+    } else {
+        peer.context
+            .config
+            .peers
+            .values()
+            .any(|configured| configured.host == id)
+            .then_some(Site::Peer(id))
+    }
 }
 
 pub(super) fn names_peer(edge: &Edge<'_>, host: &str) -> Result<bool, Fail> {
@@ -574,7 +827,12 @@ pub(super) fn dispatch(
         }
         None => (lanes, None),
     };
-    let (mut data, human) = render(&lanes, &selected, edge);
+    // A waited report makes no peer read after the wait's deadline.
+    let (mut data, human) = if met.is_some() {
+        render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path())
+    } else {
+        render(&peer, &lanes, &selected, edge)
+    };
     data["run_id"] = json!(run_id);
     data["operation_id"] = json!(batch.operation_id);
     data["host"] = json!(host);
@@ -601,6 +859,8 @@ pub(super) fn dispatch(
 pub(super) fn lanes(
     command: &Lanes,
     edge: &Edge<'_>,
+    json: bool,
+    emit: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let placements = command
         .id
@@ -629,18 +889,40 @@ pub(super) fn lanes(
             }
         }
     }
-    let peer = Peer::open_for(edge, placed)?;
-    if let Some(seconds) = command.wait {
-        let (lanes, met) = peer.wait(&selected, command.condition, seconds)?;
-        let (mut data, human) = render(&lanes, &selected, edge);
-        data["condition_met"] = json!(met);
-        return Ok(Some((data, human, !met)));
+    if command.session.is_some() {
+        return Err(unsupported("--session"));
     }
+    let peer = Peer::open_for(edge, placed)?;
     let since = command
         .since
         .map(|since| WallTime::from_micros(since.as_microsecond()))
         .transpose()
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
+    if command.wait.is_some() || command.watch.is_some() {
+        let scope = Scope {
+            exact: command
+                .id
+                .iter()
+                .filter_map(|target| target.attempt)
+                .collect(),
+            since,
+            entered: watch::entered()?,
+            explicit: true,
+            snapshot: true,
+        };
+        let fetch = |remaining| peer.records_within(&selected, remaining);
+        let first = selected
+            .first()
+            .map(|(host, _)| *host)
+            .ok_or_else(corrupt)?;
+        let host_of = |lane: &run::AttemptRecord| {
+            selected
+                .iter()
+                .find(|(_, attempt)| *attempt == lane.attempt_id)
+                .map_or(first, |(host, _)| *host)
+        };
+        return armed(command, scope, fetch, &host_of, edge, json, emit).map(Some);
+    }
     let lanes: Vec<_> = peer
         .records(&selected)?
         .into_iter()
@@ -654,8 +936,75 @@ pub(super) fn lanes(
         .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
         .take(usize::try_from(command.limit).unwrap_or(usize::MAX))
         .collect();
-    let (data, human) = render(&lanes, &selected, edge);
+    let (data, human) = render(&peer, &lanes, &selected, edge);
     Ok(Some((data, human, false)))
+}
+
+/// A wait or watch over peer lanes. `host_of` names the host each runs on.
+fn armed(
+    command: &Lanes,
+    scope: Scope,
+    fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
+    host_of: &dyn Fn(&run::AttemptRecord) -> HostId,
+    edge: &Edge<'_>,
+    json: bool,
+    emit: &mut dyn FnMut(&str) -> Result<(), Fail>,
+) -> Result<(Value, String, bool), Fail> {
+    let hosts = |lanes: &[run::AttemptRecord]| -> Vec<(HostId, AttemptId)> {
+        lanes
+            .iter()
+            .map(|lane| (host_of(lane), lane.attempt_id))
+            .collect()
+    };
+    if let Some(seconds) = command.watch {
+        let watched = watch::watch(
+            fetch,
+            scope,
+            Duration::from_secs(seconds),
+            POLL,
+            &mut |lane| {
+                let host = Some(host_of(lane));
+                let text = if json {
+                    watch::json_line(lane, host)
+                } else {
+                    watch::line(lane, host)
+                };
+                emit(&format!("{text}\n"))
+            },
+        )?;
+        let (mut data, _) = render_with_waits(
+            &watched.lanes,
+            &[],
+            &hosts(&watched.lanes),
+            edge.roots.state.as_path(),
+        );
+        data["condition_met"] = json!(watched.settled);
+        let human = if json {
+            String::new()
+        } else {
+            watch::end_line(&watched)
+        };
+        return Ok((data, human, !watched.settled));
+    }
+    let seconds = command.wait.ok_or_else(corrupt)?;
+    let waited = watch::wait(
+        fetch,
+        scope,
+        command.condition,
+        Duration::from_secs(seconds),
+        POLL,
+    )?;
+    let (mut data, human) = render_with_waits(
+        &waited.lanes,
+        &[],
+        &hosts(&waited.lanes),
+        edge.roots.state.as_path(),
+    );
+    data["condition_met"] = json!(waited.met);
+    if waited.ignored > 0 {
+        data["ignored_settled"] = json!(waited.ignored);
+    }
+    Ok((data, human, !waited.met))
 }
 
 /// `lanes --host`: the peer's own lanes, read over the peer channel. The
@@ -665,6 +1014,8 @@ pub(super) fn host_lanes(
     command: &Lanes,
     host: &str,
     edge: &Edge<'_>,
+    json: bool,
+    emit: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Result<(Value, String, bool), Fail> {
     let peer = Peer::open(edge)?;
     peer.project()?;
@@ -674,6 +1025,37 @@ pub(super) fn host_lanes(
         .ok_or_else(|| unknown_host(host))?;
     let limit = u16::try_from(command.limit)
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --limit"))?;
+    // A session label names an agent on the peer, which stamps its own lanes.
+    let owner = command
+        .session
+        .as_deref()
+        .map(|label| {
+            Address::new(id, label)
+                .map(|address| address.actor)
+                .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
+        })
+        .transpose()?;
+    let by_session =
+        |lane: &run::AttemptRecord| owner.is_none_or(|owner| lane.verified_owner == Some(owner));
+    let since = command
+        .since
+        .map(|since| WallTime::from_micros(since.as_microsecond()))
+        .transpose()
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
+    if command.wait.is_some() || command.watch.is_some() {
+        // The peer's newest lanes show what is new; a lane seen running stays
+        // tracked by ID after later dispatches push it off that page.
+        let mut tracked = watch::Tracked::default();
+        let fetch = |remaining| peer.newest(id, remaining, &mut tracked, &by_session);
+        let scope = Scope {
+            exact: BTreeSet::new(),
+            since,
+            entered: watch::entered()?,
+            explicit: false,
+            snapshot: true,
+        };
+        return armed(command, scope, fetch, &|_| id, edge, json, emit);
+    }
     let PeerResult::RunStatuses(records) = peer.call(
         id,
         PeerAction::Lanes {
@@ -687,13 +1069,9 @@ pub(super) fn host_lanes(
     if records.len() > usize::from(limit) {
         return Err(corrupt());
     }
-    let since = command
-        .since
-        .map(|since| WallTime::from_micros(since.as_microsecond()))
-        .transpose()
-        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
     let lanes: Vec<_> = records
         .into_iter()
+        .filter(&by_session)
         .filter(|lane| {
             command.states.is_empty()
                 || command
@@ -705,11 +1083,11 @@ pub(super) fn host_lanes(
         .collect();
     let selected: Vec<_> = lanes.iter().map(|lane| (id, lane.attempt_id)).collect();
     let (data, human) = if selected.is_empty() {
-        let (mut data, human) = render_lanes(&[], None, edge.roots.state.as_path());
+        let (mut data, human) = render_lanes(&[], &[], None, edge.roots.state.as_path());
         data["host"] = json!(id);
         (data, format!("host {id}\n{human}"))
     } else {
-        render(&lanes, &selected, edge)
+        render(&peer, &lanes, &selected, edge)
     };
     Ok((data, human, false))
 }
@@ -727,6 +1105,33 @@ pub(super) fn output(
             "attempt required",
         ));
     };
+    read_output(command, host, attempt, Peer::open_for(edge, [placement])?)
+}
+
+/// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
+/// local placement. The peer resolves the attempt and applies its own
+/// confinement and access rules; any run or task in the target is not checked.
+pub(super) fn output_on_peer(
+    command: &Output,
+    host: HostId,
+    edge: &Edge<'_>,
+) -> Result<(Value, String), Fail> {
+    let attempt = command
+        .attempt
+        .0
+        .attempt
+        .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
+    let peer = Peer::open(edge)?;
+    peer.project()?;
+    read_output(command, host, attempt, peer)
+}
+
+fn read_output(
+    command: &Output,
+    host: HostId,
+    attempt: AttemptId,
+    peer: Peer,
+) -> Result<(Value, String), Fail> {
     let part = match command.part {
         Part::Result => OutputPart::Result,
         Part::Stderr => OutputPart::Stderr,
@@ -739,7 +1144,6 @@ pub(super) fn output(
     if command.trace {
         return Err(unsupported("--trace"));
     }
-    let peer = Peer::open_for(edge, [placement])?;
     let input = OutputInput::Read {
         target: AttemptTarget {
             attempt,
@@ -869,7 +1273,9 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                 if !met && status == Status::Ok {
                     status = Status::Timeout;
                 }
-                let (rendered, text) = render(&lanes, &selected, edge);
+                // No peer read after the wait's deadline.
+                let (rendered, text) =
+                    render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path());
                 data["lanes"] = rendered["lanes"].clone();
                 data["condition_met"] = json!(met);
                 human.push_str(&text);
@@ -960,6 +1366,106 @@ mod tests {
     use provenant_core::RootInputs;
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    fn lane(seed: u8, state: &str) -> Result<run::AttemptRecord> {
+        Ok(serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([seed; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([seed; 16]),
+            "operation_id": "peer-wait",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(100)?,
+            "state": {"state": state},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": provenant_records::CanonicalV1::file_digest(b""),
+                "bytes": 1,
+                "complete": true,
+                "redacted": false
+            }
+        }))?)
+    }
+
+    #[test]
+    fn a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones() -> Result {
+        let host = HostId::from_bytes([9; 16]);
+        let (queued, starting) = (lane(1, "queued")?, lane(2, "starting")?);
+        let lanes = [queued.clone(), starting.clone()];
+        let selected: Vec<_> = lanes.iter().map(|l| (host, l.attempt_id)).collect();
+        let wait = |lane: &run::AttemptRecord, text: &str| run::LaneWait {
+            attempt_id: lane.attempt_id,
+            lane_class: run::LaneClass::ReadOnly,
+            waiting_for: text.into(),
+        };
+        let mut asked = Vec::new();
+        let waits = fetch_waits(&lanes, &selected, |host, action| {
+            let PeerAction::LaneWaits { targets } = action else {
+                return Err(corrupt());
+            };
+            asked.push((host, targets.iter().map(|t| t.attempt).collect::<Vec<_>>()));
+            Ok(PeerResult::LaneWaits(vec![
+                wait(&queued, "launch: not yet handed to a guardian"),
+                wait(&starting, "read-only startup spacing: 1.2 s left of 2.0 s"),
+                // Not asked about, so not believed.
+                run::LaneWait {
+                    attempt_id: AttemptId::from_bytes([77; 16]),
+                    lane_class: run::LaneClass::Writer,
+                    waiting_for: "stray".into(),
+                },
+            ]))
+        });
+        assert_eq!(
+            asked,
+            vec![(host, vec![queued.attempt_id, starting.attempt_id])]
+        );
+        assert_eq!(waits.len(), 2);
+        let (data, human) =
+            render_with_waits(&lanes, &waits, &selected, std::path::Path::new("/state"));
+        assert_eq!(data["lanes"][0]["lane_class"], "read_only");
+        assert_eq!(
+            data["lanes"][0]["waiting_for"],
+            "launch: not yet handed to a guardian"
+        );
+        assert_eq!(
+            data["lanes"][1]["waiting_for"],
+            "read-only startup spacing: 1.2 s left of 2.0 s"
+        );
+        assert_eq!(data["lanes"][1]["host"], json!(host));
+        assert!(human.contains("(read-only startup spacing: 1.2 s left of 2.0 s)"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_peer_that_cannot_say_leaves_a_lane_without_a_wait_and_running_lanes_are_not_asked()
+    -> Result {
+        let host = HostId::from_bytes([9; 16]);
+        let (running, starting) = (lane(3, "running")?, lane(4, "starting")?);
+        let lanes = [running.clone(), starting.clone()];
+        let selected: Vec<_> = lanes.iter().map(|l| (host, l.attempt_id)).collect();
+        let mut asked = Vec::new();
+        // An older peer refuses the action it does not know.
+        let waits = fetch_waits(&lanes, &selected, |_, action| {
+            if let PeerAction::LaneWaits { targets } = action {
+                asked.extend(targets.iter().map(|t| t.attempt));
+            }
+            Err(corrupt())
+        });
+        assert!(waits.is_empty());
+        assert_eq!(asked, vec![starting.attempt_id]);
+        let (data, _) =
+            render_with_waits(&lanes, &waits, &selected, std::path::Path::new("/state"));
+        assert_eq!(data["lanes"][1]["lane_class"], Value::Null);
+        assert_eq!(data["lanes"][1]["waiting_for"], Value::Null);
+        Ok(())
+    }
 
     #[test]
     fn peer_writer_moves_its_base_into_the_new_worktree() -> Result {
@@ -1207,7 +1713,7 @@ mod tests {
     fn wait_retries_a_transient_peer_failure_within_budget() {
         let mut calls = 0;
         let out = poll_until(
-            || {
+            |_| {
                 calls += 1;
                 if calls < 3 {
                     Err(unavailable("workshop: ssh timed out"))
@@ -1227,7 +1733,7 @@ mod tests {
     fn wait_reports_the_last_cause_when_the_budget_runs_out() {
         let mut calls = 0;
         let out = poll_until(
-            || {
+            |_| {
                 calls += 1;
                 Err(unavailable(&format!("workshop: failure {calls}")))
             },
@@ -1242,10 +1748,252 @@ mod tests {
     }
 
     #[test]
+    fn an_armed_peer_wait_reports_the_last_failed_read() -> Result {
+        let first = running(1);
+        let mut calls = 0;
+        let out = watch::wait(
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(vec![first.clone()])
+                } else {
+                    Err(unavailable("workshop: ssh timed out"))
+                }
+            },
+            Scope {
+                exact: BTreeSet::new(),
+                since: None,
+                entered: WallTime::from_micros(1)?,
+                explicit: false,
+                snapshot: false,
+            },
+            Condition::All,
+            Duration::from_millis(30),
+            Duration::from_millis(1),
+        );
+        let fail = out.err().expect("the final peer read failed");
+        assert_eq!(fail.kind.code(), "PEER_UNAVAILABLE");
+        assert!(fail.message.contains("ssh timed out"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_armed_peer_watch_reports_the_last_failed_read() -> Result {
+        let first = running(1);
+        let mut calls = 0;
+        let out = watch::watch(
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(vec![first.clone()])
+                } else {
+                    Err(unavailable("workshop: ssh timed out"))
+                }
+            },
+            Scope {
+                exact: BTreeSet::new(),
+                since: None,
+                entered: WallTime::from_micros(1)?,
+                explicit: false,
+                snapshot: false,
+            },
+            Duration::from_millis(30),
+            Duration::from_millis(1),
+            &mut |_| Ok(()),
+        );
+        let fail = out.err().expect("the final peer read failed");
+        assert_eq!(fail.kind.code(), "PEER_UNAVAILABLE");
+        assert!(fail.message.contains("ssh timed out"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_peer_call_is_capped_by_the_time_left_and_the_peer_limit() {
+        let secs = Duration::from_secs;
+        assert_eq!(call_seconds(secs(1), 30), 1);
+        assert_eq!(call_seconds(Duration::from_millis(1500), 30), 2);
+        assert_eq!(call_seconds(secs(25), 30), 25);
+        assert_eq!(call_seconds(secs(3600), 30), 30);
+        assert_eq!(call_seconds(Duration::MAX, 30), 30);
+        // An exhausted budget still asks for the one-second minimum.
+        assert_eq!(call_seconds(Duration::ZERO, 30), 1);
+    }
+
+    #[test]
+    // The deadline under test is a real-time reader boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn wait_starts_no_fetch_after_its_deadline() {
+        let mut starts = Vec::new();
+        let begun = Instant::now();
+        let out = poll_until(
+            |left| {
+                starts.push((Instant::now(), left));
+                Err(unavailable("workshop: ssh timed out"))
+            },
+            Condition::All,
+            Duration::from_millis(40),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            out.err().map(|fail| fail.kind.code()),
+            Some("PEER_UNAVAILABLE")
+        );
+        assert_eq!(starts.len(), 1);
+        assert!(starts[0].1 <= Duration::from_millis(40), "{starts:?}");
+        assert!(starts[0].0 < begun + Duration::from_millis(40));
+    }
+
+    fn running(id: u8) -> run::AttemptRecord {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([id; 16]),
+            "run_id": RunId::from_bytes([9; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "remote-fixture",
+            "attempt_number": u64::from(id),
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(1).expect("time"),
+            "state": {"state":"running"},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": provenant_records::CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))
+        .expect("attempt record")
+    }
+    fn attempt(id: u8) -> AttemptId {
+        AttemptId::from_bytes([id; 16])
+    }
+    /// What a peer answers: a status record for each target, and an empty
+    /// newest page. Each call first takes `delay`, as a slow transport would.
+    #[allow(clippy::disallowed_methods)]
+    fn answer(action: PeerAction, delay: Duration) -> std::result::Result<PeerResult, Fail> {
+        std::thread::sleep(delay);
+        Ok(PeerResult::RunStatuses(match action {
+            PeerAction::RunStatuses { targets } => targets
+                .iter()
+                .map(|target| running(target.attempt.as_bytes()[0]))
+                .collect(),
+            _ => Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn every_read_of_a_fetch_gets_only_the_time_the_earlier_ones_left() {
+        // One host with 101 lanes reads in two chunks, then a second host.
+        let mut selected: Vec<_> = (1..=101)
+            .map(|id| (HostId::from_bytes([1; 16]), attempt(id)))
+            .collect();
+        selected.push((HostId::from_bytes([2; 16]), attempt(102)));
+        let mut left = Vec::new();
+        let window = Window::new(Duration::from_millis(900));
+        let records = read_records(&selected, &window, &mut |_, action, budget| {
+            left.push(budget);
+            answer(action, Duration::from_millis(250))
+        })
+        .expect("three reads fit the budget");
+        assert_eq!(records.len(), 102);
+        assert_eq!(left.len(), 3);
+        // Each read is bounded by what the earlier ones left, not by 900 ms.
+        assert!(left[1] <= Duration::from_millis(700), "{left:?}");
+        assert!(left[2] <= Duration::from_millis(450), "{left:?}");
+        assert!(left[2] < left[1] && left[1] < left[0], "{left:?}");
+    }
+
+    #[test]
+    fn no_read_starts_at_or_after_the_deadline() {
+        let selected = [
+            (HostId::from_bytes([1; 16]), attempt(1)),
+            (HostId::from_bytes([2; 16]), attempt(2)),
+            (HostId::from_bytes([3; 16]), attempt(3)),
+        ];
+        let mut starts = 0;
+        let window = Window::new(Duration::from_millis(100));
+        let failure = read_records(&selected, &window, &mut |_, action, _| {
+            starts += 1;
+            answer(action, Duration::from_millis(150))
+        })
+        .expect_err("the first read used the whole budget");
+        assert_eq!(failure.kind.code(), "PEER_UNAVAILABLE");
+        assert_eq!(starts, 1, "later hosts are never asked");
+    }
+
+    #[test]
+    fn a_zero_second_budget_still_makes_its_one_read() {
+        let selected = [(HostId::from_bytes([1; 16]), attempt(1))];
+        let mut starts = 0;
+        let window = Window::new(Duration::ZERO);
+        let records = read_records(&selected, &window, &mut |_, action, _| {
+            starts += 1;
+            answer(action, Duration::ZERO)
+        })
+        .expect("the initial read runs");
+        assert_eq!((records.len(), starts), (1, 1));
+    }
+
+    /// A tracker that has seen lane 1 running, so a page without it needs a
+    /// lookup.
+    fn tracking_one() -> watch::Tracked {
+        let mut tracked = watch::Tracked::default();
+        tracked
+            .complete(vec![running(1)], |_| Err(corrupt()))
+            .expect("a page that holds the lane needs no lookup");
+        tracked
+    }
+
+    #[test]
+    fn the_missing_lane_lookup_shares_the_first_reads_deadline() {
+        let host = HostId::from_bytes([1; 16]);
+        let keep = |_: &run::AttemptRecord| true;
+        // The first read leaves time for the lookup, but only what it left.
+        let mut left = Vec::new();
+        let window = Window::new(Duration::from_millis(800));
+        let lanes = read_newest(
+            host,
+            &window,
+            &mut tracking_one(),
+            &keep,
+            &mut |_, action, budget| {
+                left.push(budget);
+                answer(action, Duration::from_millis(300))
+            },
+        )
+        .expect("both reads fit");
+        assert_eq!((lanes.len(), left.len()), (1, 2));
+        assert!(left[1] <= Duration::from_millis(500), "{left:?}");
+
+        // The first read used everything: the lookup must not start, even
+        // though a zero remainder would round up to a one-second budget.
+        let mut starts = 0;
+        let window = Window::new(Duration::from_millis(100));
+        let failure = read_newest(
+            host,
+            &window,
+            &mut tracking_one(),
+            &keep,
+            &mut |_, action, _| {
+                starts += 1;
+                answer(action, Duration::from_millis(150))
+            },
+        )
+        .expect_err("the budget ran out before the lookup");
+        assert_eq!(failure.kind.code(), "PEER_UNAVAILABLE");
+        assert_eq!(starts, 1);
+    }
+
+    #[test]
     fn wait_does_not_retry_a_non_transient_failure() {
         let mut calls = 0;
         let out = poll_until(
-            || {
+            |_| {
                 calls += 1;
                 Err(corrupt())
             },

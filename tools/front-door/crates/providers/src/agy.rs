@@ -37,8 +37,8 @@ const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 /// sidecars or knowledge: its state lives and dies in the private home. Its
 /// sign-in is in the login keychain, so the private home links only that one
 /// file, read-only. Headless mode auto-denies every tool permission it cannot
-/// prompt for, so writers auto-approve tools: our confinement profile, not
-/// agy's prompts, bounds what a writer can do. Its own sandbox cannot nest
+/// prompt for, so lanes auto-approve tools: our confinement profile, not
+/// agy's prompts, bounds what a lane can do. Its own sandbox cannot nest
 /// inside ours.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -73,9 +73,8 @@ fn prepare(
         // https://www.agy.dev/docs/cli/reference/ (--add-dir)
         argv.extend(["--add-dir".into(), plan.scratch.path.as_os_str().to_owned()]);
     }
-    if access == Access::WorktreeWrite {
-        argv.push("--dangerously-skip-permissions".into());
-    } else {
+    argv.push("--dangerously-skip-permissions".into());
+    if access == Access::ReadOnly {
         // Headless mode auto-denies reads outside the workspace, which holds
         // only the working directory, so every other read root joins it.
         for root in &plan.read_roots {
@@ -118,16 +117,18 @@ fn prepare(
             target: keychain.clone(),
         },
     ];
-    // Only writers run commands, with the system programs and tools Codex and
-    // Claude writers get.
+    // Both lanes run system commands; only writers get the additional tools.
     let mut runtime_reads = Vec::new();
-    let mut tool_exec_roots = Vec::new();
+    let mut tool_exec_roots = vec![
+        subtree("/bin"),
+        subtree("/usr/bin"),
+        subtree("/usr/libexec"),
+    ];
+    env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]);
     if shell {
-        env.extend([
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ]);
-        tool_exec_roots.extend(["/bin", "/usr/bin", "/usr/libexec"].map(subtree));
         crate::launch::rust_tools(
             input,
             access,
@@ -211,6 +212,8 @@ struct ResultWire {
     status: String,
     response: String,
     error: Option<String>,
+    #[serde(default)]
+    denied_actions: serde_json::Value,
     usage: Usage,
 }
 #[derive(Deserialize)]
@@ -272,6 +275,40 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     pool: None,
                     resets_in_seconds: resets_in(message),
                 });
+            } else if let Some(denied) = result.denied_actions.as_array().and_then(|a| a.first()) {
+                if !result.response.is_empty() {
+                    events.push(E::Text(result.response.clone()));
+                }
+                let name = denied
+                    .get("display_name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                let action = if (1..=64).contains(&name.len())
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    name
+                } else {
+                    "unknown action"
+                };
+                if result.status == "SUCCESS"
+                    && result.error.is_none()
+                    && result.response.is_empty()
+                {
+                    events.push(E::Denied {
+                        action: action.into(),
+                    });
+                } else {
+                    events.push(E::DeniedNote {
+                        action: action.into(),
+                    });
+                    events.push(if result.error.is_some() || result.status != "SUCCESS" {
+                        E::Error
+                    } else {
+                        E::Terminal
+                    });
+                }
             } else if result.error.is_some() || result.status != "SUCCESS" {
                 if !result.response.is_empty() {
                     events.push(E::Text(result.response));

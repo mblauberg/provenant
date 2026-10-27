@@ -89,6 +89,7 @@ fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
         "array" => !value.is_array(),
         "string" => !value.is_string(),
         "integer" => !value.as_number().is_some_and(|n| n.is_i64() || n.is_u64()),
+        "boolean" => !value.is_boolean(),
         "null" => !value.is_null(),
         _ => true,
     }) {
@@ -231,6 +232,7 @@ fn sample(root: &Value, schema: &Value) -> Option<Value> {
             .map(Value::String)
             .find(|v| accepts(root, schema, v)),
         "integer" => Some(json!(schema["minimum"].as_u64().unwrap_or(0))),
+        "boolean" => Some(Value::Bool(false)),
         "null" => Some(Value::Null),
         _ => None,
     }
@@ -366,6 +368,10 @@ fn candidates(root: &Value, schema: &Value, _value: &Value, valid: bool) -> Vec<
                 }
             }
         }
+        (Some("boolean"), true) => out.extend([json!(false), json!(true)]),
+        (Some("boolean"), false) => {
+            out.extend([Value::Null, json!(0), json!("false"), json!([]), json!({})]);
+        }
         (Some("object"), false) => out.push(json!("wrong type")),
         (Some("null"), true) => out.push(Value::Null),
         (Some("null"), false) => out.push(json!({"not":"null"})),
@@ -391,7 +397,7 @@ fn replace(request: &Value, path: &str, value: Value) -> Option<Value> {
     Some(result)
 }
 
-fn normalise(tool: &str, value: &mut Value) {
+fn normalise(value: &mut Value) {
     fn paths(value: &mut Value) {
         if let Some(object) = value.as_object_mut() {
             if object.get("encoding") == Some(&json!("native_bytes")) {
@@ -407,15 +413,6 @@ fn normalise(tool: &str, value: &mut Value) {
         }
     }
     paths(value);
-    if tool == "fabric_run" && value["op"] == "submit" {
-        let n = value["concurrency"].as_u64().unwrap_or(0) as usize;
-        if let Some(tasks) = value["tasks"].as_array_mut()
-            && tasks.len() < n
-            && let Some(task) = tasks.first().cloned()
-        {
-            tasks.resize(n, task);
-        }
-    }
 }
 
 fn compare(
@@ -486,7 +483,7 @@ fn walk(
                         sample(root, option).filter(|v| accepts(root, schema, v) && v != value)
                         && let Some(mut changed) = replace(request, path, v)
                     {
-                        normalise(tool, &mut changed);
+                        normalise(&mut changed);
                         compare(tool, root, &changed, path, true, counts);
                         walk(tool, root, schema, &changed, path, false, counts);
                     }
@@ -502,7 +499,7 @@ fn walk(
         .filter(|v| v != value)
     {
         if let Some(mut changed) = replace(request, path, candidate) {
-            normalise(tool, &mut changed);
+            normalise(&mut changed);
             compare(tool, root, &changed, path, true, counts);
         }
     }
@@ -594,8 +591,10 @@ fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
             .cloned()
             .unwrap_or_else(|| vec![root.clone()]);
         for operation in &operations {
-            let mut request = sample(root, operation).expect("generated valid operation");
-            normalise(name, &mut request);
+            let mut request = sample(root, operation).unwrap_or_else(|| {
+                panic!("cannot generate valid operation for {name}: {operation}")
+            });
+            normalise(&mut request);
             compare(name, root, &request, "operation", true, &mut counts);
             walk(name, root, operation, &request, "", true, &mut counts);
         }

@@ -102,6 +102,26 @@ Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
   `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`
 - Owner: `crates/providers/src/`
 
+### Agy read-only commands and denials
+
+Agy auto-approves tools in headless read-only and writer lanes. The outer
+confinement profile is the boundary: read-only lanes may execute system
+programs from `/bin`, `/usr/bin` and `/usr/libexec`, with PATH restricted to
+`/usr/bin:/bin` and global and system Git configuration disabled. Their only
+write grants remain attempt scratch and private state. Like read-only Codex
+lanes, read-only Agy lanes can run system programs with the lane's existing
+network access, so read roots must not hold anything the lane may not see.
+On a successful Agy result, a denial with an empty response fails the lane as
+`provider denied: <name>`; a non-empty response succeeds and records the denial
+as a non-fatal note. Denials do not override an earlier failure.
+- Why: headless permission prompts otherwise deny read-only commands, and a
+  remaining denial must not be mistaken for an empty response.
+- Test: `crates/providers/src/tests.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
+  `::agy_writers_exec_what_codex_writers_exec`;
+  `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_compiled_profile_denies_read_root_write`;
+  `tests/dispatch_provider.rs::agy_denial_result_reaches_terminal_reason`
+- Owner: `crates/providers/src/agy.rs`, `crates/cli/src/run.rs`
+
 ### Claude token refresh
 
 The sandbox never refreshes or writes the keychain. The host refreshes a
@@ -124,10 +144,15 @@ fingerprint identity fields only, and an undetectable identity is `unknown`.
 Quota capture checks identity before and after a probe and refuses a changed
 attribution. Probes run in a fresh 0700 directory under the host state root;
 failing to create one is a host fault, not an identity change.
-- Why: misattribution would spend or expose the wrong account.
+Version-probe refusals report termination, timeout and stdout truncation, or
+identify empty output, without quoting captured contents.
+- Why: misattribution would spend or expose the wrong account; a transient
+  version-probe failure needs an actionable diagnostic without output disclosure.
 - Test: `crates/providers/src/quota_live/claude.rs::fixed_directory_rejects_changed_account_fingerprint`;
-  `crates/providers/src/host.rs::start_up_sweeps_crashed_probes_but_never_a_live_one`
-- Owner: `crates/providers/src/identity.rs`, `crates/providers/src/host.rs`
+  `crates/providers/src/host.rs::start_up_sweeps_crashed_probes_but_never_a_live_one`;
+  `crates/cli/src/run/provider.rs::version_probe_reports_outcomes_without_disclosing_output`
+- Owner: `crates/providers/src/identity.rs`, `crates/providers/src/host.rs`,
+  `crates/cli/src/run/provider.rs`
 
 ### Pins filter, credentials stay put
 

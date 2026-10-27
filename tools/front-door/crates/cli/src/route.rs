@@ -17,7 +17,7 @@ pub enum Route {
     /// Show the catalogue, pools, configured weights and pacing policy.
     List(RouteListRequest),
     /// Resolve a named route or exact model for preview.
-    Resolve(RouteRequest),
+    Resolve(RouteResolve),
     /// Add or update a model in a user-configured pool.
     Set(RouteSet),
     /// Remove a model from a user-configured pool.
@@ -87,6 +87,14 @@ pub struct RoutePacing {
     pub policy: PacingChoice,
 }
 #[derive(Debug, Args)]
+pub struct RouteResolve {
+    /// Route name, ADAPTER/ID model, or a model ID given without its adapter
+    #[arg(conflicts_with_all = ["model", "route"])]
+    pub name: Option<String>,
+    #[command(flatten)]
+    pub request: RouteRequest,
+}
+#[derive(Debug, Clone, Args)]
 pub struct RouteRequest {
     /// Exact model in ADAPTER/ID form
     #[arg(long, conflicts_with = "route")]
@@ -143,8 +151,164 @@ impl RouteRequest {
         })
     }
 }
+/// What a `route resolve` name stands for.
+#[derive(Debug, PartialEq, Eq)]
+enum Named {
+    Route(String),
+    Model(String),
+}
+/// Resolve a name to a route or model. A route name wins, then an exact model
+/// (anything with an adapter, which resolve itself judges), then the one
+/// catalogue model whose ID is, or contains, the name. A miss lists the close
+/// matches.
+fn match_name(
+    name: &str,
+    routes: &BTreeSet<String>,
+    models: &[String],
+) -> Result<Named, Vec<String>> {
+    if routes.contains(name) {
+        return Ok(Named::Route(name.to_owned()));
+    }
+    if name.contains('/') {
+        return Ok(Named::Model(name.to_owned()));
+    }
+    let lower = name.to_ascii_lowercase();
+    let id = |model: &str| {
+        model
+            .split_once('/')
+            .map_or(model, |(_, id)| id)
+            .to_ascii_lowercase()
+    };
+    let exact: Vec<&String> = models.iter().filter(|model| id(model) == lower).collect();
+    if let [only] = exact[..] {
+        return Ok(Named::Model(only.clone()));
+    }
+    if exact.is_empty() {
+        let mut containing: Vec<Named> = routes
+            .iter()
+            .filter(|route| route.to_ascii_lowercase().contains(&lower))
+            .map(|route| Named::Route(route.clone()))
+            .chain(
+                models
+                    .iter()
+                    .filter(|model| id(model).contains(&lower))
+                    .map(|model| Named::Model(model.clone())),
+            )
+            .collect();
+        if containing.len() == 1 {
+            return Ok(containing.remove(0));
+        }
+    }
+    Err(close_matches(&lower, routes, models))
+}
+/// Up to eight routes and models that share the name as a substring or a
+/// prefix, or are one or two edits away.
+fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> Vec<String> {
+    fn edits(a: &str, b: &str) -> usize {
+        let b: Vec<char> = b.chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut diagonal = row[0];
+            row[0] = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let above = row[j + 1];
+                row[j + 1] = (diagonal + usize::from(ca != *cb))
+                    .min(row[j] + 1)
+                    .min(above + 1);
+                diagonal = above;
+            }
+        }
+        row[b.len()]
+    }
+    let near = |candidate: &str| {
+        let candidate = candidate.to_ascii_lowercase();
+        let id = candidate.split_once('/').map_or(&*candidate, |(_, id)| id);
+        let prefix = lower
+            .chars()
+            .zip(id.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        id.contains(lower)
+            || lower.contains(id)
+            || prefix >= 3
+            || edits(lower, id) <= 2
+            || edits(lower, &candidate) <= 2
+    };
+    routes
+        .iter()
+        .chain(models)
+        .filter(|candidate| near(candidate))
+        .take(8)
+        .cloned()
+        .collect()
+}
+fn close(matches: &[String]) -> String {
+    if matches.is_empty() {
+        String::new()
+    } else {
+        format!(" (close matches: {})", matches.join(", "))
+    }
+}
+fn example<'a>(found: &'a Option<String>, fallback: &'a str) -> &'a str {
+    found.as_deref().unwrap_or(fallback)
+}
+/// The request the positional name or the flags stand for.
+fn resolve_request(
+    query: &RouteResolve,
+    context: &RoutingContext<'_>,
+) -> Result<provenant_routing::RouteRequest, EdgeError> {
+    let listed = provenant_routing::list(&provenant_routing::RouteListQuery::default(), context)?;
+    let routes: BTreeSet<String> = listed
+        .named_routes
+        .keys()
+        .chain(listed.pools.keys())
+        .cloned()
+        .collect();
+    let models: Vec<String> = listed
+        .models
+        .iter()
+        .map(|entry| entry.model.as_str().to_owned())
+        .collect();
+    let unresolved = |name: &str, matches: Vec<String>| EdgeError::Unresolved {
+        name: name.to_owned(),
+        matches,
+        example_route: routes.iter().next().cloned(),
+        example_model: models.first().cloned(),
+    };
+    let mut request = query.request.clone();
+    if let Some(name) = &query.name {
+        match match_name(name, &routes, &models).map_err(|close| unresolved(name, close))? {
+            Named::Route(route) => request.route = Some(route),
+            Named::Model(model) => {
+                request.model =
+                    Some(Model::from_str(&model).map_err(|_| unresolved(name, Vec::new()))?)
+            }
+        }
+    } else if let Some(route) = request.route.as_deref()
+        && !routes.contains(route)
+    {
+        return Err(unresolved(
+            route,
+            close_matches(&route.to_ascii_lowercase(), &routes, &models),
+        ));
+    }
+    Ok(request.to_domain()?)
+}
 #[derive(Debug, thiserror::Error)]
 enum EdgeError {
+    #[error(
+        "no route or model matches `{name}`{}; try `provenant route resolve {}`, \
+         `provenant route resolve {}` or `provenant route list`",
+        close(.matches),
+        example(.example_route, "utility"),
+        example(.example_model, "ADAPTER/ID"),
+    )]
+    Unresolved {
+        name: String,
+        matches: Vec<String>,
+        example_route: Option<String>,
+        example_model: Option<String>,
+    },
     #[error(transparent)]
     Config(#[from] provenant_config::ConfigError),
     #[error(transparent)]
@@ -639,7 +803,7 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
         Route::Resolve(query) => with_context(roots, &[], &[], "local-preview", |context, _| {
             Ok(Data::Resolved(Box::new(provenant_routing::resolve(
-                &query.to_domain()?,
+                &resolve_request(query, context)?,
                 context,
             )?)))
         }),
@@ -709,7 +873,9 @@ pub fn run(
                 EdgeError::QuotaCache(crate::quota::EdgeError::Quota(_)) | EdgeError::Quota(_) => {
                     (Outcome::Invalid, "QUOTA")
                 }
-                EdgeError::Routing(_) => (Outcome::Invalid, "INVALID"),
+                EdgeError::Routing(_) | EdgeError::Unresolved { .. } => {
+                    (Outcome::Invalid, "INVALID")
+                }
                 EdgeError::Config(_) => (Outcome::Invalid, "CONFIG"),
                 _ => (Outcome::Error, "IO"),
             };
@@ -802,6 +968,45 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn names_resolve_to_routes_then_exact_then_unique_models() {
+        use super::{Named, match_name};
+        let routes = ["junior", "utility"].map(String::from).into();
+        let models =
+            ["codex/gpt-6-luna", "codex/gpt-6.1-terra", "agy/gpt-6-luna"].map(String::from);
+        let model = |name: &str| Named::Model(name.into());
+        assert_eq!(
+            match_name("utility", &routes, &models),
+            Ok(Named::Route("utility".into()))
+        );
+        assert_eq!(
+            match_name("terra", &routes, &models),
+            Ok(model("codex/gpt-6.1-terra"))
+        );
+        assert_eq!(
+            match_name("GPT-6.1-TERRA", &routes, &models),
+            Ok(model("codex/gpt-6.1-terra"))
+        );
+        // An adapter-qualified name goes to resolve as the exact model.
+        assert_eq!(
+            match_name("codex/other", &routes, &models),
+            Ok(model("codex/other"))
+        );
+        // The same ID under two adapters, or a fragment of several, is not guessed.
+        let Err(both) = match_name("gpt-6-luna", &routes, &models) else {
+            panic!("one ID under two adapters must not resolve");
+        };
+        assert!(
+            both.contains(&"codex/gpt-6-luna".to_owned())
+                && both.contains(&"agy/gpt-6-luna".to_owned())
+        );
+        let Err(close) = match_name("gpt", &routes, &models) else {
+            panic!("a fragment of several models must not resolve");
+        };
+        assert_eq!(close.len(), 3);
+        assert!(match_name("zzzzzz", &routes, &models).is_err_and(|close| close.is_empty()));
+    }
 
     #[test]
     fn only_opencode_routes_draw_on_the_free_pool() {

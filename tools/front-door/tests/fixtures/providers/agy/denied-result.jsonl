@@ -1,0 +1,1 @@
+{"event":"result","result":{"conversation_id":"","status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"RunCommand"}],"usage":{"input_tokens":0,"output_tokens":0}}}

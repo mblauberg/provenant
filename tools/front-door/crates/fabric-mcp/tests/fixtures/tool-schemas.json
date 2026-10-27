@@ -1185,6 +1185,9 @@
               "minimum": 0,
               "type": "integer"
             },
+            "no_fallback": {
+              "type": "boolean"
+            },
             "op": {
               "const": "resume"
             },
@@ -1230,7 +1233,7 @@
             "concurrency": {
               "anyOf": [
                 {
-                  "maximum": 8,
+                  "maximum": 16,
                   "minimum": 1,
                   "type": "integer"
                 },

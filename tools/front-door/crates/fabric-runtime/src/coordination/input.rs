@@ -77,6 +77,8 @@ macro_rules! bounded_input {
 pub(crate) use bounded_input;
 
 pub const MAX_TEXT_BYTES: usize = 65_536;
+/// Largest prompt a CLI peer submission may carry.
+pub const MAX_CLI_PROMPT_BYTES: usize = 1_048_576;
 pub const MAX_REFERENCE_BYTES: usize = 1_024;
 pub const MAX_ROUTE_BYTES: usize = 128;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
@@ -351,7 +353,7 @@ impl ValidateInput for GraphInput {
 }
 
 impl ValidateInput for SubmitInput {
-    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
+    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Submit {
                 tasks,
@@ -362,7 +364,7 @@ impl ValidateInput for SubmitInput {
                 if tasks.is_empty() || tasks.len() > 64 {
                     return Err(field("tasks"));
                 }
-                if concurrency.is_some_and(|n| n == 0 || n > 8 || usize::from(n) > tasks.len()) {
+                if concurrency.is_some_and(|n| n == 0 || n > 16) {
                     return Err(field("concurrency"));
                 }
                 if knobs.len() > 64 {
@@ -373,7 +375,13 @@ impl ValidateInput for SubmitInput {
                 }
                 for (index, task) in tasks.iter().enumerate() {
                     let path = format!("tasks[{index}]");
-                    task_text(&task.prompt, &format!("{path}.prompt"))?;
+                    // Peer dispatch uses the CLI launch limit; MCP retains its
+                    // smaller tool input bound.
+                    let prompt_limit = match transport {
+                        WaitTransport::Cli => MAX_CLI_PROMPT_BYTES,
+                        WaitTransport::Mcp => MAX_TEXT_BYTES,
+                    };
+                    bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
                     optional_text(
                         task.base.as_deref(),
                         &format!("{path}.base"),
@@ -470,6 +478,27 @@ mod tests {
         assert!(error.contains(path), "expected `{path}` in `{error}`");
     }
 
+    /// A one-task submit with this `concurrency`, as the CLI and store see it.
+    fn one_task_submit_is_valid(concurrency: u64) -> bool {
+        use super::ValidateInput;
+        serde_json::from_value::<SubmitInput>(json!({
+            "op":"submit","operation_id":"work-1","concurrency":concurrency,
+            "tasks":[{"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
+        }))
+        .is_ok_and(|input| input.validate_input(provenant_core::WaitTransport::Cli).is_ok())
+    }
+
+    #[test]
+    fn concurrency_above_the_task_count_is_accepted_up_to_sixteen() {
+        // The CLI and the run store accept 16 for one task, so a peer must too.
+        for accepted in [1, 2, 16] {
+            assert!(one_task_submit_is_valid(accepted), "{accepted}");
+        }
+        for refused in [0, 17] {
+            assert!(!one_task_submit_is_valid(refused), "{refused}");
+        }
+    }
+
     #[test]
     fn receipts_freeze_the_public_request() {
         let proof = super::super::ClaimProof {
@@ -488,6 +517,36 @@ mod tests {
                 "proof":{"id":"01".repeat(16),"generation":2,"token":"ab".repeat(16)}
             }})
         );
+    }
+
+    #[test]
+    fn submission_prompt_bounds_follow_the_transport() {
+        use super::ValidateInput;
+        use provenant_core::WaitTransport;
+
+        for bytes in [65_536, 65_537, 117 * 1024, 1_048_576] {
+            let input: SubmitInput = serde_json::from_value(json!({
+                "op":"submit", "operation_id":"large-prompt",
+                "tasks":[{"prompt":"x".repeat(bytes), "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+            }))
+            .unwrap();
+            assert!(input.validate_input(WaitTransport::Cli).is_ok());
+            let mcp = input.validate_input(WaitTransport::Mcp);
+            if bytes <= 65_536 {
+                assert!(mcp.is_ok());
+            } else {
+                assert_eq!(mcp.unwrap_err().path, "tasks[0].prompt");
+            }
+        }
+        for prompt in [String::new(), "x\0y".into(), "x".repeat(1_048_577)] {
+            rejects::<SubmitInput>(
+                json!({
+                    "op":"submit", "operation_id":"invalid-prompt",
+                    "tasks":[{"prompt":prompt, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+                }),
+                "tasks[0].prompt",
+            );
+        }
     }
 
     #[test]

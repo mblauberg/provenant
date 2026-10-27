@@ -93,6 +93,40 @@ pub fn main() -> std::process::ExitCode {
         }
         Some("exec" | "-p") => exit("lane provider", lane_provider()),
         Some("--writer-provider") => exit("writer provider", provider(&args)),
+        // The fake `gh` of the `pr land` fixtures.
+        Some("pr") => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            match crate::pr_land_tests::fake_gh(&args) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    let _ = writeln!(std::io::stderr().lock(), "fake gh: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        // The branch deletion of `pr land` with another process acting after
+        // the cleanup check: `--land-race <merged head> [<git argument>...]`.
+        Some("--land-race") => {
+            let result = (|| -> Result<String> {
+                let merged = args.get(1).and_then(|arg| arg.to_str()).ok_or("head")?;
+                let between: Vec<&str> =
+                    args.iter().skip(2).filter_map(|arg| arg.to_str()).collect();
+                let (status, detail) = crate::pr::land::delete_after_check(
+                    &std::env::current_dir()?,
+                    merged.parse()?,
+                    &between,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(format!("{status}\n{detail}\n"))
+            })();
+            match result {
+                Ok(text) => {
+                    let _ = write!(std::io::stdout().lock(), "{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => exit("land race", Err(error)),
+            }
+        }
         Some("--state-dir" | "internal") => {
             ExitCode::from(crate::dispatch(provenant_cli::parse(args), &Fixture))
         }
@@ -138,6 +172,18 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_an_unregistered_worktree_names_the_create_command",
             "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
+            "pr_land_merges_then_fetches_fast_forwards_and_prunes",
+            "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
+            "pr_land_changes_nothing_when_the_merge_does_not_happen",
+            "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone",
+            "pr_land_leaves_a_reused_branch_name_alone",
+            "pr_land_deletes_an_unregistered_branch_only_at_the_merged_head",
+            "pr_land_keeps_a_branch_held_by_a_paused_rebase",
+            "pr_land_keeps_a_branch_held_by_a_bisect",
+            "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away",
+            "pr_land_refuses_when_a_worktree_entry_cannot_be_read",
+            "pr_land_refuses_when_worktree_state_is_malformed",
+            "pr_open_refuses_what_the_receipts_cannot_support",
         ],
         |name| {
             let result = match name {
@@ -206,6 +252,42 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "remove_resolves_directory_names_and_remote_integration_refs" => {
                     remove_resolves_directory_names_and_remote_integration_refs()
                 }
+                "pr_land_merges_then_fetches_fast_forwards_and_prunes" => {
+                    crate::pr_land_tests::pr_land_merges_then_fetches_fast_forwards_and_prunes()
+                }
+                "pr_land_refuses_each_unsafe_step_and_reports_the_rest" => {
+                    crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
+                }
+                "pr_open_refuses_what_the_receipts_cannot_support" => {
+                    crate::pr_land_tests::pr_open_refuses_what_the_receipts_cannot_support()
+                }
+                "pr_land_changes_nothing_when_the_merge_does_not_happen" => {
+                    crate::pr_land_tests::pr_land_changes_nothing_when_the_merge_does_not_happen()
+                }
+                "pr_land_leaves_a_reused_branch_name_alone" => {
+                    crate::pr_land_tests::pr_land_leaves_a_reused_branch_name_alone()
+                }
+                "pr_land_deletes_an_unregistered_branch_only_at_the_merged_head" => {
+                    crate::pr_land_tests::pr_land_deletes_an_unregistered_branch_only_at_the_merged_head()
+                }
+                "pr_land_keeps_a_branch_held_by_a_paused_rebase" => {
+                    crate::pr_land_tests::pr_land_keeps_a_branch_held_by_a_paused_rebase()
+                }
+                "pr_land_keeps_a_branch_held_by_a_bisect" => {
+                    crate::pr_land_tests::pr_land_keeps_a_branch_held_by_a_bisect()
+                }
+                "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away" => {
+                    crate::pr_land_tests::pr_land_keeps_a_branch_held_in_a_checkout_that_went_away()
+                }
+                "pr_land_refuses_when_a_worktree_entry_cannot_be_read" => {
+                    crate::pr_land_tests::pr_land_refuses_when_a_worktree_entry_cannot_be_read()
+                }
+                "pr_land_refuses_when_worktree_state_is_malformed" => {
+                    crate::pr_land_tests::pr_land_refuses_when_worktree_state_is_malformed()
+                }
+                "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone" => {
+                    crate::pr_land_tests::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone()
+                }
                 "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_names_the_create_command()
                 }
@@ -219,7 +301,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     )
 }
 
-fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
+pub(super) fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
     let mut argv = vec![
         std::ffi::OsString::from("--state-dir"),
         rig.state.clone().into_os_string(),
@@ -922,6 +1004,7 @@ pub(super) fn open_writer_store(
     let mut store = provenant_run::RunStore::open(context, &call)?;
     store.set_admission_policy(provenant_run::AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..Default::default()
     });
     Ok(store)
@@ -941,6 +1024,7 @@ fn writer_run(
         run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
         operation_id: provenant_core::OperationId::parse(operation)?,
         request: provenant_run::CanonicalRequest {
+            fresh_continuation: None,
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {
                 base: None,
@@ -1277,7 +1361,7 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
     Ok(())
 }
 
-fn json(output: &ExecOutcome) -> Result<Value> {
+pub(super) fn json(output: &ExecOutcome) -> Result<Value> {
     Ok(serde_json::from_slice(&output.stdout.bytes)?)
 }
 

@@ -265,6 +265,55 @@ protection and any merge queue. Neither helper bypasses those gates.
 
 `pr merge` is for the immediate-merge path; use `gh pr merge --auto` to queue a merge.
 
+### Open a pull request from receipts
+
+```sh
+provenant pr open --from-attempt <writer-attempt> --review <review-attempt> \
+  --summary-file summary.md --issue 1829 --dry-run
+```
+
+`pr open` builds the body from the repository's pull request template and the
+attempts' own records, so the routes, receipt paths and heads in it are the
+recorded ones. The summary file's first line (a heading or plain text) is the
+title and the rest is the Summary section. Check the dry run, then drop
+`--dry-run` to run `gh pr create` for the attempt's delivered branch, which
+must be at the attempt's head on the remote. Complete the gate rows marked
+`pending` with the exact command and result before asking for review. The
+attempt must be local and `succeeded` or `review_required`, with a recorded
+head; read-only reviews supply the reviewer rows. `provenant pr status 148 149`
+prints `#148 OPEN <head> checks=3/4 pending=1 merge=blocked review=none`, one
+line each, for polling without parsing `gh` output.
+
+### Land a pull request
+
+`provenant pr land 148 --head <reviewed-sha>` runs the four landing steps in
+order: the `pr watch` wait on CI, the `pr merge` at that exact head, then the
+local follow-up below. The head is required, as for `pr merge`, so a landing can
+only merge what was reviewed. Nothing after the merge changes what merged, and
+no step forces: a refusal is reported in `data.steps` and the command exits 1
+with `merged: true`, so rerun it after fixing the cause (every step is safe to
+repeat).
+
+| Step | Does | Refuses when |
+|---|---|---|
+| `fetch` | `git fetch <remote> <base>` | the fetch fails, or the fetched base does not hold the merged head |
+| `fast_forward` | moves the local base to the fetched one, in the checkout that has it, or by fetching `base:base` when none does | that checkout has any change, or the base has diverged |
+| `worktree` | deletes declared build output (`gc.projects.<id>.regenerable`, plus `target`), then removes the branch's registered worktree as `worktree remove` does | the worktree is dirty or has a live writer, this command runs inside it, its HEAD is not the merged head (it stays whole), or its HEAD moves after the check, which removal re-verifies under the worktree lock |
+| `branch` | deletes the merged local branch with `git update-ref -d <branch> <merged head>`, which deletes only if the branch is still at the merged head (a branch removed with its worktree is already gone) | the branch holds commits the fetched base lacks, any worktree has it checked out, mid-rebase or mid-bisect, or it moved off the merged head after the check (it is kept); a checkout, rebase or bisect starting between the check and the delete is not caught |
+
+The `worktree` and `branch` steps act only on a local branch whose tip is the
+exact head the pull request merged. When the pull request's head is in another
+repository, such as a fork, or the local branch of that name is at any other
+tip (recreated at the base, or advanced past the merged head, even when the
+base contains it), both steps are skipped with that reason and nothing is
+touched. A tip the fetched base lacks is refused rather than skipped.
+
+The build-output deletion keeps GC's checks: tracked and `keep` paths stay,
+symlinks are never followed, and a lane that is not idle blocks it. Unlike a
+sweep it does not wait for output to be a day old, because the merge ends the
+work. A merge that is only queued reports `merged: false` and leaves everything
+in place.
+
 The helpers use the current repository, or the global `--project` selection.
 `--json` includes `number`, `head` and `result` in the normal command envelope.
 After a successful merge, JSON also includes `merged: true` and text says `merged`.

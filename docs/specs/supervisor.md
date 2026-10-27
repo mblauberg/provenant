@@ -202,10 +202,19 @@ Git-internal roots. `~/.ssh`, `~/.aws`, `~/.kube`, `~/.secrets` and Cargo
 `credentials` are denied after every grant. Unsupported or nested
 confinement fails `ConfinementUnavailable` and never widens access; Linux has
 no backend.
-- Why: one broad grant silently voids the boundary.
+Literal discovery grants accept absent entries or real directories through
+  held, revalidated parents. They refuse symlinks and other entry types and
+  grant no reads of children beyond existing read roots. Anchor refusals during
+  discovery and held-directory revalidation name the path and failure stage.
+- Why: one broad grant silently voids the boundary; directory discovery must
+  not pass through regular-file validation or expand configuration access.
 - Test: `crates/confinement/src/permissions.rs::broad_home_tmp_and_credential_roots_are_refused`;
-  `::network_levels_shared_writes_and_hard_denies_render_in_order`
-- Owner: `crates/confinement/src/permissions.rs`
+  `::network_levels_shared_writes_and_hard_denies_render_in_order`;
+  `::directory_discovery_keeps_literal_scope_and_refuses_symlinks`;
+  `::anchored_directory_detects_replacement_at_its_sbpl_path`;
+  `crates/providers/src/opencode.rs::homebrew_launch_plan_anchors_with_default_xdg_homes`;
+  `::homebrew_writer_launch_plan_anchors_with_discovery_directories`
+- Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/opencode.rs`
 
 ### Git write set
 

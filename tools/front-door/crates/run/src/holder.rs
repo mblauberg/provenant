@@ -149,6 +149,9 @@ pub struct RunHolder<'a> {
     pub resources: &'a dyn Resources,
 }
 fn custody_error(error: RunError) -> CustodyError {
+    if matches!(error, RunError::HostClock) {
+        return CustodyError::AdmissionClock;
+    }
     CustodyError::Io(std::io::Error::other(error.to_string()))
 }
 impl provenant_supervisor::Holder for RunHolder<'_> {
@@ -574,7 +577,13 @@ impl RunStore {
             } = &completion
             && let (Some(writer), Some(deliver)) = (&task.writer, &task.deliver)
         {
-            crate::delivery::deliver_once(host, writer, deliver, attempt)?;
+            crate::delivery::deliver_once(
+                host,
+                writer,
+                deliver,
+                attempt,
+                &format!("Run {}\nAttempt {id}", record.run_id),
+            )?;
         }
         let publication = TerminalPublication {
             outcome: decoded.outcome,
@@ -599,5 +608,22 @@ impl RunStore {
             return self.recover_result_only(id, &publication, exit, call);
         }
         self.publish_terminal(id, record.revision, &publication, exit, call)
+    }
+}
+
+#[cfg(test)]
+mod host_clock_tests {
+    use super::*;
+
+    #[test]
+    fn an_unreadable_host_clock_reaches_the_guardian_as_itself() {
+        assert!(matches!(
+            custody_error(RunError::HostClock),
+            CustodyError::AdmissionClock
+        ));
+        assert!(matches!(
+            custody_error(RunError::Validation("wall clock")),
+            CustodyError::Io(_)
+        ));
     }
 }

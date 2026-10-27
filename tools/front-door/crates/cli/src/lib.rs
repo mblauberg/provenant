@@ -16,6 +16,7 @@ pub use route::Route;
 pub use workflow::Workflow;
 mod grammar;
 pub mod install;
+pub mod pr_body;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
@@ -258,11 +259,7 @@ fn build_model(passive: bool) -> clap::Command {
             .disable_version_flag(true)
             .version(env!("CARGO_PKG_VERSION"));
         if command.get_name() == "resolve" {
-            command = command.group(
-                ArgGroup::new("route_choice")
-                    .args(["model", "route"])
-                    .required(true),
-            );
+            command = command.group(ArgGroup::new("route_choice").args(["name", "model", "route"]));
         }
         if command.get_name() == "dispatch" {
             command = command
@@ -280,6 +277,7 @@ fn build_model(passive: bool) -> clap::Command {
                         "fallback",
                         "mode",
                         "worktree",
+                        "deliver",
                         "read_root",
                         "write_root",
                         "network",
@@ -361,15 +359,28 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         return invalid("--json is invalid for hook/MCP/internal execution");
     }
     match &inv.command {
-        Command::Route(Route::Resolve(route)) => route_valid(route)?,
+        Command::Route(Route::Resolve(resolve)) => {
+            if resolve.name.is_none()
+                && resolve.request.model.is_none()
+                && resolve.request.route.is_none()
+            {
+                return invalid(
+                    "route resolve needs a route or model, such as `route resolve utility`, \
+                     `route resolve codex/gpt-6-luna`, `--route utility` or `--model ADAPTER/ID`",
+                );
+            }
+            route_valid(&resolve.request)?
+        }
         Command::Dispatch(dispatch) => {
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
             if (access.mode == Mode::WorktreeWrite)
-                != (access.worktree.is_some() || dispatch.branch.is_some())
+                != (access.worktree.is_some()
+                    || dispatch.branch.is_some()
+                    || dispatch.worktree_branch.is_some())
             {
                 return invalid(
-                    "--worktree, or a peer writer's --branch, is required with, and only valid \
+                    "--worktree, --worktree-branch, or a peer writer's --branch, is required with, and only valid \
                      for, --mode worktree-write",
                 );
             }
@@ -550,7 +561,7 @@ fn constraints(path: &str) -> Vec<String> {
             "prompt and manifest inputs are at most 1 MiB",
         ],
         "provenant route resolve" => &[
-            "exactly one of model or route",
+            "exactly one of NAME, model or route",
             "fallback has at most two distinct models",
         ],
         "provenant telemetry stats" => &[
@@ -558,10 +569,13 @@ fn constraints(path: &str) -> Vec<String> {
             "since must precede until",
         ],
         "provenant resume" => &[
-            "target is an ATTEMPT ID or RUN/TASK/ATTEMPT",
+            "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
             "prompt is at most 1 MiB; expected generation is 0",
         ],
-        "provenant output" => &["target is an ATTEMPT ID or RUN/TASK/ATTEMPT"],
+        "provenant output" => &[
+            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
+            "tail above 500 lines is clamped to 500",
+        ],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],
     };
@@ -571,8 +585,7 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
     match name {
         "wait" | "provider_timeout" => Some((1, 14400)),
         "limit" => Some((1, 100)),
-        "concurrency" => Some((1, 8)),
-        "tail" => Some((1, 500)),
+        "concurrency" => Some((1, 16)),
         "max_bytes" => Some((1, 65536)),
         "read_root" | "write_root" => Some((0, 32)),
         "capability" => Some((0, 16)),
@@ -644,7 +657,8 @@ mod tests {
         invalid(&["lanes", "--limit", "101"]);
         let attempt = "11".repeat(16) + &format!("/{}/{}", "22".repeat(16), "33".repeat(16));
         valid(&["output", &attempt, "--tail", "500", "--max-bytes", "65536"]);
-        invalid(&["output", &attempt, "--tail", "501"]);
+        valid(&["output", &attempt, "--tail", "501"]);
+        invalid(&["output", &attempt, "--tail", "0"]);
         invalid(&["output", &attempt, "--max-bytes", "65537"]);
         invalid(&["output", &attempt, "--offset", "0", "--tail", "1"]);
         valid(&["output", &attempt, "--trace"]);
@@ -652,6 +666,12 @@ mod tests {
         invalid(&["output", &attempt, "--trace", "--part", "prompt"]);
         invalid(&["output", &attempt, "--trace", "--tail", "1"]);
         valid(&["output", &"11".repeat(16)]);
+        valid(&["output", &"11".repeat(16), "--host", "workshop"]);
+        valid(&[
+            "output",
+            &format!("{}/{}", "11".repeat(16), "33".repeat(16)),
+        ]);
+        invalid(&["output", &format!("{}/", "11".repeat(16))]);
     }
     #[test]
     fn lanes_accept_repeatable_state_and_since_filters() {
@@ -671,16 +691,41 @@ mod tests {
         invalid(&["lanes", "--since"]);
         invalid(&["lanes", "--state", "unknown"]);
         invalid(&["lanes", "--since", "24h"]);
-        invalid(&["lanes", "--wait", "10", "--since", "86400"]);
+        valid(&["lanes", "--wait", "10", "--since", "86400"]);
+        invalid(&["lanes", "--wait", "10", "--state", "running"]);
     }
     #[test]
-    fn lanes_host_lists_a_peer_without_ids_waits_or_cursors() {
+    fn lanes_host_lists_waits_and_watches_a_peer_without_ids_or_cursors() {
         valid(&["lanes", "--host", "workshop"]);
         valid(&["lanes", "--host", "workshop", "--all", "--state", "running"]);
+        valid(&["lanes", "--host", "workshop", "--wait", "5"]);
+        valid(&["lanes", "--host", "workshop", "--watch", "5"]);
         let run = "11".repeat(16);
         invalid(&["lanes", "--host", "workshop", "--id", &run]);
-        invalid(&["lanes", "--host", "workshop", "--wait", "5"]);
         invalid(&["lanes", "--host", "workshop", "--cursor", "1"]);
+    }
+    #[test]
+    fn lanes_session_and_watch_have_bounded_shapes() {
+        valid(&["lanes", "--session", "chair"]);
+        valid(&[
+            "lanes",
+            "--session",
+            "chair",
+            "--wait",
+            "30",
+            "--condition",
+            "all",
+        ]);
+        valid(&["lanes", "--watch"]);
+        valid(&["lanes", "--watch", "600", "--session", "chair"]);
+        invalid(&["lanes", "--session", "has space"]);
+        invalid(&["lanes", "--session", ""]);
+        invalid(&["lanes", "--session", "chair", "--all"]);
+        invalid(&["lanes", "--watch", "0"]);
+        invalid(&["lanes", "--watch", "14401"]);
+        invalid(&["lanes", "--watch", "5", "--wait", "5"]);
+        invalid(&["lanes", "--watch", "5", "--state", "running"]);
+        invalid(&["lanes", "--watch", "--condition", "all"]);
     }
     #[test]
     fn session_handoff_names_a_peer_and_an_account() {
@@ -862,6 +907,72 @@ mod tests {
         let mut words = base.to_vec();
         words.extend(["--fallback", "a/id", "--fallback", "b/id"]);
         invalid(&words);
+    }
+
+    #[test]
+    fn lifecycle_flags_parse_and_refuse_ambiguous_authority() {
+        let base = [
+            "dispatch",
+            "--prompt-stdin",
+            "--operation-id",
+            "owned",
+            "--model",
+            "codex/id",
+            "--mode",
+            "worktree-write",
+            "--worktree-branch",
+            "feat/owned",
+        ];
+        let mut words = base.to_vec();
+        words.extend(["--base", "main", "--deliver", "integrate:integration"]);
+        let Command::Dispatch(dispatch) = valid(&words).command else {
+            panic!("dispatch");
+        };
+        assert_eq!(dispatch.worktree_branch.as_deref(), Some("feat/owned"));
+        assert_eq!(
+            dispatch.deliver,
+            Some(provenant_records::run::DeliveryMode::Integrate(
+                "integration".into()
+            ))
+        );
+        for flags in [
+            vec!["--worktree", "existing"],
+            vec!["--host", "peer"],
+            vec![
+                "--deliver",
+                "push",
+                "--deliver-remote",
+                "origin",
+                "--deliver-branch",
+                "lane",
+            ],
+            vec!["--deliver", "integrate:../main"],
+        ] {
+            let mut words = base.to_vec();
+            words.extend(flags);
+            invalid(&words);
+        }
+        valid(&["worktree", "adopt", "../native", "--owner", "manual"]);
+        valid(&[
+            "lane",
+            "deliver",
+            "11111111111111111111111111111111",
+            "--deliver",
+            "pr",
+        ]);
+        let Command::Resume(resume) = valid(&[
+            "resume",
+            "11111111111111111111111111111111",
+            "--operation-id",
+            "fresh",
+            "--prompt-stdin",
+            "--no-fallback",
+        ])
+        .command
+        else {
+            panic!("resume");
+        };
+        assert!(resume.no_fallback);
     }
     #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {

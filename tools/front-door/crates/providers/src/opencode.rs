@@ -95,7 +95,19 @@ fn prepare(
     })
     .to_string();
     let package = package_root(input.executable)?;
-    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
+    let bin = plan.scratch.path.join("bin");
+    let path = std::env::join_paths([
+        bin.as_path(),
+        std::path::Path::new("/usr/bin"),
+        std::path::Path::new("/bin"),
+    ])
+    .map_err(|_| ProviderError::InvalidPath)?;
+    let mut env = base_env(
+        input,
+        &plan.scratch.path,
+        path.to_str().ok_or(ProviderError::InvalidPath)?,
+    );
     let xdg = |key, fallback| {
         (input.host_var)(key)
             .map(PathBuf::from)
@@ -106,6 +118,11 @@ fn prepare(
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let data = data_home.join("opencode");
     let mut runtime_reads = vec![subtree(package), subtree(&data)];
+    runtime_reads.extend(
+        crate::dylib::linked_libraries(input.provenant.git)
+            .into_iter()
+            .map(exact),
+    );
     if access == Access::WorktreeWrite {
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
     }
@@ -117,13 +134,29 @@ fn prepare(
     let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]
         .map(|name| exact(data.join(name)))
         .to_vec();
-    let mut setup = vec![SetupStep::CreateDir(data.clone())];
+    let mut setup = vec![
+        SetupStep::CreateDir(data.clone()),
+        SetupStep::CreateDir(bin.clone()),
+        SetupStep::Symlink {
+            link: bin.join("git"),
+            target: input.provenant.git.to_owned(),
+        },
+    ];
     for name in ["log", "storage", "snapshot"] {
         let directory = data.join(name);
         state_writes.push(subtree(&directory));
         setup.push(SetupStep::CreateDir(directory));
     }
+    // Writers' system roots do not cover a host-selected Homebrew Git.
+    let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
+    let tool_exec_roots = if access == Access::WorktreeWrite {
+        vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
+    } else {
+        Vec::new()
+    };
     env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         (
             "XDG_CONFIG_HOME".into(),
             config_home.clone().into_os_string(),
@@ -157,16 +190,12 @@ fn prepare(
         setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables: vec![exact(input.executable)],
+                process_executables,
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
                 runtime_reads,
                 state_writes,
-                tool_exec_roots: if access == Access::WorktreeWrite {
-                    vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
-                } else {
-                    Vec::new()
-                },
+                tool_exec_roots,
                 discovery_reads: input
                     .cwd
                     .ancestors()
@@ -208,11 +237,22 @@ enum Event {
     },
     Error {
         error: Failure,
+        #[serde(rename = "retryAfterMs", default)]
+        retry_after_ms: Option<serde_json::Value>,
     },
     #[serde(rename = "provider.quota")]
     Quota {
         message: Option<String>,
         response: Option<Response>,
+        #[serde(rename = "retryAfterMs", default)]
+        retry_after_ms: Option<serde_json::Value>,
+    },
+    #[serde(rename = "provider.free-limit")]
+    FreeLimit {
+        message: Option<String>,
+        response: Option<Response>,
+        #[serde(rename = "retryAfterMs", default)]
+        retry_after_ms: Option<serde_json::Value>,
     },
     #[serde(other)]
     Other,
@@ -223,6 +263,8 @@ struct Failure {
     kind: String,
     message: Option<String>,
     response: Option<Response>,
+    #[serde(rename = "retryAfterMs", default)]
+    retry_after_ms: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -240,14 +282,48 @@ enum Body {
 #[derive(Deserialize)]
 struct ErrorBody {
     error: LimitError,
+    #[serde(rename = "retryAfterMs", default)]
+    retry_after_ms: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct LimitError {
     #[serde(default, rename = "type", alias = "name")]
     kind: String,
     message: Option<String>,
+    #[serde(rename = "retryAfterMs", default)]
+    retry_after_ms: Option<serde_json::Value>,
 }
-fn quota(message: Option<String>, response: Option<Response>) -> E {
+fn parse_retry_after(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    const MAX_SECONDS: u64 = 86_400;
+    let seconds = if let Some(n) = value.as_u64() {
+        if n == 0 {
+            return None;
+        }
+        n.saturating_add(999) / 1000
+    } else if let Some(i) = value.as_i64() {
+        if i <= 0 {
+            return None;
+        }
+        (i as u64).saturating_add(999) / 1000
+    } else {
+        let f = value.as_f64()?;
+        if !f.is_finite() || f <= 0.0 {
+            return None;
+        }
+        (f / 1000.0).ceil() as u64
+    };
+    if seconds == 0 {
+        return None;
+    }
+    Some(seconds.min(MAX_SECONDS))
+}
+fn quota(
+    message: Option<String>,
+    response: Option<Response>,
+    retry_after: Option<serde_json::Value>,
+    is_free_kind: bool,
+) -> E {
     let body = response
         .and_then(|response| match response {
             Response::Body { body } => body,
@@ -258,10 +334,16 @@ fn quota(message: Option<String>, response: Option<Response>) -> E {
             Body::Text(text) => wire::<ErrorBody>(text.as_bytes()).ok(),
             Body::Other(_) => None,
         });
-    let pool = body
+    let is_free = is_free_kind
+        || body
+            .as_ref()
+            .is_some_and(|body| body.error.kind == "FreeUsageLimitError");
+    let pool = is_free.then(|| "opencode-free".into());
+    let retry_val = retry_after
         .as_ref()
-        .filter(|body| body.error.kind == "FreeUsageLimitError")
-        .map(|_| "opencode-free".into());
+        .or_else(|| body.as_ref().and_then(|b| b.retry_after_ms.as_ref()))
+        .or_else(|| body.as_ref().and_then(|b| b.error.retry_after_ms.as_ref()));
+    let resets_in_seconds = parse_retry_after(retry_val);
     let message = body
         .and_then(|body| body.error.message)
         .or(message)
@@ -270,7 +352,7 @@ fn quota(message: Option<String>, response: Option<Response>) -> E {
     E::QuotaLimited {
         message,
         pool,
-        resets_in_seconds: None,
+        resets_in_seconds,
     }
 }
 #[derive(Deserialize)]
@@ -291,9 +373,27 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }
             events
         }
-        Event::Quota { message, response } => vec![quota(message, response)],
-        Event::Error { error } if error.kind == "provider.quota" => {
-            vec![quota(error.message, error.response)]
+        Event::Quota {
+            message,
+            response,
+            retry_after_ms,
+        } => vec![quota(message, response, retry_after_ms, false)],
+        Event::FreeLimit {
+            message,
+            response,
+            retry_after_ms,
+        } => vec![quota(message, response, retry_after_ms, true)],
+        Event::Error {
+            error,
+            retry_after_ms,
+        } if error.kind == "provider.quota" || error.kind == "provider.free-limit" => {
+            let is_free_kind = error.kind == "provider.free-limit";
+            vec![quota(
+                error.message,
+                error.response,
+                error.retry_after_ms.or(retry_after_ms),
+                is_free_kind,
+            )]
         }
         Event::Error { .. } => vec![E::Error],
         _ => vec![],
@@ -350,6 +450,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_discovery_exec_is_exact_in_both_access_modes() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let spec = prepare(
+                &input,
+                access,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap(),
+            )
+            .unwrap();
+            let profile = provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &spec.profile,
+                input.home,
+            )
+            .unwrap();
+            let git = input.provenant.git.display();
+            let literal = format!("(allow process-exec (literal \"{git}\"))");
+            assert!(profile.contains(&literal), "{access:?} lacks {literal}");
+            let subtree_rule = format!("(allow process-exec (subpath \"{git}\"))");
+            assert!(
+                !profile.contains(&subtree_rule),
+                "{access:?} grants {subtree_rule}"
+            );
+            for shim in ["/usr/bin/git", "/usr/bin/xcode-select"] {
+                assert!(
+                    !profile.contains(&format!("(allow process-exec (literal \"{shim}\"))")),
+                    "{access:?} grants shim {shim}"
+                );
+            }
+            let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+            let bin = plan.permissions().scratch.path.join("bin");
+            assert_eq!(std::env::split_paths(&path.1).next(), Some(bin.clone()));
+            assert!(spec.setup.contains(&SetupStep::Symlink {
+                link: bin.join("git"),
+                target: input.provenant.git.to_owned(),
+            }));
+            // Read-only Git discovery must not enable other commands.
+            assert_eq!(
+                spec.profile.spec.tool_exec_roots,
+                if access == Access::ReadOnly {
+                    Vec::new()
+                } else {
+                    vec![
+                        subtree("/bin"),
+                        subtree("/usr/bin"),
+                        subtree(package_root(input.executable).unwrap()),
+                    ]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn git_discovery_ignores_host_config_in_both_access_modes() {
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let plan = crate::tests::fixture_access_plan(access, None, false);
+            let spec = OpenCode
+                .prepare(crate::tests::fixture_input(
+                    &route,
+                    &plan,
+                    &prompt,
+                    std::path::Path::new("/fixture/repo"),
+                    None,
+                ))
+                .unwrap();
+            for (key, value) in [
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ] {
+                let actual = spec.env.iter().find(|(name, _)| name == key);
+                assert_eq!(
+                    actual.map(|(_, value)| value.as_os_str()),
+                    Some(value.as_ref()),
+                    "{access:?} {key}"
+                );
+            }
+        }
+    }
+
     /// A literal on the home's `.claude` or `.codex` would list their entries.
     #[test]
     fn seatbelt_profile_for_a_project_under_home_lists_no_home_probes() {
@@ -392,6 +584,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn homebrew_launch_plan_anchors_with_default_xdg_homes() {
+        homebrew_discovery_fixture(Access::ReadOnly);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn homebrew_writer_launch_plan_anchors_with_discovery_directories() {
+        homebrew_discovery_fixture(Access::WorktreeWrite);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn homebrew_discovery_fixture(access: Access) {
         use provenant_confinement::permissions::snapshot::compile;
         use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
         use std::fs;
@@ -409,25 +612,40 @@ mod tests {
         std::os::unix::fs::symlink("../Cellar/opencode-v2/2.0.32/bin/opencode", &link).unwrap();
         // Dispatch resolves the CLI before passing it to the provider.
         let executable = link.canonicalize().unwrap();
+        // The selected Git can be outside both system and provider roots,
+        // and its executable need not be named `git`.
+        let git = prefix.join("Cellar/git/1.0/bin/selected-git");
+        fs::create_dir_all(git.parent().unwrap()).unwrap();
+        fs::write(&git, "fixture git").unwrap();
         // The project sits under the home, as lane worktrees do.
         let home = root.clone();
         fs::create_dir_all(home.join(".config/opencode")).unwrap();
-        fs::create_dir(root.join("repo")).unwrap();
+        let project_parent = root.join("projects");
+        fs::create_dir_all(project_parent.join("repo")).unwrap();
+        // Both the read root and an ancestor contain discovery directories.
+        for parent in [&project_parent, &project_parent.join("repo")] {
+            for name in [".agents", ".claude", ".codex"] {
+                fs::create_dir(parent.join(name)).unwrap();
+                fs::write(parent.join(name).join("config.json"), "private config").unwrap();
+            }
+        }
         // Compilation refuses private directories other users can reach.
         for name in ["scratch", "state"] {
-            fs::create_dir(root.join(name)).unwrap();
-            fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::create_dir(project_parent.join(name)).unwrap();
+            fs::set_permissions(project_parent.join(name), fs::Permissions::from_mode(0o700))
+                .unwrap();
         }
-        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let plan = crate::tests::read_only_plan(project_parent.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
-        let cwd = root.join("repo");
-        let input = PrepareInput {
+        let cwd = project_parent.join("repo");
+        let mut input = PrepareInput {
             executable: &executable,
             home: &home,
             ..crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None)
         };
-        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        input.provenant.git = &git;
+        {
             let spec = prepare(
                 &input,
                 access,
@@ -436,11 +654,21 @@ mod tests {
             )
             .unwrap();
             for step in &spec.setup {
-                let SetupStep::CreateDir(path) = step else {
-                    panic!("unexpected setup step: {step:?}");
-                };
-                fs::create_dir_all(path).unwrap();
+                match step {
+                    SetupStep::CreateDir(path) => fs::create_dir_all(path).unwrap(),
+                    SetupStep::Symlink { link, target } => {
+                        std::os::unix::fs::symlink(target, link).unwrap();
+                    }
+                    _ => panic!("unexpected setup step: {step:?}"),
+                }
             }
+            assert_eq!(
+                project_parent
+                    .join("scratch/bin/git")
+                    .canonicalize()
+                    .unwrap(),
+                git
+            );
             assert!(spec.profile.spec.runtime_reads.contains(&subtree(&package)));
             let directories = required_anchors(plan.permissions(), &spec.profile, None)
                 .into_iter()
@@ -458,8 +686,24 @@ mod tests {
             let launch = compile(plan.permissions(), &spec.profile, &anchors)
                 .unwrap_or_else(|error| panic!("{access:?} profile refused: {error}"));
             let profile = String::from_utf8(launch.profile).unwrap();
+            assert!(profile.contains(&format!(
+                "(allow process-exec (literal \"{}\"))",
+                git.display()
+            )));
+            assert!(!profile.contains(&format!(
+                "(allow process-exec (subpath \"{}\"))",
+                git.display()
+            )));
             assert!(profile.contains(&format!("(literal \"{}\")", cwd.join(".claude").display())));
             for name in [".agents", ".claude", ".codex"] {
+                for parent in [&project_parent, &cwd] {
+                    let directory = parent.join(name);
+                    assert!(profile.contains(&format!("(literal \"{}\")", directory.display())));
+                    assert!(!profile.contains(&format!("(subpath \"{}\")", directory.display())));
+                    assert!(!profile.contains(directory.join("config.json").to_str().unwrap()));
+                }
+                // Ancestor configuration has no enclosing data-read grant.
+                assert!(!profile.contains(&format!("(subpath \"{}\")", project_parent.display())));
                 let literal = format!("(literal \"{}\")", home.join(name).display());
                 assert!(!profile.contains(&literal), "{access:?} grants {literal}");
             }

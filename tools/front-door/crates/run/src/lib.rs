@@ -21,15 +21,15 @@ pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 mod writer;
 
 pub use admission::{
-    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
+    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume, UncertainReason};
 pub use delivery::HostDeliveryContext;
-pub use git_context::{GitContext, resolve_git_base};
+pub use git_context::{GitContext, continuation_history, resolve_git_base};
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
-    Decoded, LaunchPaths, PreparedLaunch, Providers, RefusalKind, Started, capture_plan,
-    concurrency,
+    Decoded, LaunchPaths, PreparedLaunch, PreparedStart, Providers, RefusalKind, Started,
+    capture_plan, concurrency,
 };
 pub use plan::read_only_plan;
 pub use retention::{
@@ -118,6 +118,10 @@ pub enum RunError {
     DepthOverflow,
     #[error("host queue is full")]
     Capacity,
+    #[error(
+        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
+    )]
+    HostClock,
     #[error("run store is contended or its call budget expired")]
     Contention,
     #[error("run-store call was cancelled")]

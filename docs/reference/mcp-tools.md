@@ -1218,6 +1218,9 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
             "minimum": 0,
             "type": "integer"
           },
+          "no_fallback": {
+            "type": "boolean"
+          },
           "op": {
             "const": "resume"
           },
@@ -1263,7 +1266,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
           "concurrency": {
             "anyOf": [
               {
-                "maximum": 8,
+                "maximum": 16,
                 "minimum": 1,
                 "type": "integer"
               },

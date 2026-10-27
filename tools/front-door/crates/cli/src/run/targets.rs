@@ -35,11 +35,28 @@ pub(super) fn local(
     call: &run::Request<'_>,
 ) -> Result<run::LaneTarget, Fail> {
     match target.run {
-        Some(run) => Ok(run::LaneTarget {
-            run,
-            task: target.task,
-            attempt: target.attempt,
-        }),
+        Some(run) => {
+            // `RUN/ATTEMPT`: the second part is an attempt of this run, not a task.
+            if let (Some(task), None) = (target.task, target.attempt) {
+                let candidate = provenant_core::AttemptId::from_bytes(*task.as_bytes());
+                if session
+                    .service()
+                    .status(candidate, call)
+                    .is_ok_and(|record| record.run_id == run)
+                {
+                    return Ok(run::LaneTarget {
+                        run,
+                        task: None,
+                        attempt: Some(candidate),
+                    });
+                }
+            }
+            Ok(run::LaneTarget {
+                run,
+                task: target.task,
+                attempt: target.attempt,
+            })
+        }
         None => Ok(session.service().resolve_target(
             target.attempt.ok_or(run::RunError::NotFound)?,
             true,

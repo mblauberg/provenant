@@ -99,18 +99,46 @@ held during probes, provider waits or GitHub reads.
 
 ### Checkpoints are keyed exactly
 
-A checkpoint is bounded UTF-8 Markdown under an explicit project and host
+A checkpoint is UTF-8 Markdown, bounded to 256 KiB, under an explicit project and host
 session key, saved atomically with its bytes preserved. Session IDs are 1 to
 128 ASCII letters, digits, `.`, `_` and `-`, starting alphanumeric, with no
 `..`, so the injected save command is safe to copy. Symlinks are refused.
 - Why: restoring the wrong checkpoint misdirects an agent.
 - Test: `crates/workflow/src/session.rs::refuses_traversal_and_command_injection_in_host_keys`;
-  `::refuses_symlinked_directories_checkpoints_and_locks`
+  `::refuses_symlinked_directories_checkpoints_and_locks`;
+  `tests/workflow.rs::long_checkpoints_save_up_to_the_documented_bound`
 - Owner: `crates/workflow/src/session.rs`
+
+### Earlier checkpoints are bounded revisions
+
+A save keeps the checkpoint it replaces as numbered revision `N`, in
+`rev-N.md` beside `checkpoint.md`, and records every retained revision with its
+parent and a SHA-256 in `revisions.json`, all under the save's existing lock.
+The order is: store the old text, publish the new checkpoint, publish the
+history, then delete revisions beyond `retention.session_revisions` (default 8,
+1 to 64, current included), whether the save comes from `session save` or from
+`session handoff`. A save that stops part-way leaves a complete
+checkpoint, and the next one records the revision it finds; unreadable history
+never blocks a save. Identical text adds no revision. Each revision is held to
+the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
+a retained revision, or its unified line diff against the current one, as plain
+text. Lines compare with their terminators, so text that differs only in its final
+newline shows a difference, marked `\ No newline at end of file` as `diff -u`
+marks it. A revision whose text fails its hash is refused with `HISTORY`.
+- Why: a bad save or a compaction must not destroy the only copy of earlier
+  state, and the history must stay bounded.
+- Test: `crates/workflow/src/session.rs::each_save_keeps_the_replaced_checkpoint_as_a_linked_hashed_revision`;
+  `::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
+  `::an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost`;
+  `::unreadable_history_never_blocks_a_save_and_a_changed_revision_is_refused`;
+  `crates/workflow/src/session/diff.rs::a_newline_only_change_is_a_difference_with_a_note`;
+  `src/handoff.rs::a_handoff_checkpoint_keeps_the_configured_number_of_revisions`;
+  `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
+- Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`
 
 ### Session hooks are advisory
 
-`pre-compact` and `compact` exit 0 on missing or invalid state with a
+`pre-compact`, `compact`, `session-start` and `stop` exit 0 on missing or invalid state with a
 diagnostic naming a cause kind, never a path. SessionStart emits only the
 checkpoint for its own key, or a missing or stale status. It never emits the
 latest file, withholds stale content and caps output at 8 KiB.
@@ -118,6 +146,62 @@ latest file, withholds stale content and caps output at 8 KiB.
 - Test: `crates/workflow/src/session.rs::malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback`;
   `::native_host_fixtures_select_only_their_key_and_emit_native_json`
 - Owner: `crates/workflow/src/session.rs`
+
+### Session state is derived, bounded and never authority
+
+`session-start` and `compact` add a digest of this project's in-flight
+lanes, the lanes settled since the chair last saved, and `pr status` for the
+pull requests the chair named in the checkpoint. The digest is at most 3 KiB,
+read-only and shares the 8 KiB output cap, so the checkpoint excerpt shrinks
+first. Lane, PR and worktree facts come from the read commands (`lanes`,
+`pr status`, `worktree list`) under one 4 second deadline. A command that is
+missing, slow or failing marks its section unavailable and never reads as
+empty. Record fields are stripped of markers, backticks and control
+characters before they are shown.
+- Why: a restarted chair must see real lane state quickly, and absence of
+  evidence must not read as an empty queue.
+- Test: `crates/workflow/src/session/state.rs::output_is_bounded_and_says_when_it_was`;
+  `::unreadable_sections_are_named_not_shown_empty`;
+  `::hostile_fields_cannot_forge_markers_or_headings`;
+  `tests/hooks_session.rs::restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair`
+- Owner: `crates/workflow/src/session/state.rs`, `src/hook_state.rs`, `src/hooks.rs`
+
+### Autosave never writes the chair's checkpoint
+
+`pre-compact` saves, and `stop` refreshes after ten quiet minutes (neither the
+checkpoint nor the last autosave changed), the derived lane, PR and worktree
+state to `autosave.md`, a file beside `checkpoint.md` that only hooks write.
+No autosave path opens `checkpoint.md` for writing, so the chair's text, its
+newlines and its modification time (the "last chair save" baseline) are never
+touched, and a copy of saved state in the chair's notes is never replaced.
+`session-start` and `compact` render the chair's checkpoint followed by
+`autosave.md`. The two are read independently: a damaged or unreadable
+`autosave.md` costs one diagnostic line (`Autosave unavailable: <cause>`) and
+never hides a readable checkpoint. A checkpoint that holds a block from an earlier release keeps it
+as chair text. `stop` never creates a session directory, `autosave.md` alone is
+reported as holding only automatically saved state, and lane sessions never
+write. A next-page command in the digest is shown only if it survives
+rendering byte for byte (within 512 bytes and free of `<`, `>` and backticks);
+otherwise a plain note names the cursor. Every other command a hook prints
+(the digest heading, the bounded-output marker, the `pr status` hint, the `Save:` line, the `session show`
+pointer) repeats the hook's non-default `--state-dir` on the same terms, so
+following it reaches the store the hook used; one that cannot is not printed.
+- Why: automatic state must not erase the authority references the chair wrote
+  or hide that the chair has not saved notes; separate files remove the
+  ownership question a shared file raises.
+- Test: `tests/hooks_session.rs::autosave_never_writes_the_chair_file_and_output_shows_both_parts`;
+  `::a_legacy_block_in_the_checkpoint_stays_chair_text`;
+  `::pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing`;
+  `::stop_hook_refreshes_only_an_existing_quiet_checkpoint`;
+  `::lane_sessions_report_but_never_write_checkpoint_state`;
+  `crates/workflow/src/session/state.rs::a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte`;
+  `::the_digest_title_names_the_store_it_was_read_from`;
+  `::the_bounded_fallback_lists_the_store_the_digest_came_from`;
+  `crates/workflow/src/session.rs::a_damaged_or_unreadable_autosave_never_hides_a_readable_checkpoint`;
+  `tests/hooks_session.rs::a_damaged_autosave_leaves_the_chair_notes_visible_at_session_start`;
+  `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
+  `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
+- Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
 
 ## Session handoff
 
@@ -164,3 +248,31 @@ authority.
 - Receipt mutation commands, repair and finding sidecars.
 - Provider-family maps in workflow, or a tracker replay queue.
 - Transcript reinjection and workflow MCP tools.
+- Merging, syncing or conflict-free replication of checkpoint revisions; the
+  history is one writer's bounded chain.
+
+## Lane delivery evidence
+
+Lane delivery modes and later `lane deliver` pickup use the run owner's sealed
+terminal result and exact Git head. PR bodies are supplied from that result,
+and graph PRs combine bounded node result excerpts with their attempt IDs.
+A host delivery or worktree cleanup receipt is separate from the chair's
+workflow acceptance receipt. Successful push or local integration grants no
+additional review, protected-branch merge or release authority.
+Delivery modes refused before admission when targeting a protected branch are
+`integrate` and direct `push` (including legacy delivery flags and manifests);
+the protected branches are the primary checkout branch, each configured
+remote's recorded default, or `main` and `master` when no remote default is
+recorded. PR mode onto the default branch is allowed, using the default branch
+as its base while publishing an unprotected head branch. Replay of an accepted
+operation is not refused before admission if branch protection changes later,
+though actual delivery still rechecks protection.
+A succeeded lane whose delivery outcome is `NoNewCommits` keeps its worktree
+on purpose, because cleanup requires a Delivered receipt. The tree is kept so
+idle runs or uncommitted edits can be inspected, and is reclaimed later
+through gc or disk reclaim.
+- Why: lifecycle automation must preserve the distinction between publishing
+  evidence and accepting a change under the repository's workflow.
+- Test: `crates/run/src/delivery_tests.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
+  `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`.
+- Owner: `crates/run/src/delivery.rs`, `src/fabric.rs`; acceptance remains with `crates/workflow`

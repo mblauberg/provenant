@@ -1,5 +1,5 @@
 //! Native advisory hook protocol shared by Claude Code and Codex.
-use super::{HostSessionId, SessionError, SessionStore};
+use super::{CommandPrefix, HostSessionId, SessionError, SessionStore};
 use provenant_core::{Clock, DurationMicros, ProjectId, StateRoot};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -24,6 +24,8 @@ pub enum CheckpointStatus {
     Present,
     Missing,
     Stale,
+    /// Present, but holding only the automatically saved state block.
+    StateOnly,
     InvalidInput,
     Unavailable,
 }
@@ -51,9 +53,9 @@ enum HostOutput<'a> {
     },
 }
 #[derive(Clone, Copy)]
-enum ExcerptState {
+enum ExcerptState<'a> {
     Complete,
-    Truncated,
+    Truncated(&'a str),
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +74,41 @@ pub fn hook_context(
     clock: &dyn Clock,
     max_age: DurationMicros,
 ) -> HookContext {
+    hook_context_with(
+        root,
+        project,
+        event,
+        input,
+        clock,
+        max_age,
+        Advice {
+            digest: "",
+            commands: &CommandPrefix::default(),
+        },
+    )
+}
+
+/// What the caller adds to a hook: a bounded `digest` and how to reach its store.
+#[derive(Clone, Copy)]
+pub struct Advice<'a> {
+    pub digest: &'a str,
+    pub commands: &'a CommandPrefix,
+}
+
+/// As [`hook_context`], with a freshly derived `digest` of lane and pull
+/// request state placed before the checkpoint. The digest is the caller's
+/// bounded text; the checkpoint excerpt shrinks first when output is capped.
+/// A saved state block is withheld from the excerpt, since the digest
+/// supersedes it.
+pub fn hook_context_with(
+    root: &StateRoot,
+    project: ProjectId,
+    event: HookEvent,
+    input: impl Read,
+    clock: &dyn Clock,
+    max_age: DurationMicros,
+    advice: Advice<'_>,
+) -> HookContext {
     let mut bytes = Vec::new();
     let parsed = input
         .take(HOOK_INPUT_LIMIT + 1)
@@ -82,44 +119,117 @@ pub fn hook_context(
         .filter(|host| host.hook_event_name == event)
         .and_then(|host| host.session_id)
         .and_then(|id| HostSessionId::parse(&id).ok());
+    let Advice { digest, commands } = advice;
     let Some(session) = parsed else {
-        return render(event, None, CheckpointStatus::InvalidInput,
-            "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None);
+        return render(event, None, CheckpointStatus::InvalidInput, digest,
+            "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None, "");
     };
     let store = SessionStore::new(root.clone(), project, session.clone());
-    let (status, markdown, cause) = match store.read() {
-        Ok(Some(checkpoint)) => match clock.wall_now() {
-            Ok(now) => {
-                let age =
-                    i128::from(now.as_micros()) - i128::from(checkpoint.modified_at.as_micros());
-                if age < 0 || age > i128::from(max_age.as_micros()) {
-                    (CheckpointStatus::Stale, None, None)
-                } else {
-                    (CheckpointStatus::Present, Some(checkpoint.markdown), None)
-                }
-            }
-            Err(error) => (CheckpointStatus::Unavailable, None, Some(error.to_string())),
-        },
-        Ok(None) => (CheckpointStatus::Missing, None, None),
-        Err(error) => (CheckpointStatus::Unavailable, None, Some(read_cause(error))),
+    // The chair's checkpoint and the hook-owned autosave file are read apart
+    // and rendered one after the other; neither is ever merged into the other.
+    // A damaged or unreadable autosave is reported on its own line and never
+    // hides a checkpoint that read cleanly.
+    let autosave = store.read_autosave();
+    let (status, markdown, cause, autosave_problem) = match (store.read(), clock.wall_now()) {
+        (Err(error), _) => (
+            CheckpointStatus::Unavailable,
+            None,
+            Some(read_cause(error)),
+            None,
+        ),
+        (_, Err(error)) => (
+            CheckpointStatus::Unavailable,
+            None,
+            Some(error.to_string()),
+            None,
+        ),
+        (Ok(checkpoint), Ok(now)) => {
+            let (autosave, problem) = match autosave {
+                Ok(autosave) => (autosave, None),
+                Err(error) => (None, Some(read_cause(error))),
+            };
+            let fresh = |at: provenant_core::UtcMicros| {
+                let age = i128::from(now.as_micros()) - i128::from(at.as_micros());
+                (0..=i128::from(max_age.as_micros())).contains(&age)
+            };
+            let chair_stale = checkpoint.as_ref().is_some_and(|c| !fresh(c.modified_at));
+            let chair = checkpoint
+                .as_ref()
+                .filter(|c| fresh(c.modified_at))
+                .map(|c| c.markdown.clone())
+                .filter(|text| super::state::has_chair_text(text));
+            let saved = autosave
+                .as_ref()
+                .filter(|a| fresh(a.modified_at))
+                .map(|a| a.markdown.clone())
+                .filter(|text| super::state::has_chair_text(text));
+            let status = if chair.is_some() {
+                CheckpointStatus::Present
+            } else if chair_stale {
+                CheckpointStatus::Stale
+            } else if checkpoint.is_some() || saved.is_some() {
+                CheckpointStatus::StateOnly
+            } else if autosave.is_some() {
+                CheckpointStatus::Stale
+            } else {
+                CheckpointStatus::Missing
+            };
+            let both = match (chair, saved) {
+                (Some(chair), Some(saved)) => Some(format!("{chair}\n\n{saved}")),
+                (one, other) => one.or(other),
+            };
+            (status, both, None, problem)
+        }
     };
     let state = match status {
         CheckpointStatus::Present => {
             "present; no save needed by freshness policy (save again if progress changed)"
         }
         CheckpointStatus::Missing => "missing; saving needed",
+        CheckpointStatus::StateOnly => {
+            "holds only automatically saved lane and PR state; chair notes and authority references still need saving"
+        }
         CheckpointStatus::Stale => "stale; saving needed; stale content withheld",
         _ => "unavailable (invalid state or I/O); saving needed after checking state",
     };
     let cause = cause
         .map(|cause| format!("\nCause: {cause}."))
         .unwrap_or_default();
-    let message = format!(
-        "Checkpoint {state}.{cause}\nProject: {project}; host session: {}\nSave: provenant workflow session save {} --file <checkpoint.md>\nPreserve originating authority references; checkpoint prose grants no new authority.",
-        session.as_str(),
-        session.as_str()
+    let cause = format!(
+        "{cause}{}",
+        autosave_problem
+            .map(|problem| format!(
+                "\nAutosave unavailable: {problem}; its saved state is not shown."
+            ))
+            .unwrap_or_default()
     );
-    render(event, Some(session), status, message, markdown)
+    // The save must reach the store this hook read. When the command cannot be
+    // shown so that it round-trips, say so rather than show one that would
+    // write into the default store.
+    let save = match commands.runnable(&format!("workflow session save {}", session.as_str())) {
+        Some(command) => format!("{command} --file <checkpoint.md>"),
+        None => format!(
+            "no runnable command is shown because this hook's --state-dir path cannot be shown safely; run workflow session save {} --file <checkpoint.md> with that --state-dir, since without it the save goes to the default store",
+            session.as_str()
+        ),
+    };
+    let message = format!(
+        "Checkpoint {state}.{cause}\nProject: {project}; host session: {}\nSave: {save}\nPreserve originating authority references; checkpoint prose grants no new authority.",
+        session.as_str(),
+    );
+    let more = match commands.runnable(&format!("workflow session show {}", session.as_str())) {
+        Some(command) => format!("read it with `{command}`"),
+        None => "use workflow session show with this ID and this hook's --state-dir".into(),
+    };
+    render(
+        event,
+        Some(session),
+        status,
+        digest,
+        message,
+        markdown,
+        &more,
+    )
 }
 
 /// Bounded read cause for the diagnostic: OS kind and code, never paths.
@@ -134,15 +244,23 @@ fn render(
     event: HookEvent,
     session_id: Option<HostSessionId>,
     status: CheckpointStatus,
+    digest: &str,
     diagnostic: String,
     markdown: Option<String>,
+    more: &str,
 ) -> HookContext {
     let retained = if event == HookEvent::SessionStart {
         markdown.unwrap_or_default()
     } else {
         String::new()
     };
-    let mut stdout = encode(event, &diagnostic, &retained, ExcerptState::Complete);
+    let mut stdout = encode(
+        event,
+        &diagnostic,
+        digest,
+        &retained,
+        ExcerptState::Complete,
+    );
     if stdout.len() > HOOK_OUTPUT_LIMIT {
         // Search UTF-8 boundaries against encoded bytes. Raw bytes and escaped
         // JSON bytes are different measures; subtracting the excess can erase
@@ -160,8 +278,9 @@ fn render(
             let candidate = encode(
                 event,
                 &diagnostic,
+                digest,
                 retained.get(..end).unwrap_or_default(),
-                ExcerptState::Truncated,
+                ExcerptState::Truncated(more),
             );
             if candidate.len() <= HOOK_OUTPUT_LIMIT {
                 low = middle;
@@ -173,8 +292,9 @@ fn render(
         stdout = encode(
             event,
             &diagnostic,
+            digest,
             retained.get(..end).unwrap_or_default(),
-            ExcerptState::Truncated,
+            ExcerptState::Truncated(more),
         );
     }
     HookContext {
@@ -186,10 +306,22 @@ fn render(
     }
 }
 
-fn encode(event: HookEvent, diagnostic: &str, retained: &str, excerpt: ExcerptState) -> Vec<u8> {
+fn encode(
+    event: HookEvent,
+    diagnostic: &str,
+    digest: &str,
+    retained: &str,
+    excerpt: ExcerptState<'_>,
+) -> Vec<u8> {
     let mut text = diagnostic.to_owned();
-    if matches!(excerpt, ExcerptState::Truncated) {
-        text.push_str("\n[Checkpoint excerpt; use workflow session show with this ID for the complete Markdown.]");
+    if !digest.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(digest);
+    }
+    if let ExcerptState::Truncated(more) = excerpt {
+        text.push_str("\n[Checkpoint excerpt; ");
+        text.push_str(more);
+        text.push_str(" for the complete Markdown.]");
     }
     if !retained.is_empty() {
         text.push_str("\n\n");

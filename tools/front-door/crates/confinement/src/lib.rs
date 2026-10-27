@@ -12,6 +12,7 @@ pub mod quarantine;
 pub mod redact;
 pub mod repo;
 pub mod run_config;
+pub mod scratch;
 mod stable_read;
 mod status;
 #[cfg(test)]

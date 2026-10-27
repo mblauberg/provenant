@@ -9,9 +9,27 @@ use provenant_supervisor::custody::{
 use rusqlite::{OptionalExtension, params};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
-/// An explicit dispatch argument wins over the effective profile default.
-pub fn concurrency(explicit: Option<u64>, profile: &HarnessProfile) -> u64 {
-    explicit.unwrap_or_else(|| profile.knob_u64("lanes.max_concurrency").unwrap_or(8))
+/// An explicit dispatch argument wins over the effective profile default. A
+/// batch with no writer defaults from `lanes.max_concurrency_read_only`
+/// (16); any batch with a writer defaults from `lanes.max_concurrency` (8).
+/// `bound` is a `lanes.max_concurrency` the user set while leaving the
+/// read-only knob alone: it caps the read-only default, never an explicit value.
+pub fn concurrency(
+    explicit: Option<u64>,
+    profile: &HarnessProfile,
+    read_only: bool,
+    bound: Option<u64>,
+) -> u64 {
+    explicit.unwrap_or_else(|| {
+        if read_only {
+            let default = profile
+                .knob_u64("lanes.max_concurrency_read_only")
+                .unwrap_or(16);
+            bound.map_or(default, |bound| default.min(bound))
+        } else {
+            profile.knob_u64("lanes.max_concurrency").unwrap_or(8)
+        }
+    })
 }
 
 pub fn capture_plan(task: &TaskRequest) -> CapturePlan {
@@ -43,6 +61,39 @@ pub struct PreparedLaunch {
     pub observed_head: Option<provenant_core::GitOid>,
     pub confinement: Option<crate::LaunchConfinement>,
 }
+
+fn applied_write_grants(
+    plan: &PreparedLaunch,
+) -> std::result::Result<admission::AppliedWriteGrants, String> {
+    let Some(confinement) = &plan.confinement else {
+        return Ok(admission::AppliedWriteGrants::default());
+    };
+    let permissions = confinement.plan.permissions();
+    let grants = provenant_confinement::write_grants(permissions, &confinement.profile)
+        .into_iter()
+        .map(|grant| {
+            Ok(WriteGrantRecord {
+                source: grant.source,
+                path: provenant_records::AbsolutePath::new(&grant.path)
+                    .map_err(|_| "invalid write grant path".to_owned())?,
+                scope: grant.scope,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    if !crate::reader::write_grants_fit(&grants) {
+        return Err("write grants exceed 1,024 entries or 256 KiB".to_owned());
+    }
+    let git_grants_digest = match &permissions.mode {
+        provenant_confinement::permissions::AccessMode::ReadOnly => None,
+        provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) => Some(
+            provenant_core::Digest::from_bytes(authority.git_grants_digest),
+        ),
+    };
+    Ok(admission::AppliedWriteGrants {
+        grants,
+        git_grants_digest,
+    })
+}
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
     pub outcome: Outcome,
@@ -67,6 +118,107 @@ pub struct LaunchPaths {
     /// Private temporary directory for a lane, never a shared system
     /// one. Terminal commit and withdrawal remove it best-effort.
     pub temporary: PathBuf,
+}
+
+/// A fresh continuation prepared before its operation and attempt are recorded.
+/// Only this invocation's exclusively created, unrecorded staging is disposable.
+pub struct PreparedStart {
+    pub task: TaskRequest,
+    pub attempt: AttemptId,
+    pub plan: std::cell::RefCell<Option<PreparedLaunch>>,
+    runs: provenant_os::fs::Directory,
+    run: RunId,
+    retained: bool,
+}
+impl Drop for PreparedStart {
+    fn drop(&mut self) {
+        if !self.retained {
+            let _ = crate::artifacts::remove_entry_tree(
+                &self.runs,
+                std::ffi::OsStr::new(&self.run.to_string()),
+            );
+        }
+    }
+}
+
+fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
+    format!(
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. Files left in $TMPDIR are not deliverables.\n\n{prompt}",
+        result = directory.join("result.md").display(),
+        exit = directory.join("process-exit.json").display(),
+        stdout = directory.join("stdout.log").display(),
+        stderr = directory.join("stderr.log").display(),
+    )
+}
+
+impl RunStore {
+    pub(crate) fn prepare_fresh_start(
+        &self,
+        input: &PreparedRun,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<PreparedStart> {
+        let [task] = input.request.tasks.as_slice() else {
+            return Err(RunError::Validation("continuation task count"));
+        };
+        let [attempt] = input.attempts.as_slice() else {
+            return Err(RunError::Validation("continuation attempt count"));
+        };
+        let runs = crate::artifacts::subdir(&self.root, std::ffi::OsStr::new("runs"), true)?;
+        // Exclusive creation makes cleanup safe even if admission races a replay.
+        runs.mkdir(std::ffi::OsStr::new(&input.run_id.to_string()), 0o700)?;
+        let mut ready = PreparedStart {
+            task: task.clone(),
+            attempt: attempt.attempt_id,
+            plan: std::cell::RefCell::new(None),
+            runs,
+            run: input.run_id,
+            retained: false,
+        };
+        ready.runs.sync()?;
+        let directory = self.attempt_dir(input.run_id, attempt.attempt_id, true)?;
+        for name in ["scratch", "provider-state", "tmp"] {
+            crate::artifacts::subdir(&directory, std::ffi::OsStr::new(name), true)?;
+        }
+        let base = self.context.state_root.as_path().join(format!(
+            "runs/{}/attempts/{}",
+            input.run_id, attempt.attempt_id
+        ));
+        let paths = LaunchPaths {
+            attempt_id: attempt.attempt_id,
+            operation_id: input.operation_id.clone(),
+            task_index: 0,
+            lane_depth: input.request.lane_depth.unwrap_or(1),
+            run_id: input.run_id,
+            deadline_unix_ms: u64::try_from(
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?
+                    .as_micros()
+                    / 1000,
+            )
+            .unwrap_or(0)
+            .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
+            scratch: base.join("scratch"),
+            provider_state: base.join("provider-state"),
+            temporary: base.join("tmp"),
+        };
+        let prompt = output_prompt(&base, &attempt.prompt);
+        let plan = providers
+            .check_policy(task)
+            .and_then(|()| providers.prepare(task, &prompt, &paths, None))
+            .and_then(|plan| applied_write_grants(&plan).map(|_| plan))
+            .map_err(|message| RunError::Input {
+                kind: ErrorKind::ContinuationUnsupported,
+                message: format!("fresh fallback refused before admission: {message}"),
+            })?;
+        *ready.plan.get_mut() = Some(plan);
+        Ok(ready)
+    }
+
+    pub(crate) fn retain_prepared_start(&self, ready: &mut PreparedStart, run: RunId) {
+        ready.retained = ready.run == run;
+    }
 }
 pub trait Providers {
     /// Host policy checks before provider preparation. A refusal is task-local;
@@ -486,6 +638,7 @@ impl RunStore {
         };
         let resume = request
             .parent
+            .filter(|_| request.fresh_continuation.is_none())
             .map(|prior| self.record(prior, call))
             .transpose()?;
         let ids: Vec<String> = call.retry(|| {
@@ -616,13 +769,7 @@ impl RunStore {
                 .state_root
                 .as_path()
                 .join(format!("runs/{run}/attempts/{id}"));
-            let prompt = format!(
-                "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. Files left in $TMPDIR are not deliverables.\n\n{prompt}",
-                result = directory.join("result.md").display(),
-                exit = directory.join("process-exit.json").display(),
-                stdout = directory.join("stdout.log").display(),
-                stderr = directory.join("stderr.log").display(),
-            );
+            let prompt = output_prompt(&directory, &prompt);
             let attempt = self.attempt_dir(record.run_id, id, false)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
@@ -690,46 +837,7 @@ impl RunStore {
                 .and_then(|c| c.plan.permissions().read_only.as_ref())
                 .map(|g| g.writable_paths())
                 .unwrap_or_default();
-            let write_grants = plan
-                .confinement
-                .as_ref()
-                .map(
-                    |c| -> std::result::Result<admission::AppliedWriteGrants, String> {
-                        let permissions = c.plan.permissions();
-                        let grants = provenant_confinement::write_grants(permissions, &c.profile)
-                            .into_iter()
-                            .map(|grant| {
-                                Ok(WriteGrantRecord {
-                                    source: grant.source,
-                                    path: provenant_records::AbsolutePath::new(&grant.path)
-                                        .map_err(|_| "invalid write grant path".to_owned())?,
-                                    scope: grant.scope,
-                                })
-                            })
-                            .collect::<std::result::Result<Vec<_>, String>>()?;
-                        let git_grants_digest = match &permissions.mode {
-                            provenant_confinement::permissions::AccessMode::ReadOnly => None,
-                            provenant_confinement::permissions::AccessMode::WorktreeWrite(
-                                authority,
-                            ) => Some(provenant_core::Digest::from_bytes(
-                                authority.git_grants_digest,
-                            )),
-                        };
-                        Ok(admission::AppliedWriteGrants {
-                            grants,
-                            git_grants_digest,
-                        })
-                    },
-                )
-                .transpose()
-                .and_then(|grants| {
-                    let grants = grants.unwrap_or_default();
-                    if crate::reader::write_grants_fit(&grants.grants) {
-                        Ok(grants)
-                    } else {
-                        Err("write grants exceed 1,024 entries or 256 KiB".to_owned())
-                    }
-                });
+            let write_grants = applied_write_grants(&plan);
             let write_grants = match write_grants {
                 Ok(grants) => grants,
                 Err(reason) => {
@@ -893,6 +1001,18 @@ impl RunStore {
                 local(&e)
             }
         })?;
+        if record.retry_of.is_some()
+            && let Some(writer) = plan
+                .confinement
+                .as_ref()
+                .and_then(|plan| plan.writer.as_ref())
+            && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
+        {
+            lease
+                .withdraw_unlaunched()
+                .map_err(|error| HandOff::Uncertain(error.to_string()))?;
+            return Err(local(&error));
+        }
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
             Ok(now)
