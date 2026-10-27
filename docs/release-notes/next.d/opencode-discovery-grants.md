@@ -1,4 +1,4 @@
-## OpenCode discovery directories
+## Fixes
 
 OpenCode lanes now launch when the project or an ancestor contains `.agents`,
 `.claude` or `.codex` directories. Discovery stays literal and does not grant
