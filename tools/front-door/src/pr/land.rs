@@ -8,7 +8,10 @@ use provenant_core::GitOid;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +21,15 @@ enum Status {
     Skipped,
     /// Left as it was because proceeding would be unsafe.
     Refused,
+}
+impl Status {
+    /// The name the JSON report and the text report both give the status.
+    fn name(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
 }
 #[derive(Debug, Serialize)]
 struct Step {
@@ -100,7 +112,18 @@ fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, 
         return Err("cannot find the common Git directory".into());
     };
     let common = project.join(common.trim_end_matches('\n'));
-    let mut entries = vec![common.clone()];
+    for dir in administrative_dirs(&common)? {
+        if let Some(how) = use_in(&dir, branch)? {
+            return Ok(Some((checkout_path(&dir, &common), how)));
+        }
+    }
+    Ok(None)
+}
+
+/// The main repository's administrative directory, then each linked
+/// worktree's `<common>/worktrees/<id>/`.
+fn administrative_dirs(common: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = vec![common.to_path_buf()];
     let linked = common.join("worktrees");
     match fs::read_dir(&linked) {
         Ok(listing) => {
@@ -110,55 +133,49 @@ fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, 
                 if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                     return Err(format!("unexpected entry {}", entry.path().display()).into());
                 }
-                entries.push(entry.path());
+                dirs.push(entry.path());
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("cannot read {}: {error}", linked.display()).into()),
     }
+    Ok(dirs)
+}
+
+/// How the checkout whose administrative directory is `dir` uses `branch`.
+fn use_in(dir: &Path, branch: &str) -> Result<Option<Use>> {
     let head = format!("refs/heads/{branch}");
-    for dir in entries {
-        let read = |file: &str| -> Result<Option<String>> {
-            match fs::read_to_string(dir.join(file)) {
-                Ok(text) => Ok(Some(text.trim().to_owned())),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(error) => {
-                    Err(format!("cannot read {file} in {}: {error}", dir.display()).into())
-                }
-            }
-        };
-        // A present state file must hold what Git writes there; anything else
-        // (an empty or truncated file, say) refuses rather than reads as free.
-        let names = |file: &str, wanted: &str, valid: fn(&str) -> bool| -> Result<bool> {
-            match read(file)? {
-                Some(text) if valid(&text) => Ok(text == wanted),
-                Some(_) => Err(format!("cannot parse {file} in {}", dir.display()).into()),
-                None => Ok(false),
-            }
-        };
-        let how = match read("HEAD")? {
-            Some(text) => match text.strip_prefix("ref: ").map(str::trim) {
-                Some(to) if to == head => Some(Use::CheckedOut),
-                Some(to) if is_ref(to) => None,
-                None if is_object_id(&text) => None,
-                _ => return Err(format!("cannot parse HEAD in {}", dir.display()).into()),
-            },
-            None => None,
-        };
-        let how = if how.is_some() {
-            how
-        } else if names("rebase-merge/head-name", &head, is_head_name)?
-            || names("rebase-apply/head-name", &head, is_head_name)?
-        {
-            Some(Use::Rebased)
-        } else if names("BISECT_START", branch, is_bisect_start)? {
-            Some(Use::Bisected)
-        } else {
-            None
-        };
-        if let Some(how) = how {
-            return Ok(Some((checkout_path(&dir, &common), how)));
+    let read = |file: &str| -> Result<Option<String>> {
+        match fs::read_to_string(dir.join(file)) {
+            Ok(text) => Ok(Some(text.trim().to_owned())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("cannot read {file} in {}: {error}", dir.display()).into()),
         }
+    };
+    // A present state file must hold what Git writes there; anything else
+    // (an empty or truncated file, say) refuses rather than reads as free.
+    let names = |file: &str, wanted: &str, valid: fn(&str) -> bool| -> Result<bool> {
+        match read(file)? {
+            Some(text) if valid(&text) => Ok(text == wanted),
+            Some(_) => Err(format!("cannot parse {file} in {}", dir.display()).into()),
+            None => Ok(false),
+        }
+    };
+    if let Some(text) = read("HEAD")? {
+        match text.strip_prefix("ref: ").map(str::trim) {
+            Some(to) if to == head => return Ok(Some(Use::CheckedOut)),
+            Some(to) if is_ref(to) => {}
+            None if is_object_id(&text) => {}
+            _ => return Err(format!("cannot parse HEAD in {}", dir.display()).into()),
+        }
+    }
+    if names("rebase-merge/head-name", &head, is_head_name)?
+        || names("rebase-apply/head-name", &head, is_head_name)?
+    {
+        return Ok(Some(Use::Rebased));
+    }
+    if names("BISECT_START", branch, is_bisect_start)? {
+        return Ok(Some(Use::Bisected));
     }
     Ok(None)
 }
@@ -613,10 +630,7 @@ pub(super) fn run(
         text.push_str(&format!(
             "  {} {} {}\n",
             step.step,
-            serde_json::to_value(step.status)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_default(),
+            step.status.name(),
             step.detail
         ));
     }
@@ -651,6 +665,5 @@ pub(crate) fn delete_after_check(
         }
     }
     let step = delete_branch(&git, project, "feat", "main", upstream, tip, false)?;
-    let status = serde_json::to_value(step.status)?;
-    Ok((status.as_str().unwrap_or_default().to_owned(), step.detail))
+    Ok((step.status.name(), step.detail))
 }

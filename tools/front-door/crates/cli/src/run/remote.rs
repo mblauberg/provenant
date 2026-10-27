@@ -529,23 +529,17 @@ fn poll_until(
 ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
     let deadline = Instant::now() + budget;
     loop {
-        let last = match fetch(deadline.saturating_duration_since(Instant::now())) {
-            Ok(lanes) => {
+        let last = match watch::tick(&mut fetch, deadline)? {
+            watch::Tick::Lanes(lanes) => {
                 let met = condition_met(&lanes, condition);
                 if met || Instant::now() >= deadline {
                     return Ok((lanes, met));
                 }
                 Ok(lanes)
             }
-            Err(fail) if fail.kind == ErrorKind::PeerUnavailable => {
-                if Instant::now() >= deadline {
-                    return Err(fail);
-                }
-                Err(fail)
-            }
-            Err(fail) => return Err(fail),
+            watch::Tick::Retry(fail) => Err(fail),
         };
-        std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
+        watch::pause(poll, deadline);
         if Instant::now() >= deadline {
             return last.map(|lanes| (lanes, false));
         }

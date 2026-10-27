@@ -320,34 +320,22 @@ pub(crate) fn pr_land_keeps_a_branch_held_by_a_paused_rebase() -> Result {
     // state records that `feat` is still in use.
     let landing = landing()?;
     let held = hold(&landing, "rebase")?;
-    let (status, detail) = race(&landing, &[])?;
-    assert_eq!(status, "refused", "{detail}");
-    assert!(detail.contains("rebased"), "{detail}");
-    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    assert_kept(&landing, race(&landing, &[])?, "rebased")?;
 
     // Once the rebase is aborted nothing holds the branch, so it is deleted.
     git_in(&landing.rig, &held, &["rebase", "--abort"])?;
     git_in(&landing.rig, &held, &["checkout", "-q", "--detach"])?;
-    let (status, detail) = race(&landing, &[])?;
-    assert_eq!(status, "done", "{detail}");
-    assert!(!branch_exists(&landing.rig, "feat")?);
-    Ok(())
+    assert_deleted(&landing)
 }
 
 pub(crate) fn pr_land_keeps_a_branch_held_by_a_bisect() -> Result {
     let landing = landing()?;
     let held = hold(&landing, "bisect")?;
-    let (status, detail) = race(&landing, &[])?;
-    assert_eq!(status, "refused", "{detail}");
-    assert!(detail.contains("bisected"), "{detail}");
-    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    assert_kept(&landing, race(&landing, &[])?, "bisected")?;
 
     git_in(&landing.rig, &held, &["bisect", "reset"])?;
     git_in(&landing.rig, &held, &["checkout", "-q", "--detach"])?;
-    let (status, detail) = race(&landing, &[])?;
-    assert_eq!(status, "done", "{detail}");
-    assert!(!branch_exists(&landing.rig, "feat")?);
-    Ok(())
+    assert_deleted(&landing)
 }
 
 pub(crate) fn pr_land_keeps_a_branch_held_in_a_checkout_that_went_away() -> Result {
@@ -356,11 +344,7 @@ pub(crate) fn pr_land_keeps_a_branch_held_in_a_checkout_that_went_away() -> Resu
     let landing = landing()?;
     let held = hold(&landing, "rebase")?;
     fs::rename(&held, landing.rig.root.join("moved-away"))?;
-    let (status, detail) = race(&landing, &[])?;
-    assert_eq!(status, "refused", "{detail}");
-    assert!(detail.contains("rebased"), "{detail}");
-    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
-    Ok(())
+    assert_kept(&landing, race(&landing, &[])?, "rebased")
 }
 
 pub(crate) fn pr_land_refuses_when_a_worktree_entry_cannot_be_read() -> Result {
@@ -371,11 +355,7 @@ pub(crate) fn pr_land_refuses_when_a_worktree_entry_cannot_be_read() -> Result {
     fs::set_permissions(&entry, fs::Permissions::from_mode(0o000))?;
     let outcome = race(&landing, &[]);
     fs::set_permissions(&entry, fs::Permissions::from_mode(0o755))?;
-    let (status, detail) = outcome?;
-    assert_eq!(status, "refused", "{detail}");
-    assert!(detail.contains("cannot read"), "{detail}");
-    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
-    Ok(())
+    assert_kept(&landing, outcome?, "cannot read")
 }
 
 pub(crate) fn pr_land_refuses_when_worktree_state_is_malformed() -> Result {
@@ -392,10 +372,7 @@ pub(crate) fn pr_land_refuses_when_worktree_state_is_malformed() -> Result {
     let original = fs::read(&head_name)?;
     for malformed in ["", "refs/\n"] {
         fs::write(&head_name, malformed)?;
-        let (status, detail) = race(&landing, &[])?;
-        assert_eq!(status, "refused", "{malformed:?}: {detail}");
-        assert!(detail.contains("cannot parse"), "{detail}");
-        assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+        assert_kept(&landing, race(&landing, &[])?, "cannot parse")?;
     }
     fs::write(&head_name, original)?;
 
@@ -404,10 +381,7 @@ pub(crate) fn pr_land_refuses_when_worktree_state_is_malformed() -> Result {
     fs::write(&head, "abc\n")?;
     let outcome = race(&landing, &[]);
     fs::write(&head, original)?;
-    let (status, detail) = outcome?;
-    assert_eq!(status, "refused", "{detail}");
-    assert!(detail.contains("cannot parse HEAD"), "{detail}");
-    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    assert_kept(&landing, outcome?, "cannot parse HEAD")?;
 
     let bisect = self::landing()?;
     hold(&bisect, "bisect")?;
@@ -418,10 +392,23 @@ pub(crate) fn pr_land_refuses_when_worktree_state_is_malformed() -> Result {
         bisect.rig.project.join(".git/worktrees/held/BISECT_START")
     };
     fs::write(&start, ":\n")?;
-    let (status, detail) = race(&bisect, &[])?;
+    assert_kept(&bisect, race(&bisect, &[])?, "cannot parse BISECT_START")
+}
+
+/// The `branch` step refused, naming `reason`, and `feat` is still at the
+/// merged head.
+fn assert_kept(landing: &Landing, (status, detail): (String, String), reason: &str) -> Result {
     assert_eq!(status, "refused", "{detail}");
-    assert!(detail.contains("cannot parse BISECT_START"), "{detail}");
-    assert_eq!(git(&bisect.rig, &["rev-parse", "feat"])?, bisect.head);
+    assert!(detail.contains(reason), "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    Ok(())
+}
+
+/// With nothing holding `feat`, the cleanup deletes it.
+fn assert_deleted(landing: &Landing) -> Result {
+    let (status, detail) = race(landing, &[])?;
+    assert_eq!(status, "done", "{detail}");
+    assert!(!branch_exists(&landing.rig, "feat")?);
     Ok(())
 }
 
