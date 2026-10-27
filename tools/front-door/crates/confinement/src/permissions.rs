@@ -4603,6 +4603,19 @@ mod tests {
         let open = render(&plan);
         assert!(open.contains("(allow network-outbound (remote ip \"*:*\"))"));
         assert!(open.contains("PGSQL"));
+        for path in [
+            "/Users/fixture/.config/gh",
+            "/Users/fixture/Library/Application Support/GitHub CLI",
+        ] {
+            let read = format!("(allow file-read* (subpath \"{path}\"))");
+            let deny_read = format!("(deny file-read* (subpath \"{path}\"))");
+            let deny_write = format!("(deny file-write* (subpath \"{path}\"))");
+            assert!(open.contains(&read), "{path}");
+            assert!(!open.contains(&deny_read), "{path}");
+            assert!(open.contains(&deny_write), "{path}");
+            assert!(!provider.contains(&read), "{path}");
+            assert!(!local.contains(&read), "{path}");
+        }
     }
 
     #[cfg(target_os = "macos")]
