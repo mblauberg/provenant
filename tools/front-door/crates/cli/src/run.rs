@@ -2037,11 +2037,11 @@ fn launch_unknown(started: &[run::Started]) -> Vec<String> {
 }
 
 fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
-    // Preserve the receipt for existing unknown-handoff recovery, including
-    // Fabric's operation replay, even when another task was refused.
+    // Preserve the full receipt whenever a sibling can still make progress
+    // or needs unknown-handoff recovery, including Fabric's operation replay.
     if started
         .iter()
-        .any(|started| matches!(started, run::Started::Unknown { .. }))
+        .any(|started| !matches!(started, run::Started::Refused { .. }))
     {
         return Ok(());
     }
@@ -4130,6 +4130,19 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
 #[cfg(test)]
 mod writer_disk_tests {
     use super::*;
+
+    #[test]
+    fn dispatch_policy_refusal_preserves_launched_sibling() -> Result<(), String> {
+        check_launch_policy(&[
+            run::Started::Refused {
+                attempt: AttemptId::from_bytes([1; 16]),
+                kind: run::RefusalKind::Policy,
+                reason: "insufficient disk space".into(),
+            },
+            run::Started::Launched(AttemptId::from_bytes([2; 16])),
+        ])
+        .map_err(|error| error.message)
+    }
 
     #[test]
     fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
