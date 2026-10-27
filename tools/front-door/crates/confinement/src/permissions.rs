@@ -1625,8 +1625,8 @@ fn verify_shared_writes(
     Ok(())
 }
 
-/// Credential and preservation paths no lane may read or write, whatever
-/// else its profile grants. Rendered last so they override every allow.
+/// Credential and preservation paths denied to lanes by default. Rendered
+/// last so they override every allow, except the scoped gh read below.
 /// `Library/Keychains` stays out: Agy reads its login keychain through an
 /// exact authentication grant.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -1936,8 +1936,32 @@ fn render_profile(
     for grant in &plan.protected_roots {
         push_rule(&mut source, "deny", "file-write*", &grant.path, grant.scope)?;
     }
+    let gh_read = matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open;
+    if gh_read {
+        for path in [
+            home.join(".config/gh"),
+            home.join("Library/Application Support/GitHub CLI"),
+        ] {
+            push_rule(
+                &mut source,
+                "allow",
+                "file-read*",
+                &path,
+                PathScope::Subtree,
+            )?;
+            push_rule(
+                &mut source,
+                "deny",
+                "file-write*",
+                &path,
+                PathScope::Subtree,
+            )?;
+        }
+    }
     for (path, scope) in hard_denied(home) {
-        push_rule(&mut source, "deny", "file-read*", &path, scope)?;
+        if !gh_read || path != home.join(".config/gh") {
+            push_rule(&mut source, "deny", "file-read*", &path, scope)?;
+        }
         push_rule(&mut source, "deny", "file-write*", &path, scope)?;
     }
     if let Some(grants) = worktree_grants {
