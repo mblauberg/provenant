@@ -44,7 +44,9 @@ too; a preset does not. An explicit `--concurrency N` (1 to 16) or Fabric
 Batch concurrency is separate from host admission. Each lane has a class, and
 spacing is measured only against the last start of the same class: writers
 wait 20 s after the last writer start, read-only lanes 2 s after the last
-read-only start, so a read-only lane never waits behind a writer. The host
+read-only start, so a read-only lane never waits behind a writer. Within one
+boot no two lanes of a class start less than one spacing apart, however the
+wall clock changes; a reboot resets spacing. The host
 allows 64 active lanes and 32 per project, and the memory (5 %) and disk
 (500 MiB) floors apply to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s

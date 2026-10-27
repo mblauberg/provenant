@@ -21,11 +21,16 @@
   capacity. A peer's lanes, from `lanes --host` or a placed run, show the same
   fields; an older peer shows neither.
 - The host admission ledger (`admission.sqlite3`) moves to schema version 2 and
-  upgrades in place on first use. Its single spacing row becomes the writer
-  start, and existing leases and tickets with no class count as writers. A
-  binary from before this release refuses the upgraded ledger, so upgrade every
-  host together.
-- A wall clock that steps back no longer lets two lanes of one class start
-  inside one spacing. A start recorded ahead of the clock now holds its class
-  for one full spacing from the step, however large the step, instead of
-  freeing it at once.
+  upgrades in place on first use. Existing leases and tickets with no class
+  count as writers, and the old wall-time spacing row is dropped, so each class
+  starts free. A binary from before this release refuses the upgraded ledger,
+  so upgrade every host together.
+- Startup spacing no longer depends on the wall clock. It is measured on the
+  host's monotonic clock since boot, which every process on the host shares and
+  no clock change can move, and each class's last start is kept with the boot
+  it was read in. Within one boot, no two lanes of a class start less than one
+  spacing apart, whatever the wall clock does, including a step back then
+  forward or a step forward alone. A reboot resets spacing, so the first lane
+  of each class after a boot starts at once. If the host's clock or boot
+  identity cannot be read, the lane's start is refused with `startup spacing
+  cannot be judged` instead of falling back to the wall clock.
