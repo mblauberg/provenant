@@ -1,16 +1,19 @@
-Every install's source digest changes once with this release. `check install`
-reports existing installs as stale until they are reinstalled.
+This release makes lanes self-managing (epic #1829):
+- A writer dispatch creates, owns and prunes its own worktree.
+- `lanes --wait` and landing replace chair polling.
+- Garbage collection runs on settlement and landing, with a scheduled backstop.
+- Closed runs' event logs expire under `retention.logs_days`.
 
-The source digest now covers shipped workspace source (each member's `src/`,
-`assets/` and `build.rs`), manifests, the lockfile, the toolchain and Cargo
-configuration, the release packager (`examples/package-release.rs`) and the
-bundled assets. Edits under a member's `tests/`, `benches/` and other
-`examples/` no longer change it.
+It also:
+- records Claude lane token usage, including cache counts;
+- serialises concurrent Claude OAuth refreshes;
+- links each attempt to its provider transcript;
+- reports quota use by account across projects.
 
 ## Stability
 
-The v1.0.0 stability promise is withdrawn. Commands, flags, `--json` output,
-`config.toml` keys, the state layout and Fabric MCP tool names and schemas can
-change in any release, with no deprecation period or compatibility shims. Each
-release's notes list its breaking changes. Upgrade every host together, since
-peers on different versions are not supported.
+There is no stability promise. Commands, flags, `--json` output, `config.toml`
+keys, the state layout and Fabric MCP tool names and schemas can change in any
+release, with no deprecation period or compatibility shims. Each release's notes
+list its breaking changes. Upgrade every host together, since peers on different
+versions are not supported.
