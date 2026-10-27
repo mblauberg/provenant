@@ -78,6 +78,8 @@ The disk guard and writer admission use pressure collection without network
 fetches or worktree removal. Admission caps its single attempt at five seconds
 and rechecks every output volume once. Applied full and pressure sweeps share
 `<state>/gc/collection.lock`; a busy collector is skipped, not queued.
+Manual `gc --pressure` prints a notice when scheduling is disabled, the project
+is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
 Provider-cache and temporary cleanup at settlement, and lane-cache cleanup on
 worktree removal, remain scoped to their owner. Event wiring for settlement
 lane caches and delivery landing belongs to their respective callers.

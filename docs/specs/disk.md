@@ -176,6 +176,9 @@ worktree deletion and honours `gc.schedule=false`. Admission-triggered collectio
 selects only the launching project, including its caches and temporary run
 payloads; it does not enumerate other registered projects. Applied sweeps share
 a nonblocking collection lock. The scheduled agent runs at load and daily.
+Manual `gc --pressure` reports one notice line when `gc.schedule=false`, a
+transient project is skipped or no eligible data is in scope. JSON includes
+the same reason in `notice`.
 Settlement already prunes provider caches and temporary state; removal prunes
 the removed worktree's cache. Settlement lane-cache and delivery-integration
 event wiring remains with those callers.

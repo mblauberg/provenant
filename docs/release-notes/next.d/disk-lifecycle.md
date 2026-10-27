@@ -9,6 +9,8 @@ disk, then rechecks all output volumes. Pressure sweeps skip network fetches
 and worktree deletion, honour `gc.schedule=false` and limit writer-admission
 collection to the launching project. Pressure still prunes declared idle output, with a one-day floor below the
 free-space floor. Scheduled collection now runs daily.
+Manual pressure collection reports why it has nothing to collect, including
+when `gc.schedule=false` disables it.
 
 `retention.logs_days` defaults to 30. Large stdout/stderr captures of closed
 runs, including child stores, expire with a 64 KiB tail retained. Disk reports

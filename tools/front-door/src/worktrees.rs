@@ -243,6 +243,8 @@ struct GcData {
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
     skipped_transient: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<String>,
 }
 
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
@@ -287,6 +289,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 provider_state: *provider_state,
                 worktree_cleanup,
                 alerts,
+                notice: None,
             };
             let message = format!("{failure}\n{}", gc_data_summary(&data));
             let mut result = CommandResult::new("gc", Outcome::Error, data);
@@ -304,6 +307,10 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
 
 fn gc_data_summary(data: &GcData) -> String {
     let mut human = gc_summary(&data.report);
+    if let Some(notice) = &data.notice {
+        human.push_str(notice);
+        human.push('\n');
+    }
     human.push_str(&format!(
         "{} provider-state removal(s), {} kept, {} error(s)\n",
         data.provider_state.removed.len(),
@@ -494,6 +501,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
+            notice: command
+                .pressure
+                .then(|| "pressure collection skipped: gc.schedule=false".into()),
             ..Default::default()
         });
     }
@@ -534,6 +544,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 },
                 idle_days: command.idle_days,
                 skipped_transient,
+                notice: command
+                    .pressure
+                    .then(|| "pressure collection skipped: transient project".into()),
                 ..Default::default()
             });
         }
@@ -738,6 +751,16 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             ));
         }
     };
+    let notice = (command.pressure
+        && report.removed.is_empty()
+        && provider_state.removed.is_empty()
+        && provider_state.attempt_tmp.is_empty()
+        && provider_state.attempt_logs.is_empty()
+        && provider_state.errors.is_empty()
+        && worktree_cleanup
+            .iter()
+            .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
+    .then(|| "pressure collection: no eligible data in scope".into());
     Ok(GcData {
         report,
         idle_days: command.idle_days,
@@ -746,6 +769,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         skipped_transient,
         worktree_cleanup,
         alerts,
+        notice,
     })
 }
 

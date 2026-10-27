@@ -1364,6 +1364,13 @@ fn gc_pressure_collects_only_the_selected_primary_project() -> Result {
             .is_empty()
     );
     assert!(tree.join("target/artifact").is_file());
+    let disabled_text = command(&rig, &["gc", "--pressure", "--apply"])?;
+    assert_eq!(code(&disabled_text), 0);
+    let disabled_text = String::from_utf8(disabled_text.stdout.bytes)?;
+    assert!(
+        disabled_text.contains("pressure collection skipped: gc.schedule=false"),
+        "{disabled_text}"
+    );
     fs::write(
         rig.state.join("config.toml"),
         config.replace("schedule=false", "schedule=true"),
@@ -1379,6 +1386,13 @@ fn gc_pressure_collects_only_the_selected_primary_project() -> Result {
     assert!(!tree.join("target").exists());
     assert!(other_tree.join("target/artifact").is_file());
     assert!(tree.is_dir() && other_tree.is_dir());
+    let empty = command(&rig, &["gc", "--pressure", "--apply"])?;
+    assert_eq!(code(&empty), 0);
+    let empty = String::from_utf8(empty.stdout.bytes)?;
+    assert!(
+        empty.contains("pressure collection: no eligible data in scope"),
+        "{empty}"
+    );
     Ok(())
 }
 
