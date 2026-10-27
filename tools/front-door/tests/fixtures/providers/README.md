@@ -40,3 +40,6 @@ tests cover them with inputs labelled synthetic.
 `agy/command-denied.stderr` is the verbatim denial diagnostic reported in
 issue #1776 from three read-only lanes on 2026-10-26. It records only stderr;
 tests combine it with explicitly synthetic stdout frames or empty stdout.
+
+`agy/denied-result.jsonl` is a synthetic stream frame using the denial shape
+reported in [upstream issue #794](https://github.com/google-antigravity/antigravity-cli/issues/794).

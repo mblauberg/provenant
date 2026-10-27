@@ -44,5 +44,11 @@ Dispatch uses the same route flags. Copy the resolved `adapter/model@effort`
 from the attempt record; never infer a model from a tier or a provider name.
 Quota observations use `provenant quota show` and `provenant quota tick`.
 
+Agy read-only lanes can run system commands, including Git, within the outer
+read-only confinement profile. Headless tool permissions are auto-approved;
+the profile still restricts writes to attempt scratch and private state. If
+Agy reports a denied action, the terminal reason names it, for example
+`provider denied: RunCommand`.
+
 The routing, providers and quota crates define the records and eligibility
 policy. Run `provenant help route` for flags.

@@ -102,6 +102,26 @@ Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
   `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`
 - Owner: `crates/providers/src/`
 
+### Agy read-only commands and denials
+
+Agy auto-approves tools in headless read-only and writer lanes. The outer
+confinement profile is the boundary: read-only lanes may execute system
+programs from `/bin`, `/usr/bin` and `/usr/libexec`, with PATH restricted to
+`/usr/bin:/bin` and global and system Git configuration disabled. Their only
+write grants remain attempt scratch and private state. Like read-only Codex
+lanes, read-only Agy lanes can run system programs with the lane's existing
+network access, so read roots must not hold anything the lane may not see.
+On a successful Agy result, a denial with an empty response fails the lane as
+`provider denied: <name>`; a non-empty response succeeds and records the denial
+as a non-fatal note. Denials do not override an earlier failure.
+- Why: headless permission prompts otherwise deny read-only commands, and a
+  remaining denial must not be mistaken for an empty response.
+- Test: `crates/providers/src/tests.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
+  `::agy_writers_exec_what_codex_writers_exec`;
+  `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_compiled_profile_denies_read_root_write`;
+  `tests/dispatch_provider.rs::agy_denial_result_reaches_terminal_reason`
+- Owner: `crates/providers/src/agy.rs`, `crates/cli/src/run.rs`
+
 ### Claude token refresh
 
 The sandbox never refreshes or writes the keychain. The host refreshes a
