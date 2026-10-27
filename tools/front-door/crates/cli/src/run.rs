@@ -2037,11 +2037,11 @@ fn launch_unknown(started: &[run::Started]) -> Vec<String> {
 }
 
 fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
-    // Preserve the receipt for existing unknown-handoff recovery, including
-    // Fabric's operation replay, even when another task was refused.
+    // Preserve the full receipt whenever a sibling can still make progress
+    // or needs unknown-handoff recovery, including Fabric's operation replay.
     if started
         .iter()
-        .any(|started| matches!(started, run::Started::Unknown { .. }))
+        .any(|started| !matches!(started, run::Started::Refused { .. }))
     {
         return Ok(());
     }
