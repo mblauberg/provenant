@@ -64,10 +64,9 @@ Auto-saved: 2026-10-27T03:00:00Z
   newlines and modification time stay as the chair left them, a copy of the
   saved state in the chair's notes is just notes, and "settled since the last
   chair save" is measured from the checkpoint's own modification time.
-- `session-start` shows the status diagnostic, then the freshly derived
-  digest, then the chair's checkpoint, then `autosave.md`, under the 8 KiB cap
-  (the checkpoint text shrinks first). `compact` shows the diagnostic and
-  digest only.
+- `session-start` and `compact` show the status diagnostic, then the freshly
+  derived digest, then the chair's checkpoint, then `autosave.md`, under the
+  8 KiB cap (the checkpoint text shrinks first).
 - A `workflow session save` replaces only `checkpoint.md`; the next autosave
   rewrites only `autosave.md`. A checkpoint from an earlier release that holds
   an in-body state block keeps it as ordinary chair text; the new file starts
