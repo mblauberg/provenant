@@ -1074,6 +1074,26 @@ mod tests {
     }
 
     #[test]
+    fn gc_expiry_sweep_tightens_open_claude_config_itself() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let config = attempt.join("provider-state/candidate-0/claude-config");
+        let other = attempt.join("provider-state/candidate-1/claude-config");
+        fs::create_dir(&other)?;
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o707))?;
+
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.tightened.contains(&config), "{:?}", report.tightened);
+        assert!(report.tightened.contains(&other), "{:?}", report.tightened);
+        assert!(!attempt.join("provider-state").exists());
+        Ok(())
+    }
+
+    #[test]
     fn gc_continues_after_unsafe_credential_path() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
