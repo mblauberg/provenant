@@ -52,17 +52,18 @@ process's newer start still waits for it. When the stored boot identity is the
 current one, spacing is the clock now minus the start, and no wall-clock step,
 forward or back, moves it. The guarantee is: within one boot, no two lanes of a
 class start less than one spacing apart. A reboot resets spacing: a start from
-another boot, or none, leaves the class free. If the clock or the boot identity
+another boot, or none, leaves the class free, apart from the one-time version 1
+upgrade below, which holds each class for one spacing. If the clock or the boot identity
 cannot be read the claim is refused with a reason (`startup spacing cannot be
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
 memory floor (5 %) and disk floor (500 MiB) refuse both classes. A ledger row
 or ticket with no class is a writer; opening a version 1 ledger upgrades it in
-place, in one transaction, carrying its wall-time start across as a start under
-the current boot for each class (as old as the wall clock says, never older than
-one spacing, and a full spacing if it lies in the wall future), and refuses the
-upgrade if the clock or boot identity cannot be read. Spacing is enforced at
+place, in one transaction, carrying any wall-time start across as a start of now under the current boot
+for each class, whatever its age and without reading the wall clock, so the
+one-time upgrade holds each class for one spacing; it refuses the upgrade if the
+clock or boot identity cannot be read. Spacing is enforced at
 admission, the ledger commit, not at provider spawn, so a guardian suspended
 between the two can spawn alongside a later lane. A run's own batch concurrency (1 to 16) defaults to
 8 when any lane writes and to 16 when none does, from `lanes.max_concurrency`
@@ -108,10 +109,10 @@ action simply shows none.
   `::lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreadable`;
   `::a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free`;
   `::upgrading_a_version_1_ledger_is_atomic`;
-  `::a_version_1_start_still_holds_its_class_after_the_upgrade`;
-  `::a_version_1_start_in_the_wall_future_holds_a_full_spacing`;
+  `::a_version_1_start_of_any_age_holds_each_class_one_full_spacing`;
+  `::a_version_1_ledger_with_no_start_holds_nothing`;
   `::a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read`;
-  `crates/supervisor/src/guardian/tests.rs::an_unreadable_host_clock_is_named_in_the_admission_refusal`;
+  `crates/supervisor/tests/custody.rs::the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal`;
   `crates/run/src/holder.rs::host_clock_tests::an_unreadable_host_clock_reaches_the_guardian_as_itself`;
   `crates/os/src/sys/clock.rs::host_monotonic_clock_does_not_go_backwards_and_the_boot_identity_is_stable`;
   `::lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for`;
