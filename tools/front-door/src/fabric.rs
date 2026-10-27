@@ -2370,6 +2370,14 @@ fn settle_owned_worktree(
     let Some(writer) = task.writer else {
         return Ok(());
     };
+    let _collection = match crate::worktrees::collection_lock(roots) {
+        Ok(lock) => lock,
+        // A scheduled, pressure or other event collector already owns this pass.
+        Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     if let Some(receipt) = replay_worktree_settlement(
         store
             .worktree_settlement(record.attempt_id, &call)?
@@ -2387,15 +2395,8 @@ fn settle_owned_worktree(
     let delivery = delivery_override
         .or(pickup.as_ref().map(|(_, receipt)| receipt))
         .or(record.delivery.as_ref());
-    if let Some(reason) =
-        settlement_retention_reason(&record.state, task.deliver.is_some(), delivery)
-    {
-        let receipt = serde_json::json!({
-            "schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason
-        });
-        record_worktree_settlement(&store, record.attempt_id, &receipt)?;
-        return Ok(());
-    }
+    let retention_reason =
+        settlement_retention_reason(&record.state, task.deliver.is_some(), delivery);
     let mut pruning_intent = None;
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
@@ -2446,6 +2447,52 @@ fn settle_owned_worktree(
                 };
                 let no_live =
                     |path: &Path| states().is_some_and(|snapshot| snapshot.no_live_lanes(path));
+                let lane = worktrees::list(context, cancel)?
+                    .into_iter()
+                    .find(|lane| lane.path == writer.worktree)
+                    .ok_or(worktrees::WorktreeError::NotFound)?;
+                let output_policy = WorktreeGcPolicy {
+                    upstream: None,
+                    terminal: &terminal,
+                    no_live_lanes: &no_live,
+                    regenerable: &settings.regenerable,
+                    keep: &settings.keep,
+                    written_before_ns: i128::MAX,
+                    foreign_merged_clean: false,
+                    foreign_idle_before_ns: None,
+                    dry_run: false,
+                };
+                worktrees::collect(context, std::slice::from_ref(&lane), &output_policy, cancel)?;
+                // Retained lanes can resume with fresh caches. Restrict this
+                // pass to their owner, including detached remnants, and prove
+                // terminal state again while acquiring writer exclusion.
+                if lane.writer == worktrees::WriterState::Free {
+                    provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
+                        &settled.roots.home,
+                        &provenant_confinement::cache::CacheGcPolicy {
+                            idle_before_ns: Some(i128::MAX),
+                            project_owners: [writer.worktree.clone()].into(),
+                            selected_only: true,
+                            ..Default::default()
+                        },
+                        |path| {
+                            let guard = worktrees::cache_writer_guard(
+                                context.binding,
+                                context.project_state,
+                                path,
+                                lane.branch.as_deref(),
+                            )?;
+                            if !terminal(path) || !no_live(path) {
+                                return Err(worktrees::WorkerState::Unknown);
+                            }
+                            Ok(guard)
+                        },
+                    )
+                    .map_err(|error| crate::worktrees::Error::Permissions(*error.source))?;
+                }
+                if retention_reason.is_some() {
+                    return Ok(None);
+                }
                 let upstream = delivery
                     .filter(|receipt| {
                         matches!(
@@ -2485,14 +2532,7 @@ fn settle_owned_worktree(
                             )
                         })
                         .map(|_| pinned),
-                    terminal: &terminal,
-                    no_live_lanes: &no_live,
-                    regenerable: &settings.regenerable,
-                    keep: &settings.keep,
-                    written_before_ns: i128::MAX,
-                    foreign_merged_clean: false,
-                    foreign_idle_before_ns: None,
-                    dry_run: false,
+                    ..output_policy
                 };
                 let intent = serde_json::json!({
                     "schema_version":1, "state":"pruning", "worktree":writer.worktree,
@@ -2514,7 +2554,12 @@ fn settle_owned_worktree(
         )?)
     })();
     let receipt = match result {
-        Ok(None) => return Ok(()),
+        Ok(None) => {
+            let Some(reason) = retention_reason else {
+                return Ok(());
+            };
+            serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason})
+        }
         Ok(Some(result)) => {
             serde_json::json!({"schema_version":1, "state":"pruned", "worktree": writer.worktree, "result":result})
         }
@@ -4131,7 +4176,9 @@ mod peer_tests {
     #[test]
     fn retained_lane_settlement_collects_only_its_output_and_cache()
     -> Result<(), Box<dyn std::error::Error>> {
-        if host_test("fabric::peer_tests::retained_lane_settlement_collects_only_its_output_and_cache")? {
+        if host_test(
+            "fabric::peer_tests::retained_lane_settlement_collects_only_its_output_and_cache",
+        )? {
             return Ok(());
         }
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -4153,7 +4200,17 @@ mod peer_tests {
         std::fs::write(fixture.worktree.join("saved/keep"), "keep")?;
         let other = fixture.rig.project.join(".worktrees/foreign");
         let git = provenant_os::git::git_executable().ok_or("git")?;
-        let output = fixture.rig.execute(&git, &["worktree", "add", "-b", "foreign", other.to_str().ok_or("path")?], None)?;
+        let output = fixture.rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "foreign",
+                other.to_str().ok_or("path")?,
+            ],
+            None,
+        )?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
         std::fs::create_dir(other.join("build"))?;
         std::fs::write(other.join("build/artifact"), "foreign")?;
@@ -4162,7 +4219,10 @@ mod peer_tests {
         let cache = cache_root.join("a".repeat(64));
         let orphan = cache_root.join("b".repeat(64));
         let identity = std::fs::metadata(&fixture.worktree)?;
-        for (path, owner) in [(&cache, fixture.worktree.clone()), (&orphan, fixture.rig.root.join("missing"))] {
+        for (path, owner) in [
+            (&cache, fixture.worktree.clone()),
+            (&orphan, fixture.rig.root.join("missing")),
+        ] {
             std::fs::create_dir_all(path)?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
             let mut marker = b"provenant-lane-cargo-owner-v2\n".to_vec();
@@ -4179,13 +4239,60 @@ mod peer_tests {
             head: None,
             state: provenant_run::WriterDeliveryState::NotAttempted,
         };
+        let collection = crate::worktrees::collection_lock(&fixture.roots)?;
+        settle_owned_worktree(
+            &fixture.settled,
+            &fixture.roots,
+            &FreeWorkers,
+            Some(&delivery),
+        )?;
+        assert!(fixture.worktree.join("build/artifact").exists());
+        assert!(cache.exists());
+        drop(collection);
+        let state = provenant_os::fs::Directory::open_anchor(
+            &fixture
+                .rig
+                .state
+                .join("worktrees")
+                .join(fixture.settled.project_id.to_string())
+                .join(provenant_confinement::worktrees::state_dir_name(
+                    &fixture.worktree,
+                )),
+        )?;
+        let writer = state.lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            WaitBudget::nonblocking(SystemClock.mono_now()),
+            &CancelToken::new(),
+            &SystemClock,
+        )?;
+        settle_owned_worktree(
+            &fixture.settled,
+            &fixture.roots,
+            &FreeWorkers,
+            Some(&delivery),
+        )?;
+        assert!(fixture.worktree.join("build/artifact").exists());
+        assert!(cache.exists());
+        drop(writer);
         for _ in 0..2 {
-            settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, Some(&delivery))?;
+            settle_owned_worktree(
+                &fixture.settled,
+                &fixture.roots,
+                &FreeWorkers,
+                Some(&delivery),
+            )?;
             assert!(fixture.worktree.exists());
             assert!(!fixture.worktree.join("build/artifact").exists());
             assert!(!cache.exists(), "settled lane cache survived");
-            assert_eq!(std::fs::read_to_string(fixture.worktree.join("saved/keep"))?, "keep");
-            assert_eq!(std::fs::read_to_string(other.join("build/artifact"))?, "foreign");
+            assert_eq!(
+                std::fs::read_to_string(fixture.worktree.join("saved/keep"))?,
+                "keep"
+            );
+            assert_eq!(
+                std::fs::read_to_string(other.join("build/artifact"))?,
+                "foreign"
+            );
             assert!(orphan.exists(), "unrelated cache collected");
         }
         Ok(())

@@ -564,6 +564,7 @@ pub(crate) fn land_cleanup(
         roots::Product::Required,
     )?;
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+    let _collection = collection_lock(&roots)?;
     with_context(
         &roots,
         &home,
@@ -671,6 +672,21 @@ pub(crate) fn land_cleanup(
     )
 }
 
+pub(crate) fn collection_lock(
+    roots: &provenant_core::Roots,
+) -> Result<provenant_os::fs::LockGuard, Error> {
+    provenant_config::private_directory(&roots.state.as_path().join("gc"), true)
+        .map_err(|_| Error::GcObservation("cannot establish GC lock directory"))?;
+    let directory = Directory::open_anchor(&roots.state.as_path().join("gc"))?;
+    Ok(directory.lock(
+        OsStr::new("collection.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+        WaitBudget::nonblocking(SystemClock.mono_now()),
+        &CancelToken::new(),
+        &SystemClock,
+    )?)
+}
+
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
     use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
     use provenant_confinement::worktrees::{WorkerState, WriterState};
@@ -690,16 +706,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let _collection = if command.dry_run {
         None
     } else {
-        provenant_config::private_directory(&roots.state.as_path().join("gc"), true)
-            .map_err(|_| Error::GcObservation("cannot establish GC lock directory"))?;
-        let directory = Directory::open_anchor(&roots.state.as_path().join("gc"))?;
-        Some(directory.lock(
-            OsStr::new("collection.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-            WaitBudget::nonblocking(SystemClock.mono_now()),
-            &CancelToken::new(),
-            &SystemClock,
-        )?)
+        Some(collection_lock(&roots)?)
     };
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
