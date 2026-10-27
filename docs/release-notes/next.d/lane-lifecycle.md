@@ -1,3 +1,5 @@
+## Additions
+
 Writer dispatch can create and own its worktree with `--worktree-branch` and
 deliver with `--deliver none|push|integrate:BRANCH|pr`. Graph nodes share these
 modes and a graph can open one integration PR. `lane deliver` picks up a
