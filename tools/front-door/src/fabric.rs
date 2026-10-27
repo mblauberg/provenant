@@ -319,10 +319,15 @@ impl F3Facade for BoundFacade<'_> {
 /// Retain lower-level diagnostics while naming the request that failed.
 fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
     match error {
-        FacadeError::Io { operation, path } => FacadeError::Io {
-            operation: format!("{scope}: {operation}"),
-            path,
-        },
+        FacadeError::Io { operation, path } => {
+            let prefix = format!("{scope}: ");
+            let operation = if operation.starts_with(&prefix) {
+                operation
+            } else {
+                format!("{scope}: {operation}")
+            };
+            FacadeError::Io { operation, path }
+        }
         other => other,
     }
 }
@@ -2935,6 +2940,35 @@ mod peer_tests {
             super::FacadeError::Io {
                 operation: "submit: access Fabric database".into(),
                 path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
+        let peer_error = super::FacadeError::Io {
+            operation: "submit: open writer repository".into(),
+            path: Some("/repo".into()),
+        };
+        let rescoped = super::scope_io(peer_error.clone(), "submit");
+        assert_eq!(
+            rescoped,
+            super::FacadeError::Io {
+                operation: "submit: open writer repository".into(),
+                path: Some("/repo".into()),
+            }
+        );
+
+        let local_error = super::FacadeError::Io {
+            operation: "open writer repository".into(),
+            path: Some("/repo".into()),
+        };
+        let scoped = super::scope_io(local_error, "submit");
+        assert_eq!(
+            scoped,
+            super::FacadeError::Io {
+                operation: "submit: open writer repository".into(),
+                path: Some("/repo".into()),
             }
         );
     }

@@ -1465,6 +1465,56 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         }
     }
 
+    use provenant_fabric_runtime::coordination::facade::FacadeError;
+    for (error, expected_operation) in [
+        (
+            FacadeError::Io {
+                operation: "submit: access database".into(),
+                path: None,
+            },
+            "submit: access database",
+        ),
+        (
+            FacadeError::Io {
+                operation: "spawn peer".into(),
+                path: None,
+            },
+            "submit: spawn peer",
+        ),
+    ] {
+        response.result = PeerResult::Error { error };
+        std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
+        let replies = mcp(
+            &rig,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "fabric_run",
+                    "arguments": {
+                        "op": "submit",
+                        "operation_id": "verified-submit-scope",
+                        "host": remote_host.to_string(),
+                        "tasks": [{
+                            "prompt": "fixture",
+                            "route": {"kind": "model", "provider": "codex", "model": "gpt-6-luna"},
+                            "timeout_seconds": 1
+                        }]
+                    }
+                }
+            })],
+        )?;
+        let result = &replies
+            .iter()
+            .find(|r| r["id"] == 1)
+            .ok_or("submit reply")?["result"];
+        assert_eq!(result["isError"], true, "{result}");
+        let structured = &result["structuredContent"];
+        assert_eq!(structured["code"], "io", "{result}");
+        assert_eq!(structured["operation"], expected_operation, "{result}");
+    }
+
     // Return valid status records after admission, so a wrong-branch receipt
     // cannot pass this test by failing an unrelated later status request.
     let status_path = rig.root.join("ssh-status.json");
