@@ -167,3 +167,8 @@ event wiring remains with those callers.
   `src/gc_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
   `src/disk_guard_host.rs::pressure_gc_leaves_the_configured_free_floor_in_effect`
 - Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/gc_agent.rs`
+
+Applied foreign removal creates a private writer lock when state is absent,
+and holds it across final checks and Git removal without creating an ownership
+identity. Previews do not create state. Native processes do not take this
+advisory lock; the complete process census and final clean recheck still apply.

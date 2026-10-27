@@ -87,3 +87,6 @@ proof budget; repository boundaries remain protected in both paths.
 
 Submitted queued writers protect their worktrees before launch. Keep a writer
 reservation for tasks that have not yet been submitted into the run store.
+
+Applied foreign cleanup may leave a private writer lock without an ownership
+record. This provides exclusion through removal and does not adopt the tree.

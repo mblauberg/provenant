@@ -2683,6 +2683,67 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn gc_foreign_without_state_holds_writer_through_final_recheck() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let path = fixture._temp.path().join("native-no-state");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "native-no-state",
+            path.to_str().ok_or("path")?,
+        ])?;
+        let lanes = list(&context, &cancel())?;
+        let state_name = state_dir_name(&path);
+        assert!(
+            context
+                .project_state
+                .open_verified_directory(&state_name)
+                .is_err()
+        );
+        let final_writer_held = std::cell::Cell::new(false);
+        let no_live = |_: &Path| {
+            if context
+                .project_state
+                .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                .is_err()
+            {
+                let Ok(state) = context.project_state.open_verified_directory(&state_name) else {
+                    return false;
+                };
+                final_writer_held.set(matches!(
+                    state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+                    Err(FsError::LockTimeout { .. })
+                ));
+            }
+            true
+        };
+        let report = collect(
+            &context,
+            &lanes,
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| false,
+                no_live_lanes: &no_live,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+                foreign_merged_clean: true,
+                foreign_idle_before_ns: None,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(report.worktrees.removed.len(), 1, "{report:?}");
+        assert!(final_writer_held.get());
+        let state = context.project_state.open_verified_directory(&state_name)?;
+        assert!(state.metadata_at(OsStr::new(IDENTITY), false).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), "target/\n")?;

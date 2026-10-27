@@ -812,6 +812,7 @@ fn newest_foreign_bounded(
 
 /// Foreign worktrees need a complete free process census in place of a
 /// Provenant custody proof. Preserve local refs and never create ownership records.
+/// Applied removal creates writer exclusion even for trees with no state yet.
 fn collect_foreign(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
@@ -834,13 +835,32 @@ fn collect_foreign(
         .open_verified_directory(&state_dir_name(&lane.path))
     {
         Ok(state) => Some(state),
-        Err(error) if error.is_not_found() => None,
+        Err(error) if error.is_not_found() && policy.dry_run => None,
+        Err(error) if error.is_not_found() => {
+            let name = state_dir_name(&lane.path);
+            match context.project_state.mkdir(&name, 0o700) {
+                Ok(()) => {}
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            Some(context.project_state.open_verified_directory(&name)?)
+        }
         Err(error) => return Err(error.into()),
     };
     let _writer = match &state {
         Some(state) => {
             ensure_unreserved(state)?;
-            let guard = state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
+            let guard = if policy.dry_run {
+                state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?
+            } else {
+                state.lock(
+                    OsStr::new(WRITER_LOCK),
+                    LockMode::Exclusive,
+                    WaitBudget::nonblocking(context.clock.mono_now()),
+                    cancel,
+                    context.clock,
+                )?
+            };
             ensure_unreserved(state)?;
             Some(guard)
         }
