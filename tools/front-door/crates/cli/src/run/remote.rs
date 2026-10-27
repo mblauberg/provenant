@@ -940,96 +940,6 @@ pub(super) fn lanes(
     Ok(Some((data, human, false)))
 }
 
-/// Keep a peer's last transient read cause while the shared wait/watch logic
-/// retries. That logic retains stale lanes on retries, so the peer boundary
-/// restores the cause if no successful read follows it.
-struct PeerRead<F> {
-    fetch: F,
-    last_failure: Option<PeerReadFailure>,
-}
-struct PeerReadFailure {
-    status: Status,
-    kind: ErrorKind,
-    message: String,
-    detail: Option<FacadeError>,
-}
-impl PeerReadFailure {
-    fn from(fail: &Fail) -> Self {
-        Self {
-            status: fail.status,
-            kind: fail.kind,
-            message: fail.message.clone(),
-            detail: fail.detail.clone(),
-        }
-    }
-    fn into_fail(self) -> Fail {
-        Fail {
-            status: self.status,
-            kind: self.kind,
-            message: self.message,
-            detail: self.detail,
-        }
-    }
-}
-impl<F> PeerRead<F>
-where
-    F: FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
-{
-    fn new(fetch: F) -> Self {
-        Self {
-            fetch,
-            last_failure: None,
-        }
-    }
-    fn read(&mut self, budget: Duration) -> Result<Vec<run::AttemptRecord>, Fail> {
-        match (self.fetch)(budget) {
-            Ok(lanes) => {
-                self.last_failure = None;
-                Ok(lanes)
-            }
-            Err(fail) => {
-                if fail.kind == ErrorKind::PeerUnavailable {
-                    self.last_failure = Some(PeerReadFailure::from(&fail));
-                }
-                Err(fail)
-            }
-        }
-    }
-    fn finish<T>(&mut self, result: Result<T, Fail>) -> Result<T, Fail> {
-        match result {
-            Err(fail) => Err(fail),
-            Ok(value) => match self.last_failure.take() {
-                Some(fail) => Err(fail.into_fail()),
-                None => Ok(value),
-            },
-        }
-    }
-}
-
-fn peer_wait(
-    fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
-    scope: Scope,
-    condition: Condition,
-    budget: Duration,
-    poll: Duration,
-) -> Result<watch::Waited, Fail> {
-    let mut fetch = PeerRead::new(fetch);
-    let result = watch::wait(|left| fetch.read(left), scope, condition, budget, poll);
-    fetch.finish(result)
-}
-
-fn peer_watch(
-    fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
-    scope: Scope,
-    budget: Duration,
-    poll: Duration,
-    emit: &mut dyn FnMut(&run::AttemptRecord) -> Result<(), Fail>,
-) -> Result<watch::Watched, Fail> {
-    let mut fetch = PeerRead::new(fetch);
-    let result = watch::watch(|left| fetch.read(left), scope, budget, poll, emit);
-    fetch.finish(result)
-}
-
 /// A wait or watch over peer lanes. `host_of` names the host each runs on.
 fn armed(
     command: &Lanes,
@@ -1047,7 +957,7 @@ fn armed(
             .collect()
     };
     if let Some(seconds) = command.watch {
-        let watched = peer_watch(
+        let watched = watch::watch(
             fetch,
             scope,
             Duration::from_secs(seconds),
@@ -1077,7 +987,7 @@ fn armed(
         return Ok((data, human, !watched.settled));
     }
     let seconds = command.wait.ok_or_else(corrupt)?;
-    let waited = peer_wait(
+    let waited = watch::wait(
         fetch,
         scope,
         command.condition,
@@ -1841,7 +1751,7 @@ mod tests {
     fn an_armed_peer_wait_reports_the_last_failed_read() -> Result {
         let first = running(1);
         let mut calls = 0;
-        let out = peer_wait(
+        let out = watch::wait(
             |_| {
                 calls += 1;
                 if calls == 1 {
@@ -1871,7 +1781,7 @@ mod tests {
     fn an_armed_peer_watch_reports_the_last_failed_read() -> Result {
         let first = running(1);
         let mut calls = 0;
-        let out = peer_watch(
+        let out = watch::watch(
             |_| {
                 calls += 1;
                 if calls == 1 {

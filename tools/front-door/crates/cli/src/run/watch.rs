@@ -223,7 +223,8 @@ fn arm(
 }
 
 /// Sleep out the poll, then, if the deadline has not passed, read the lanes
-/// again. A transient peer failure leaves `lanes` as they were.
+/// again. A transient peer failure leaves `lanes` as they were and is kept in
+/// `stale` until a later read succeeds, so a wait that ends on it reports it.
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
 fn refresh(
@@ -232,12 +233,17 @@ fn refresh(
     deadline: Instant,
     poll: Duration,
     lanes: &mut Vec<run::AttemptRecord>,
+    stale: &mut Option<Fail>,
 ) -> Result<(), Fail> {
     pause(poll, deadline);
-    if Instant::now() < deadline
-        && let Tick::Lanes(next) = tick(fetch, deadline)?
-    {
-        *lanes = armed.counted(next);
+    if Instant::now() < deadline {
+        match tick(fetch, deadline)? {
+            Tick::Lanes(next) => {
+                *lanes = armed.counted(next);
+                *stale = None;
+            }
+            Tick::Retry(fail) => *stale = Some(fail),
+        }
     }
     Ok(())
 }
@@ -259,16 +265,20 @@ pub(super) fn wait(
 ) -> Result<Waited, Fail> {
     let deadline = Instant::now() + budget;
     let (armed, mut lanes) = arm(&mut fetch, scope, deadline, poll)?;
+    let mut stale = None;
     loop {
         let met = condition_met(&lanes, condition);
         if met || Instant::now() >= deadline {
+            if let Some(fail) = stale {
+                return Err(fail);
+            }
             return Ok(Waited {
                 lanes,
                 met,
                 ignored: armed.ignored(),
             });
         }
-        refresh(&mut fetch, &armed, deadline, poll, &mut lanes)?;
+        refresh(&mut fetch, &armed, deadline, poll, &mut lanes, &mut stale)?;
     }
 }
 
@@ -290,6 +300,7 @@ pub(super) fn watch(
     let deadline = Instant::now() + budget;
     let (armed, mut lanes) = arm(&mut fetch, scope, deadline, poll)?;
     let mut seen: BTreeMap<AttemptId, String> = BTreeMap::new();
+    let mut stale = None;
     loop {
         for lane in &lanes {
             let state = state_name(&lane.state);
@@ -300,12 +311,15 @@ pub(super) fn watch(
         }
         let all_settled = lanes.iter().all(|lane| settled(&lane.state).0);
         if all_settled || Instant::now() >= deadline {
+            if let Some(fail) = stale {
+                return Err(fail);
+            }
             return Ok(Watched {
                 lanes,
                 settled: all_settled,
             });
         }
-        refresh(&mut fetch, &armed, deadline, poll, &mut lanes)?;
+        refresh(&mut fetch, &armed, deadline, poll, &mut lanes, &mut stale)?;
     }
 }
 
