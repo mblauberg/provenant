@@ -325,12 +325,7 @@ pub struct UsageRecord {
     pub reasoning: Option<u64>,
     pub source: Option<String>,
     pub context_basis_points: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "missing_reason",
-        alias = "absent"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absent_reason: Option<String>,
 }
 impl From<UsageRecord> for crate::Usage {
@@ -750,12 +745,6 @@ mod tests {
         assert_eq!(sealed["absent_reason"], "no result event");
         let decoded: UsageRecord = serde_json::from_value(sealed)?;
         assert_eq!(decoded.absent_reason.as_deref(), Some("no result event"));
-
-        let aliased: UsageRecord = serde_json::from_value(serde_json::json!({
-            "uncached_input": null,
-            "missing_reason": "no result event"
-        }))?;
-        assert_eq!(aliased.absent_reason.as_deref(), Some("no result event"));
         Ok(())
     }
 }

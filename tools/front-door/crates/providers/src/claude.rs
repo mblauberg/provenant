@@ -781,13 +781,14 @@ enum Content {
 }
 #[derive(Deserialize)]
 struct Usage {
+    // Cursor shares this result shape and spells the counts in camelCase.
     #[serde(alias = "inputTokens")]
     input_tokens: u64,
     #[serde(alias = "outputTokens")]
     output_tokens: u64,
-    #[serde(default, alias = "cacheReadInputTokens")]
+    #[serde(default)]
     cache_read_input_tokens: Option<u64>,
-    #[serde(default, alias = "cacheCreationInputTokens")]
+    #[serde(default)]
     cache_creation_input_tokens: Option<u64>,
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
