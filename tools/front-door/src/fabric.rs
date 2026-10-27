@@ -2370,10 +2370,19 @@ fn settle_owned_worktree(
     let Some(writer) = task.writer else {
         return Ok(());
     };
-    let _collection = match crate::worktrees::collection_lock(roots) {
+    let _collection = match crate::worktrees::event_collection_lock(roots) {
         Ok(lock) => lock,
-        // A scheduled, pressure or other event collector already owns this pass.
+        // A long-running collector still owns the pass. Leave a visible
+        // receipt rather than skipping silently; replay ignores retained ones.
         Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
+            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY});
+            // Never replace a receipt that already settled or began pruning.
+            if store
+                .worktree_settlement(record.attempt_id, &call)?
+                .is_none()
+            {
+                record_worktree_settlement(&store, record.attempt_id, &receipt)?;
+            }
             return Ok(());
         }
         Err(error) => return Err(error.into()),
@@ -2398,6 +2407,7 @@ fn settle_owned_worktree(
     let retention_reason =
         settlement_retention_reason(&record.state, task.deliver.is_some(), delivery);
     let mut pruning_intent = None;
+    let collection_error = std::cell::RefCell::new(None::<String>);
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
         let settings = config
@@ -2447,10 +2457,6 @@ fn settle_owned_worktree(
                 };
                 let no_live =
                     |path: &Path| states().is_some_and(|snapshot| snapshot.no_live_lanes(path));
-                let lane = worktrees::list(context, cancel)?
-                    .into_iter()
-                    .find(|lane| lane.path == writer.worktree)
-                    .ok_or(worktrees::WorktreeError::NotFound)?;
                 let output_policy = WorktreeGcPolicy {
                     upstream: None,
                     terminal: &terminal,
@@ -2462,33 +2468,50 @@ fn settle_owned_worktree(
                     foreign_idle_before_ns: None,
                     dry_run: false,
                 };
-                worktrees::collect(context, std::slice::from_ref(&lane), &output_policy, cancel)?;
-                // Retained lanes can resume with fresh caches. Restrict this
-                // pass to their owner, including detached remnants, and prove
-                // terminal state again while acquiring writer exclusion.
-                if lane.writer == worktrees::WriterState::Free {
-                    provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
-                        &settled.roots.home,
-                        &provenant_confinement::cache::CacheGcPolicy {
-                            idle_before_ns: Some(i128::MAX),
-                            project_owners: [writer.worktree.clone()].into(),
-                            selected_only: true,
-                            ..Default::default()
-                        },
-                        |path| {
-                            let guard = worktrees::cache_writer_guard(
-                                context.binding,
-                                context.project_state,
-                                path,
-                                lane.branch.as_deref(),
-                            )?;
-                            if !terminal(path) || !no_live(path) {
-                                return Err(worktrees::WorkerState::Unknown);
-                            }
-                            Ok(guard)
-                        },
-                    )
-                    .map_err(|error| crate::worktrees::Error::Permissions(*error.source))?;
+                // A failed pre-prune step must not replace a retained lane's
+                // real reason, so record it and carry on.
+                let pre_prune = || -> Result<(), Box<dyn std::error::Error>> {
+                    let lane = worktrees::list(context, cancel)?
+                        .into_iter()
+                        .find(|lane| lane.path == writer.worktree)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    worktrees::collect(
+                        context,
+                        std::slice::from_ref(&lane),
+                        &output_policy,
+                        cancel,
+                    )?;
+                    // Retained lanes can resume with fresh caches. Restrict this
+                    // pass to their owner, including detached remnants, and prove
+                    // terminal state again while acquiring writer exclusion.
+                    if lane.writer == worktrees::WriterState::Free {
+                        provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
+                            &settled.roots.home,
+                            &provenant_confinement::cache::CacheGcPolicy {
+                                idle_before_ns: Some(i128::MAX),
+                                project_owners: [writer.worktree.clone()].into(),
+                                selected_only: true,
+                                ..Default::default()
+                            },
+                            |path| {
+                                let guard = worktrees::cache_writer_guard(
+                                    context.binding,
+                                    context.project_state,
+                                    path,
+                                    lane.branch.as_deref(),
+                                )?;
+                                if !terminal(path) || !no_live(path) {
+                                    return Err(worktrees::WorkerState::Unknown);
+                                }
+                                Ok(guard)
+                            },
+                        )
+                        .map_err(|error| crate::worktrees::Error::Permissions(*error.source))?;
+                    }
+                    Ok(())
+                };
+                if let Err(error) = pre_prune() {
+                    *collection_error.borrow_mut() = Some(error.to_string());
                 }
                 if retention_reason.is_some() {
                     return Ok(None);
@@ -2557,6 +2580,10 @@ fn settle_owned_worktree(
         Ok(None) => {
             let Some(reason) = retention_reason else {
                 return Ok(());
+            };
+            let reason = match collection_error.take() {
+                Some(error) => format!("{reason}; collection failed: {error}"),
+                None => reason.to_owned(),
             };
             serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason})
         }
@@ -4248,6 +4275,19 @@ mod peer_tests {
         )?;
         assert!(fixture.worktree.join("build/artifact").exists());
         assert!(cache.exists());
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        let busy = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("missing busy settlement receipt")?;
+        assert_eq!(busy["state"], "retained", "{busy}");
+        assert_eq!(busy["reason"], crate::worktrees::COLLECTION_BUSY);
         drop(collection);
         let state = provenant_os::fs::Directory::open_anchor(
             &fixture
