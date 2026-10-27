@@ -46,7 +46,9 @@ spacing is measured only against the last start of the same class: writers
 wait 20 s after the last writer start, read-only lanes 2 s after the last
 read-only start, so a read-only lane never waits behind a writer. Within one
 boot no two lanes of a class start less than one spacing apart, however the
-wall clock changes; a reboot resets spacing. The host
+wall clock changes; a reboot resets spacing. Spacing is enforced at admission,
+not at provider spawn, so a guardian suspended between the two can spawn
+alongside a later lane. The host
 allows 64 active lanes and 32 per project, and the memory (5 %) and disk
 (500 MiB) floors apply to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s

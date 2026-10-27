@@ -22,8 +22,10 @@
   fields; an older peer shows neither.
 - The host admission ledger (`admission.sqlite3`) moves to schema version 2 and
   upgrades in place on first use. Existing leases and tickets with no class
-  count as writers, and the old wall-time spacing row is dropped, so each class
-  starts free. A binary from before this release refuses the upgraded ledger,
+  count as writers, and the old wall-time start is carried across for each
+  class, so a lane admitted just before the upgrade still holds its class for
+  the rest of one spacing. The upgrade is refused if the host's clock or boot
+  identity cannot be read. A binary from before this release refuses the upgraded ledger,
   so upgrade every host together.
 - Startup spacing no longer depends on the wall clock. It is measured on the
   host's monotonic clock since boot, which every process on the host shares and
@@ -33,4 +35,7 @@
   forward or a step forward alone. A reboot resets spacing, so the first lane
   of each class after a boot starts at once. If the host's clock or boot
   identity cannot be read, the lane's start is refused with `startup spacing
-  cannot be judged` instead of falling back to the wall clock.
+  cannot be judged: host clock or boot identity unreadable` instead of falling
+  back to the wall clock. Spacing is enforced at admission, not at provider
+  spawn, so a guardian suspended between the two can spawn alongside a later
+  lane.
