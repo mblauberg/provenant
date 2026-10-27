@@ -1480,65 +1480,10 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        let is_remote = match &input {
-            SubmitInput::Submit {
-                host: Some(host), ..
-            } => *host != self.factory.context.identity.host,
-            _ => false,
-        };
-        if is_remote {
-            self.submit_remote(input, budget, cancel)
-        } else {
-            self.submit_local(input, budget, cancel)
-                .map_err(|error| scope_io(error, "submit"))
-        }
+        self.submit_inner(input, budget, cancel)
+            .map_err(|error| scope_io(error, "submit"))
     }
-    fn submit_remote(
-        &mut self,
-        input: SubmitInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<SubmissionReceipt, FacadeError> {
-        let SubmitInput::Submit {
-            operation_id,
-            tasks,
-            concurrency,
-            knobs,
-            host,
-        } = input;
-        let Some(host) = host else {
-            return Err(FacadeError::InvalidInput);
-        };
-        if !self.allow_remote {
-            return Err(FacadeError::ConfinementRefused);
-        }
-        // MCP forwards read-only work only; a peer writer comes from `dispatch`.
-        if tasks
-            .iter()
-            .any(|t| t.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly)
-        {
-            return Err(FacadeError::OwnerUnavailable);
-        }
-        let input = SubmitInput::Submit {
-            operation_id: operation_id.clone(),
-            tasks,
-            concurrency,
-            knobs,
-            host: None,
-        };
-        match self.peer(host, PeerAction::Submit { input }, budget, cancel)? {
-            PeerResult::Submitted(receipt)
-                if receipt.operation_id == operation_id
-                    && receipt.worktree.is_none()
-                    && !receipt.targets.is_empty()
-                    && receipt.targets.iter().all(|t| t.host == Some(host)) =>
-            {
-                Ok(receipt)
-            }
-            _ => Err(FacadeError::StateCorrupt),
-        }
-    }
-    fn submit_local(
+    fn submit_inner(
         &mut self,
         input: SubmitInput,
         budget: WaitBudget,
@@ -1550,8 +1495,39 @@ impl BinaryRunOwner<'_> {
             tasks,
             concurrency,
             knobs,
-            ..
+            host,
         } = input;
+        // Explicit placement forwards the whole batch; the peer confines it.
+        if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
+            if !self.allow_remote {
+                return Err(FacadeError::ConfinementRefused);
+            }
+            // MCP forwards read-only work only; a peer writer comes from `dispatch`.
+            if tasks
+                .iter()
+                .any(|t| t.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly)
+            {
+                return Err(FacadeError::OwnerUnavailable);
+            }
+            let input = SubmitInput::Submit {
+                operation_id: operation_id.clone(),
+                tasks,
+                concurrency,
+                knobs,
+                host: None,
+            };
+            return match self.peer(host, PeerAction::Submit { input }, budget, cancel)? {
+                PeerResult::Submitted(receipt)
+                    if receipt.operation_id == operation_id
+                        && receipt.worktree.is_none()
+                        && !receipt.targets.is_empty()
+                        && receipt.targets.iter().all(|t| t.host == Some(host)) =>
+                {
+                    Ok(receipt)
+                }
+                _ => Err(FacadeError::StateCorrupt),
+            };
+        }
         // Peer ingress creates a writer's worktree in this host's clone; a
         // caller never names a path here, and a batch creates at most one.
         let ingress = !self.allow_remote;
