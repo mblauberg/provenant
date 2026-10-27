@@ -64,11 +64,14 @@ pub(crate) fn find(
         if grant.source != WriteSource::StateWrite || grant.scope != PathScope::Exact {
             continue;
         }
-        let path = grant.path.to_path_buf().ok()?;
-        let name = path.file_name()?;
-        let parent = path.parent()?;
+        let Ok(path) = grant.path.to_path_buf() else {
+            continue;
+        };
+        let (Some(name), Some(parent)) = (path.file_name(), path.parent()) else {
+            continue;
+        };
         if name != OsStr::new(&format!("{session}.jsonl"))
-            || parent.parent()?.file_name()? != OsStr::new("projects")
+            || parent.parent().and_then(Path::file_name) != Some(OsStr::new("projects"))
         {
             continue;
         }
