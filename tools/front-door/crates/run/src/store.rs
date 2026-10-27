@@ -648,7 +648,19 @@ impl RunStore {
         proof: &provenant_supervisor::custody::RebootRecovery,
         call: &Request<'_>,
     ) -> Result<()> {
-        let scope = proof.scope();
+        self.commit_lost(
+            proof.scope(),
+            "machine rebooted before the guardian settled the attempt",
+            call,
+        )
+    }
+
+    pub(crate) fn commit_lost(
+        &self,
+        scope: provenant_supervisor::custody::Scope,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<()> {
         let directory = self.run_dir(scope.run, false)?;
         let _publication = directory.lock(
             OsStr::new("publication.lock"),
@@ -673,7 +685,7 @@ impl RunStore {
                 .clock
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?,
-            reason: Some("machine rebooted before the guardian settled the attempt".into()),
+            reason: Some(reason.into()),
         };
         super::reader::validate_attempt(&next)?;
         // Keep recovery discoverable until fence release, even for readers
