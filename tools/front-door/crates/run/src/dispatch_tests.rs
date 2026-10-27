@@ -4876,6 +4876,167 @@ fn reconcile_retries_reboot_release_for_a_reader() -> TestResult {
     recover_rebooted_writer(false, true, false, NEW_BOOT)
 }
 
+#[test]
+fn unreserved_cancel_keeps_unidentified_provider_uncertain() -> TestResult {
+    placed_writer_without_reservation(true, 0)
+}
+
+#[test]
+fn unreserved_reconcile_keeps_unidentified_provider_uncertain() -> TestResult {
+    placed_writer_without_reservation(false, 0)
+}
+
+#[test]
+fn unreserved_live_guardian_keeps_attempt_open() -> TestResult {
+    placed_writer_without_reservation(true, 1)?;
+    placed_writer_without_reservation(false, 1)
+}
+
+#[test]
+fn unreserved_live_provider_keeps_attempt_open() -> TestResult {
+    placed_writer_without_reservation(true, 3)?;
+    placed_writer_without_reservation(false, 3)
+}
+
+#[test]
+fn unreserved_recorded_process_tree_before_reboot_is_lost() -> TestResult {
+    placed_writer_without_reservation(true, 2)?;
+    placed_writer_without_reservation(false, 2)
+}
+
+fn placed_writer_without_reservation(cancel_run: bool, evidence: u8) -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    let worktree = temp.path().join("lane");
+    std::fs::create_dir(&worktree)?;
+    run.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store
+        .claim(id, &at_micros(100), &call)?
+        .ok_or("not admitted")?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let custody = store
+        .writer_registry
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&custody)?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&custody)?,
+        scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let summary =
+        serde_json::json!({"schema_version":1, "scope":scope, "requester":context.actor_id});
+    artifacts::seal(
+        &attempt,
+        "launch.json",
+        &serde_json::to_vec(&summary)?,
+        RECORD_LIMIT,
+    )?;
+    if evidence != 0 {
+        let (guardian, provider) = if evidence == 1 || evidence == 3 {
+            let provenant_supervisor::census::ProcessObservation::Present(fact) =
+                provenant_supervisor::census::current_process()
+            else {
+                return Err("current process identity unavailable".into());
+            };
+            let mut guardian = fact.identity.clone();
+            if evidence == 3 {
+                guardian.native_start = guardian.native_start.saturating_add(1);
+            }
+            (guardian, fact.identity)
+        } else {
+            use provenant_supervisor::census::ProcessIdentity;
+            (
+                ProcessIdentity {
+                    boot: OLD_BOOT.into(),
+                    pid: 100,
+                    native_start: 1,
+                    group_id: 100,
+                    session_id: 100,
+                },
+                ProcessIdentity {
+                    boot: OLD_BOOT.into(),
+                    pid: 101,
+                    native_start: 2,
+                    group_id: 101,
+                    session_id: 100,
+                },
+            )
+        };
+        attempt.atomic_write(
+            std::ffi::OsStr::new("process.json"),
+            ".checkpoint-",
+            &serde_json::to_vec(
+                &serde_json::json!({"schema_version": 1, "scope": scope, "guardian": guardian, "provider": provider}),
+            )?,
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+    }
+    // A launch summary alone does not prove the provider was never spawned.
+    std::fs::remove_file(custody.join("reservation.json"))?;
+    let system = provenant_supervisor::census::SystemProcessObserver;
+    let reboot = RebootObserver(NEW_BOOT);
+    let observer: &dyn provenant_supervisor::census::ProcessObserver =
+        if evidence == 2 { &reboot } else { &system };
+    if cancel_run {
+        assert_eq!(
+            store.cancel_with_observer(id, "stop", &call, observer)?,
+            if evidence == 2 {
+                CancelReceipt::AlreadyTerminal
+            } else {
+                CancelReceipt::Requested
+            }
+        );
+    } else {
+        assert_eq!(
+            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?,
+            vec![(
+                id,
+                match evidence {
+                    1 => Reconciled::Held,
+                    2 => Reconciled::Finished,
+                    _ => Reconciled::Uncertain {
+                        reason: UncertainReason::GuardianNotObservable
+                    },
+                }
+            )]
+        );
+    }
+    if evidence == 2 {
+        assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    } else {
+        assert!(!matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
+    }
+    Ok(())
+}
+
 const OLD_BOOT: &str = "darwin:00000000-0000-0000-0000-000000000000";
 const NEW_BOOT: &str = "darwin:11111111-1111-1111-1111-111111111111";
 
