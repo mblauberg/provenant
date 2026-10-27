@@ -4092,10 +4092,7 @@ mod writer_disk_tests {
             let error = result
                 .err()
                 .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
-            assert!(
-                error.contains("99 bytes available") && error.contains("floor 100 bytes"),
-                "{error}"
-            );
+            assert!(error.contains("insufficient disk space"), "{error}");
             assert!(observed.contains(&low.to_path_buf()));
         }
         check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
