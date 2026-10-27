@@ -4129,6 +4129,69 @@ mod peer_tests {
     }
 
     #[test]
+    fn retained_lane_settlement_collects_only_its_output_and_cache()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::retained_lane_settlement_collects_only_its_output_and_cache")? {
+            return Ok(());
+        }
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = SettlementFixture::resumed()?;
+        std::fs::write(
+            fixture.rig.project.join(".git/info/exclude"),
+            "build/\nsaved/\n",
+        )?;
+        std::fs::write(
+            fixture.rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[gc.projects.\"{}\"]\nregenerable=['build','saved']\nkeep=['saved']\nforeign_worktrees='merged-clean'\n",
+                fixture.settled.project_id
+            ),
+        )?;
+        std::fs::create_dir(fixture.worktree.join("build"))?;
+        std::fs::write(fixture.worktree.join("build/artifact"), "regenerable")?;
+        std::fs::create_dir(fixture.worktree.join("saved"))?;
+        std::fs::write(fixture.worktree.join("saved/keep"), "keep")?;
+        let other = fixture.rig.project.join(".worktrees/foreign");
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(&git, &["worktree", "add", "-b", "foreign", other.to_str().ok_or("path")?], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        std::fs::create_dir(other.join("build"))?;
+        std::fs::write(other.join("build/artifact"), "foreign")?;
+        let cache_root = fixture.rig.home.join("Library/Caches/provenant-lane-cargo");
+        // Use valid cache ownership markers, including an unrelated orphan.
+        let cache = cache_root.join("a".repeat(64));
+        let orphan = cache_root.join("b".repeat(64));
+        let identity = std::fs::metadata(&fixture.worktree)?;
+        for (path, owner) in [(&cache, fixture.worktree.clone()), (&orphan, fixture.rig.root.join("missing"))] {
+            std::fs::create_dir_all(path)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            let mut marker = b"provenant-lane-cargo-owner-v2\n".to_vec();
+            marker.extend_from_slice(&identity.dev().to_le_bytes());
+            marker.extend_from_slice(&identity.ino().to_le_bytes());
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(path.join(".provenant-worktree-owner"), marker)?;
+            std::fs::write(path.join("artifact"), "cached")?;
+        }
+        let delivery = provenant_run::WriterDeliveryReceipt {
+            schema_version: 1,
+            remote: "origin".into(),
+            branch: "resumed-lane".into(),
+            head: None,
+            state: provenant_run::WriterDeliveryState::NotAttempted,
+        };
+        for _ in 0..2 {
+            settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, Some(&delivery))?;
+            assert!(fixture.worktree.exists());
+            assert!(!fixture.worktree.join("build/artifact").exists());
+            assert!(!cache.exists(), "settled lane cache survived");
+            assert_eq!(std::fs::read_to_string(fixture.worktree.join("saved/keep"))?, "keep");
+            assert_eq!(std::fs::read_to_string(other.join("build/artifact"))?, "foreign");
+            assert!(orphan.exists(), "unrelated cache collected");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn resumed_lane_settlement_prunes_and_records_its_receipt()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::resumed_lane_settlement_prunes_and_records_its_receipt")?
