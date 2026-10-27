@@ -169,7 +169,7 @@ pub(super) fn nothing_pending(ignored: usize) -> Fail {
 /// slow peer cannot hold the command past its budget.
 pub(super) type Fetch<'a> = dyn FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail> + 'a;
 
-enum Tick {
+pub(super) enum Tick {
     Lanes(Vec<run::AttemptRecord>),
     /// A transient peer failure, to retry while the budget lasts.
     Retry(Fail),
@@ -179,7 +179,7 @@ enum Tick {
 /// budget runs out on it.
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
-fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fail> {
+pub(super) fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fail> {
     match fetch(deadline.saturating_duration_since(Instant::now())) {
         Ok(lanes) => Ok(Tick::Lanes(lanes)),
         Err(fail) if fail.kind == ErrorKind::PeerUnavailable && Instant::now() < deadline => {
@@ -190,7 +190,7 @@ fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fail> {
 }
 // Waits and watches have a real-time reader deadline independent of store progress.
 #[allow(clippy::disallowed_methods)]
-fn pause(poll: Duration, deadline: Instant) {
+pub(super) fn pause(poll: Duration, deadline: Instant) {
     std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
 }
 /// Arm on the first successful fetch. No fetch starts after the deadline: the
@@ -222,6 +222,26 @@ fn arm(
     Ok((armed, counted))
 }
 
+/// Sleep out the poll, then, if the deadline has not passed, read the lanes
+/// again. A transient peer failure leaves `lanes` as they were.
+// A reader deadline is a real transport boundary.
+#[allow(clippy::disallowed_methods)]
+fn refresh(
+    fetch: &mut Fetch<'_>,
+    armed: &Armed,
+    deadline: Instant,
+    poll: Duration,
+    lanes: &mut Vec<run::AttemptRecord>,
+) -> Result<(), Fail> {
+    pause(poll, deadline);
+    if Instant::now() < deadline
+        && let Tick::Lanes(next) = tick(fetch, deadline)?
+    {
+        *lanes = armed.counted(next);
+    }
+    Ok(())
+}
+
 pub(super) struct Waited {
     pub(super) lanes: Vec<run::AttemptRecord>,
     pub(super) met: bool,
@@ -248,13 +268,7 @@ pub(super) fn wait(
                 ignored: armed.ignored(),
             });
         }
-        pause(poll, deadline);
-        if Instant::now() >= deadline {
-            continue;
-        }
-        if let Tick::Lanes(next) = tick(&mut fetch, deadline)? {
-            lanes = armed.counted(next);
-        }
+        refresh(&mut fetch, &armed, deadline, poll, &mut lanes)?;
     }
 }
 
@@ -291,13 +305,7 @@ pub(super) fn watch(
                 settled: all_settled,
             });
         }
-        pause(poll, deadline);
-        if Instant::now() >= deadline {
-            continue;
-        }
-        if let Tick::Lanes(next) = tick(&mut fetch, deadline)? {
-            lanes = armed.counted(next);
-        }
+        refresh(&mut fetch, &armed, deadline, poll, &mut lanes)?;
     }
 }
 
