@@ -127,6 +127,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
+            "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
             "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
             "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
@@ -182,6 +183,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     crate::provider_retention::provider_state_gc_sweeps_children_and_refuses_replaced_roots()
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
+                "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()
@@ -1318,6 +1320,84 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let cache = authority.cargo_cache().path.clone();
     fs::write(cache.join("artifact"), b"lane build output")?;
     Ok(cache)
+}
+
+fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
+    for name in ["bare.git", ".git"] {
+        let mut rig = repository()?;
+        let container = rig.root.join("bare-container");
+        fs::create_dir(&container)?;
+        let bare = container.join(name);
+        git(
+            &rig,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                rig.project.to_str().ok_or("path")?,
+                bare.to_str().ok_or("path")?,
+            ],
+        )?;
+        let linked = rig.root.join("bare-linked");
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "worktree",
+                "add",
+                "-qb",
+                "bare-linked",
+                linked.to_str().ok_or("path")?,
+            ],
+        )?;
+        let registration = git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "worktree",
+                "list",
+                "--porcelain",
+            ],
+        )?;
+        rig.project = linked.clone();
+        let from_linked = command(&rig, &["gc", "--apply", "--json"])?;
+        assert_ne!(
+            code(&from_linked),
+            0,
+            "bare-backed linked checkout accepted as primary: {name}"
+        );
+        let value: Value = serde_json::from_slice(&from_linked.stdout.bytes)?;
+        assert_eq!(value["error"]["code"], "GC");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .contains("bare repository")
+        );
+        rig.project = bare.clone();
+        let from_bare = command(&rig, &["gc", "--apply", "--json"])?;
+        assert_ne!(code(&from_bare), 0);
+        assert!(bare.join("HEAD").is_file() && linked.join(".git").is_file());
+        assert_eq!(
+            git(&rig, &["worktree", "list", "--porcelain"])?,
+            registration
+        );
+    }
+    let rig = repository()?;
+    let separate = rig.root.join("separate-git-dir");
+    git(
+        &rig,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            separate.to_str().ok_or("path")?,
+        ],
+    )?;
+    ok(&rig, &["gc", "--pressure", "--apply", "--json"])?;
+    Ok(())
 }
 
 fn gc_pressure_collects_only_the_selected_primary_project() -> Result {

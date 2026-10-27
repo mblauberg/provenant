@@ -29,5 +29,6 @@ Queued or pending submitted writers retain managed trees under foreign GC.
 
 Foreign removal holds writer exclusion even when no state existed and clears
 its temporary state after removal or refusal.
+GC refuses bare-backed linked checkouts as primary collection roots.
 
 Stderr output remains readable after retention, with truncation reported.

@@ -440,6 +440,11 @@ fn gc_project(
         workers,
         read_only,
         |context, cancel| {
+            if gc_primary_checkout(context.repo, context.executor, context.utility, cancel)?
+                != context.repo.root_path()
+            {
+                return Err(Error::GcObservation("GC requires the primary checkout"));
+            }
             Ok(GcProject {
                 binding: context.binding.clone(),
                 path: project.to_owned(),
@@ -454,6 +459,39 @@ fn gc_project(
             })
         },
     )
+}
+
+fn gc_primary_checkout<'a>(
+    repo: &'a provenant_confinement::repo::VerifiedRepo,
+    executor: &dyn provenant_os::exec::Executor,
+    runtime: &UtilityRuntime,
+    cancel: &CancelToken,
+) -> Result<&'a Path, Error> {
+    let bare = provenant_confinement::utility::run_utility(
+        executor,
+        provenant_confinement::utility::GitRead::LocalBare,
+        repo,
+        runtime,
+        UtilityBudget::bounded(Duration::from_secs(5))?,
+        cancel,
+    )?;
+    if bare.termination != provenant_os::exec::Termination::Exit(0)
+        || bare.stdout.bytes != b"false\n"
+    {
+        return Err(Error::GcObservation(
+            "GC cannot select a primary checkout for a bare repository or unknown repository configuration",
+        ));
+    }
+    let common = repo.common_git_dir();
+    if common.file_name() == Some(OsStr::new(".git")) {
+        common.parent().ok_or(Error::InvalidScope)
+    } else if repo.private_git_dir() == common {
+        Ok(repo.root_path())
+    } else {
+        Err(Error::GcObservation(
+            "GC cannot use a linked worktree as the primary checkout",
+        ))
+    }
 }
 
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
@@ -528,8 +566,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     } else {
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
         let runtime = UtilityRuntime::read_only(canonicalize(&git)?)?;
+        let executor = SystemExecutor::new(1)?;
         let repo = runtime.open_repo(
-            &SystemExecutor::new(1)?,
+            &executor,
             &project,
             UtilityBudget::bounded(Duration::from_secs(5))?,
             &CancelToken::new(),
@@ -550,11 +589,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        let primary = if common.file_name() == Some(OsStr::new(".git")) {
-            common.parent().ok_or(Error::InvalidScope)?
-        } else {
-            &project
-        };
+        let primary = gc_primary_checkout(&repo, &executor, &runtime, &CancelToken::new())?;
         let selected = gc_project(&roots, &home, primary, workers, command.dry_run)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);

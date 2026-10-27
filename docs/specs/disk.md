@@ -109,6 +109,10 @@ reservations, free existing writer locks and a complete free process census
 are required. Repository custody protects registration rechecks; every
 worktree is verified against the Git common directory. The primary stays
 protected and local refs survive this policy's removals.
+GC verifies the repository's local `core.bare` value before selecting a primary
+checkout. Bare repositories and their linked checkouts cannot supply that root,
+even when the bare directory is named `.git`. A primary using a separate Git
+directory remains eligible; a linked checkout is never the fallback primary.
 Foreign idleness scans the non-output tree within 1,000,000 entries and five
 seconds. Declared ignored output contributes only its top-level directory mtime:
 the scanner skips its contents, so neither deep writes nor the worktree root

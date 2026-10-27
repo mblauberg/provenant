@@ -92,6 +92,8 @@ paths. Configure `regenerable`, `keep` and the opt-in
 [configuration runbook](configuration.md#lane-cache-collection).
 Applied foreign collection removes any temporary writer state it created,
 after removal or refusal. Existing worktree state stays in place.
+GC requires a primary checkout. Bare repositories and their linked checkouts
+are refused as collection roots; scheduled scans report them as unobserved.
 
 A preview uses existing project custody only. An unregistered selected checkout
 or missing custody hierarchy returns an observation error without initialising
