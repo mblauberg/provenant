@@ -311,9 +311,10 @@ impl RunStore {
                                 Ok(self.db.query_row(
                                     "SELECT COUNT(*) FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
                                     rusqlite::params![id, record.project_id.to_string()],
-                                    |row| row.get::<_, u64>(0),
+                                    |row| row.get::<_, i64>(0),
                                 )?)
-                            })?
+                            })
+                            .map(|count| u64::try_from(count).unwrap_or(0))?
                         } else {
                             let update = Request {
                                 budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 5)
@@ -325,7 +326,7 @@ impl RunStore {
                                     "DELETE FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
                                     rusqlite::params![id, record.project_id.to_string()],
                                 )?;
-                                Ok(deleted as u64)
+                                Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
                             })?
                         };
                         report.expired_events += expired_events;
