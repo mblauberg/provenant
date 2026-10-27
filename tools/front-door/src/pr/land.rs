@@ -93,6 +93,7 @@ fn follow_up(
     }
     let remote = git.remote_of(project, base)?;
     let upstream = format!("{remote}/{base}");
+    let pinned = merged;
     let merged = merged.to_string();
     let mut steps = Vec::new();
     let skipped = |steps: &mut Vec<Step>, names: &[&'static str], why: &str| {
@@ -136,7 +137,7 @@ fn follow_up(
 
     steps.push(fast_forward(&git, project, base, &remote, &upstream)?);
 
-    match cleanup_target(&git, project, pull, &upstream)? {
+    match cleanup_target(&git, project, pull, pinned, &upstream)? {
         Cleanup::Skip(status, why) => {
             for name in ["worktree", "branch"] {
                 steps.push(Step::new(name, status, why.as_str()));
@@ -166,10 +167,19 @@ enum Cleanup {
 }
 
 /// A local branch is the pull request's branch only when its head lives in
-/// this repository, and is safe to remove only when the base contains its tip.
-/// A fork's `feature` says nothing about a local `feature`, and commits made
-/// after the merged head belong to neither.
-fn cleanup_target(git: &Git, project: &Path, pull: &Pull, upstream: &str) -> Result<Cleanup> {
+/// this repository and its tip is the head the pull request merged. It is safe
+/// to remove only when the base also contains that tip. A fork's `feature`
+/// says nothing about a local `feature`, a branch recreated at the base is not
+/// the merged branch, and commits made after the merged head belong to neither.
+/// A tip beyond the merged head is not matched even when the base contains it,
+/// because that cannot tell later work from a branch reused at the base.
+fn cleanup_target(
+    git: &Git,
+    project: &Path,
+    pull: &Pull,
+    merged: GitOid,
+    upstream: &str,
+) -> Result<Cleanup> {
     let branch = pull.branch.as_str();
     if pull.cross_repository {
         return Ok(Cleanup::Skip(
@@ -194,6 +204,14 @@ fn cleanup_target(git: &Git, project: &Path, pull: &Pull, upstream: &str) -> Res
             Status::Refused,
             format!(
                 "{branch} has commits that {upstream} does not contain, so its worktree is kept"
+            ),
+        ));
+    }
+    if tip != merged {
+        return Ok(Cleanup::Skip(
+            Status::Skipped,
+            format!(
+                "the local {branch} is at {tip}, not the merged pull request head {merged}, so it is not that branch"
             ),
         ));
     }

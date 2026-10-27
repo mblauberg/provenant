@@ -267,6 +267,34 @@ pub(crate) fn pr_land_leaves_a_local_namesake_of_a_fork_branch_alone() -> Result
     Ok(())
 }
 
+pub(crate) fn pr_land_leaves_a_reused_branch_name_alone() -> Result {
+    // Someone recreated `feat` at the base after the pull request's `feat` was
+    // merged. The base contains that tip, but it is not the merged head, so the
+    // branch and its clean checkout are not the pull request's to remove.
+    let landing = landing()?;
+    git_in(
+        &landing.rig,
+        &landing.worktree,
+        &["reset", "-q", "--hard", "origin/main"],
+    )?;
+    let reused = git(&landing.rig, &["rev-parse", "feat"])?;
+    assert_ne!(reused, landing.head);
+    let value = land(&landing)?;
+    assert_eq!(value["data"]["merged"], true, "{value}");
+    assert_eq!(status(&value, "fast_forward")?, "done", "{value}");
+    assert_eq!(status(&value, "worktree")?, "skipped", "{value}");
+    assert_eq!(status(&value, "branch")?, "skipped", "{value}");
+    assert!(
+        value
+            .to_string()
+            .contains("not the merged pull request head"),
+        "the report says why: {value}"
+    );
+    assert!(landing.worktree.exists());
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, reused);
+    Ok(())
+}
+
 /// The message of a refused `pr open`, which is a usage error.
 fn open_refusal(rig: &TestRig, args: &[&str]) -> Result<String> {
     let mut argv = vec!["pr", "open"];
