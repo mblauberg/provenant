@@ -2760,21 +2760,33 @@ mod lifecycle_tests {
             &cancel(),
         )?;
         let test_context = TestContext::new(&fixture)?;
-        for base in ["unknown/branch", "origin/missing"] {
-            let error = create(
-                &test_context.context(),
-                WorktreeCreate {
-                    branch: "feature/missing-base".to_owned(),
-                    base: Some(base.to_owned()),
-                },
-                &cancel(),
-            )
-            .expect_err("missing base must fail");
-            assert_eq!(
-                error.to_string(),
-                format!("base {base} did not resolve to a commit")
-            );
-        }
+        let error = create(
+            &test_context.context(),
+            WorktreeCreate {
+                branch: "feature/missing-base".to_owned(),
+                base: Some("origin/missing".to_owned()),
+            },
+            &cancel(),
+        )
+        .expect_err("missing remote branch must fail");
+        assert!(matches!(
+            error,
+            WorktreeError::BaseNotFound { ref base } if base == "origin/missing"
+        ));
+
+        let error = create(
+            &test_context.context(),
+            WorktreeCreate {
+                branch: "feature/missing-base".to_owned(),
+                base: Some("unknown/branch".to_owned()),
+            },
+            &cancel(),
+        )
+        .expect_err("missing base must fail");
+        assert_eq!(
+            error.to_string(),
+            "base unknown/branch did not resolve to a commit"
+        );
         Ok(())
     }
 

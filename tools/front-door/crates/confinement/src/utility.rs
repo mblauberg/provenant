@@ -620,8 +620,7 @@ pub(crate) fn fetch_missing_remote_branch(
         return Ok(());
     }
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
-    // A missing remote branch is reported by the caller's subsequent resolve,
-    // while a failed fetch needs to retain its distinct transport diagnostic.
+    // A failed fetch can mean either a missing remote ref or a transport fault.
     let fetched = run(&[
         "fetch".into(),
         // Creation must not indirectly prune stale worktree registrations.
@@ -636,6 +635,20 @@ pub(crate) fn fetch_missing_remote_branch(
     if let Termination::Exit(status) = fetched.termination
         && status != 0
     {
+        let remote_ref = format!("refs/heads/{branch}");
+        let advertised = run(&[
+            "ls-remote".into(),
+            "--exit-code".into(),
+            "--heads".into(),
+            "--".into(),
+            remote.into(),
+            remote_ref.into(),
+        ]);
+        // ls-remote uses status 2 when the remote answered but advertised no
+        // matching ref. Let the caller's resolution return BaseNotFound.
+        if advertised.is_ok_and(|outcome| outcome.termination == Termination::Exit(2)) {
+            return Ok(());
+        }
         return Err(UtilityError::FetchFailed {
             status,
             stderr: fetch_stderr_excerpt(&fetched.stderr.bytes),
@@ -647,7 +660,10 @@ pub(crate) fn fetch_missing_remote_branch(
 fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
     let safe = crate::redact::known_shapes(bytes)
         .unwrap_or_else(|_| b"fetch stderr could not be sanitised".to_vec());
-    let mut stderr = String::from_utf8_lossy(&safe).into_owned();
+    let mut stderr: String = String::from_utf8_lossy(&safe)
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .collect();
     if stderr.len() > MAX_FETCH_STDERR {
         let mut end = MAX_FETCH_STDERR - '…'.len_utf8();
         while !stderr.is_char_boundary(end) {
@@ -1331,9 +1347,25 @@ pub(crate) mod tests {
     use super::*;
     use crate::repo::verify_worktree;
     use crate::test_support::{Fixture, add_poisoned_gitlink, assert_raw_git_runs_poison_filter};
+    use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor};
     use std::error::Error;
     use std::fs;
     use std::time::Duration;
+
+    struct CredentialEchoFetch<'a>(&'a SystemExecutor);
+
+    impl Executor for CredentialEchoFetch<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let is_fetch = options.argv.iter().any(|arg| arg == "fetch");
+            let mut outcome = self.0.execute(options)?;
+            if is_fetch && outcome.termination != Termination::Exit(0) {
+                outcome.stderr.bytes = b"fatal: https://user:secret@example.invalid/repo denied\n"
+                    .to_vec();
+                outcome.stderr.total_bytes = outcome.stderr.bytes.len() as u64;
+            }
+            Ok(outcome)
+        }
+    }
 
     #[test]
     fn missing_remote_fetch_reports_bounded_sanitised_stderr() -> Result<(), Box<dyn Error>> {
@@ -1362,14 +1394,37 @@ pub(crate) mod tests {
             return Err(format!("unexpected error: {error}").into());
         };
         assert_ne!(status, 0);
-        assert!(stderr.contains("fatal"));
         assert!(stderr.len() <= MAX_FETCH_STDERR);
 
-        let redacted = fetch_stderr_excerpt(
-            b"fatal: unable to access 'https://user:secret@example.invalid/repo': denied",
-        );
-        assert!(!redacted.contains("secret"));
-        assert!(redacted.contains("[REDACTED]"));
+        fixture.run(&[
+            "remote",
+            "set-url",
+            "origin",
+            "http://user:secret@127.0.0.1:1/repo.git",
+        ])?;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let credential_echo = CredentialEchoFetch(&fixture.executor);
+        let error = fetch_missing_remote_branch(
+            &credential_echo,
+            &fixture.repo,
+            &fixture.runtime,
+            &fixture.home,
+            "origin/main",
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+        .expect_err("transport failure must be reported");
+        let UtilityError::FetchFailed { stderr, .. } = error else {
+            return Err(format!("unexpected error: {error}").into());
+        };
+        assert!(!stderr.contains("secret"));
+        assert!(stderr.contains("[REDACTED]"));
+        assert!(!stderr.chars().any(char::is_control));
         Ok(())
     }
 
