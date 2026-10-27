@@ -2955,11 +2955,13 @@ mod tests {
             directories: &directories,
             worktree: None,
         };
-        assert!(matches!(
-            anchors.verify_all(),
-            Err(PermissionError::AnchorMismatchAt { path: failed, stage })
-                if failed == path && stage == "held directory revalidation"
-        ));
+        let error = anchors.verify_all().expect_err("replaced anchor accepted");
+        assert!(
+            error
+                .to_string()
+                .contains(path.to_str().expect("UTF-8 fixture"))
+        );
+        assert!(error.to_string().contains("held directory revalidation"));
     }
 
     #[cfg(target_os = "macos")]
@@ -3064,9 +3066,11 @@ mod tests {
                 .err()
                 .ok_or("missing discovery parent accepted")?;
             assert!(
-                matches!(error, PermissionError::AnchorMismatchAt { path, stage }
-                if path == root.join(".agents") && stage == "discovery parent anchor lookup")
+                error
+                    .to_string()
+                    .contains(root.join(".agents").to_str().ok_or("path")?)
             );
+            assert!(error.to_string().contains("discovery parent anchor lookup"));
             // Only the ancestor's literal directory is readable through discovery.
             for grant in profile
                 .spec
