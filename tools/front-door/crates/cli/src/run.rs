@@ -754,12 +754,10 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
             }
         }
     }
-    let writer = matches!(access.mode, Mode::WorktreeWrite);
     let network = match (access.network, postgres) {
         (Some(Switch::On), _) => Some(run::NetworkAccess::Open),
         (Some(Switch::Off), true) => Some(run::NetworkAccess::Local),
         (Some(Switch::Off), false) => Some(run::NetworkAccess::Provider),
-        (None, true) if !writer => Some(run::NetworkAccess::Local),
         (None, _) => None,
     };
     // A first dispatch can precede the state root's creation; compare lexically then.
