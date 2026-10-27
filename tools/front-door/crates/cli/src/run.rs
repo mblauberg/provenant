@@ -3201,13 +3201,23 @@ pub fn continue_attempt_mode(
             return Ok((run, started));
         }
     }
-    let unavailable = Registry::default()
-        .check_continuable(&record)
-        .err()
-        .map(|fail| fail.message)
-        .or_else(|| {
-            provider::continuation_available(&record, session.context.state_root.as_path()).err()
-        });
+    let ownership = session.store.check_continuation_writer(prior, call);
+    let displaced = ownership.is_err();
+    let owner_base = ownership
+        .as_ref()
+        .ok()
+        .and_then(|owner| owner.as_ref())
+        .map(|owner| owner.base.clone());
+    let unavailable = ownership.err().map(|error| error.to_string()).or_else(|| {
+        Registry::default()
+            .check_continuable(&record)
+            .err()
+            .map(|fail| fail.message)
+            .or_else(|| {
+                provider::continuation_available(&record, session.context.state_root.as_path())
+                    .err()
+            })
+    });
     if !fallback && let Some(reason) = &unavailable {
         return Err(Fail::new(
             Status::Refused,
@@ -3259,11 +3269,20 @@ pub fn continue_attempt_mode(
             .into_iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(run::RunError::NotFound)?;
-        let cwd = task
-            .writer
-            .as_ref()
-            .map_or(edge.cwd, |writer| writer.worktree.as_path());
-        let log = run::continuation_history(cwd)
+        let cwd = task.writer.as_ref().map_or(edge.cwd, |writer| {
+            if displaced {
+                writer.project.as_path()
+            } else {
+                writer.worktree.as_path()
+            }
+        });
+        let history_base = owner_base
+            .as_deref()
+            .or(task.base.as_deref())
+            .map(str::to_owned)
+            .or_else(|| record.head.map(|head| head.to_string()))
+            .unwrap_or_else(|| "HEAD".into());
+        let log = run::continuation_history(cwd, &history_base)
             .unwrap_or_else(|error| format!("[history unavailable: {error}]"));
         let digest = record
             .result
@@ -3271,7 +3290,7 @@ pub fn continue_attempt_mode(
             .map(|artifact| provenant_core::hex(artifact.digest.bytes()))
             .unwrap_or_else(|| "unavailable".into());
         prompt = format!(
-            "Continuation: fresh\nFallback from {prior}: {reason}\n\nOriginal prompt:\n{original}\n\nPrior result digest: {digest}\nPrior result tail:\n{tail}\n\nGit log main..HEAD:\n{log}\n\nNew prompt:\n{prompt}"
+            "Continuation: fresh\nFallback from {prior}: {reason}\n\nOriginal prompt:\n{original}\n\nPrior result digest: {digest}\nPrior result tail:\n{tail}\n\nGit log from recorded base {history_base}:\n{log}\n\nNew prompt:\n{prompt}"
         );
         scan(&prompt)?;
     }
@@ -3284,22 +3303,76 @@ pub fn continue_attempt_mode(
         prompt,
         created_at: now(call.clock)?,
     };
-    let run = if let Some(reason) = &unavailable {
-        session.store.resume_fresh(&input, reason, call)
+    let fresh_writer = if displaced {
+        Some(fresh_continuation_worktree(
+            session, edge, &record, &input, call,
+        )?)
+    } else {
+        None
+    };
+    let accepted = if let Some(reason) = &unavailable {
+        if let Some((writer, _)) = &fresh_writer {
+            session.store.resume_fresh_in(&input, reason, writer, call)
+        } else {
+            session.store.resume_fresh(&input, reason, call)
+        }
     } else {
         session.service().resume(&input, call)
-    }
-    .map_err(|error| {
+    };
+    let cleanup_failure = if accepted.is_err()
+        && let Some((writer, head)) = &fresh_writer
+    {
+        // A refused continuation has not launched. Roll back only the new,
+        // clean owned checkout, using the same ownership and custody fences.
+        provenant_confinement::worktrees::with_context(
+            edge.roots,
+            edge.home,
+            &writer.project,
+            call.clock,
+            call.cancel,
+            |context| {
+                use provenant_confinement::worktrees::{self, WorktreeGcPolicy};
+                worktrees::prune_owned(
+                    context,
+                    &writer.worktree,
+                    input.attempt_id,
+                    *head,
+                    *head,
+                    &WorktreeGcPolicy {
+                        upstream: None,
+                        terminal: &|_| true,
+                        no_live_lanes: &|_| true,
+                        regenerable: &[],
+                        keep: &[],
+                        written_before_ns: i128::MAX,
+                        dry_run: false,
+                    },
+                    call.cancel,
+                )
+            },
+        )
+        .err()
+        .map(|error| {
+            format!(
+                "; cleanup retained fresh worktree at {} for gc: {error}",
+                writer.worktree.display()
+            )
+        })
+    } else {
+        None
+    };
+    let run = accepted.map_err(|error| {
         Fail::new(
             Status::Refused,
             ErrorKind::ContinuationUnsupported,
             format!(
-                "continuation {}: {error}",
+                "continuation {}: {error}{}",
                 if unavailable.is_some() {
                     "fresh fallback refused"
                 } else {
                     "provider resume refused"
-                }
+                },
+                cleanup_failure.as_deref().unwrap_or("")
             ),
         )
     })?;
@@ -3328,6 +3401,105 @@ pub fn continue_attempt_mode(
         ));
     }
     Ok((run, started))
+}
+fn fresh_continuation_worktree(
+    session: &Session,
+    edge: &Edge<'_>,
+    prior: &run::AttemptRecord,
+    input: &run::Resume,
+    call: &run::Request<'_>,
+) -> Result<(run::WriterRequest, provenant_core::GitOid), Fail> {
+    let task = session
+        .store
+        .request(prior.run_id, call)?
+        .tasks
+        .into_iter()
+        .find(|task| task.task_id == prior.task_id)
+        .ok_or(run::RunError::NotFound)?;
+    let writer = task
+        .writer
+        .ok_or(run::RunError::Validation("fresh writer missing"))?;
+    let base = prior.head.map(|head| head.to_string()).or(task.base);
+    let base = match base {
+        Some(base) => base,
+        None => {
+            let git = provenant_os::git::git_executable()
+                .ok_or(run::RunError::Validation("Git unavailable"))?;
+            run::resolve_git_base(&git, &writer.project, "HEAD")?
+        }
+    };
+    let host = provenant_config::bind_host(edge.roots)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+    let mut retained = None;
+    let info = provenant_confinement::worktrees::with_context(
+        edge.roots,
+        edge.home,
+        &writer.project,
+        call.clock,
+        call.cancel,
+        |context| {
+            use provenant_confinement::worktrees::{
+                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+            };
+            let branch = format!("lane/resume-{}", input.attempt_id);
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: branch.clone(),
+                    base: Some(base.clone()),
+                },
+                call.cancel,
+            )?;
+            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+            let publication = worktrees::save_owner(
+                &tree,
+                &WorktreeOwner {
+                    attempt_id: Some(input.attempt_id),
+                    operation_id: Some(input.operation_id.clone()),
+                    branch,
+                    base: base.clone(),
+                    host,
+                    created_at: input.created_at,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            );
+            if let Err(error) = publication {
+                if worktrees::remove(
+                    context,
+                    worktrees::WorktreeRemove::Name {
+                        name: format!("lane/resume-{}", input.attempt_id),
+                        discard: false,
+                        integration: None,
+                    },
+                    call.cancel,
+                )
+                .is_err()
+                {
+                    retained = Some(info.path.clone());
+                }
+                return Err(error);
+            }
+            Ok(info)
+        },
+    )
+    .map_err(|error| {
+        let mut fail = Fail::from(run::RunError::from(error));
+        if let Some(path) = retained {
+            fail.message.push_str(&format!(
+                "; cleanup retained fresh worktree at {} for gc",
+                path.display()
+            ));
+        }
+        fail
+    })?;
+    Ok((
+        run::WriterRequest {
+            project: writer.project,
+            worktree: info.path,
+        },
+        info.head,
+    ))
 }
 fn read_full_prompt(
     session: &Session,

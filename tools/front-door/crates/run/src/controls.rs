@@ -107,6 +107,251 @@ impl std::fmt::Display for UncertainReason {
 /// How long recovery waits after each of TERM and KILL for an orphan to go.
 const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
+#[cfg(test)]
+mod lineage_tests {
+    use super::*;
+    use provenant_confinement::worktrees::{
+        self, WorktreeCreate, WorktreeGcPolicy, WorktreeOrigin, WorktreeOwner,
+    };
+    use provenant_core::Clock;
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+    use std::{ffi::OsString, time::Duration};
+
+    #[test]
+    fn resume_refuses_a_pruned_worktree_reused_by_another_lane()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut execution = crate::tests::context(temp.path())?;
+        let project = temp.path().join("checkout");
+        let home = temp.path().join("home");
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(execution.state_root.as_path().into());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Base",
+            ],
+        ] {
+            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.into_iter().map(OsString::from))
+                .collect();
+            let outcome = SystemExecutor::new(1)?.execute(ExecOptions::new(
+                &argv,
+                &project,
+                Duration::from_secs(5),
+            ))?;
+            assert_eq!(outcome.termination, Termination::Exit(0));
+        }
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        let mut original = crate::tests::input();
+        original.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+            mode: DeliveryMode::Pr,
+            remote: "origin".into(),
+            branch: "old-lane".into(),
+            open_pr: true,
+        });
+        let prior = original.attempts[0].attempt_id;
+        let (project_id, info) =
+            worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                let info = worktrees::create(
+                    context,
+                    WorktreeCreate {
+                        branch: "lane".into(),
+                        base: None,
+                    },
+                    &cancel,
+                )?;
+                let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                worktrees::save_owner(
+                    &tree,
+                    &WorktreeOwner {
+                        attempt_id: Some(prior),
+                        operation_id: Some(original.operation_id.clone()),
+                        branch: "lane".into(),
+                        base: info.head.to_string(),
+                        host: provenant_core::HostId::from_bytes([3; 16]),
+                        created_at: original.created_at,
+                        origin: WorktreeOrigin::Lane,
+                        label: None,
+                    },
+                )?;
+                Ok((context.binding.project_id(), info))
+            })?;
+        execution.project_id = project_id;
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        let store = RunStore::open(&execution, &call)?;
+        original.request.tasks[0].writer = Some(WriterRequest {
+            project: project.clone(),
+            worktree: info.path.clone(),
+        });
+        store.create(&original, &call)?;
+        store.withdraw(
+            prior,
+            AttemptState::Queued,
+            Outcome::Cancelled,
+            "fixture",
+            clock.wall_now()?,
+            &call,
+        )?;
+        assert!(store.check_continuation_writer(prior, &call)?.is_some());
+        let first = Resume {
+            prior,
+            expected_generation: 0,
+            operation_id: "queued-resume".parse()?,
+            run_id: RunId::from_bytes([30; 16]),
+            attempt_id: AttemptId::from_bytes([31; 16]),
+            prompt: "Continue".into(),
+            created_at: clock.wall_now()?,
+        };
+        store.resume_fresh(&first, "fixture", &call)?;
+        store.withdraw(
+            first.attempt_id,
+            AttemptState::Queued,
+            Outcome::Cancelled,
+            "fixture",
+            clock.wall_now()?,
+            &call,
+        )?;
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            worktrees::prune_owned(
+                context,
+                &info.path,
+                prior,
+                info.head,
+                info.head,
+                &WorktreeGcPolicy {
+                    upstream: Some(info.head),
+                    terminal: &|_| true,
+                    no_live_lanes: &|_| true,
+                    regenerable: &[],
+                    keep: &[],
+                    written_before_ns: i128::MAX,
+                    dry_run: false,
+                },
+                &cancel,
+            )?;
+            let replacement = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: "lane".into(),
+                    base: None,
+                },
+                &cancel,
+            )?;
+            assert_eq!(replacement.path, info.path);
+            let tree = provenant_confinement::verify_worktree(context.repo, &replacement.path)?;
+            worktrees::save_owner(
+                &tree,
+                &WorktreeOwner {
+                    attempt_id: Some(AttemptId::from_bytes([40; 16])),
+                    operation_id: Some("foreign".parse().unwrap()),
+                    branch: "lane".into(),
+                    base: replacement.head.to_string(),
+                    host: provenant_core::HostId::from_bytes([3; 16]),
+                    created_at: original.created_at,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            )?;
+            let queued = store.record(first.attempt_id, &call).unwrap();
+            assert!(matches!(
+                store.check_writer_lineage(&queued, &tree, &call),
+                Err(RunError::Validation(
+                    "continuation worktree belongs to another lane"
+                ))
+            ));
+            Ok(())
+        })?;
+        let next = Resume {
+            prior: first.attempt_id,
+            operation_id: "new-resume".parse()?,
+            run_id: RunId::from_bytes([50; 16]),
+            attempt_id: AttemptId::from_bytes([51; 16]),
+            ..first
+        };
+        assert!(matches!(
+            store.resume(&next, &call),
+            Err(RunError::Validation(
+                "continuation worktree belongs to another lane"
+            ))
+        ));
+        assert!(matches!(
+            store.resume_fresh(&next, "fixture", &call),
+            Err(RunError::Validation(
+                "continuation worktree belongs to another lane"
+            ))
+        ));
+        let replacement =
+            worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                let replacement = worktrees::create(
+                    context,
+                    WorktreeCreate {
+                        branch: "replacement".into(),
+                        base: Some(info.head.to_string()),
+                    },
+                    &cancel,
+                )?;
+                let tree = provenant_confinement::verify_worktree(context.repo, &replacement.path)?;
+                worktrees::save_owner(
+                    &tree,
+                    &WorktreeOwner {
+                        attempt_id: Some(next.attempt_id),
+                        operation_id: Some(next.operation_id.clone()),
+                        branch: "replacement".into(),
+                        base: replacement.head.to_string(),
+                        host: provenant_core::HostId::from_bytes([3; 16]),
+                        created_at: next.created_at,
+                        origin: WorktreeOrigin::Lane,
+                        label: None,
+                    },
+                )?;
+                Ok(replacement)
+            })?;
+        let writer = WriterRequest {
+            project: project.clone(),
+            worktree: replacement.path,
+        };
+        let accepted =
+            store.resume_fresh_in(&next, "original worktree reassigned", &writer, &call)?;
+        assert_eq!(
+            store.request(accepted.run_id, &call)?.tasks[0]
+                .writer
+                .as_ref(),
+            Some(&writer)
+        );
+        assert_eq!(
+            store.request(accepted.run_id, &call)?.tasks[0]
+                .deliver
+                .as_ref()
+                .unwrap()
+                .branch,
+            "replacement"
+        );
+        assert!(info.path.exists(), "foreign lane must retain its checkout");
+        Ok(())
+    }
+}
+
 impl Reconciled {
     fn uncertain(reason: UncertainReason) -> Self {
         Self::Uncertain { reason }
@@ -395,7 +640,7 @@ impl RunStore {
     /// once; `expected_generation` is 0 before that and 1 after. The route,
     /// access and timeout come from the prior task, never from the caller.
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
-        self.resume_mode(input, call, None)
+        self.resume_mode(input, call, None, None)
     }
     /// Same lineage, route, authority and writer, without provider continuation.
     pub fn resume_fresh(
@@ -404,19 +649,106 @@ impl RunStore {
         reason: &str,
         call: &Request<'_>,
     ) -> Result<RunRecord> {
-        self.resume_mode(input, call, Some(reason))
+        self.resume_mode(input, call, Some(reason), None)
+    }
+    /// A fresh fallback may replace a vanished or reassigned writer only with
+    /// a new worktree owned by this continuation.
+    pub fn resume_fresh_in(
+        &self,
+        input: &Resume,
+        reason: &str,
+        writer: &WriterRequest,
+        call: &Request<'_>,
+    ) -> Result<RunRecord> {
+        let launch = crate::prepare_writer(writer, &self.writer_registry, self.context.project_id)?;
+        let owner = provenant_confinement::worktrees::load_owner(&launch.worktree)?.ok_or(
+            RunError::Validation("fresh fallback needs an owned worktree"),
+        )?;
+        if owner.origin != provenant_confinement::worktrees::WorktreeOrigin::Lane
+            || owner.operation_id.as_ref() != Some(&input.operation_id)
+            || owner.attempt_id != Some(input.attempt_id)
+        {
+            return Err(RunError::Validation(
+                "fresh fallback worktree has another owner",
+            ));
+        }
+        self.resume_mode(
+            input,
+            call,
+            Some(reason),
+            Some((writer, owner.branch.as_str())),
+        )
+    }
+    /// Admission checks ownership as well as the path. A later handoff checks
+    /// again under custody so prune and reuse cannot redirect a queued resume.
+    pub fn check_continuation_writer(
+        &self,
+        prior: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
+        let prior = self.record(prior, call)?;
+        let request = self.request(prior.run_id, call)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == prior.task_id)
+            .ok_or(RunError::Validation("prior task missing from request"))?;
+        let Some(writer) = &task.writer else {
+            return Ok(None);
+        };
+        let launch = crate::prepare_writer(writer, &self.writer_registry, prior.project_id)?;
+        self.check_writer_lineage(&prior, &launch.worktree, call)
+            .map(Some)
+    }
+    pub(crate) fn check_writer_lineage(
+        &self,
+        record: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+    ) -> Result<provenant_confinement::worktrees::WorktreeOwner> {
+        use provenant_confinement::worktrees::{WorktreeOrigin, load_owner};
+        let owner = load_owner(tree)?.ok_or(RunError::Validation(
+            "continuation worktree has no lane owner",
+        ))?;
+        if owner.origin != WorktreeOrigin::Lane {
+            return Err(RunError::Validation(
+                "continuation worktree belongs to an adopted owner",
+            ));
+        }
+        let mut current = record.clone();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current.attempt_id) || seen.len() > 128 {
+                return Err(RunError::Validation("continuation parent chain"));
+            }
+            if owner.attempt_id == Some(current.attempt_id)
+                || owner.operation_id.as_ref() == Some(&current.operation_id)
+            {
+                return Ok(owner);
+            }
+            let Some(parent) = current.retry_of else {
+                return Err(RunError::Validation(
+                    "continuation worktree belongs to another lane",
+                ));
+            };
+            current = self.record(parent, call)?;
+        }
     }
     fn resume_mode(
         &self,
         input: &Resume,
         call: &Request<'_>,
         fresh: Option<&str>,
+        writer: Option<(&WriterRequest, &str)>,
     ) -> Result<RunRecord> {
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
         }
         let replay = self.operation(&input.operation_id, call)?.is_some();
+        if !replay && writer.is_none() {
+            self.check_continuation_writer(input.prior, call)?;
+        }
         let _retention = if replay || fresh.is_some() {
             None
         } else {
@@ -428,6 +760,17 @@ impl RunStore {
             .iter()
             .find(|t| t.task_id == prior.task_id)
             .ok_or(RunError::Validation("prior task missing from request"))?;
+        let mut deliver = task.deliver.clone();
+        if let Some((_, branch)) = writer
+            && let Some(prior) = &deliver
+            && matches!(prior.mode, DeliveryMode::Push | DeliveryMode::Pr)
+        {
+            let mut destination = HostDeliveryContext::destination(prior.mode.clone(), branch)?
+                .ok_or(RunError::Validation("fresh fallback delivery destination"))?;
+            destination.remote = prior.remote.clone();
+            destination.open_pr |= prior.open_pr;
+            deliver = Some(destination);
+        }
         let prepared = PreparedRun {
             run_id: input.run_id,
             operation_id: input.operation_id.clone(),
@@ -446,8 +789,10 @@ impl RunStore {
                     account: task.account.clone(),
                     fallback: vec![],
                     authority_digest: prior.authority_digest,
-                    writer: task.writer.clone(),
-                    deliver: task.deliver.clone(),
+                    writer: writer
+                        .map(|(writer, _)| writer.clone())
+                        .or_else(|| task.writer.clone()),
+                    deliver,
                     provider_timeout_seconds: task.provider_timeout_seconds,
                     delivery_id: prior.delivery_id,
                     access: task.access.clone(),

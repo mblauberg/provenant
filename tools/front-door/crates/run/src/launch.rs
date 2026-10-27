@@ -912,6 +912,18 @@ impl RunStore {
                 local(&e)
             }
         })?;
+        if record.retry_of.is_some()
+            && let Some(writer) = plan
+                .confinement
+                .as_ref()
+                .and_then(|plan| plan.writer.as_ref())
+            && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
+        {
+            lease
+                .withdraw_unlaunched()
+                .map_err(|error| HandOff::Uncertain(error.to_string()))?;
+            return Err(local(&error));
+        }
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
             Ok(now)
