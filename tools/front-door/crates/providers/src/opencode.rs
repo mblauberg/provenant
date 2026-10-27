@@ -365,7 +365,10 @@ struct Finish {
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
-        Event::Text { session, part } => vec![E::Session(session), E::Text(part.text)],
+        // OpenCode emits completed text parts, but can drop the final
+        // step_finish while reconciling at idle. Success still requires exit 0
+        // and no errors in StreamState::finish.
+        Event::Text { session, part } => vec![E::Session(session), E::Text(part.text), E::Terminal],
         Event::StepFinish { session, part } => {
             let mut events = vec![E::Session(session)];
             if part.reason == "stop" {
