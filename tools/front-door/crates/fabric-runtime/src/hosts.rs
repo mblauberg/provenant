@@ -626,6 +626,70 @@ impl SshTransport<'_> {
                         remote: 1,
                     });
                 }
+                if code == 3
+                    && String::from_utf8_lossy(&outcome.stderr.bytes)
+                        .lines()
+                        .any(|line| {
+                            line.trim().starts_with(
+                                "provenant: fabric peer: peer agent closed without a reply; see ",
+                            )
+                        })
+                {
+                    // The v1 agent hides decode refusals, but this can also be
+                    // a lost mutation reply. Probe health, never repeat the
+                    // operation, and reclassify only a proven version mismatch.
+                    // Omit protocol and trace so v1 can decode the probe.
+                    let mut probe = serde_json::to_vec(&serde_json::json!({
+                        "version": 1,
+                        "target_host": request.target_host,
+                        "source_host": request.source_host,
+                        "agent": request.agent,
+                        "project": request.project,
+                        "action": {"action": "health"},
+                    }))
+                    .map_err(|_| PeerError::Frame)?;
+                    probe.push(b'\n');
+                    let remaining = timeout
+                        .saturating_sub(Duration::from_micros(outcome.elapsed_micros))
+                        .min(Duration::from_micros(
+                            budget.remaining(self.clock.mono_now()).as_micros(),
+                        ));
+                    if !remaining.is_zero() && !cancel.is_cancelled() {
+                        let mut options = ExecOptions::new(&argv, self.cwd, remaining);
+                        options.env = Some(&env);
+                        options.stdin = Some(&probe);
+                        options.stdout = StreamPolicy::Capture { limit: MAX_FRAME };
+                        options.stderr = StreamPolicy::Capture { limit: 4096 };
+                        options.cancel = Some(cancel);
+                        options.stop_on_output_limit = true;
+                        if let Some((terminate_grace, reap_timeout)) = cleanup {
+                            options.terminate_grace = terminate_grace;
+                            options.reap_timeout = reap_timeout;
+                        }
+                        if let Ok(reply) = self.executor.execute(options)
+                            && reply.termination == Termination::Exit(0)
+                            && !reply.timed_out
+                            && !reply.cancelled
+                            && !reply.stdout.truncated
+                            && !reply.stdout.read_failed
+                            && !reply.drain_truncated
+                            && let Ok(response) =
+                                provenant_records::decode::<PeerResponse<serde_json::Value>, _>(
+                                    reply.stdout.bytes.as_slice(),
+                                    Limits::CONFIG,
+                                )
+                            && response.version == 1
+                            && response.host == peer.host
+                            && response.project == request.project.key
+                            && response.protocol != PROTOCOL
+                        {
+                            return Err(PeerError::ProtocolMismatch {
+                                peer: peer.destination.clone(),
+                                remote: response.protocol,
+                            });
+                        }
+                    }
+                }
                 return Err(uncertain(if line.is_empty() {
                     format!("ssh exited with status {code}")
                 } else {
@@ -1071,6 +1135,11 @@ mod tests {
     struct Canned(Mutex<Option<Result<ExecOutcome, ExecError>>>);
     impl Executor for Canned {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let wire: serde_json::Value = serde_json::from_slice(options.stdin.unwrap()).unwrap();
+            if wire.get("protocol").is_none() {
+                assert_eq!(wire["action"], serde_json::json!({"action":"health"}));
+                return Err(ExecError::Busy);
+            }
             let request = decode_request(options.stdin.unwrap()).unwrap();
             assert_eq!(request.protocol, PROTOCOL);
             self.0.lock().unwrap().take().unwrap()
