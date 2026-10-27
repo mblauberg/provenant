@@ -1,3 +1,5 @@
+## Behaviour changes
+
 `lanes --wait` now counts only lanes that were unsettled when the wait started
 or have settled since (or since `--since`), so a settled older attempt no longer
 ends a wait on a newer one. An attempt named by its exact ID still counts
