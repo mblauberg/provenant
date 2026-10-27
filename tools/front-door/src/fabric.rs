@@ -3543,6 +3543,7 @@ pub fn events(
     }
 }
 #[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes these helpers without libtest.
 mod peer_tests {
     use super::*;
     use provenant_core::{AttemptId, RunId, TaskId};
