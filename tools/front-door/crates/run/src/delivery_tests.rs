@@ -75,6 +75,21 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
         host.integrate(&fixture.writer, &fixture.request, head),
         Err(RunError::Delivery(WriterDeliveryStage::Integrate))
     ));
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/heads/alias",
+        "refs/heads/primary-live",
+    ])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("alias".into()), "lane")?
+            .ok_or("destination")?;
+    assert!(matches!(
+        fixture.prepare(),
+        Err(RunError::DeliveryPrepare {
+            step: "integration target",
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -91,6 +106,20 @@ fn graph_publication_never_adopts_a_foreign_local_branch()
             .is_err()
     );
     fixture.git(&["branch", "-d", &publication])?;
+    fixture.git(&[
+        "symbolic-ref",
+        &format!("refs/heads/{publication}"),
+        "refs/heads/missing",
+    ])?;
+    assert!(
+        host.graph_publication_branch(&fixture.writer.project, head)
+            .is_err()
+    );
+    fixture.git(&[
+        "symbolic-ref",
+        "--delete",
+        &format!("refs/heads/{publication}"),
+    ])?;
     assert_eq!(
         host.graph_publication_branch(&fixture.writer.project, head)?,
         publication
@@ -221,6 +250,16 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
     );
     let capped = cap_pr_body("\u{1f600}".repeat(30_000));
     assert!(capped.len() <= 60_000 && capped.ends_with("[Commit summary truncated.]\n"));
+    fixture.commit(
+        &fixture.writer.worktree,
+        &format!("Large commit\n\n{}", "\u{1f600}".repeat(20_000)),
+    )?;
+    let body = host.commit_body(
+        &fixture.writer,
+        host.head(&fixture.writer)?,
+        "Run fixture\nAttempt fixture",
+    )?;
+    assert!(body.len() <= 60_000 && body.contains("[Commit summary truncated.]"));
     Ok(())
 }
 
@@ -248,6 +287,44 @@ fn remote_integration_refreshes_the_leased_destination()
         head.to_string()
     );
     host.integrate(&fixture.writer, &fixture.request, head)?;
+    Ok(())
+}
+
+#[test]
+fn remote_integration_refuses_a_symbolic_destination()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["push", "origin", "HEAD:refs/heads/main"])?;
+    fixture.git(&[
+        "--git-dir",
+        fixture.root.join("remote.git").to_str().ok_or("remote")?,
+        "symbolic-ref",
+        "refs/heads/integration",
+        "refs/heads/main",
+    ])?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("origin/integration".into()),
+        "lane",
+    )?
+    .ok_or("destination")?;
+    let host = fixture.prepare()?;
+    let original = host.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "lane change")?;
+    let head = host.head(&fixture.writer)?;
+    assert!(matches!(
+        host.integrate(&fixture.writer, &fixture.request, head),
+        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+    ));
+    let remote = host.command(
+        &fixture.writer.project,
+        "git",
+        &["ls-remote", "origin", "refs/heads/main"],
+        WriterDeliveryStage::Verify,
+    )?;
+    assert_eq!(
+        remote.split_whitespace().next(),
+        Some(original.to_string().as_str())
+    );
     Ok(())
 }
 
@@ -514,6 +591,27 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         ))
     ));
     fixture.lane_git(&["reset", "--hard", &head.to_string()])?;
+    let key = provenant_core::hex(
+        provenant_records::CanonicalV1::file_digest(&serde_json::to_vec(&(
+            head,
+            &fixture.request,
+        ))?)
+        .bytes(),
+    );
+    artifacts::seal(
+        &attempt,
+        &format!("delivery-{key}.json"),
+        &db::bytes(&WriterDeliveryReceipt {
+            schema_version: 1,
+            remote: fixture.request.remote.clone(),
+            branch: fixture.request.branch.clone(),
+            head: Some(head),
+            state: WriterDeliveryState::Failed {
+                stage: WriterDeliveryStage::Interrupted,
+            },
+        })?,
+        RECORD_LIMIT,
+    )?;
     let receipt = deliver()?;
     assert!(matches!(
         receipt.state,
@@ -524,6 +622,12 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         Some(receipt.clone())
     );
     assert_eq!(deliver()?, receipt);
+    attempt.unlink(std::ffi::OsStr::new("delivery-pickup.json"))?;
+    assert_eq!(deliver()?, receipt);
+    assert_eq!(
+        store.delivered(id, &call)?.map(|(_, delivered)| delivered),
+        Some(receipt.clone())
+    );
     store.record_worktree_settlement(
         id,
         &serde_json::json!({"schema_version":1,"state":"pruned"}),

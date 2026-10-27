@@ -53,6 +53,26 @@ struct PickupReceipt {
     request: WriterDeliveryRequest,
     receipt: WriterDeliveryReceipt,
 }
+
+fn publish_pickup(
+    attempt: &Directory,
+    request: &WriterDeliveryRequest,
+    receipt: &WriterDeliveryReceipt,
+) -> Result<()> {
+    attempt
+        .atomic_write(
+            OsStr::new("delivery-pickup.json"),
+            ".pickup-",
+            &crate::db::bytes(&PickupReceipt {
+                schema_version: 1,
+                request: request.clone(),
+                receipt: receipt.clone(),
+            })?,
+            provenant_os::fs::PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(RunError::from)
+}
 impl std::fmt::Debug for HostDeliveryContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HostDeliveryContext([private handoff])")
@@ -76,6 +96,20 @@ impl HostDeliveryContext {
     }
 
     fn refuse_protected_target(&self, writer: &WriterRequest, target: &str) -> Result<()> {
+        if !self
+            .command(
+                &writer.worktree,
+                "git",
+                &["symbolic-ref", "--quiet", &format!("refs/heads/{target}")],
+                Stage::Prepare,
+            )?
+            .is_empty()
+        {
+            return Err(prepare_error(
+                "integration target",
+                "symbolic branch targets are refused",
+            ));
+        }
         let default = self.command(
             &writer.worktree,
             "git",
@@ -103,6 +137,31 @@ impl HostDeliveryContext {
                 "integration target",
                 "default and primary checkout branches require PR delivery",
             ));
+        }
+        Ok(())
+    }
+
+    fn refuse_remote_symbolic_target(
+        &self,
+        cwd: &Path,
+        remote: &str,
+        target: &str,
+        stage: Stage,
+    ) -> Result<()> {
+        let refs = self.command(
+            cwd,
+            "git",
+            &[
+                "ls-remote",
+                "--symref",
+                "--",
+                remote,
+                &format!("refs/heads/{target}"),
+            ],
+            stage,
+        )?;
+        if refs.lines().any(|line| line.starts_with("ref: ")) {
+            return Err(RunError::Delivery(stage));
         }
         Ok(())
     }
@@ -145,6 +204,7 @@ impl HostDeliveryContext {
         let branch = publication.as_deref().unwrap_or(branch);
         let reference = format!("refs/heads/{branch}");
         if local {
+            host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
             host.command(
                 project,
                 "git",
@@ -229,6 +289,17 @@ impl HostDeliveryContext {
         let branch = format!("provenant/graph/{head}");
         let reference = format!("refs/heads/{branch}");
         let marker = format!("provenant-graph-publication-{head}.json");
+        if !self
+            .command(
+                project,
+                "git",
+                &["symbolic-ref", "--quiet", &reference],
+                stage,
+            )?
+            .is_empty()
+        {
+            return Err(RunError::Delivery(stage));
+        }
         if let Some(raw) = crate::artifacts::read_sealed(&directory, &marker, crate::RECORD_LIMIT)?
         {
             if raw != branch.as_bytes()
@@ -247,7 +318,13 @@ impl HostDeliveryContext {
             self.command(
                 project,
                 "git",
-                &["update-ref", &reference, &head.to_string(), ""],
+                &[
+                    "update-ref",
+                    "--no-deref",
+                    &reference,
+                    &head.to_string(),
+                    "",
+                ],
                 stage,
             )?;
             crate::artifacts::seal(&directory, &marker, branch.as_bytes(), crate::RECORD_LIMIT)?;
@@ -713,7 +790,7 @@ impl HostDeliveryContext {
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
-        let absent_default = args == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]
+        let absent_default = args.starts_with(&["symbolic-ref", "--quiet"])
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
         let bounded_log = commit_log && output.stdout.truncated && output.overflow_stopped;
@@ -834,12 +911,14 @@ impl HostDeliveryContext {
             .lock(
                 OsStr::new(&lock_name),
                 LockMode::Exclusive,
-                // Each of at most 16 commands under this lock has a 30s deadline.
-                WaitBudget::cli(clock.mono_now(), 16 * 30 + 60)
+                // Each of at most 24 commands under this lock has a 30s deadline.
+                WaitBudget::cli(clock.mono_now(), 24 * 30 + 60)
                     .map_err(|_| RunError::Delivery(stage))?,
                 &cancel,
                 &clock,
             )
+            .map_err(|_| RunError::Delivery(stage))?;
+        self.refuse_protected_target(writer, &request.branch)
             .map_err(|_| RunError::Delivery(stage))?;
         self.clean(writer)?;
         if self.head(writer)? != head {
@@ -950,6 +1029,16 @@ impl HostDeliveryContext {
             )?;
             GitOid::parse(&commit).map_err(|_| RunError::Delivery(stage))?
         };
+        self.refuse_protected_target(writer, &request.branch)
+            .map_err(|_| RunError::Delivery(stage))?;
+        if remote {
+            self.refuse_remote_symbolic_target(
+                &writer.worktree,
+                &bound.push_url,
+                &request.branch,
+                stage,
+            )?;
+        }
         if remote {
             self.command(
                 &writer.worktree,
@@ -993,6 +1082,7 @@ impl HostDeliveryContext {
                 "git",
                 &[
                     "update-ref",
+                    "--no-deref",
                     &destination,
                     &candidate.to_string(),
                     &expected,
@@ -1071,6 +1161,7 @@ impl HostDeliveryContext {
             return Err(RunError::Delivery(Stage::Head));
         }
         let destination = format!("refs/heads/{}", request.branch);
+        self.refuse_remote_symbolic_target(cwd, &bound.push_url, &request.branch, Stage::Push)?;
         let refspec = format!("{head}:{destination}");
         self.command(
             cwd,
@@ -1454,13 +1545,17 @@ impl crate::RunStore {
             )
             .bytes(),
         );
-        let receipt_name = format!("delivery-{key}.json");
-        if let Some(raw) =
-            crate::artifacts::read_sealed(&attempt, &receipt_name, crate::RECORD_LIMIT)?
-        {
-            let receipt: WriterDeliveryReceipt = crate::db::decode(&raw)?;
-            if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
-                return Ok(receipt);
+        // New successful receipts never collide with a legacy failed seal.
+        let receipt_name = format!("delivery-complete-{key}.json");
+        for name in [&receipt_name, &format!("delivery-{key}.json")] {
+            if let Some(raw) = crate::artifacts::read_sealed(&attempt, name, crate::RECORD_LIMIT)? {
+                let receipt: WriterDeliveryReceipt = crate::db::decode(&raw)?;
+                if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
+                    // Recover a crash between sealing success and publishing
+                    // the mutable pickup pointer used by graph observation.
+                    publish_pickup(&attempt, &request, &receipt)?;
+                    return Ok(receipt);
+                }
             }
         }
         if let Some(receipt) = record.delivery.as_ref()
@@ -1532,19 +1627,7 @@ impl crate::RunStore {
                 &crate::db::bytes(&receipt)?,
                 crate::RECORD_LIMIT,
             )?;
-            attempt
-                .atomic_write(
-                    OsStr::new("delivery-pickup.json"),
-                    ".pickup-",
-                    &crate::db::bytes(&PickupReceipt {
-                        schema_version: 1,
-                        request,
-                        receipt: receipt.clone(),
-                    })?,
-                    provenant_os::fs::PublishMode::Replace,
-                )?
-                .require_durable()
-                .map_err(RunError::from)?;
+            publish_pickup(&attempt, &request, &receipt)?;
         }
         Ok(receipt)
     }
