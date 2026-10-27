@@ -1085,7 +1085,37 @@ struct StoredObservation {
     scope: Scope,
     guardian: Option<ProcessIdentity>,
     #[serde(default)]
+    provider: Option<ProcessIdentity>,
+    #[serde(default)]
     publication_pending: bool,
+}
+
+/// A reboot after both identities were recorded proves the entire old process
+/// tree is gone, including descendants which escaped the provider's group.
+pub fn checkpoint_before_reboot(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> bool {
+    let Ok(record) = read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT)
+    else {
+        return false;
+    };
+    let (Some(guardian), Some(provider)) = (record.guardian, record.provider) else {
+        return false;
+    };
+    record.scope == scope
+        && !record.publication_pending
+        && guardian.validate().is_ok()
+        && provider.validate().is_ok()
+        && guardian.boot == provider.boot
+        && guardian.session_id == guardian.pid
+        && guardian.group_id == guardian.pid
+        && provider.session_id == guardian.session_id
+        && provider.group_id == provider.pid
+        && observer
+            .boot_identity()
+            .is_ok_and(|boot| !boot.is_empty() && boot != guardian.boot)
 }
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {

@@ -750,13 +750,12 @@ impl RunStore {
         )
         .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
-    /// Settle an attempt whose reservation has gone. A free writer lock proves
-    /// no guardian holds custody, and with no exit sealed nothing else can
-    /// settle it, so it is lost. A held lock or a sealed exit settles normally.
+    /// Settle an unreserved attempt only with proof its process tree is gone.
     fn settle_unreserved_loss(
         &self,
         record: &AttemptRecord,
         call: &Request<'_>,
+        observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
         // The slot is named from the worktree path, so it needs no Git access.
@@ -799,9 +798,12 @@ impl RunStore {
         if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
             return Ok(None);
         }
+        if !custody::checkpoint_before_reboot(&attempt, Self::scope(record), observer) {
+            return Ok(None);
+        }
         self.commit_lost(
             Self::scope(record),
-            "writer reservation was gone and no guardian held custody",
+            "writer reservation was gone and the recorded process tree predates this boot",
             call,
         )?;
         self.set_temporary_retained(record.attempt_id, false, call)?;
@@ -971,7 +973,7 @@ impl RunStore {
             match custody::reattach(dir, Self::scope(&record)) {
                 Ok(handle) => {
                     if let Some(Reconciled::Finished) =
-                        self.settle_unreserved_loss(&record, call)?
+                        self.settle_unreserved_loss(&record, call, observer)?
                     {
                         return Ok(CancelReceipt::AlreadyTerminal);
                     }
@@ -1686,7 +1688,7 @@ impl RunStore {
                     }
                     Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
                     Ok(Observation::Unknown) => Ok(self
-                        .settle_unreserved_loss(record, call)?
+                        .settle_unreserved_loss(record, call, observer)?
                         .unwrap_or_else(|| {
                             Reconciled::uncertain(UncertainReason::GuardianNotObservable)
                         })),
