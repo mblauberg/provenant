@@ -81,6 +81,8 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<GraphRoute>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Require this exact, case-sensitive line (ignoring surrounding whitespace)
+    /// in a successful result. A missing line fails the node without fallback.
     pub required_verdict: Option<String>,
 }
 
@@ -923,11 +925,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attempt_ref,
                         outcome,
                         launched,
-                        result: _result,
+                        result,
                     } => {
                         attempt.launched = launched;
                         attempt.state = AttemptState::Terminal;
                         attempt.attempt_ref = attempt_ref;
+                        // Provider success alone does not satisfy an explicit result contract.
+                        let outcome = if outcome == AttemptOutcome::Succeeded
+                            && node.required_verdict.as_ref().is_some_and(|required| {
+                                !result.as_deref().is_some_and(|text| {
+                                    text.lines().any(|line| line.trim() == required.trim())
+                                })
+                            }) {
+                            AttemptOutcome::TaskFailed
+                        } else {
+                            outcome
+                        };
                         attempt.outcome = Some(outcome);
                         match outcome {
                             AttemptOutcome::Succeeded => {
@@ -1055,6 +1068,13 @@ fn validate_plan(
             && integration != target
         {
             return Err("node integration target differs from graph integration branch");
+        }
+        if node.required_verdict.as_ref().is_some_and(|line| {
+            line.trim().is_empty()
+                || line.len() > MAX_NODE_PROMPT_BYTES
+                || line.contains(['\n', '\r'])
+        }) {
+            return Err("required verdict must be a non-empty single line");
         }
         validate_access(node.access, node.worktree.as_deref())?;
         if node.access == AccessMode::ReadOnly
@@ -1895,7 +1915,11 @@ mod tests {
         let mut review = node("review", route("fixture"));
         review.prompt = "Review the change and finish with VERDICT: PASS if approved.".into();
         review.required_verdict = Some("VERDICT: PASS".into());
-        let document = graph(vec![review]);
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("review".into());
+        let mut document = graph(vec![review, child]);
+        document.integration_branch = Some("integration".into());
+        document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
         let mut owner = FakeOwner {
             observations: VecDeque::from([terminal_with_result(
                 AttemptOutcome::Succeeded,
@@ -1906,6 +1930,67 @@ mod tests {
         let mut journal = MemoryJournal::default();
         let result = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(result.checkpoint.nodes[0].state, NodeState::Failed);
+        assert_eq!(result.checkpoint.nodes[1].state, NodeState::Blocked);
+        assert!(!result.checkpoint.delivered);
+        assert_eq!(owner.calls.len(), 1);
+        let replay = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(replay.checkpoint, result.checkpoint);
+        assert_eq!(owner.calls.len(), 1);
+    }
+
+    #[test]
+    fn required_verdict_checks_exact_lines_and_missing_results() {
+        for (text, expected) in [
+            (
+                Some("Review complete.\n  VERDICT: PASS  \n"),
+                NodeState::Succeeded,
+            ),
+            (Some("VERDICT: FAIL"), NodeState::Failed),
+            (Some("verdict: pass"), NodeState::Failed),
+            (Some("Use VERDICT: PASS when done"), NodeState::Failed),
+            (Some(""), NodeState::Failed),
+            (None, NodeState::Failed),
+        ] {
+            let mut review = node("arbitrary-id", route("fixture"));
+            review.required_verdict = Some("VERDICT: PASS".into());
+            let document = graph(vec![review]);
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([AttemptObservation::Terminal {
+                    attempt_ref: None,
+                    outcome: AttemptOutcome::Succeeded,
+                    launched: true,
+                    result: text.map(str::to_owned),
+                }]),
+                ..Default::default()
+            };
+            let mut journal = MemoryJournal::default();
+            let run = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(run.checkpoint.nodes[0].state, expected, "{text:?}");
+            assert_eq!(
+                advance(&document, &mut owner, &mut journal)
+                    .unwrap()
+                    .checkpoint,
+                run.checkpoint
+            );
+        }
+    }
+
+    #[test]
+    fn required_verdict_rejects_invalid_contracts() {
+        for contract in ["", "  ", "PASS\nFAIL", "PASS\rFAIL"] {
+            let mut review = node("review", route("fixture"));
+            review.required_verdict = Some(contract.into());
+            let mut owner = FakeOwner::default();
+            assert!(
+                advance(
+                    &graph(vec![review]),
+                    &mut owner,
+                    &mut MemoryJournal::default()
+                )
+                .is_err()
+            );
+            assert!(owner.calls.is_empty());
+        }
     }
 }
 
