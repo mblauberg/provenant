@@ -746,6 +746,28 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 }
 
 #[test]
+fn claude_usage_comes_from_the_result_event() -> Result<(), ProviderError> {
+    let stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"session_id\":\"s\",\"parent_tool_use_id\":null,\"message\":{\"model\":\"claude-sonnet-5\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40}}\n",
+    );
+    let (events, _) = replay(&claude::Claude, stream, EXIT)?;
+    let usage: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event, ProviderEvent::Usage { .. }))
+        .collect();
+    assert_eq!(
+        usage,
+        [&ProviderEvent::Usage {
+            input: 10,
+            output: 20
+        }]
+    );
+    Ok(())
+}
+
+#[test]
 fn claude_answer_is_recorded_once() -> Result<(), ProviderError> {
     let (events, _) = replay(&claude::Claude, fixture!("claude/fresh.jsonl"), EXIT)?;
     let texts: Vec<_> = events
