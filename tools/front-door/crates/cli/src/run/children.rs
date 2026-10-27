@@ -273,7 +273,15 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             &reason,
             &call,
             |id, validated| {
-                launch_on_host(&session, id, &edge, &call, Some(launch), Some(validated))
+                launch_on_host(
+                    &session,
+                    id,
+                    &edge,
+                    &call,
+                    Some(launch),
+                    Some(validated),
+                    None,
+                )
             },
         )?;
         accepted.extend(scan.accepted);

@@ -988,7 +988,7 @@ pub fn submit_with_host(
     let started = if parent_attempt.is_some() {
         Vec::new()
     } else if let Some(host) = host {
-        launch_on_host(session, record.run_id, edge, call, Some(host), None)?
+        launch_on_host(session, record.run_id, edge, call, Some(host), None, None)?
     } else {
         launch(session, record.run_id, edge, call)?
     };
@@ -1743,12 +1743,68 @@ pub fn launch(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
+    launch_prepared(session, run, edge, call, None)
+}
+fn launch_prepared(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    ready: Option<&run::PreparedStart>,
+) -> Result<Vec<run::Started>, Fail> {
     // Every lane-facing launch path is submission-only. Only its host holder
     // prepares providers, including credentials and the child's OS profile.
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host(session, run, edge, call, None, None)
+    launch_on_host(session, run, edge, call, None, None, ready)
+}
+
+struct PreparedProvider<'a> {
+    fallback: &'a dyn run::Providers,
+    ready: Option<&'a run::PreparedStart>,
+}
+impl run::Providers for PreparedProvider<'_> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+        if let Some(ready) = self.ready {
+            if ready.task != *task {
+                return Err("prepared continuation task changed".into());
+            }
+            return Ok(());
+        }
+        self.fallback.check_policy(task)
+    }
+    fn prepare(
+        &self,
+        task: &run::TaskRequest,
+        prompt: &str,
+        paths: &run::LaunchPaths,
+        resume: Option<&run::AttemptRecord>,
+    ) -> Result<run::PreparedLaunch, String> {
+        if let Some(ready) = self.ready {
+            if ready.attempt != paths.attempt_id || ready.task != *task || resume.is_some() {
+                return Err("prepared continuation identity changed".into());
+            }
+            return ready
+                .plan
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "prepared continuation consumed".into());
+        }
+        self.fallback.prepare(task, prompt, paths, resume)
+    }
+    fn decode(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+    ) -> Result<run::Decoded, String> {
+        self.fallback.decode(route, stdout, exit, provider_state)
+    }
+    fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
+        self.fallback.failure_diagnostic(route, stderr)
+    }
 }
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
@@ -1759,6 +1815,7 @@ fn launch_on_host(
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
     validated: Option<&run::CanonicalRequest>,
+    ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
     let host = match host {
         Some(host) => host.clone(),
@@ -1858,13 +1915,17 @@ fn launch_on_host(
         project_id: Some(session.context.project_id),
         host: Some(&host),
     };
+    let providers = PreparedProvider {
+        fallback: &registry,
+        ready,
+    };
     // Fixture guardians observe a recorded boot key, so the reservation must be
     // taken against the same key as on the lane-launch path of the test host.
     #[cfg(feature = "fixture")]
     if host.fixture_state_write {
         let started = session.store.start_with_writer_lease(
             run,
-            &registry,
+            &providers,
             &holder,
             &|directory, scope, binding| {
                 provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -1884,7 +1945,7 @@ fn launch_on_host(
     }
     let started = session
         .service()
-        .start(run, &registry, &holder, validated, call)?;
+        .start(run, &providers, &holder, validated, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }
@@ -3306,6 +3367,13 @@ pub fn continue_attempt_mode(
         ));
     }
     if let Some(reason) = &unavailable {
+        let task = session
+            .store
+            .request(record.run_id, call)?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(run::RunError::NotFound)?;
         let mut source = record.clone();
         let mut seen = std::collections::HashSet::new();
         while let Some(parent) = source.retry_of {
@@ -3342,13 +3410,6 @@ pub fn continue_attempt_mode(
         } else {
             "[prior attempt has no result]".into()
         };
-        let task = session
-            .store
-            .request(record.run_id, call)?
-            .tasks
-            .into_iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(run::RunError::NotFound)?;
         let cwd = task.writer.as_ref().map_or(edge.cwd, |writer| {
             if displaced {
                 writer.project.as_path()
@@ -3389,8 +3450,32 @@ pub fn continue_attempt_mode(
     } else {
         None
     };
+    let mut ready = None;
     let accepted = if let Some(reason) = &unavailable {
-        if let Some((writer, _)) = &fresh_writer {
+        if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none() {
+            let registry = Registry {
+                roots: Some(edge.roots),
+                home: Some(edge.home),
+                assets: Some(edge.assets),
+                cwd: Some(edge.cwd),
+                state_root: Some(session.context.state_root.as_path()),
+                project_id: Some(session.context.project_id),
+                host: None,
+            };
+            session
+                .store
+                .resume_fresh_prepared(
+                    &input,
+                    reason,
+                    fresh_writer.as_ref().map(|(writer, _)| writer),
+                    &registry,
+                    call,
+                )
+                .map(|(run, prepared)| {
+                    ready = prepared;
+                    run
+                })
+        } else if let Some((writer, _)) = &fresh_writer {
             session.store.resume_fresh_in(&input, reason, writer, call)
         } else {
             session.store.resume_fresh(&input, reason, call)
@@ -3455,30 +3540,20 @@ pub fn continue_attempt_mode(
             ),
         )
     })?;
-    let started = launch(session, run.run_id, edge, call).map_err(|fail| {
-        if unavailable.is_some() {
-            Fail::new(
-                fail.status,
-                ErrorKind::ContinuationUnsupported,
-                format!("fresh fallback refused: {}", fail.message),
-            )
-        } else {
-            fail
-        }
-    })?;
-    if unavailable.is_some()
-        && let Some(run::Started::Refused {
-            attempt, reason, ..
-        }) = started
-            .iter()
-            .find(|started| matches!(started, run::Started::Refused { .. }))
-    {
-        return Err(Fail::new(
-            Status::Refused,
-            ErrorKind::ContinuationUnsupported,
-            format!("fresh fallback refused for {attempt}: {reason}"),
-        ));
-    }
+    let started =
+        launch_prepared(session, run.run_id, edge, call, ready.as_ref()).map_err(|fail| {
+            if unavailable.is_some() {
+                Fail::new(
+                    Status::Failed,
+                    fail.kind,
+                    format!("accepted fresh fallback launch failed: {}", fail.message),
+                )
+            } else {
+                fail
+            }
+        })?;
+    // Admission has succeeded. Later custody or handoff failures are execution
+    // outcomes of that accepted attempt, as they are for dispatch.
     Ok((run, started))
 }
 fn fresh_continuation_worktree(

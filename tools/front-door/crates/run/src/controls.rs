@@ -839,7 +839,8 @@ impl RunStore {
     /// once; `expected_generation` is 0 before that and 1 after. The route,
     /// access and timeout come from the prior task, never from the caller.
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
-        self.resume_mode(input, call, None, None)
+        self.resume_mode(input, call, None, None, None)
+            .map(|(run, _)| run)
     }
     /// Same lineage, route, authority and writer, without provider continuation.
     pub fn resume_fresh(
@@ -848,7 +849,8 @@ impl RunStore {
         reason: &str,
         call: &Request<'_>,
     ) -> Result<RunRecord> {
-        self.resume_mode(input, call, Some(reason), None)
+        self.resume_mode(input, call, Some(reason), None, None)
+            .map(|(run, _)| run)
     }
     /// A fresh fallback may replace a vanished or reassigned writer only with
     /// a new worktree owned by this continuation.
@@ -859,6 +861,32 @@ impl RunStore {
         writer: &WriterRequest,
         call: &Request<'_>,
     ) -> Result<RunRecord> {
+        let branch = self.fresh_writer_branch(input, writer)?;
+        self.resume_mode(input, call, Some(reason), Some((writer, &branch)), None)
+            .map(|(run, _)| run)
+    }
+    /// Prepare against the canonical continuation request before recording it.
+    /// Replays retain their accepted IDs and use the ordinary launch path.
+    pub fn resume_fresh_prepared(
+        &self,
+        input: &Resume,
+        reason: &str,
+        writer: Option<&WriterRequest>,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<(RunRecord, Option<PreparedStart>)> {
+        let branch = writer
+            .map(|writer| self.fresh_writer_branch(input, writer))
+            .transpose()?;
+        self.resume_mode(
+            input,
+            call,
+            Some(reason),
+            writer.zip(branch.as_deref()),
+            Some(providers),
+        )
+    }
+    fn fresh_writer_branch(&self, input: &Resume, writer: &WriterRequest) -> Result<String> {
         let launch = crate::prepare_writer(writer, &self.writer_registry, self.context.project_id)?;
         let owner = provenant_confinement::worktrees::load_owner(&launch.worktree)?.ok_or(
             RunError::Validation("fresh fallback needs an owned worktree"),
@@ -871,12 +899,7 @@ impl RunStore {
                 "fresh fallback worktree has another owner",
             ));
         }
-        self.resume_mode(
-            input,
-            call,
-            Some(reason),
-            Some((writer, owner.branch.as_str())),
-        )
+        Ok(owner.branch)
     }
     /// Admission checks ownership as well as the path. A later handoff checks
     /// again under custody so prune and reuse cannot redirect a queued resume.
@@ -952,7 +975,8 @@ impl RunStore {
         call: &Request<'_>,
         fresh: Option<&str>,
         writer: Option<(&WriterRequest, &str)>,
-    ) -> Result<RunRecord> {
+        providers: Option<&dyn Providers>,
+    ) -> Result<(RunRecord, Option<PreparedStart>)> {
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
@@ -1035,7 +1059,33 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
         }
-        self.create(&prepared, call)
+        let mut ready = if !replay {
+            providers
+                .map(|providers| self.prepare_fresh_start(&prepared, providers, call))
+                .transpose()?
+        } else {
+            None
+        };
+        let created = self.create(&prepared, call);
+        if let Some(ready) = &mut ready {
+            let recorded = match &created {
+                Ok(run) => run.run_id == input.run_id,
+                // Publication may fail after reserving the operation. Keep
+                // its staging for recovery, including an unreadable index.
+                Err(_) => self
+                    .operation(&input.operation_id, call)
+                    .map(|operation| operation.is_some_and(|op| op.run_id == input.run_id))
+                    .unwrap_or(true),
+            };
+            if recorded {
+                self.retain_prepared_start(ready, input.run_id);
+            }
+        }
+        let run = created?;
+        if run.run_id != input.run_id {
+            ready = None;
+        }
+        Ok((run, ready))
     }
 
     /// Up to `limit` runs needing recovery or terminal temporary cleanup in

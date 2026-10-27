@@ -380,6 +380,12 @@ admission fence still permits one successor, and operation replay retains the
 original choice and prompt even after provider-state expiry. Uncertain custody
 never triggers a new writer; refusal names the fresh fallback when it cannot
 launch safely.
+On the host, policy, provider preparation and write-grant validation run before
+recording the fallback operation or spending the continuation. A preparation
+refusal leaves no successor or staging, and the same operation can be retried
+after repairing the environment. Admission retains that exact prepared plan.
+Later custody or handoff failures are reported as execution outcomes of the
+accepted attempt, as for dispatch.
 Before admission and again under writer custody, continuations verify the
 worktree owner's lane lineage. Launch snapshots durably record whether the tree
 was lane-owned. Explicit unowned and adopted trees resume in place unless a
