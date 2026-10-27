@@ -2041,6 +2041,38 @@ impl provenant_os::exec::Executor for FileCredentialScript {
 }
 
 #[test]
+fn cursor_cli_only_account_matches_desktop_identity() {
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+
+    struct NoDesktop;
+    impl Executor for NoDesktop {
+        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            Err(ExecError::Busy)
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("cli-config.json"),
+        br#"{"authInfo":{"authId":"auth0|user_fixture","email":"fixture@example.test","userId":123}}"#,
+    )
+    .unwrap();
+    let key = crate::accounts::detect(
+        &NoDesktop,
+        "cursor",
+        Path::new("/bin/cursor-agent"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        directory.path(),
+        directory.path(),
+    )
+    .unwrap();
+    assert_eq!(
+        Some(key),
+        crate::identity::cursor_account("header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature")
+    );
+}
+
+#[test]
 fn agy_account_probe_logs_under_the_host_probe_root() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
