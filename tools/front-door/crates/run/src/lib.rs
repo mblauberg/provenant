@@ -116,6 +116,10 @@ pub enum RunError {
     DepthOverflow,
     #[error("host queue is full")]
     Capacity,
+    #[error(
+        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
+    )]
+    HostClock,
     #[error("run store is contended or its call budget expired")]
     Contention,
     #[error("run-store call was cancelled")]

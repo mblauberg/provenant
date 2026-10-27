@@ -134,10 +134,6 @@ impl RunStore {
     /// names a wait only when it can see one: run concurrency, then startup
     /// spacing, then the shared host and project caps and resource floors.
     pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
-        let now_ms = call
-            .clock
-            .wall_now()
-            .map_or(0, |now| now.as_micros() / 1000);
         lanes
             .iter()
             .filter(|lane| matches!(lane.state, AttemptState::Queued | AttemptState::Starting))
@@ -155,9 +151,13 @@ impl RunStore {
                             |r| r.get(0),
                         )
                         .ok()?;
-                    let spacing = i64::try_from(ticket.startup_spacing_ms).ok()?;
-                    let left =
-                        crate::ledger::spacing_left(&self.writer_registry, class, spacing, now_ms);
+                    let spacing = ticket.startup_spacing_ms;
+                    let left = crate::ledger::spacing_left(
+                        &self.writer_registry,
+                        class,
+                        spacing,
+                        call.clock,
+                    );
                     if active >= i64::try_from(ticket.run_concurrency).ok()? {
                         format!(
                             "run concurrency: {active} of {} lanes of this run are active",
@@ -406,8 +406,8 @@ fn class_name(class: LaneClass) -> &'static str {
 }
 /// Milliseconds as seconds to one decimal place, rounded up so a wait never
 /// reads as zero while it holds.
-fn tenths(ms: i64) -> String {
-    let tenths = (ms.max(0) + 99) / 100;
+fn tenths(ms: u64) -> String {
+    let tenths = ms.div_ceil(100);
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
