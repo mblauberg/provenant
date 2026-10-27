@@ -320,11 +320,14 @@ PR modes use `origin` and the lane branch; `integrate:BRANCH` selects an
 existing local branch, and `integrate:origin/BRANCH` selects an existing
 remote integration branch. The legacy remote, branch and open-PR flags remain
 aliases and conflict with `--deliver`. Read-only lanes may select only none.
-Integration refuses the default branch recorded by any configured remote and
-the primary checkout branch. If no remote HEAD is available, both `main` and
-`master` are protected.
-Dispatch checks integration protection before admission, and before creating
-an owned worktree, so a refused target leaves no admitted run.
+Direct push and integration refuse publication to the default branch recorded
+by any configured remote and the primary checkout branch. If no remote HEAD
+is available, both `main` and `master` are protected. PR delivery publishes a
+feature branch and may target a protected branch as its PR base; its published
+head branch is subject to the same protection.
+Dispatch checks publication targets before admission for concise modes,
+legacy flags and manifests, so a refused target leaves no admitted run.
+Destinations supplied in flags are also checked before creating an owned tree.
 
 Integration serialises by destination using a stable lock in the common Git
 directory. It fast-forwards when possible, otherwise uses `merge-tree` and

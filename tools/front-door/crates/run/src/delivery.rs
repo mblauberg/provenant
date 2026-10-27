@@ -82,6 +82,10 @@ impl std::fmt::Debug for HostDeliveryContext {
 impl HostDeliveryContext {
     /// Integration authority never includes the default or primary checkout ref.
     pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
+        Self::validate_delivery_target(project, target.strip_prefix("origin/").unwrap_or(target))
+    }
+    /// A publication ref is distinct from a PR's base, which may be protected.
+    pub fn validate_delivery_target(project: &Path, target: &str) -> Result<()> {
         let writer = WriterRequest {
             project: project.into(),
             worktree: project.into(),
@@ -92,7 +96,7 @@ impl HostDeliveryContext {
             git: host.executable("git", &writer)?,
             gh: None,
         });
-        host.refuse_protected_target(&writer, target.strip_prefix("origin/").unwrap_or(target))
+        host.refuse_protected_target(&writer, target)
     }
 
     fn refuse_protected_target(&self, writer: &WriterRequest, target: &str) -> Result<()> {

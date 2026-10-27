@@ -1076,12 +1076,9 @@ fn dispatch_with_workers(
     }
     reply_waited("dispatch", result)
 }
-fn validate_integration_mode(project: &Path, mode: &run::DeliveryMode) -> Result<(), Fail> {
-    if let run::DeliveryMode::Integrate(target) = mode {
-        run::HostDeliveryContext::validate_integration_target(project, target)
-            .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))?;
-    }
-    Ok(())
+fn validate_delivery_target(project: &Path, branch: &str) -> Result<(), Fail> {
+    run::HostDeliveryContext::validate_delivery_target(project, branch)
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
 }
 
 fn dispatch_inner(
@@ -1108,7 +1105,11 @@ fn dispatch_inner(
             ));
         }
         if let Some(mode) = &command.deliver {
-            validate_integration_mode(edge.cwd, mode)?;
+            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), branch)? {
+                validate_delivery_target(edge.cwd, &delivery.branch)?;
+            }
+        } else if let Some(target) = &command.deliver_branch {
+            validate_delivery_target(edge.cwd, target)?;
         }
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -1436,7 +1437,7 @@ fn dispatch_inner(
     }
     for (_, _, _, _, _, _, delivery, _) in &tasks {
         if let Some(delivery) = delivery {
-            validate_integration_mode(edge.cwd, &delivery.mode)?;
+            validate_delivery_target(edge.cwd, &delivery.branch)?;
         }
     }
     let tasks = tasks
@@ -4232,10 +4233,18 @@ mod tests {
             assert_eq!(output.termination, Termination::Exit(0));
             String::from_utf8(output.stdout.bytes)?.trim().to_owned()
         };
-        for (index, (target, placement)) in ["main", "master", primary.as_str()]
+        for (index, (target, placement, delivery)) in ["main", "master", primary.as_str()]
             .into_iter()
             .flat_map(|target| {
-                ["owned", "existing", "manifest"].map(|placement| (target, placement))
+                [
+                    (target, "owned", "integrate"),
+                    (target, "existing", "integrate"),
+                    (target, "manifest", "integrate"),
+                    (target, "owned", "legacy-push"),
+                    (target, "existing", "legacy-push"),
+                    (target, "manifest", "push"),
+                    (target, "owned", "push"),
+                ]
             })
             .enumerate()
         {
@@ -4244,14 +4253,28 @@ mod tests {
                 ["dispatch", "--operation-id", &operation, "--base", "HEAD"]
                     .map(OsString::from)
                     .into();
-            let mode = run::DeliveryMode::Integrate(target.into());
+            let mode = if delivery == "integrate" {
+                run::DeliveryMode::Integrate(target.into())
+            } else {
+                run::DeliveryMode::Push
+            };
             if placement != "manifest" {
                 args.extend(
                     ["--model", "codex/gpt-6-luna", "--mode", "worktree-write"].map(OsString::from),
                 );
             }
             if placement == "owned" {
-                args.extend(["--worktree-branch", "refused-lane"].map(OsString::from));
+                args.extend(
+                    [
+                        "--worktree-branch",
+                        if delivery == "push" {
+                            target
+                        } else {
+                            "refused-lane"
+                        },
+                    ]
+                    .map(OsString::from),
+                );
             } else if placement == "existing" {
                 args.extend([
                     OsString::from("--worktree"),
@@ -4264,14 +4287,28 @@ mod tests {
                     &manifest,
                     serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
                         "prompt":"reply OK", "route":run::RequestedRoute::Model { provider:"codex".into(), model:"codex/gpt-6-luna".into(), effort:None },
-                        "deliver":run::HostDeliveryContext::destination(mode, "protected-existing")?
+                        "deliver":run::HostDeliveryContext::destination(mode, target)?
                     }]}))?,
                 )?;
                 args.extend([OsString::from("--manifest"), manifest.into_os_string()]);
             } else {
+                if delivery == "legacy-push" {
+                    args.extend(
+                        ["--deliver-remote", "origin", "--deliver-branch", target]
+                            .map(OsString::from),
+                    );
+                } else {
+                    args.extend([
+                        OsString::from("--deliver"),
+                        if delivery == "integrate" {
+                            format!("integrate:{target}")
+                        } else {
+                            "push".into()
+                        }
+                        .into(),
+                    ]);
+                }
                 args.extend([
-                    OsString::from("--deliver"),
-                    format!("integrate:{target}").into(),
                     OsString::from("--prompt-file"),
                     prompt.as_os_str().to_owned(),
                 ]);
@@ -4299,8 +4336,18 @@ mod tests {
                     .message
                     .contains("default and primary checkout branches")
             );
-            assert!(!project.join(".worktrees/refused-lane").exists());
+            let branch = if delivery == "push" && placement == "owned" {
+                target
+            } else {
+                "refused-lane"
+            };
+            assert!(!project.join(".worktrees").join(branch).exists());
         }
+        let pr =
+            run::HostDeliveryContext::destination(run::DeliveryMode::Pr, "protected-existing")?
+                .ok_or("PR destination")?;
+        validate_delivery_target(&project, &pr.branch).map_err(|error| error.message)?;
+        assert!(pr.open_pr);
         for origin in [
             None,
             Some(WorktreeOrigin::Lane),

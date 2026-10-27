@@ -5,3 +5,5 @@
   after pruning, reassignment or owner removal.
 - State that prior history is unavailable when resume needs a replacement
   worktree, avoiding unrelated primary-checkout commits in the fallback prompt.
+- Refuse protected direct-push targets before admission for concise delivery,
+  legacy flags and manifests. PRs may still target protected base branches.
