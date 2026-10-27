@@ -207,6 +207,24 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
 }
 
 #[test]
+fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut plan, profile) = prepared("codex", Access::WorktreeWrite, login("codex"), false)?;
+    for network in [NetworkAccess::Provider, NetworkAccess::Local, NetworkAccess::Open] {
+        plan.network = network;
+        let rendered = render(&plan, &profile, Path::new(HOME))?;
+        for path in [".config/gh", "Library/Application Support/GitHub CLI"] {
+            let path = Path::new(HOME).join(path);
+            let read = format!("(allow file-read* (subpath \"{}\"))", path.display());
+            let deny = format!("(deny file-read* (subpath \"{}\"))", path.display());
+            assert_eq!(rendered.contains(&read), network == NetworkAccess::Open, "writer gh read grant");
+            assert_eq!(rendered.contains(&deny), network != NetworkAccess::Open, "writer gh read denial");
+            assert!(rendered.contains(&format!("(deny file-write* (subpath \"{}\"))", path.display())));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn seatbelt_profiles_match_snapshots() -> Result<(), Box<dyn std::error::Error>> {
     let update = std::env::var(UPDATE_ENV).is_ok_and(|value| value == "1");
     let dir = snapshot_dir();
