@@ -193,10 +193,10 @@ Constraints: <authority, isolation, governing skill and stop condition>
 Output: <shape, length and durable evidence location>
 Verification: <checks; for review, the rubric path or full rubric>
 Cargo (writer lanes): batch targeted tests into one invocation
-(`cargo test -p a -p b FILTER`) and never run cargo commands in parallel. Run
-`cargo check` and `cargo clippy` with both `CARGO_TARGET_DIR` and
-`CARGO_BUILD_BUILD_DIR` set to `$PROVENANT_LANE_CARGO_LINT_TARGET` so they do
-not wait on test builds. Keep incremental builds on: the sandbox's hard-link
+(`cargo test -p a -p b FILTER`) and never run two cargo commands on the same
+target directory at once. Run `cargo check` and `cargo clippy` with both
+`CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to
+`$PROVENANT_LANE_CARGO_LINT_TARGET`, so they can run beside a test build. Keep incremental builds on: the sandbox's hard-link
 warning only means rustc copies instead.
 Agent-filed issues: when filing is authorised, apply source:agent and end the
 issue body with Filed-by: <PROVENANT_AGENT_LABEL> <run> using the actual label
