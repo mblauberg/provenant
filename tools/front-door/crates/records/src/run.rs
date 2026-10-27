@@ -325,8 +325,6 @@ pub struct UsageRecord {
     pub reasoning: Option<u64>,
     pub source: Option<String>,
     pub context_basis_points: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub absent_reason: Option<String>,
 }
 impl From<UsageRecord> for crate::Usage {
     fn from(u: UsageRecord) -> Self {
@@ -731,20 +729,5 @@ mod tests {
         let access = LaneAccess::default();
         assert_eq!(access.network(false), NetworkAccess::Open);
         assert_eq!(access.network(true), NetworkAccess::Open);
-    }
-
-    #[test]
-    fn usage_record_absent_reason_round_trips_and_omits_when_none()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut usage = UsageRecord::default();
-        let empty = serde_json::to_value(&usage)?;
-        assert!(empty.get("absent_reason").is_none());
-
-        usage.absent_reason = Some("no result event".into());
-        let sealed = serde_json::to_value(&usage)?;
-        assert_eq!(sealed["absent_reason"], "no result event");
-        let decoded: UsageRecord = serde_json::from_value(sealed)?;
-        assert_eq!(decoded.absent_reason.as_deref(), Some("no result event"));
-        Ok(())
     }
 }

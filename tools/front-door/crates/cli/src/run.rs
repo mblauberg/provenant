@@ -253,8 +253,9 @@ impl run::Providers for Registry<'_> {
             result: String::new(),
             complete: false,
             observed_route: None,
+            // `source` names why usage is absent; records stay readable by older builds.
             usage: run::UsageRecord {
-                absent_reason: is_claude.then(|| "no result event".into()),
+                source: is_claude.then(|| "absent: no result event".into()),
                 ..run::UsageRecord::default()
             },
             session: None,
@@ -354,13 +355,13 @@ impl run::Providers for Registry<'_> {
         }
         if (is_claude || adapter.id() == "claude") && !has_usage {
             let has_result = stdout.split(|&b| b == b'\n').any(|line| {
-                line.windows(15).any(|w| w == b"\"type\":\"result\"")
-                    || line.windows(16).any(|w| w == b"\"type\": \"result\"")
+                serde_json::from_slice::<serde_json::Value>(line)
+                    .is_ok_and(|event| event["type"] == "result")
             });
-            decoded.usage.absent_reason = Some(if has_result {
-                "result event has no usage".into()
+            decoded.usage.source = Some(if has_result {
+                "absent: result event has no usage".into()
             } else {
-                "no result event".into()
+                "absent: no result event".into()
             });
         }
         let auth = events.contains(&ProviderEvent::AuthRequired);
@@ -5931,11 +5932,10 @@ mod tests {
         assert_eq!(decoded.usage.cache_read, Some(30));
         assert_eq!(decoded.usage.cache_write, Some(40));
         assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
-        assert_eq!(decoded.usage.absent_reason, None);
     }
 
     #[test]
-    fn claude_absent_usage_records_absent_reason() {
+    fn claude_absent_usage_names_its_reason() {
         let route = run::RouteRecord {
             provider: Some("claude".into()),
             model: Some("claude/claude-sonnet-5".into()),
@@ -5951,15 +5951,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(decoded.usage.uncached_input, None);
-        assert_eq!(decoded.usage.source, None);
         assert_eq!(
-            decoded.usage.absent_reason.as_deref(),
-            Some("no result event")
+            decoded.usage.source.as_deref(),
+            Some("absent: no result event")
         );
 
         let stream_no_usage = concat!(
             "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\"}\n",
+            "{\"type\" : \"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\"}\n",
         );
         let decoded_no_usage = Registry::default()
             .decode(
@@ -5970,10 +5969,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(decoded_no_usage.usage.uncached_input, None);
-        assert_eq!(decoded_no_usage.usage.source, None);
         assert_eq!(
-            decoded_no_usage.usage.absent_reason.as_deref(),
-            Some("result event has no usage")
+            decoded_no_usage.usage.source.as_deref(),
+            Some("absent: result event has no usage")
         );
     }
 }
