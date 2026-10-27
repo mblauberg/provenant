@@ -1268,7 +1268,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .expect("isolated settings");
                 assert_eq!(argv[sources + 1], "");
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
-                assert_eq!(argv[tools + 1], "Read,Grep,Glob");
+                assert_eq!(argv[tools + 1], "Read,Grep,Glob,Bash");
                 // The host's token is the only credential: no keychain or
                 // other credential path is readable. Only Provenant and its hook helpers are added.
                 assert!(
@@ -1286,7 +1286,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .iter()
                     .position(|arg| arg == "--allowedTools")
                     .expect("allow-list");
-                assert_eq!(argv[allowed + 1], "mcp__fabric__*");
+                assert_eq!(argv[allowed + 1], "Bash,mcp__fabric__*");
                 assert!(spec.profile.spec.authentication.is_empty());
                 assert!(
                     spec.profile
