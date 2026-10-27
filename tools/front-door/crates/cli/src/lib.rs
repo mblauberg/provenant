@@ -687,16 +687,41 @@ mod tests {
         invalid(&["lanes", "--since"]);
         invalid(&["lanes", "--state", "unknown"]);
         invalid(&["lanes", "--since", "24h"]);
-        invalid(&["lanes", "--wait", "10", "--since", "86400"]);
+        valid(&["lanes", "--wait", "10", "--since", "86400"]);
+        invalid(&["lanes", "--wait", "10", "--state", "running"]);
     }
     #[test]
-    fn lanes_host_lists_a_peer_without_ids_waits_or_cursors() {
+    fn lanes_host_lists_waits_and_watches_a_peer_without_ids_or_cursors() {
         valid(&["lanes", "--host", "workshop"]);
         valid(&["lanes", "--host", "workshop", "--all", "--state", "running"]);
+        valid(&["lanes", "--host", "workshop", "--wait", "5"]);
+        valid(&["lanes", "--host", "workshop", "--watch", "5"]);
         let run = "11".repeat(16);
         invalid(&["lanes", "--host", "workshop", "--id", &run]);
-        invalid(&["lanes", "--host", "workshop", "--wait", "5"]);
         invalid(&["lanes", "--host", "workshop", "--cursor", "1"]);
+    }
+    #[test]
+    fn lanes_session_and_watch_have_bounded_shapes() {
+        valid(&["lanes", "--session", "chair"]);
+        valid(&[
+            "lanes",
+            "--session",
+            "chair",
+            "--wait",
+            "30",
+            "--condition",
+            "all",
+        ]);
+        valid(&["lanes", "--watch"]);
+        valid(&["lanes", "--watch", "600", "--session", "chair"]);
+        invalid(&["lanes", "--session", "has space"]);
+        invalid(&["lanes", "--session", ""]);
+        invalid(&["lanes", "--session", "chair", "--all"]);
+        invalid(&["lanes", "--watch", "0"]);
+        invalid(&["lanes", "--watch", "14401"]);
+        invalid(&["lanes", "--watch", "5", "--wait", "5"]);
+        invalid(&["lanes", "--watch", "5", "--state", "running"]);
+        invalid(&["lanes", "--watch", "--condition", "all"]);
     }
     #[test]
     fn session_handoff_names_a_peer_and_an_account() {

@@ -3,6 +3,7 @@
 //! forward by ID. Routing, confinement and execution stay on the peer. This
 //! host keeps only a placement record under `fabric/remote-runs/`, never a
 //! copy of the peer's run state.
+use super::watch::{self, Scope};
 use super::{Condition, Edge, Fail, Reply, Status, condition_met, render_lanes, reply, state_name};
 use crate::{
     Cancel, Dispatch, Lanes, Output, Part,
@@ -19,7 +20,7 @@ use provenant_fabric_runtime::{
     },
     graph::AccessMode,
     hosts::{PeerAction, PeerResult},
-    identity::CrossHostProjectKey,
+    identity::{Address, CrossHostProjectKey},
     runs::RunResult,
 };
 use provenant_os::{
@@ -31,7 +32,7 @@ use run::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     time::{Duration, Instant},
 };
@@ -651,6 +652,8 @@ pub(super) fn dispatch(
 pub(super) fn lanes(
     command: &Lanes,
     edge: &Edge<'_>,
+    json: bool,
+    emit: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let placements = command
         .id
@@ -679,18 +682,39 @@ pub(super) fn lanes(
             }
         }
     }
-    let peer = Peer::open_for(edge, placed)?;
-    if let Some(seconds) = command.wait {
-        let (lanes, met) = peer.wait(&selected, command.condition, seconds)?;
-        let (mut data, human) = render(&lanes, &selected, edge);
-        data["condition_met"] = json!(met);
-        return Ok(Some((data, human, !met)));
+    if command.session.is_some() {
+        return Err(unsupported("--session"));
     }
+    let peer = Peer::open_for(edge, placed)?;
     let since = command
         .since
         .map(|since| WallTime::from_micros(since.as_microsecond()))
         .transpose()
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
+    if command.wait.is_some() || command.watch.is_some() {
+        let scope = Scope {
+            exact: command
+                .id
+                .iter()
+                .filter_map(|target| target.attempt)
+                .collect(),
+            since,
+            explicit: true,
+            snapshot: true,
+        };
+        let fetch = || peer.records(&selected);
+        let first = selected
+            .first()
+            .map(|(host, _)| *host)
+            .ok_or_else(corrupt)?;
+        let host_of = |lane: &run::AttemptRecord| {
+            selected
+                .iter()
+                .find(|(_, attempt)| *attempt == lane.attempt_id)
+                .map_or(first, |(host, _)| *host)
+        };
+        return armed(command, scope, fetch, &host_of, edge, json, emit).map(Some);
+    }
     let lanes: Vec<_> = peer
         .records(&selected)?
         .into_iter()
@@ -708,6 +732,63 @@ pub(super) fn lanes(
     Ok(Some((data, human, false)))
 }
 
+/// A wait or watch over peer lanes. `host_of` names the host each runs on.
+fn armed(
+    command: &Lanes,
+    scope: Scope,
+    fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    host_of: &dyn Fn(&run::AttemptRecord) -> HostId,
+    edge: &Edge<'_>,
+    json: bool,
+    emit: &mut dyn FnMut(&str) -> Result<(), Fail>,
+) -> Result<(Value, String, bool), Fail> {
+    let hosts = |lanes: &[run::AttemptRecord]| -> Vec<(HostId, AttemptId)> {
+        lanes
+            .iter()
+            .map(|lane| (host_of(lane), lane.attempt_id))
+            .collect()
+    };
+    if let Some(seconds) = command.watch {
+        let watched = watch::watch(
+            fetch,
+            scope,
+            Duration::from_secs(seconds),
+            POLL,
+            &mut |lane| {
+                let host = Some(host_of(lane));
+                let text = if json {
+                    watch::json_line(lane, host)
+                } else {
+                    watch::line(lane, host)
+                };
+                emit(&format!("{text}\n"))
+            },
+        )?;
+        let (mut data, _) = render(&watched.lanes, &hosts(&watched.lanes), edge);
+        data["condition_met"] = json!(watched.settled);
+        let human = if json {
+            String::new()
+        } else {
+            watch::end_line(&watched)
+        };
+        return Ok((data, human, !watched.settled));
+    }
+    let seconds = command.wait.ok_or_else(corrupt)?;
+    let waited = watch::wait(
+        fetch,
+        scope,
+        command.condition,
+        Duration::from_secs(seconds),
+        POLL,
+    )?;
+    let (mut data, human) = render(&waited.lanes, &hosts(&waited.lanes), edge);
+    data["condition_met"] = json!(waited.met);
+    if waited.ignored > 0 {
+        data["ignored_settled"] = json!(waited.ignored);
+    }
+    Ok((data, human, !waited.met))
+}
+
 /// `lanes --host`: the peer's own lanes, read over the peer channel. The
 /// peer applies `--all` and `--limit`; state and time filters apply here to
 /// the page it returns.
@@ -715,6 +796,8 @@ pub(super) fn host_lanes(
     command: &Lanes,
     host: &str,
     edge: &Edge<'_>,
+    json: bool,
+    emit: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Result<(Value, String, bool), Fail> {
     let peer = Peer::open(edge)?;
     peer.project()?;
@@ -724,6 +807,49 @@ pub(super) fn host_lanes(
         .ok_or_else(|| unknown_host(host))?;
     let limit = u16::try_from(command.limit)
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --limit"))?;
+    // A session label names an agent on the peer, which stamps its own lanes.
+    let owner = command
+        .session
+        .as_deref()
+        .map(|label| {
+            Address::new(id, label)
+                .map(|address| address.actor)
+                .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
+        })
+        .transpose()?;
+    let by_session =
+        |lane: &run::AttemptRecord| owner.is_none_or(|owner| lane.verified_owner == Some(owner));
+    let since = command
+        .since
+        .map(|since| WallTime::from_micros(since.as_microsecond()))
+        .transpose()
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
+    if command.wait.is_some() || command.watch.is_some() {
+        // The peer's newest lanes: the window a wait or watch can see.
+        let fetch = || {
+            let PeerResult::RunStatuses(records) = peer.call(
+                id,
+                PeerAction::Lanes {
+                    all: true,
+                    limit: PEER_LANES,
+                },
+            )?
+            else {
+                return Err(corrupt());
+            };
+            if records.len() > usize::from(PEER_LANES) {
+                return Err(corrupt());
+            }
+            Ok(records.into_iter().filter(&by_session).collect())
+        };
+        let scope = Scope {
+            exact: BTreeSet::new(),
+            since,
+            explicit: false,
+            snapshot: true,
+        };
+        return armed(command, scope, fetch, &|_| id, edge, json, emit);
+    }
     let PeerResult::RunStatuses(records) = peer.call(
         id,
         PeerAction::Lanes {
@@ -737,13 +863,9 @@ pub(super) fn host_lanes(
     if records.len() > usize::from(limit) {
         return Err(corrupt());
     }
-    let since = command
-        .since
-        .map(|since| WallTime::from_micros(since.as_microsecond()))
-        .transpose()
-        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
     let lanes: Vec<_> = records
         .into_iter()
+        .filter(&by_session)
         .filter(|lane| {
             command.states.is_empty()
                 || command

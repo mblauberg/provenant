@@ -472,6 +472,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::dispatch(*cmd, edge)
         }),
+        Command::Lanes(cmd) if cmd.watch.is_some() => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::lanes_streaming(
+                cmd,
+                edge,
+                globals.json,
+                &mut provenant_cli::run::write_line,
+            )
+        }),
         Command::Lanes(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::lanes(cmd, edge)
         }),

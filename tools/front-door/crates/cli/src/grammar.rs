@@ -420,9 +420,12 @@ pub struct Lanes {
     /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long, conflicts_with = "all")]
     pub id: Vec<Target>,
-    /// List a configured peer's own lanes, by label or host ID
-    #[arg(long, conflicts_with_all = ["id", "wait", "cursor"])]
+    /// List, wait on or watch a configured peer's own lanes, by label or host ID
+    #[arg(long, conflicts_with_all = ["id", "cursor"])]
     pub host: Option<String>,
+    /// Keep lanes submitted by this session (its agent label)
+    #[arg(long, value_parser = session_label, conflicts_with = "all")]
+    pub session: Option<String>,
     /// Show every lane
     #[arg(long)]
     pub all: bool,
@@ -430,20 +433,43 @@ pub struct Lanes {
     #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: u64,
     /// Continue from a previous page's cursor
-    #[arg(long, conflicts_with = "wait")]
+    #[arg(long, conflicts_with_all = ["wait", "watch"])]
     pub cursor: Option<String>,
-    /// Wait up to this many seconds for a lane condition
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+    /// Wait up to this many seconds for a lane to settle after the wait starts
+    #[arg(long, conflicts_with = "watch", value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub wait: Option<u64>,
     /// Wait for any or all lanes to settle
-    #[arg(long, default_value = "any", requires = "wait", value_enum)]
+    #[arg(
+        long,
+        default_value = "any",
+        requires = "wait",
+        conflicts_with = "watch",
+        value_enum
+    )]
     pub condition: Condition,
+    /// Print one line per lane state change until every selected lane has
+    /// settled or this many seconds pass (default 14400)
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "14400",
+        value_name = "SECONDS",
+        conflicts_with_all = ["all", "states", "cursor"],
+        value_parser = clap::value_parser!(u64).range(1..=14400)
+    )]
+    pub watch: Option<u64>,
     /// Keep lanes in any of these states.
-    #[arg(long = "state", conflicts_with = "wait")]
+    #[arg(long = "state", conflicts_with_all = ["wait", "watch"])]
     pub states: Vec<LaneState>,
     /// Keep lanes queued within this many seconds, or since an RFC3339 time.
-    #[arg(long, value_parser = since, conflicts_with = "wait")]
+    /// With --wait or --watch, count lanes that settled since then.
+    #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
+}
+fn session_label(value: &str) -> Result<String, &'static str> {
+    provenant_fabric_runtime::identity::validate_label(value)
+        .map(|()| value.to_owned())
+        .map_err(|_| "session must be an agent label of 1 to 128 letters, digits, dots, underscores or hyphens")
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Part {

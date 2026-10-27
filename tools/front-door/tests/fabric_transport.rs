@@ -2780,12 +2780,15 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     assert_eq!(status, 0, "{lanes}");
     assert_eq!(lanes["data"]["lanes"][0]["attempt_id"], attempt.as_str());
     assert_eq!(lanes["data"]["lanes"][0]["state"], lane["state"]);
-    let (status, waited) = json_command(&rig, &["lanes", "--id", &run, "--wait", "5", "--json"])?;
+    // A named attempt counts whenever it settled; a run would count only
+    // settlements after the wait starts.
+    let task = lane["task_id"].as_str().ok_or("task")?;
+    let target = format!("{run}/{task}/{attempt}");
+    let (status, waited) =
+        json_command(&rig, &["lanes", "--id", &target, "--wait", "5", "--json"])?;
     assert_eq!(status, 0, "{waited}");
     assert_eq!(waited["data"]["condition_met"], true);
 
-    let task = lane["task_id"].as_str().ok_or("task")?;
-    let target = format!("{run}/{task}/{attempt}");
     let peer_text = peer.to_string();
     let (status, stderr) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
     if cfg!(target_os = "macos") {

@@ -1827,14 +1827,16 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--id` | `{"bounds": [0, 100], "conflicts": ["all"], "name": "id", "repeatable": true}` |
-| `--host` | `{"conflicts": ["id", "wait", "cursor"], "name": "host"}` |
+| `--host` | `{"conflicts": ["id", "cursor"], "name": "host"}` |
+| `--session` | `{"conflicts": ["all"], "name": "session"}` |
 | `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"conflicts": ["wait"], "name": "cursor"}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--condition` | `{"defaults": ["any"], "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
-| `--state` | `{"conflicts": ["wait"], "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
-| `--since` | `{"conflicts": ["wait"], "name": "since"}` |
+| `--cursor` | `{"conflicts": ["wait", "watch"], "name": "cursor"}` |
+| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "name": "wait"}` |
+| `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
+| `--watch` | `{"conflicts": ["all", "states", "cursor"], "name": "watch"}` |
+| `--state` | `{"conflicts": ["wait", "watch"], "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
+| `--since` | `{"name": "since"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -1848,11 +1850,13 @@ bounds are null. Positional arguments have no long flag.
       "arguments": [
         "id",
         "host",
+        "session",
         "all",
         "limit",
         "cursor",
         "wait",
         "condition",
+        "watch",
         "states",
         "since"
       ],

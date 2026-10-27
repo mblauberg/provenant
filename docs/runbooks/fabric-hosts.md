@@ -229,7 +229,7 @@ host ID. The peer resolves the route, confines the lane and runs it in its own
 checkout of the same project, at the same path under its home directory, with
 its own provider sign-ins; a `--account` pin is checked against the peer's registrations. The calling host keeps only a placement record under
 `fabric/remote-runs/` in its state directory. `lanes --id`, `output` and `cancel` find that record and forward to
-the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
+the peer by ID, and `dispatch --wait`, `lanes --wait` and `lanes --watch` poll the peer. Lanes
 keep running after the SSH call returns. Fabric MCP `fabric_run`
 (`op: submit`) takes the same placement as an optional `host` field.
 To read a peer's own attempt without a local placement record, use
@@ -272,8 +272,9 @@ Other limits on a peer run:
 - `lanes` without `--id` lists only lanes on the calling host, and mixing
   local and peer runs in one call is refused. `lanes --host workshop` lists
   the peer's own lanes, newest first with `--all`. It takes `--state` and
-  `--since` but not `--id`, `--wait` or `--cursor`, and filters only the page
-  the peer returns.
+  `--since` but not `--id` or `--cursor`, and filters only the page the peer
+  returns. `lanes --host workshop --wait N` and `--watch` follow the peer's
+  newest 100 lanes, counting only those that settle after the call starts.
 
 `provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation

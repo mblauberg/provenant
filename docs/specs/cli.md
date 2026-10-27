@@ -86,6 +86,46 @@ exits 124, and neither expiry nor cancelling a wait stops the work.
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
 - Owner: `crates/cli/src/lib.rs`
 
+### Lane waits count only new settlements
+
+`lanes --wait` counts a lane only if it was unsettled when the wait started
+or settled since, so a settled older attempt never satisfies a wait on a newer
+one. `--since TIME` also counts lanes that settled at or after that time. An
+attempt named by its exact ID counts whenever it settled. When every lane
+named by `--id RUN[/TASK]` settled before the wait started, the wait is
+refused (exit 2) with the count, instead of returning at once or idling to
+expiry; the result reports `ignored_settled` otherwise. Without `--id`, a wait
+covers the calling session's lanes and resumes after the settlements that
+session last acknowledged. `--session LABEL` selects the lanes another agent
+label submitted on this host, and narrows `--id` and listings the same way.
+`--host PEER` waits on or lists the peer's own lanes (its newest 100) and
+reads `--session` as an agent label on the peer. `--wait` still excludes
+`--state` and `--cursor`.
+- Why: a stale settlement must never wake a chair that waits for newer work,
+  and selecting by session removes hand-copied ID lists.
+- Test: `crates/cli/src/run/watch.rs::a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one`;
+  `::a_named_attempt_counts_whenever_it_settled`;
+  `::since_counts_settlements_before_arming`;
+  `::nothing_pending_is_refused_for_named_lanes_only`;
+  `crates/cli/src/lib.rs::lanes_session_and_watch_have_bounded_shapes`
+- Owner: `crates/cli/src/run/watch.rs`, `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
+
+### Lane watch is one stable line per event
+
+`lanes --watch[=SECONDS]` (default and maximum 14400) selects lanes as a wait
+does and prints one line per state a counted lane enters, then `end settled
+lanes=N`, or `end timeout lanes=N pending=M` with exit 124 when the budget
+passes first. A line is `STATE RUN/TASK/ATTEMPT`, with ` host=ID` for a peer's
+lane, and carries no free text. Each line is flushed as written, so a
+background shell or monitor sees it at once. A lane dispatched during the
+watch joins it. With `--json` each line is a JSON object with `event: lane`
+and the final line is the usual envelope. `--watch` excludes `--wait`,
+`--state`, `--all` and `--cursor`.
+- Why: a chair must be told when work settles without polling for it.
+- Test: `crates/cli/src/run/watch.rs::watch_emits_each_state_once_and_ends_when_all_settle`;
+  `::watch_times_out_with_pending_lanes_and_names_the_host`
+- Owner: `crates/cli/src/run/watch.rs`, `src/lib.rs`
+
 ## Guards
 
 ### Merge guard
