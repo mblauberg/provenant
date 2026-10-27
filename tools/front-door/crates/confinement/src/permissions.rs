@@ -176,6 +176,8 @@ pub enum PermissionError {
     ProtectedOverlap,
     #[error("required held path anchor is missing or changed")]
     AnchorMismatch,
+    #[error("required held path anchor is missing or changed at {path:?} during {stage}")]
+    AnchorMismatchAt { path: PathBuf, stage: &'static str },
     #[error("writable tree contains a hard-linked regular file")]
     HardLinkedWritableFile,
     #[error("path is not valid UTF-8 for the SBPL source format")]
@@ -770,9 +772,50 @@ pub struct Anchors<'a> {
 impl Anchors<'_> {
     fn verify_all(&self) -> Result<(), PermissionError> {
         for anchor in self.directories {
-            anchor.verify()?;
+            anchor.verify().map_err(|error| match error {
+                PermissionError::AnchorMismatch => PermissionError::AnchorMismatchAt {
+                    path: anchor.path.clone(),
+                    stage: "held directory revalidation",
+                },
+                error => error,
+            })?;
         }
         Ok(())
+    }
+
+    fn verify_discovery_grant(&self, grant: &PathGrant) -> Result<(), PermissionError> {
+        // Discovery grants list only the literal directory, never its children.
+        // Resolve the entry without following links through its verified parent.
+        let mismatch = |stage| PermissionError::AnchorMismatchAt {
+            path: grant.path.clone(),
+            stage,
+        };
+        if grant.scope != PathScope::Exact {
+            return Err(PermissionError::InvalidPath(grant.path.clone()));
+        }
+        let parent = grant
+            .path
+            .parent()
+            .ok_or_else(|| mismatch("discovery parent"))?;
+        let name = grant
+            .path
+            .file_name()
+            .ok_or_else(|| mismatch("discovery entry"))?;
+        let anchor = self
+            .directories
+            .iter()
+            .find(|anchor| anchor.path == parent)
+            .ok_or_else(|| mismatch("discovery parent anchor lookup"))?;
+        anchor.verify().map_err(|error| match error {
+            PermissionError::AnchorMismatch => mismatch("discovery parent revalidation"),
+            error => error,
+        })?;
+        match anchor.directory.metadata_at(name, false) {
+            Ok(metadata) if metadata.kind == FileKind::Directory => Ok(()),
+            Ok(_) => Err(mismatch("discovery entry type check")),
+            Err(error) if error.is_not_found() => Ok(()),
+            Err(error) => Err(PermissionError::Filesystem(error)),
+        }
     }
 
     fn verify_grant_held(&self, grant: &PathGrant) -> Result<(), PermissionError> {
@@ -1210,6 +1253,7 @@ fn compile_sbpl(
     }
     let grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
     let read_grants = &grants.reads;
+    let all_reads = || read_grants.iter().chain(&profile.spec.discovery_reads);
     let credential_writes = &grants.credential_writes;
     let worktree_grants = grants.worktree.as_ref();
 
@@ -1220,8 +1264,7 @@ fn compile_sbpl(
         .collect();
     // The path checks above know only conventional homes; the host's own home
     // is broad and its nested credential roots stay hidden wherever it lives.
-    if read_grants
-        .iter()
+    if all_reads()
         .chain(shared_writes.iter().copied())
         .chain(&profile.spec.tool_exec_roots)
         .chain(&profile.spec.state_writes)
@@ -1231,6 +1274,9 @@ fn compile_sbpl(
     }
     for grant in read_grants {
         anchors.verify_grant_held(grant)?;
+    }
+    for grant in &profile.spec.discovery_reads {
+        anchors.verify_discovery_grant(grant)?;
     }
     for executable in &profile.spec.process_executables {
         anchors.verify_executable(executable)?;
@@ -1258,8 +1304,7 @@ fn compile_sbpl(
     }
     validate_noncredential_grant(&plan.scratch)?;
     anchors.verify_grant_held(&plan.scratch)?;
-    let mut scratch_exclusions: Vec<&PathGrant> = read_grants
-        .iter()
+    let mut scratch_exclusions: Vec<&PathGrant> = all_reads()
         .chain(&plan.protected_roots)
         .chain(&plan.secret_roots)
         .chain(&profile.spec.continuation_reads)
@@ -1311,7 +1356,7 @@ fn compile_sbpl(
         secret.validate()?;
         anchors.verify_grant_held(secret)?;
     }
-    for read in read_grants {
+    for read in all_reads() {
         if plan.secret_roots.iter().any(|secret| read.overlaps(secret)) {
             return Err(PermissionError::ProtectedOverlap);
         }
@@ -1377,6 +1422,9 @@ fn compile_sbpl(
         )?;
     }
     anchors.verify_all()?;
+    for grant in &profile.spec.discovery_reads {
+        anchors.verify_discovery_grant(grant)?;
+    }
     // Avoid retaining a second mutable representation of the profile.
     profile_bytes.shrink_to_fit();
     Ok(ConfinedLaunch {
@@ -1418,7 +1466,6 @@ impl<'a> GrantSet<'a> {
         }
         reads.extend(plan.protected_roots.iter().cloned());
         reads.extend(profile.spec.runtime_reads.iter().cloned());
-        reads.extend(profile.spec.discovery_reads.iter().cloned());
         reads.extend(profile.spec.process_executables.iter().cloned());
         let mut credential_writes = Vec::new();
         if let Some(mechanism) = &plan.selected_authentication {
@@ -1691,7 +1738,7 @@ fn render_profile(
     // launch prerequisites and provider profiles aligned.
     source.push_str(DYLD_BOOTSTRAP_RULES);
     source.push_str(RUNTIME_BASELINE_RULES);
-    for grant in reads {
+    for grant in reads.iter().chain(&profile.spec.discovery_reads) {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
     }
     for executable in &profile.spec.process_executables {
@@ -2908,10 +2955,176 @@ mod tests {
             directories: &directories,
             worktree: None,
         };
-        assert!(matches!(
-            anchors.verify_all(),
-            Err(PermissionError::AnchorMismatch)
-        ));
+        let error = anchors.verify_all().expect_err("replaced anchor accepted");
+        assert!(
+            error
+                .to_string()
+                .contains(path.to_str().expect("UTF-8 fixture"))
+        );
+        assert!(error.to_string().contains("held directory revalidation"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(
+        clippy::print_stderr,
+        reason = "Native probe omissions must be visible in test output"
+    )]
+    fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let fixture = crate::test_support::Fixture::new()?;
+        let root = provenant_os::fs::canonicalize(fixture._temp.path())?;
+        let home = provenant_os::fs::canonicalize(&fixture.home)?;
+        let project = root.join("lane");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "discovery",
+            project.to_str().ok_or("path")?,
+        ])?;
+        let linked = crate::repo::verify_worktree(&fixture.repo, &project)?;
+        let selected_ref = GitRefName::branch("discovery")?;
+        let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?;
+        prepare_writer_directories(&linked, &selected_ref, &authority, &home)?;
+        let scratch = root.join("scratch");
+        std::fs::create_dir(&scratch)?;
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+        let discovery = [&project, &root]
+            .into_iter()
+            .flat_map(|parent| {
+                [".agents", ".claude", ".codex"].map(|name| PathGrant {
+                    path: parent.join(name),
+                    scope: PathScope::Exact,
+                })
+            })
+            .collect::<Vec<_>>();
+        for grant in &discovery {
+            std::fs::create_dir(&grant.path)?;
+            std::fs::write(grant.path.join("config.json"), b"private config")?;
+        }
+        let mut profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                process_executables: vec![PathGrant {
+                    path: "/bin/cat".into(),
+                    scope: PathScope::Exact,
+                }],
+                discovery_reads: discovery,
+                ..ProviderProfileSpec::default()
+            },
+            observations: BTreeMap::new(),
+        };
+        let mut plan = PlanPermissions {
+            mode: AccessMode::ReadOnly,
+            read_only: None,
+            read_roots: vec![PathGrant {
+                path: project.clone(),
+                scope: PathScope::Subtree,
+            }],
+            protected_roots: Vec::new(),
+            secret_roots: Vec::new(),
+            scratch: PathGrant {
+                path: scratch.clone(),
+                scope: PathScope::Subtree,
+            },
+            private_state: None,
+            selected_authentication: None,
+            include_continuation: false,
+            write_roots: Vec::new(),
+            network: NetworkAccess::Provider,
+            nested_confinement: false,
+        };
+        for mode in [
+            AccessMode::ReadOnly,
+            AccessMode::WorktreeWrite(Box::new(authority)),
+        ] {
+            plan.mode = mode;
+            let worktree = matches!(plan.mode, AccessMode::WorktreeWrite(_))
+                .then_some((&linked, &selected_ref));
+            let directories = required_anchors(&plan, &profile, worktree)
+                .iter()
+                .map(AnchoredDirectory::open_canonical)
+                .collect::<Result<Vec<_>, _>>()?;
+            let anchors = Anchors {
+                home: &home,
+                directories: &directories,
+                worktree,
+            };
+            let compiled = compile_sbpl(&plan, &profile, &anchors)?;
+            let sbpl = std::str::from_utf8(&compiled.profile)?;
+            let held_without_parent = directories.iter().filter(|anchor| anchor.path != root);
+            let missing_parent = Anchors {
+                home: &home,
+                directories: &held_without_parent
+                    .map(|anchor| AnchoredDirectory::open_canonical(&anchor.path))
+                    .collect::<Result<Vec<_>, _>>()?,
+                worktree,
+            };
+            let error = compile_sbpl(&plan, &profile, &missing_parent)
+                .err()
+                .ok_or("missing discovery parent accepted")?;
+            assert!(
+                error
+                    .to_string()
+                    .contains(root.join(".agents").to_str().ok_or("path")?)
+            );
+            assert!(error.to_string().contains("discovery parent anchor lookup"));
+            // Only the ancestor's literal directory is readable through discovery.
+            for grant in profile
+                .spec
+                .discovery_reads
+                .iter()
+                .filter(|grant| grant.path.parent() == Some(root.as_path()))
+            {
+                let argv = [
+                    OsString::from(SANDBOX_EXEC),
+                    "-p".into(),
+                    sbpl.into(),
+                    "/bin/cat".into(),
+                    grant.path.join("config.json").into_os_string(),
+                ];
+                let mut options = ExecOptions::new(&argv, &scratch, Duration::from_secs(2));
+                options.stderr = StreamPolicy::Capture { limit: 1024 };
+                let outcome = fixture.executor.execute(options)?;
+                if String::from_utf8_lossy(&outcome.stderr.bytes)
+                    .contains("sandbox_apply: Operation not permitted")
+                {
+                    eprintln!("native discovery denial probe unavailable under inherited sandbox");
+                    assert_ne!(
+                        std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
+                        Ok("1")
+                    );
+                    break;
+                }
+                assert!(denied_probe(&outcome), "{outcome:?}");
+                assert!(outcome.stdout.bytes.is_empty());
+            }
+            // The regular-file path must still reject directories, even when
+            // the same literal is also requested for discovery.
+            profile
+                .spec
+                .runtime_reads
+                .push(profile.spec.discovery_reads[0].clone());
+            assert!(matches!(
+                compile_sbpl(&plan, &profile, &anchors),
+                Err(PermissionError::AnchorMismatch)
+            ));
+            profile.spec.runtime_reads.pop();
+            let path = &profile.spec.discovery_reads[0].path;
+            let moved = project.join("moved-config");
+            std::fs::rename(path, &moved)?;
+            symlink(&moved, path)?;
+            let error = compile_sbpl(&plan, &profile, &anchors)
+                .err()
+                .ok_or("discovery symlink accepted")?;
+            assert!(error.to_string().contains(path.to_str().ok_or("path")?));
+            assert!(error.to_string().contains("discovery entry type check"));
+            std::fs::remove_file(path)?;
+            std::fs::rename(moved, path)?;
+        }
+        Ok(())
     }
 
     #[test]
