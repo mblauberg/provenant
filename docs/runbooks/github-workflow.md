@@ -298,12 +298,15 @@ repeat).
 |---|---|---|
 | `fetch` | `git fetch <remote> <base>` | the fetch fails, or the fetched base does not hold the merged head |
 | `fast_forward` | moves the local base to the fetched one, in the checkout that has it, or by fetching `base:base` when none does | that checkout has any change, or the base has diverged |
-| `worktree` | deletes declared build output (`gc.projects.<id>.regenerable`, plus `target`), then removes the branch's registered worktree as `worktree remove` does | the worktree is dirty or has a live writer, this command runs inside it, or its HEAD holds commits the fetched base lacks (it stays whole) |
+| `worktree` | deletes declared build output (`gc.projects.<id>.regenerable`, plus `target`), then removes the branch's registered worktree as `worktree remove` does | the worktree is dirty or has a live writer, this command runs inside it, its HEAD is not the merged head (it stays whole), or its HEAD moves after the check, which removal re-verifies under the worktree lock |
 | `branch` | `git branch -d` of the merged local branch | the branch holds commits the fetched base lacks, or Git refuses |
 
-When the pull request's head is in another repository, such as a fork, the
-`worktree` and `branch` steps are skipped with that reason: a local branch of
-the same name is not the pull request's branch and is never touched.
+The `worktree` and `branch` steps act only on a local branch whose tip is the
+exact head the pull request merged. When the pull request's head is in another
+repository, such as a fork, or the local branch of that name is at any other
+tip (recreated at the base, or advanced past the merged head, even when the
+base contains it), both steps are skipped with that reason and nothing is
+touched. A tip the fetched base lacks is refused rather than skipped.
 
 The build-output deletion keeps GC's checks: tracked and `keep` paths stay,
 symlinks are never followed, and a lane that is not idle blocks it. Unlike a

@@ -105,10 +105,14 @@ session last acknowledged. `--session LABEL` selects the lanes another agent
 label submitted on this host, and narrows `--id` and listings the same way.
 `--host PEER` waits on or lists the peer's own lanes (its newest 100, with any
 lane it saw running tracked by ID until it settles) and reads `--session` as an
-agent label on the peer. A peer read inside a wait or
-watch is capped by the time the budget has left (at least one second, at most
-`limits.peer_seconds`), and no read starts once the budget has passed, so a
-one-second watch ends in about a second. `--wait` still excludes `--state` and
+agent label on the peer. One poll
+of a wait or watch draws every peer read (each host, each 100 lanes, and the
+lookup of tracked lanes) on a single deadline fixed when the poll starts. A read is
+capped by what the earlier reads left (at least one second, at most
+`limits.peer_seconds`), and no read after the first starts at or after the
+deadline, so a one-second watch ends in about a second. Budgets are whole
+seconds, so a read started with a fraction of a second left can run under a
+second past the deadline. `--wait` still excludes `--state` and
 `--cursor`.
 - Why: a stale settlement must never wake a chair that waits for newer work,
   and selecting by session removes hand-copied ID lists.
@@ -125,6 +129,10 @@ one-second watch ends in about a second. `--wait` still excludes `--state` and
   `::a_lane_that_settles_off_the_page_is_kept_in_the_result`;
   `crates/cli/src/run/remote.rs::a_peer_call_is_capped_by_the_time_left_and_the_peer_limit`;
   `::wait_starts_no_fetch_after_its_deadline`;
+  `::every_read_of_a_fetch_gets_only_the_time_the_earlier_ones_left`;
+  `::no_read_starts_at_or_after_the_deadline`;
+  `::a_zero_second_budget_still_makes_its_one_read`;
+  `::the_missing_lane_lookup_shares_the_first_reads_deadline`;
   `crates/cli/src/lib.rs::lanes_session_and_watch_have_bounded_shapes`;
   `tests/parser.rs::lanes_watch_and_session_selection_report_an_empty_store`
 - Owner: `crates/cli/src/run/watch.rs`, `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
@@ -165,10 +173,13 @@ that head unchanged, then follows up locally: fetch the base, fast-forward the
 local base only in a checkout with no changes, delete declared build output
 and remove the branch's registered worktree through `worktree remove`, and
 delete the merged branch with `git branch -d`. The two cleanup steps act only
-on the pull request's own branch: a head in another repository (a fork) leaves
-a same-named local branch and its worktree alone, and a local branch whose tip
-the fetched base does not contain keeps its worktree as well as the branch. The
-head is required. A failure
+on a local branch of the pull request's name whose tip is exactly the head the
+pull request merged: a head in another repository (a fork) leaves a same-named
+local branch and its worktree alone, so does a branch recreated or advanced to
+any other tip (even one the base contains), and a local branch whose tip the
+fetched base does not contain is refused and keeps its worktree as well as the
+branch. Removal carries that head and refuses, under the worktree lock, if the
+worktree's HEAD has moved since it was checked. The head is required. A failure
 before the merge changes nothing. After it, each step refuses and reports
 instead of forcing, and the command exits 1 with `merged: true`.
 - Why: a landing is four routine steps, and none of them may widen what was
@@ -176,8 +187,10 @@ instead of forcing, and the command exits 1 with `merged: true`.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
   `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
   `::pr_land_changes_nothing_when_the_merge_does_not_happen`;
-  `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`
-- Owner: `src/pr/land.rs`, `src/worktrees.rs`
+  `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`;
+  `::pr_land_leaves_a_reused_branch_name_alone`;
+  `crates/confinement/src/worktrees.rs::named_removal_refuses_a_head_that_moved_after_the_callers_check`
+- Owner: `src/pr/land.rs`, `src/worktrees.rs`, `crates/confinement/src/worktrees.rs`
 
 ### Pull request bodies come from receipts
 

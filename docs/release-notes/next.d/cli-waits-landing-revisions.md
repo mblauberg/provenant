@@ -7,8 +7,10 @@ whenever it settled, and a wait on runs whose lanes all settled earlier is
 refused with the count. `lanes` takes `--session LABEL`, `--host` works with
 `--wait`, and `lanes --watch` prints one line per state change for a background
 shell or monitor. The wait starts at command entry, so a lane that settles while a
-peer is unreachable still counts. Each peer read is capped by the time the wait
-has left and none starts after its deadline. A peer wait keeps every running
+peer is unreachable still counts. One poll shares a single deadline across
+all its peer reads, each capped by what the earlier ones left, and none after
+the first starts at or after it (budgets are whole seconds, so the last read can
+run under a second over). A peer wait keeps every running
 lane tracked until it settles, even after newer dispatches push it off the
 peer's newest 100, and `--since` selects by settlement time rather than queue
 order, scanning up to 1000 lanes.
@@ -17,9 +19,11 @@ order, scanning up to 1000 lanes.
 existing merge path, then fetches, fast-forwards a clean local base, removes
 the merged branch's worktree (after its declared build output) and deletes the
 branch with `git branch -d`. Each follow-up step refuses and reports rather than
-forcing, and cleanup only touches the pull request's own branch: a fork's head
-leaves a same-named local branch alone, and a worktree holding commits the base
-lacks is kept along with its branch. `pr open --from-attempt` builds the pull
+forcing, and cleanup only touches a local branch whose tip is exactly the head
+the pull request merged: a fork's head leaves a same-named local branch alone,
+so does a branch recreated or advanced to another tip, and a worktree holding
+commits the base lacks is kept along with its branch. Removal refuses if the
+worktree's HEAD moves after that check. `pr open --from-attempt` builds the pull
 request body from the attempt's receipts into the repository template, and
 `pr status` prints one line per pull request.
 

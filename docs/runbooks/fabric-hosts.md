@@ -288,9 +288,13 @@ no ID list is needed. The wait starts when the command does, so a peer lane
 that settles while the peer is unreachable still counts once it answers. The
 comparison uses the peer's recorded settlement time against this host's clock,
 so keep the hosts' clocks synchronised. For a background job or monitor, run
-`provenant lanes --watch 3600`. Each peer read is bounded by the time the wait
-has left as well as by `limits.peer_seconds`, so a short wait or watch never
-sits in a slow SSH call past its own budget. The watch prints `STATE RUN/TASK/ATTEMPT` (and
+`provenant lanes --watch 3600`. One poll shares a single deadline across
+all its peer reads (one per host and per 100 lanes, plus the lookup of lanes
+that left the newest page). Each read is bounded by the time the earlier reads
+left, as well as by `limits.peer_seconds`, and no read after the first starts
+at or after the deadline; the poll then fails as a transient peer error, which
+the wait retries until its own budget ends. Budgets are whole seconds, so the
+last read can run under a second past the deadline. The watch prints `STATE RUN/TASK/ATTEMPT` (and
 `host=ID` for a peer's lane) once per state change, then `end settled lanes=N`,
 or `end timeout lanes=N pending=M` with exit 124.
 
