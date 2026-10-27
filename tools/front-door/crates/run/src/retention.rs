@@ -302,6 +302,20 @@ impl RunStore {
                             dry_run,
                             &mut report,
                         )?;
+                        if !dry_run {
+                            let update = Request {
+                                budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 5)
+                                    .map_err(|_| RunError::Contention)?,
+                                ..observation
+                            };
+                            self.write(&update, |tx| {
+                                tx.execute(
+                                    "DELETE FROM events WHERE attempt=?1 AND project=?2",
+                                    rusqlite::params![id, record.project_id.to_string()],
+                                )?;
+                                Ok(())
+                            })?;
+                        }
                     }
                 }
                 if age >= DAY_MICROS {
@@ -1061,6 +1075,80 @@ mod tests {
         assert_eq!(
             tail.digest,
             provenant_records::CanonicalV1::file_digest(&tail.bytes)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_expires_closed_run_events_after_log_retention() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let id = input.attempts[0].attempt_id;
+        withdraw(&store, &input, &call)?;
+
+        let events_before = store.events(0, 64, Some(id), &call)?;
+        assert!(!events_before.is_empty(), "seeded terminal attempt must record events");
+
+        // Younger than logs_days (e.g. 29 days): events survive.
+        sweep(&store, &context, 7, 30 * DAY_MICROS - 1, false, &call)?;
+        assert_eq!(
+            store.events(0, 64, Some(id), &call)?.len(),
+            events_before.len()
+        );
+
+        // Dry run at logs_days (30 days): events survive.
+        sweep(&store, &context, 7, 30 * DAY_MICROS, true, &call)?;
+        assert_eq!(
+            store.events(0, 64, Some(id), &call)?.len(),
+            events_before.len()
+        );
+
+        // Applied sweep at logs_days (30 days): closed run events expire.
+        sweep(&store, &context, 7, 30 * DAY_MICROS, false, &call)?;
+        assert!(
+            store.events(0, 64, Some(id), &call)?.is_empty(),
+            "closed run events must be expired after log retention"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_retains_events_while_sibling_attempt_in_same_run_is_open() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut input = input();
+        let task2 = provenant_core::TaskId::from_bytes([20; 16]);
+        let attempt2 = AttemptId::from_bytes([21; 16]);
+        let mut task_def = input.request.tasks[0].clone();
+        task_def.task_id = task2;
+        input.request.tasks.push(task_def);
+        input.attempts.push(NewAttempt {
+            task_id: task2,
+            attempt_id: attempt2,
+            prompt: "exact prompt".into(),
+        });
+        store.create(&input, &call)?;
+        let first = input.attempts[0].attempt_id;
+        store.withdraw(
+            first,
+            AttemptState::Queued,
+            Outcome::Cancelled,
+            "first finished",
+            WallTime::from_micros(200)?,
+            &call,
+        )?;
+        let events = store.events(0, 64, Some(first), &call)?;
+        assert!(!events.is_empty());
+        // Sibling attempt2 is still Queued (terminal == 0).
+        sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?;
+        assert_eq!(
+            store.events(0, 64, Some(first), &call)?.len(),
+            events.len(),
+            "events must survive while run has an open attempt"
         );
         Ok(())
     }
