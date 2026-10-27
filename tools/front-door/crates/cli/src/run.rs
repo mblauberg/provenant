@@ -861,7 +861,16 @@ pub fn submit_with_host(
                     &writer.worktree,
                     edge.home,
                 )
-                .map_err(|message| Fail::new(Status::Refused, ErrorKind::Refused, message))?;
+                .map_err(|message| {
+                    let mut fail = Fail::new(Status::Refused, ErrorKind::Refused, message.clone());
+                    // Keep the volume, available bytes and floor for MCP callers.
+                    fail.detail = Some(
+                        provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                            reason: message,
+                        },
+                    );
+                    fail
+                })?;
             }
         }
     }

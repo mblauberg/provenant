@@ -1184,17 +1184,7 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     fail_error(error.into())
 }
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
-    if let Some(detail) = fail.detail {
-        return detail;
-    }
-    // Dispatch policy refusals carry actionable details, including the disk
-    // volume, available bytes and floor. Do not collapse them into confinement.
-    if fail.kind == provenant_run::ErrorKind::Refused {
-        return FacadeError::DispatchRefused {
-            reason: fail.message,
-        };
-    }
-    kind_error(fail.kind)
+    fail.detail.unwrap_or_else(|| kind_error(fail.kind))
 }
 /// Translate a typed run category at the MCP edge. `ErrorKind` is the one
 /// categorisation of run errors; this only renders it.
