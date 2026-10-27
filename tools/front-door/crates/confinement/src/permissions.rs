@@ -323,9 +323,15 @@ pub enum AccessMode {
 pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
     cargo_cache: PathGrant,
+    #[serde(default)]
+    publishing_disabled: bool,
 }
 
 impl WorktreeWriteAuthority {
+    pub fn set_publishing(&mut self, enabled: bool) {
+        self.publishing_disabled = !enabled;
+    }
+
     /// Exact lane-only cache already bound into this writer authority.
     pub fn cargo_cache(&self) -> &PathGrant {
         &self.cargo_cache
@@ -343,6 +349,7 @@ impl WorktreeWriteAuthority {
         Ok(Self {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
+            publishing_disabled: false,
         })
     }
 }
@@ -605,6 +612,14 @@ pub struct PlanPermissions {
     pub write_roots: Vec<PathGrant>,
     pub network: NetworkAccess,
     pub nested_confinement: bool,
+}
+
+impl PlanPermissions {
+    /// Publishing credentials require both writer authority and open network.
+    pub fn writer_publishing(&self) -> bool {
+        matches!(&self.mode, AccessMode::WorktreeWrite(authority) if !authority.publishing_disabled)
+            && self.network == NetworkAccess::Open
+    }
 }
 
 /// An explicit write allowance, subject to the rendered profile's deny rules.
@@ -1940,7 +1955,9 @@ fn render_profile(
     // The gh read comes before the secret-root denies: Seatbelt is
     // last-match-wins, so an overlapping secret root must still hide it.
     let gh_paths =
-        if matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open {
+        if (matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open)
+            || plan.writer_publishing()
+        {
             gh_config_paths(home)
         } else {
             Vec::new()
