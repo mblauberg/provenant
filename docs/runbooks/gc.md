@@ -97,4 +97,4 @@ are refused as collection roots; scheduled scans report them as unobserved.
 
 A preview uses existing project custody only. An unregistered selected checkout
 or missing custody hierarchy returns an observation error without initialising
-it. Scheduled previews count such roots as unobserved.
+it. Scheduled previews list such roots in `unobserved_projects`.

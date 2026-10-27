@@ -161,8 +161,9 @@ probe, run and scratch roots before collecting project IDs for disk alerts.
 Old identity records stay available for indexed run evidence and keep their
 existing IDs. New transient
 and non-Git invocation roots receive a deterministic in-memory identity
-without a persistent registration. `unobserved_projects` in GC JSON is a
-count, not a list of paths.
+without a persistent registration. `unobserved_projects` in GC JSON is an
+array of paths whose project custody could not be observed. The separate
+`skipped_transient` array lists excluded transient common directories.
 
 After collection, GC checks available space on the state volume against the
 floor. `gc.alert_below` can raise the alert threshold and accepts the same
