@@ -51,7 +51,9 @@ start as the writer start. A run's own batch concurrency (1 to 16) defaults to
 8 when any lane writes and to 16 when none does, from `lanes.max_concurrency`
 and `lanes.max_concurrency_read_only`; an explicit value wins. A
 `lanes.max_concurrency` the user set also caps the read-only default unless
-they set the read-only knob too.
+they set the read-only knob too. Every entry point (CLI, Fabric and a peer)
+accepts a value above the task count; it cannot admit more lanes than the run
+has.
 
 `lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run
@@ -70,6 +72,10 @@ it can see.
   `::legacy_rows_without_a_class_are_treated_as_writers`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
+  `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
+  `crates/fabric-runtime/src/coordination/input.rs::concurrency_above_the_task_count_is_accepted_up_to_sixteen`;
+  `::a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it`;
+  `::a_recorded_start_only_moves_forward_unless_the_clock_stepped_back_a_spacing`;
   `::lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for`;
   `crates/cli/src/run.rs::render_lanes_says_what_an_unstarted_lane_waits_for`;
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`

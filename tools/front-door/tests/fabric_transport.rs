@@ -2257,6 +2257,8 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             vec!["lanes.max_concurrency=2"],
             1,
         ),
+        // Four tasks and an explicit 16: above the task count, still accepted.
+        ("wide-capacity", Some(16), vec![], 16),
     ] {
         let (request, attempt) = submitted_policy(
             &rig,

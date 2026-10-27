@@ -391,7 +391,7 @@ fn replace(request: &Value, path: &str, value: Value) -> Option<Value> {
     Some(result)
 }
 
-fn normalise(tool: &str, value: &mut Value) {
+fn normalise(value: &mut Value) {
     fn paths(value: &mut Value) {
         if let Some(object) = value.as_object_mut() {
             if object.get("encoding") == Some(&json!("native_bytes")) {
@@ -407,15 +407,6 @@ fn normalise(tool: &str, value: &mut Value) {
         }
     }
     paths(value);
-    if tool == "fabric_run" && value["op"] == "submit" {
-        let n = value["concurrency"].as_u64().unwrap_or(0) as usize;
-        if let Some(tasks) = value["tasks"].as_array_mut()
-            && tasks.len() < n
-            && let Some(task) = tasks.first().cloned()
-        {
-            tasks.resize(n, task);
-        }
-    }
 }
 
 fn compare(
@@ -486,7 +477,7 @@ fn walk(
                         sample(root, option).filter(|v| accepts(root, schema, v) && v != value)
                         && let Some(mut changed) = replace(request, path, v)
                     {
-                        normalise(tool, &mut changed);
+                        normalise(&mut changed);
                         compare(tool, root, &changed, path, true, counts);
                         walk(tool, root, schema, &changed, path, false, counts);
                     }
@@ -502,7 +493,7 @@ fn walk(
         .filter(|v| v != value)
     {
         if let Some(mut changed) = replace(request, path, candidate) {
-            normalise(tool, &mut changed);
+            normalise(&mut changed);
             compare(tool, root, &changed, path, true, counts);
         }
     }
@@ -595,7 +586,7 @@ fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
             .unwrap_or_else(|| vec![root.clone()]);
         for operation in &operations {
             let mut request = sample(root, operation).expect("generated valid operation");
-            normalise(name, &mut request);
+            normalise(&mut request);
             compare(name, root, &request, "operation", true, &mut counts);
             walk(name, root, operation, &request, "", true, &mut counts);
         }

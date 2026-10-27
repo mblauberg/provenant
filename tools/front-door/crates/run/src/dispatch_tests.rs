@@ -2500,6 +2500,25 @@ fn read_only_lanes_are_spaced_2_seconds_apart() -> TestResult {
 }
 
 #[test]
+fn the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut run = lane(90, false);
+    run.request.concurrency = 16;
+    store.create(&run, &call)?;
+    assert_eq!(store.request(run.run_id, &call)?.concurrency, 16);
+    let mut wider = lane(91, false);
+    wider.request.concurrency = 17;
+    assert!(matches!(
+        store.create(&wider, &call),
+        Err(RunError::Validation(_))
+    ));
+    Ok(())
+}
+
+#[test]
 fn a_recorded_start_only_moves_forward_unless_the_clock_stepped_back_a_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
