@@ -295,7 +295,13 @@ pub fn plan_tick_with_settings(
     let mut solo = Vec::new();
     for account in detections
         .iter()
-        .filter(|d| selected(&d.adapter) && d.status != QuotaStatus::AuthRequired)
+        .filter(|d| {
+            selected(&d.adapter)
+                // Skip probing on AuthRequired only when unambiguous (single account),
+                // so multi-account adapters still probe each account to learn its auth state.
+                && !(d.status == QuotaStatus::AuthRequired
+                    && d.accounts.as_ref().is_some_and(|a| a.len() == 1))
+        })
         .filter_map(|d| d.accounts.as_ref())
         .flatten()
     {
@@ -399,9 +405,12 @@ pub fn report(
         let age = record.snapshot.as_ref().map(|s| {
             u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
         });
-        let auth_required = detections
-            .iter()
-            .any(|d| d.adapter == record.account.adapter && d.status == QuotaStatus::AuthRequired);
+        let auth_required = record.last_error == Some(ProbeFailure::Auth)
+            || detections.iter().any(|d| {
+                d.adapter == record.account.adapter
+                    && d.status == QuotaStatus::AuthRequired
+                    && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
+            });
         let fresh = record.snapshot.as_ref().is_some_and(|s| {
             s.observed_unix_seconds <= now
                 && record.last_error.is_none()
@@ -415,7 +424,6 @@ pub fn report(
             _ if auth_required => QuotaStatus::AuthRequired,
             Some(snapshot) if fresh => snapshot.status,
             Some(_) => QuotaStatus::Stale,
-            None if record.last_error == Some(ProbeFailure::Auth) => QuotaStatus::AuthRequired,
             None if record.last_error == Some(ProbeFailure::Disabled) => QuotaStatus::Unsupported,
             None => QuotaStatus::Unknown,
         };
@@ -611,7 +619,7 @@ mod tests {
         .unwrap()
         .accounts
         .remove(0);
-        assert_eq!(row.status, QuotaStatus::Stale);
+        assert_eq!(row.status, QuotaStatus::AuthRequired);
         assert_eq!(row.error, Some(ProbeFailure::Auth));
         assert_eq!(row.snapshot.unwrap().observed_unix_seconds, 50);
         assert!(failed.check(Some(&r)).is_err());
@@ -1057,5 +1065,125 @@ mod transition_tests {
         assert!(rep.accounts[0].snapshot.is_some());
         assert_eq!(rep.coverage.known, 0);
         assert_eq!(rep.coverage.total, 1);
+    }
+    #[test]
+    fn multi_account_ambient_auth_required_keeps_fresh_rows_available_and_known() {
+        let first = account("claude", "first");
+        let second = account("claude", "second");
+        let mut r1 = AccountRecord::empty(first.clone());
+        r1.revision = 1;
+        r1.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: first.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let mut r2 = AccountRecord::empty(second.clone());
+        r2.revision = 1;
+        r2.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: second.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let detections = [Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![first.clone(), second.clone()]),
+            status: QuotaStatus::AuthRequired,
+        }];
+        let rep = report(
+            crate::source::TEST_POLICIES,
+            &[r1.clone(), r2.clone()],
+            &detections,
+            &QuotaQuery { adapter: None },
+            110,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 2);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::Available);
+        assert_eq!(rep.accounts[1].status, QuotaStatus::Available);
+        assert_eq!(rep.coverage.known, 2);
+        assert_eq!(rep.coverage.total, 2);
+
+        // Multi-account adapter with ambient AuthRequired is still batched for probing.
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Manual,
+            power: Power::Ac,
+        };
+        let plan = plan_tick(
+            crate::source::TEST_POLICIES,
+            &[r1, r2],
+            &detections,
+            &tick,
+            500,
+        )
+        .unwrap();
+        assert_eq!(plan.batches.len(), 1);
+        assert_eq!(plan.batches[0].len(), 2);
+    }
+    #[test]
+    fn multi_account_ambient_auth_required_marks_only_account_with_auth_error() {
+        let first = account("claude", "first");
+        let second = account("claude", "second");
+        let mut r1 = AccountRecord::empty(first.clone());
+        r1.revision = 1;
+        r1.last_error = Some(ProbeFailure::Auth);
+        r1.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: first.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let mut r2 = AccountRecord::empty(second.clone());
+        r2.revision = 1;
+        r2.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: second.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let detections = [Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![first.clone(), second.clone()]),
+            status: QuotaStatus::AuthRequired,
+        }];
+        let rep = report(
+            crate::source::TEST_POLICIES,
+            &[r1, r2],
+            &detections,
+            &QuotaQuery { adapter: None },
+            110,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 2);
+        assert_eq!(rep.accounts[0].account, first);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
+        assert_eq!(rep.accounts[1].account, second);
+        assert_eq!(rep.accounts[1].status, QuotaStatus::Available);
+        assert_eq!(rep.coverage.known, 1);
+        assert_eq!(rep.coverage.total, 2);
     }
 }
