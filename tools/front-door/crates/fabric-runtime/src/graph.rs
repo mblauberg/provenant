@@ -802,7 +802,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     for node_index in 0..plan.nodes.len() {
         if matches!(
             checkpoint.nodes[node_index].state,
-            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
+            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked | NodeState::NoVerdict
         ) {
             continue;
         }
@@ -820,7 +820,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
         if parent_states
             .iter()
-            .any(|state| matches!(state, NodeState::Failed | NodeState::Blocked))
+            .any(|state| matches!(state, NodeState::Failed | NodeState::Blocked | NodeState::NoVerdict))
         {
             checkpoint.nodes[node_index].state = NodeState::Blocked;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -925,7 +925,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attempt_ref,
                         outcome,
                         launched,
-                        result: _result,
+                        result,
                     } => {
                         attempt.launched = launched;
                         attempt.state = AttemptState::Terminal;
@@ -933,7 +933,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attempt.outcome = Some(outcome);
                         match outcome {
                             AttemptOutcome::Succeeded => {
-                                progress.state = NodeState::Succeeded;
+                                if is_review_node(node) && !has_verdict(result.as_deref()) {
+                                    progress.state = NodeState::NoVerdict;
+                                } else {
+                                    progress.state = NodeState::Succeeded;
+                                }
                                 false
                             }
                             AttemptOutcome::AuthRequired
@@ -979,7 +983,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let status = if checkpoint.nodes.iter().all(|node| {
         matches!(
             node.state,
-            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
+            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked | NodeState::NoVerdict
         )
     }) {
         GraphStatus::Complete
@@ -991,6 +995,119 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         checkpoint,
         advance_error: None,
     })
+}
+
+fn is_review_node(node: &PlannedNode) -> bool {
+    if let Some(explicit) = node.review {
+        return explicit;
+    }
+    let id_is_review = node.id == "review"
+        || node.id.starts_with("review-")
+        || node.id.starts_with("review_")
+        || node.id.ends_with("-review")
+        || node.id.ends_with("_review");
+    id_is_review && node.prompt.to_ascii_lowercase().contains("review")
+}
+
+fn is_valid_verdict_phrase(phrase: &str) -> bool {
+    let lower = phrase.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+    match words[0] {
+        "clean" | "approve" | "approved" | "pass" | "passed" | "fail" | "failed" | "reject"
+        | "rejected" | "block" | "blocked" => true,
+        "approve_with_nits" | "approve-with-nits" | "request_changes" | "request-changes" => true,
+        "request" if words.len() > 1 && words[1] == "changes" => true,
+        _ => false,
+    }
+}
+
+fn json_has_verdict(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(verdict)) = map.get("verdict") {
+                is_valid_verdict_phrase(verdict)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn has_verdict(result: Option<&str>) -> bool {
+    let Some(result) = result else {
+        return false;
+    };
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if json_has_verdict(&value) {
+            return true;
+        }
+    }
+
+    for line in trimmed.lines() {
+        let line = line.trim();
+        let clean = line
+            .trim_start_matches(|c: char| {
+                c == '#' || c == '*' || c == '-' || c == '>' || c == '`' || c.is_whitespace()
+            })
+            .trim();
+
+        if clean.eq_ignore_ascii_case("clean") {
+            return true;
+        }
+
+        if line.starts_with("[P0]")
+            || line.starts_with("[P1]")
+            || line.starts_with("[P2]")
+            || line.starts_with("[P3]")
+        {
+            return true;
+        }
+
+        let lower = clean.to_ascii_lowercase();
+        let rest = if let Some(rest) = lower.strip_prefix("verdict") {
+            Some(rest)
+        } else if let Some(rest) = lower.strip_prefix("review verdict") {
+            Some(rest)
+        } else {
+            None
+        };
+
+        if let Some(rest) = rest {
+            let rest = rest.trim_start_matches(|c: char| {
+                c == '*' || c == '_' || c == ':' || c == '-' || c.is_whitespace()
+            });
+            if is_valid_verdict_phrase(rest) {
+                return true;
+            }
+        }
+    }
+
+    if let Some(start) = trimmed.find("```json") {
+        let rest = &trimmed[start + 7..];
+        if let Some(end) = rest.find("```") {
+            let json_str = rest[..end].trim();
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if json_has_verdict(&value) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 pub(crate) fn validate_access(
