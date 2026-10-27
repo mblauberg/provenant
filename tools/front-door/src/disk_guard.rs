@@ -269,6 +269,11 @@ struct State {
     paused: Vec<Process>,
     warned_at: Option<i64>,
     paused_at: Option<i64>,
+    // What `lanes` shows while builds are held: free bytes last seen and the resume level.
+    #[serde(default)]
+    free: Option<u64>,
+    #[serde(default)]
+    resume_at: Option<u64>,
     gc_at: Option<i64>,
 }
 
@@ -304,7 +309,24 @@ fn check(
     let pause = size(&settings.pause)?;
     let resume_bytes = size(&settings.resume)?;
     let warn = size(&settings.warn)?;
+    if !state.paused.is_empty()
+        && free < resume_bytes
+        && (state.free != Some(free) || state.resume_at != Some(resume_bytes))
+    {
+        // Builds stay stopped until the resume level, so `lanes` needs the
+        // current figures on every tick, not only below the pause level. A
+        // failed save restores the old figures so the next tick retries it.
+        let previous = (state.free, state.resume_at);
+        state.free = Some(free);
+        state.resume_at = Some(resume_bytes);
+        if let Err(error) = save(state) {
+            (state.free, state.resume_at) = previous;
+            return Err(error);
+        }
+    }
     if free < pause {
+        state.free = Some(free);
+        state.resume_at = Some(resume_bytes);
         let processes = host.processes()?;
         let mut protected = std::collections::HashSet::from([host.pid()]);
         loop {
@@ -850,6 +872,67 @@ mod tests {
         assert!(load(&directory).unwrap().paused.is_empty());
     }
     #[test]
+    fn paused_state_follows_free_space_between_the_pause_and_resume_levels() {
+        let mut host = Fake {
+            free: 25 * GIB,
+            processes: vec![process(10, 501, "cargo")],
+            ..Fake::default()
+        };
+        let mut state = State::default();
+        tick(&mut host, &mut state, 0);
+        assert!(host.signals.is_empty());
+        host.free = 24 * GIB;
+        tick(&mut host, &mut state, 1);
+        assert_eq!(state.free, Some(24 * GIB));
+        host.free = 40 * GIB;
+        let mut saved = Vec::new();
+        check(
+            &DiskGuardSettings::default(),
+            &mut state,
+            120,
+            501,
+            &mut host,
+            &mut |state| {
+                saved.push(serde_json::to_vec(state)?);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(state.paused.len(), 1);
+        assert_eq!(state.free, Some(40 * GIB));
+        assert_eq!(state.resume_at, Some(50 * GIB));
+        let last: State = serde_json::from_slice(saved.last().expect("refresh saved")).unwrap();
+        assert_eq!(last.free, Some(40 * GIB));
+        assert_eq!(last.resume_at, Some(50 * GIB));
+        // A failed refresh save is retried on the next tick at the same free space.
+        host.free = 41 * GIB;
+        let refused = check(
+            &DiskGuardSettings::default(),
+            &mut state,
+            240,
+            501,
+            &mut host,
+            &mut |_| Err(io::Error::other("disk full")),
+        );
+        assert!(refused.is_err());
+        assert_eq!(state.free, Some(40 * GIB));
+        let mut saved = Vec::new();
+        check(
+            &DiskGuardSettings::default(),
+            &mut state,
+            360,
+            501,
+            &mut host,
+            &mut |state| {
+                saved.push(serde_json::to_vec(state)?);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let last: State = serde_json::from_slice(saved.last().expect("retry saved")).unwrap();
+        assert_eq!(last.free, Some(41 * GIB));
+    }
+    #[test]
     fn pauses_exact_names_for_this_user_and_resumes_only_at_resume_level() {
         let mut host = Fake {
             free: 25 * GIB,
@@ -882,6 +965,9 @@ mod tests {
             serde_json::from_slice::<State>(&saved[0]).unwrap().paused,
             [process(10, 501, "cargo")]
         );
+        let saved_state = serde_json::from_slice::<State>(&saved[0]).unwrap();
+        assert_eq!(saved_state.free, Some(25 * GIB - 1));
+        assert_eq!(saved_state.resume_at, Some(50 * GIB));
         state = serde_json::from_slice(saved.last().unwrap()).unwrap();
         host.free = 49 * GIB;
         tick(&mut host, &mut state, 120);
