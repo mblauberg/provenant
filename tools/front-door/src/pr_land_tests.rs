@@ -350,6 +350,34 @@ pub(crate) fn pr_land_keeps_a_branch_held_by_a_bisect() -> Result {
     Ok(())
 }
 
+pub(crate) fn pr_land_keeps_a_branch_held_in_a_checkout_that_went_away() -> Result {
+    // The paused rebase lives in the worktree's administrative directory, so
+    // losing the checkout directory does not release the branch.
+    let landing = landing()?;
+    let held = hold(&landing, "rebase")?;
+    fs::rename(&held, landing.rig.root.join("moved-away"))?;
+    let (status, detail) = race(&landing, &[])?;
+    assert_eq!(status, "refused", "{detail}");
+    assert!(detail.contains("rebased"), "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    Ok(())
+}
+
+pub(crate) fn pr_land_refuses_when_a_worktree_entry_cannot_be_read() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let landing = landing()?;
+    hold(&landing, "rebase")?;
+    let entry = landing.rig.project.join(".git/worktrees/held");
+    fs::set_permissions(&entry, fs::Permissions::from_mode(0o000))?;
+    let outcome = race(&landing, &[]);
+    fs::set_permissions(&entry, fs::Permissions::from_mode(0o755))?;
+    let (status, detail) = outcome?;
+    assert_eq!(status, "refused", "{detail}");
+    assert!(detail.contains("cannot read"), "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    Ok(())
+}
+
 /// A second worktree that has `feat` mid-`operation` on a detached HEAD, with
 /// the registered `feat` worktree dropped.
 fn hold(landing: &Landing, operation: &str) -> Result<PathBuf> {

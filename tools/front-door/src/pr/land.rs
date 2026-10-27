@@ -8,10 +8,7 @@ use provenant_core::GitOid;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::{fs, io, path::Path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,41 +89,95 @@ enum Use {
 /// The worktree using `branch` and how: checked out, or, on a detached HEAD,
 /// paused in a rebase of it or a bisect started from it. `git branch -d`
 /// refuses all three, but `git worktree list` reports only the first.
+///
+/// This reads Git's administrative directories as Git does: the main
+/// repository's and each `<common>/worktrees/<id>/`. A checkout that is
+/// missing, unmounted or unreadable still holds its branch there. A missing
+/// state file means not held; any other read error or an unparseable entry is
+/// an error, which refuses the deletion.
 fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
-    if let Some(path) = checkout_of(git, project, branch)? {
-        return Ok(Some((path, Use::CheckedOut)));
-    }
-    let Some(listing) = git.full(project, &["worktree", "list", "--porcelain"])? else {
-        return Err("cannot list worktrees".into());
+    let Some(common) = git.full(project, &["rev-parse", "--git-common-dir"])? else {
+        return Err("cannot find the common Git directory".into());
     };
-    let head = format!("refs/heads/{branch}");
-    for path in listing
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-    {
-        let dir = Path::new(path);
-        if !dir.is_dir() {
-            continue;
+    let common = project.join(common.trim_end_matches('\n'));
+    let mut entries = vec![common.clone()];
+    let linked = common.join("worktrees");
+    match fs::read_dir(&linked) {
+        Ok(listing) => {
+            for entry in listing {
+                let entry =
+                    entry.map_err(|error| format!("cannot read {}: {error}", linked.display()))?;
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    return Err(format!("unexpected entry {}", entry.path().display()).into());
+                }
+                entries.push(entry.path());
+            }
         }
-        let Some(git_dir) = git.full(dir, &["rev-parse", "--absolute-git-dir"])? else {
-            return Err(format!("cannot find the Git directory of {path}").into());
-        };
-        let git_dir = PathBuf::from(git_dir.trim_end_matches('\n'));
-        let names = |file: &str, wanted: &str| -> Result<bool> {
-            match fs::read_to_string(git_dir.join(file)) {
-                Ok(text) => Ok(text.trim() == wanted),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-                Err(error) => Err(format!("cannot read {file} of {path}: {error}").into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot read {}: {error}", linked.display()).into()),
+    }
+    let head = format!("refs/heads/{branch}");
+    for dir in entries {
+        let read = |file: &str| -> Result<Option<String>> {
+            match fs::read_to_string(dir.join(file)) {
+                Ok(text) => Ok(Some(text.trim().to_owned())),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => {
+                    Err(format!("cannot read {file} in {}: {error}", dir.display()).into())
+                }
             }
         };
-        if names("rebase-merge/head-name", &head)? || names("rebase-apply/head-name", &head)? {
-            return Ok(Some((path.to_owned(), Use::Rebased)));
-        }
-        if names("BISECT_START", branch)? {
-            return Ok(Some((path.to_owned(), Use::Bisected)));
+        let names = |file: &str, wanted: &str| -> Result<bool> {
+            Ok(read(file)?.as_deref() == Some(wanted))
+        };
+        let how = match read("HEAD")? {
+            Some(text)
+                if text
+                    .strip_prefix("ref: ")
+                    .is_some_and(|to| to.trim() == head) =>
+            {
+                Some(Use::CheckedOut)
+            }
+            Some(text)
+                if text.starts_with("ref: ")
+                    || (!text.is_empty() && text.chars().all(|c| c.is_ascii_hexdigit())) =>
+            {
+                None
+            }
+            Some(_) => return Err(format!("cannot parse HEAD in {}", dir.display()).into()),
+            None => None,
+        };
+        let how = if how.is_some() {
+            how
+        } else if names("rebase-merge/head-name", &head)? || names("rebase-apply/head-name", &head)?
+        {
+            Some(Use::Rebased)
+        } else if names("BISECT_START", branch)? {
+            Some(Use::Bisected)
+        } else {
+            None
+        };
+        if let Some(how) = how {
+            return Ok(Some((checkout_path(&dir, &common), how)));
         }
     }
     Ok(None)
+}
+
+/// The checkout that the administrative directory `dir` belongs to, or the
+/// directory itself when that cannot be told.
+fn checkout_path(dir: &Path, common: &Path) -> String {
+    let checkout = if dir == common {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        fs::read_to_string(dir.join("gitdir"))
+            .ok()
+            .and_then(|text| Path::new(text.trim()).parent().map(Path::to_path_buf))
+    };
+    checkout
+        .unwrap_or_else(|| dir.to_path_buf())
+        .display()
+        .to_string()
 }
 
 fn follow_up(
@@ -398,7 +449,17 @@ fn delete_branch(
     // is rebasing or is bisecting, but it deletes whatever the branch holds by
     // then. Keep that refusal here and make the deletion itself conditional on
     // the merged head.
-    if let Some((path, how)) = holder_of(git, project, branch)? {
+    let holder = match holder_of(git, project, branch) {
+        Ok(holder) => holder,
+        Err(error) => {
+            return Ok(Step::new(
+                "branch",
+                Status::Refused,
+                format!("{branch} is kept because its use could not be checked: {error}"),
+            ));
+        }
+    };
+    if let Some((path, how)) = holder {
         let how = match how {
             Use::CheckedOut => "checked out",
             Use::Rebased => "being rebased",

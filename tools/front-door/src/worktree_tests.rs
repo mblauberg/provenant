@@ -177,6 +177,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_deletes_an_unregistered_branch_only_at_the_merged_head",
             "pr_land_keeps_a_branch_held_by_a_paused_rebase",
             "pr_land_keeps_a_branch_held_by_a_bisect",
+            "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away",
+            "pr_land_refuses_when_a_worktree_entry_cannot_be_read",
             "pr_open_refuses_what_the_receipts_cannot_support",
         ],
         |name| {
@@ -266,6 +268,12 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "pr_land_keeps_a_branch_held_by_a_bisect" => {
                     crate::pr_land_tests::pr_land_keeps_a_branch_held_by_a_bisect()
+                }
+                "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away" => {
+                    crate::pr_land_tests::pr_land_keeps_a_branch_held_in_a_checkout_that_went_away()
+                }
+                "pr_land_refuses_when_a_worktree_entry_cannot_be_read" => {
+                    crate::pr_land_tests::pr_land_refuses_when_a_worktree_entry_cannot_be_read()
                 }
                 "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone" => {
                     crate::pr_land_tests::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone()
