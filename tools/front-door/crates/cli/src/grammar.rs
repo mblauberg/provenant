@@ -531,6 +531,8 @@ pub enum Part {
     Prompt,
     Stderr,
     Events,
+    /// The provider's own transcript, tailed in place
+    Transcript,
 }
 #[derive(Debug, Args)]
 pub struct Output {

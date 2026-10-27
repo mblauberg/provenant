@@ -2241,6 +2241,18 @@ fn render_lanes(
                         .unwrap_or_else(|| "unknown".into())
                 ));
             }
+            // A pointer to the provider's own transcript; never a copy.
+            let transcript = lane
+                .applied_route
+                .as_ref()
+                .and_then(|r| r.provider.as_deref())
+                .zip(lane.session.as_deref())
+                .map(|(adapter, session)| {
+                    let attempt = artifact(root, lane, "");
+                    let path = run::locate_transcript(&attempt, session, &lane.write_grants)
+                        .map(|path| attempt.join(path));
+                    json!({ "adapter": adapter, "session": session, "path": path })
+                });
             json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
@@ -2269,6 +2281,7 @@ fn render_lanes(
                 "delivery": lane.delivery,
                 "continuation": lane.continuation,
                 "result_path": result,
+                "transcript": transcript,
             })
         })
         .collect();
@@ -2927,6 +2940,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,
         Part::Stderr => run::ArtifactPart::Stderr,
+        Part::Transcript => run::ArtifactPart::Transcript,
         Part::Events => {
             // An attempt has a handful of revisions; offset is an event cursor.
             let events = session
@@ -2947,7 +2961,10 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
     let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
     if let Some(lines) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
-        chunk = session.service().output(id, part, range, &call)?;
+        // A short transcript's first page already includes the requested tail.
+        if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
+            chunk = session.service().output(id, part, range, &call)?;
+        }
         let text = &chunk.bytes;
         let body = text.strip_suffix(b"\n").unwrap_or(text);
         let start = body
@@ -5312,6 +5329,71 @@ mod tests {
         lane.protected_paths = vec![];
         let (_, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert!(human.contains("  review head=unknown paths=\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn render_lanes_points_at_the_provider_transcript() -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "transcript-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": {"provider":"claude","model":"claude/claude-sonnet-5"},
+            "session": "sess-1848",
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state": "terminal", "outcome": "rejected", "finished_at": now},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        let root = tempfile::tempdir()?;
+        let state = root.path().canonicalize()?;
+        let attempt = artifact(&state, &lane, "");
+        let transcript = attempt.join("provider-state/candidate-0/claude-config/projects/k");
+        std::fs::create_dir_all(&transcript)?;
+        std::fs::write(transcript.join("sess-1848.jsonl"), "{}\n")?;
+        let (data, _) = render_lanes(&[lane.clone()], &[], None, &state);
+        let found = &data["lanes"][0]["transcript"];
+        assert_eq!(found["adapter"], "claude");
+        assert_eq!(found["session"], "sess-1848");
+        assert_eq!(
+            found["path"],
+            transcript
+                .join("sess-1848.jsonl")
+                .to_string_lossy()
+                .as_ref()
+        );
+        // Read-only Claude records its selected account's exact state-write path.
+        let account = root.path().join("accounts/claude/projects/project-key");
+        std::fs::create_dir_all(&account)?;
+        let path = account.join("sess-1848.jsonl");
+        std::fs::write(&path, "{}\n")?;
+        lane.write_grants = vec![run::WriteGrantRecord {
+            source: run::WriteSource::StateWrite,
+            scope: run::PathScope::Exact,
+            path: provenant_records::AbsolutePath::new(&path)?,
+        }];
+        let other = tempfile::tempdir()?;
+        std::fs::create_dir_all(artifact(other.path(), &lane, ""))?;
+        let (data, _) = render_lanes(&[lane], &[], None, other.path());
+        assert_eq!(
+            data["lanes"][0]["transcript"]["path"],
+            path.to_string_lossy().as_ref()
+        );
         Ok(())
     }
 

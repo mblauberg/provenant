@@ -183,6 +183,7 @@ mod tests {
             lineage: vec![],
             reason: None,
             trace: Default::default(),
+            transcript: None,
         }
     }
     fn subject() -> Subject {

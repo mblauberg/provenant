@@ -17,7 +17,9 @@ mod service;
 #[cfg(test)]
 mod service_tests;
 mod store;
+mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
+pub use transcript::locate as locate_transcript;
 mod writer;
 
 pub use admission::{

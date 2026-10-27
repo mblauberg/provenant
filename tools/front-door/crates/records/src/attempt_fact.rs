@@ -72,6 +72,14 @@ pub struct OutputRef {
     pub digest: FileDigest,
 }
 
+/// Pointer to the provider's own transcript of an attempt. The transcript
+/// stays with the provider; only its identity is recorded here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TranscriptRef {
+    pub adapter: String,
+    pub session: String,
+}
+
 /// Immutable Serialize-only projection of one completed attempt. The run owner
 /// constructs it after validating the stored attempt; it has no Deserialize
 /// implementation.
@@ -102,4 +110,6 @@ pub struct AttemptFact {
     pub lineage: Vec<AttemptId>,
     pub reason: Option<String>,
     pub trace: Trace,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<TranscriptRef>,
 }

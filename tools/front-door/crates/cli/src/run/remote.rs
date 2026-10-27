@@ -1137,6 +1137,7 @@ fn read_output(
         Part::Stderr => OutputPart::Stderr,
         Part::Prompt => OutputPart::Prompt,
         Part::Events => OutputPart::Events,
+        Part::Transcript => return Err(unsupported("--part transcript")),
     };
     if command.tail.is_some() {
         return Err(unsupported("--tail"));

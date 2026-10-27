@@ -488,6 +488,49 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
 }
 
 #[test]
+fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    let run = store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let mut done = publication();
+    done.session = Some("sess-1848".into());
+    store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    let attempt = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let dir = attempt.join("provider-state/candidate-0/claude-config/projects/key");
+    std::fs::create_dir_all(&dir)?;
+    let secret = format!("ghp_{}", "a".repeat(36));
+    std::fs::write(
+        dir.join("sess-1848.jsonl"),
+        format!("{{\"n\":1}}\n{{\"token\":\"{secret}\"}}\n"),
+    )?;
+    let chunk = store.read_output(
+        id,
+        ArtifactPart::Transcript,
+        ByteRange::default(),
+        &context,
+        &call,
+    )?;
+    let text = String::from_utf8(chunk.bytes)?;
+    assert!(text.contains("\"n\":1"));
+    assert!(!text.contains(&secret));
+    let fact = store.attempt(id, &call)?;
+    let transcript = fact.transcript.ok_or("missing transcript locator")?;
+    assert_eq!(transcript.adapter, "fixture");
+    assert_eq!(transcript.session, "sess-1848");
+    Ok(())
+}
+
+#[test]
 fn created_attempt_and_event_carry_the_host_and_submitting_parent() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
