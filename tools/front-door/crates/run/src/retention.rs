@@ -1088,7 +1088,10 @@ mod tests {
         withdraw(&store, &input, &call)?;
 
         let events_before = store.events(0, 64, Some(id), &call)?;
-        assert!(!events_before.is_empty(), "seeded terminal attempt must record events");
+        assert!(
+            !events_before.is_empty(),
+            "seeded terminal attempt must record events"
+        );
 
         // Younger than logs_days (e.g. 29 days): events survive.
         sweep(&store, &context, 7, 30 * DAY_MICROS - 1, false, &call)?;
