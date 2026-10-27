@@ -2177,6 +2177,29 @@ mod lifecycle_tests {
             origin: WorktreeOrigin::Adopted,
             label: Some("manual".into()),
         };
+        let lane_owner = WorktreeOwner {
+            origin: WorktreeOrigin::Lane,
+            operation_id: Some("not-adopted".parse()?),
+            ..owner.clone()
+        };
+        assert!(matches!(
+            adopt(&context, &native, &lane_owner, &cancel()),
+            Err(WorktreeError::InvalidRequest)
+        ));
+        assert!(load_owner(&tree)?.is_none());
+        // A failed owner publication must not register custody identity.
+        let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
+        fs::create_dir(&owner_path)?;
+        assert!(adopt(&context, &native, &owner, &cancel()).is_err());
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&native))?;
+        assert!(
+            state
+                .read_bounded(OsStr::new(IDENTITY), MAX_STATE_RECORD)
+                .is_err_and(|error| error.is_not_found())
+        );
+        fs::remove_dir(owner_path)?;
         adopt(&context, &native, &owner, &cancel())?;
         assert_eq!(load_owner(&tree)?, Some(owner.clone()));
         assert_eq!(

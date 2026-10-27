@@ -161,6 +161,10 @@ pub fn adopt(
     owner: &WorktreeOwner,
     cancel: &CancelToken,
 ) -> Result<WorktreeInfo, WorktreeError> {
+    if owner.origin != WorktreeOrigin::Adopted {
+        return Err(WorktreeError::InvalidRequest);
+    }
+    validate(owner)?;
     validate_binding(context)?;
     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let worktree = verify_worktree(context.repo, path)?;
@@ -194,12 +198,12 @@ pub fn adopt(
     )?;
     ensure_unreserved(&state)?;
     worktree.repo().revalidate()?;
+    save_owner(&worktree, owner)?;
     write_identity(
         &state,
         &identity_for(context, &path, branch, worktree.identity()),
         PublishMode::Replace,
     )?;
-    save_owner(&worktree, owner)?;
     Ok(WorktreeInfo {
         path,
         branch: Some(branch.as_str().to_owned()),
