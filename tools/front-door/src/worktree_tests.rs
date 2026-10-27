@@ -2039,9 +2039,21 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     );
     let lease = acquire(Scope {
         run: provenant_core::RunId::from_bytes([33; 16]),
+        attempt: provenant_core::AttemptId::from_bytes([34; 16]),
         ..scope
     })?;
     lease.withdraw_unlaunched()?;
+    // The first run cannot return to the path by readmitting its attempt
+    // once another run has owned it.
+    assert!(
+        acquire(Scope {
+            generation: 2,
+            ..scope
+        })
+        .is_err_and(|error| error
+            .to_string()
+            .contains("writer reservation requires recovery"))
+    );
     drop(old_tree);
     Ok(())
 }
