@@ -1095,6 +1095,10 @@ mod tests {
         exchange_failure(result, false)
     }
     fn exchange_failure(result: Result<ExecOutcome, ExecError>, mutation: bool) -> PeerError {
+        let executor = Canned(Mutex::new(Some(result)));
+        exchange_error(&executor, mutation)
+    }
+    fn exchange_error(executor: &dyn Executor, mutation: bool) -> PeerError {
         let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let host = HostId::from_bytes([2; 16]);
@@ -1131,9 +1135,8 @@ mod tests {
             remote_executable: None,
             connect_timeout_seconds: 10,
         };
-        let executor = Canned(Mutex::new(Some(result)));
         let transport = SshTransport {
-            executor: &executor,
+            executor,
             clock: &clock,
             home: Path::new("/home/a"),
             cwd: Path::new("/home/a/repo"),
@@ -1188,6 +1191,67 @@ mod tests {
             } else {
                 assert!(matches!(error, PeerError::Failed(_)), "{error}");
             }
+        }
+    }
+
+    #[test]
+    fn legacy_agent_socket_decode_refusal_reports_protocol_one() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        // SSH's remote entrypoint forwards to the agent socket. The
+        // protocol-1 wire fixture reproduces the old relay dropping a child's
+        // decode refusal, then answering a legacy health request.
+        struct AgentSsh(Mutex<std::collections::VecDeque<UnixStream>>);
+        impl Executor for AgentSsh {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let mut stream = self.0.lock().unwrap().pop_front().unwrap();
+                stream.write_all(options.stdin.unwrap()).unwrap();
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                Ok(if bytes.is_empty() {
+                    outcome(
+                        3,
+                        "provenant: fabric peer: peer agent closed without a reply; see /home/a/peer-agent/agent.log\n",
+                        false,
+                    )
+                } else {
+                    let mut reply = outcome(0, "", false);
+                    reply.stdout.bytes = bytes;
+                    reply
+                })
+            }
+        }
+        for mutation in [false, true] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (probe, health) = UnixStream::pair().unwrap();
+            let server = std::thread::spawn(move || {
+                for mut stream in [server, health] {
+                    let mut bytes = Vec::new();
+                    stream.read_to_end(&mut bytes).unwrap();
+                    let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    if request.get("protocol").is_none() {
+                        assert_eq!(request["action"], serde_json::json!({"action":"health"}));
+                        let reply = serde_json::json!({
+                            "version":1, "host":request["target_host"],
+                            "project":request["project"]["key"],
+                            "result":{"result":"health","data":{
+                                "host":request["target_host"],"available":true,"execution":true,
+                            }},
+                        });
+                        stream
+                            .write_all(&serde_json::to_vec(&reply).unwrap())
+                            .unwrap();
+                    }
+                }
+            });
+            let error = exchange_error(&AgentSsh(Mutex::new([client, probe].into())), mutation);
+            assert!(
+                matches!(error, PeerError::ProtocolMismatch { remote: 1, .. }),
+                "{error}"
+            );
+            server.join().unwrap();
         }
     }
 
