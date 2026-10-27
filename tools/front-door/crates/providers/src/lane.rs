@@ -359,6 +359,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn publishing_setup_supports_every_writer_adapter() -> Result<(), ProviderError> {
+        let prompt = crate::Prompt::new("fixture".into());
+        let token = crate::tests::fixture_token();
+        for entry in crate::REGISTRY {
+            let id = entry.adapter.id();
+            let mut route = crate::tests::route(id, "fixture-model");
+            route.account_key = None;
+            let plan = crate::tests::fixture_access_plan(
+                crate::Access::WorktreeWrite,
+                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication), false,
+            );
+            let mut spec = entry.adapter.prepare(crate::tests::fixture_input(
+                &route, &plan, &prompt, Path::new("/fixture/repo"), (id == "claude").then_some(&token),
+            ))?;
+            let result = spec.configure_publishing(&plan.permissions().scratch.path, Path::new("/fixture/git"), Path::new("/fixture/gh"), "feat/lane");
+            assert!(result.is_ok(), "publishing setup for {id}: {result:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn writer_publishing_pushes_only_its_branch_and_redacts_credentials()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::{Access, Adapter, Prompt, codex::Codex};
