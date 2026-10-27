@@ -431,6 +431,7 @@ pub fn plist(home: &Path) -> PathBuf {
         .join(format!("{LABEL}.plist"))
 }
 
+/// Return stdout on success, or the termination cause and captured output on failure.
 pub fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError> {
     launchctl_with(args, home, &SystemExecutor::new(1)?)
 }
@@ -448,20 +449,36 @@ fn launchctl_with(
     ];
     let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
     options.env = Some(&env);
-    options.stdout = StreamPolicy::Discard;
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let outcome = executor.execute(options)?;
-    Ok((
-        outcome.termination == Termination::Exit(0) && !outcome.timed_out,
-        String::from_utf8_lossy(&outcome.stderr.bytes)
-            .trim()
-            .to_owned(),
-    ))
+    let ok = outcome.termination == Termination::Exit(0) && !outcome.timed_out;
+    let stdout = String::from_utf8_lossy(&outcome.stdout.bytes);
+    if ok {
+        return Ok((true, stdout.trim().to_owned()));
+    }
+    let mut detail = if outcome.timed_out {
+        "timed out after 10s".to_owned()
+    } else {
+        match outcome.termination {
+            Termination::Exit(code) => format!("exit {code}"),
+            Termination::Signal(signal) => format!("signal {signal}"),
+        }
+    };
+    let stderr = String::from_utf8_lossy(&outcome.stderr.bytes);
+    let output = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if !output.is_empty() {
+        detail.push_str(": ");
+        detail.push_str(output);
+    }
+    Ok((false, detail))
 }
 
 /// Start the receipt-owned plist after managed publication has succeeded.
-// LaunchAgent bootstrap retries are bounded real-time OS operations.
-#[allow(clippy::disallowed_methods)]
 fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError> {
     bootstrap_with(state, home, changed, launchctl)
 }
@@ -481,17 +498,44 @@ fn bootstrap_with(
     let plist = plist(home);
     let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
-    let loaded = run(&["print".as_ref(), service.as_ref()], home)?.0;
+    let (loaded, before) = run(&["print".as_ref(), service.as_ref()], home)?;
     if loaded && !changed {
+        let pid = |text: &str| {
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix("pid = ")?.parse::<u32>().ok())
+                .filter(|pid| *pid != 0)
+        };
+        let previous_pid = pid(&before);
         let (ok, error) = run(
             &["kickstart".as_ref(), "-k".as_ref(), service.as_ref()],
             home,
         )?;
-        return if ok {
-            Ok(())
-        } else {
-            Err(AgentError::Launchctl("kickstart", error))
-        };
+        // launchctl can report failure after actually restarting the agent.
+        // A running service with a different pid proves the restart happened.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let (printed, status) = run(&["print".as_ref(), service.as_ref()], home)?;
+            if printed
+                && status.lines().any(|line| line.trim() == "state = running")
+                && pid(&status).is_some_and(|current| Some(current) != previous_pid)
+            {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            std::thread::park_timeout(remaining.min(Duration::from_millis(300)));
+        }
+        let reason = "agent did not restart with a new running pid";
+        return Err(AgentError::Launchctl(
+            "kickstart",
+            if ok {
+                reason.into()
+            } else {
+                format!("{error}; {reason}")
+            },
+        ));
     }
     if loaded {
         run(&["bootout".as_ref(), service.as_ref()], home)?;
@@ -883,10 +927,19 @@ mod tests {
             (Termination::Signal(15), false, "signal 15"),
             (Termination::Signal(15), true, "timed out after 10s"),
         ] {
-            let runner = LaunchctlRunner { termination, timed_out, stdout: "", stderr: "" };
-            let (ok, detail) = launchctl_with(&["kickstart".as_ref()], Path::new("/"), &runner).unwrap();
+            let runner = LaunchctlRunner {
+                termination,
+                timed_out,
+                stdout: "",
+                stderr: "",
+            };
+            let (ok, detail) =
+                launchctl_with(&["kickstart".as_ref()], Path::new("/"), &runner).unwrap();
             assert!(!ok);
-            assert_eq!(AgentError::Launchctl("kickstart", detail).to_string(), format!("launchctl kickstart failed: {expected}"));
+            assert_eq!(
+                AgentError::Launchctl("kickstart", detail).to_string(),
+                format!("launchctl kickstart failed: {expected}")
+            );
         }
     }
 
@@ -894,11 +947,31 @@ mod tests {
     fn launchctl_captures_stdout_and_prefers_stderr_for_failures() {
         use super::*;
         for (termination, stdout, stderr, expected) in [
-            (Termination::Exit(0), "state = running\n pid = 42\n", "", "state = running\n pid = 42"),
-            (Termination::Exit(1), " stdout reason\n", "", "exit 1: stdout reason"),
-            (Termination::Exit(1), "stdout reason", " stderr reason\n", "exit 1: stderr reason"),
+            (
+                Termination::Exit(0),
+                "state = running\n pid = 42\n",
+                "",
+                "state = running\n pid = 42",
+            ),
+            (
+                Termination::Exit(1),
+                " stdout reason\n",
+                "",
+                "exit 1: stdout reason",
+            ),
+            (
+                Termination::Exit(1),
+                "stdout reason",
+                " stderr reason\n",
+                "exit 1: stderr reason",
+            ),
         ] {
-            let runner = LaunchctlRunner { termination, timed_out: false, stdout, stderr };
+            let runner = LaunchctlRunner {
+                termination,
+                timed_out: false,
+                stdout,
+                stderr,
+            };
             let (_, detail) = launchctl_with(&["print".as_ref()], Path::new("/"), &runner).unwrap();
             assert_eq!(detail, expected);
         }
@@ -915,14 +988,47 @@ mod tests {
             (true, "state = running\n pid = 41"),
             (true, "state = waiting\n pid = 42"),
             (true, "state = running\n pid = 42"),
-        ].into_iter();
+        ]
+        .into_iter();
         bootstrap_with(root.path(), root.path(), false, |args, _| {
             calls.push(args[0].to_owned());
             let (ok, detail) = replies.next().expect("unexpected launchctl call");
             Ok((ok, detail.into()))
-        }).unwrap();
+        })
+        .unwrap();
         assert!(replies.next().is_none());
-        assert_eq!(calls, ["print", "kickstart", "print", "print", "print"].map(OsString::from));
+        assert_eq!(
+            calls,
+            ["print", "kickstart", "print", "print", "print"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn kickstart_requires_a_new_running_pid_even_when_the_command_succeeds() {
+        use super::*;
+        for kickstart_ok in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut prints = 0;
+            let error = bootstrap_with(root.path(), root.path(), false, |args, _| {
+                if args[0] == OsStr::new("kickstart") {
+                    assert_eq!(args[1], OsStr::new("-k"));
+                    return Ok((kickstart_ok, "exit 113".into()));
+                }
+                assert_eq!(args[0], OsStr::new("print"));
+                prints += 1;
+                let status = match prints {
+                    2 => "state = running", // No pid is not proof of a restart.
+                    3 => "state = running\n pid = 0",
+                    4 => "state = waiting\n pid = 42",
+                    _ => "state = running\n pid = 41",
+                };
+                Ok((true, status.into()))
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("agent did not restart with a new running pid"));
+            assert_eq!(error.contains("exit 113"), !kickstart_ok);
+        }
     }
 
     /// A stand-in for the worktree owner's registry entry name.
