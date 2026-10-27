@@ -44,6 +44,7 @@ running in parallel; a read that overruns leaves its section unavailable.
 
 ```text
 <!-- provenant:session-state:begin -->
+Block-digest: <SHA-256 of the lines below, up to the end marker>
 ## Provenant session state
 Chair-saved-unix: 1761500000
 Auto-saved: 2026-10-27T03:00:00Z
@@ -51,7 +52,10 @@ Auto-saved: 2026-10-27T03:00:00Z
 <!-- provenant:session-state:end -->
 ```
 
-- Only that block is replaced. Everything outside the markers, including every
+- Only that block is replaced, and only when its digest verifies: marker lines
+  in the chair's own text, or a block whose content was edited, carry no valid
+  digest, stay untouched, and a fresh block is appended after them. Everything
+  outside the verified block, including every
   authority reference the chair wrote, is kept as written.
 - A `workflow session save` replaces the whole file, block included; the next
   autosave adds a fresh block. `Chair-saved-unix` records when the chair last

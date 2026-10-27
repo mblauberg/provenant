@@ -152,6 +152,7 @@ write.
   or hide that the chair has not saved notes.
 - Test: `crates/workflow/src/session/state.rs::splice_preserves_chair_text_and_replaces_only_the_block`;
   `::unmatched_markers_never_swallow_chair_text`;
+  `::marker_look_alikes_in_chair_text_are_never_replaced`;
   `::autosave_refuses_to_trim_chair_text_and_keeps_the_first_save_time`;
   `crates/workflow/src/session.rs::update_edits_under_the_checkpoint_lock_and_creates_only_when_asked`;
   `tests/hooks_session.rs::pre_compact_keeps_the_chair_text_and_replaces_only_its_own_block`;
