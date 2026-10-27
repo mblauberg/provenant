@@ -194,6 +194,7 @@ fn execute(
                             name,
                             discard: args.discard,
                             integration: args.integration,
+                            expected_head: None,
                         }
                     } else {
                         WorktreeRemove::Merged {
@@ -539,6 +540,7 @@ pub(crate) fn land_cleanup(
                     name: branch.to_owned(),
                     discard: false,
                     integration: Some(integration.to_owned()),
+                    expected_head: Some(tip),
                 },
                 cancel,
             ) {
