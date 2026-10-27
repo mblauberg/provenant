@@ -350,6 +350,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_discovery_exec_is_exact_in_both_access_modes() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let spec = prepare(
+                &input,
+                access,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap(),
+            )
+            .unwrap();
+            for path in [std::path::Path::new("/usr/bin/git"), input.provenant.git] {
+                assert!(
+                    spec.profile.spec.tool_exec_roots.contains(&exact(path)),
+                    "{access:?} lacks exact Git exec grant for {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
     /// A literal on the home's `.claude` or `.codex` would list their entries.
     #[test]
     fn seatbelt_profile_for_a_project_under_home_lists_no_home_probes() {
