@@ -5487,3 +5487,49 @@ fn lane_waits_name_a_disk_guard_pause_for_running_lanes() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn disk_guard_wait_shows_a_pause_without_figures() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(120, true), &call)?;
+    let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
+    let records = [running];
+    let guard = store.writer_registry().join("disk-guard");
+    std::fs::create_dir_all(&guard)?;
+    std::fs::write(
+        guard.join("paused.json"),
+        r#"{"paused":[{"pid":42,"uid":501,"name":"cargo","started":"x"}]}"#,
+    )?;
+    let waits = store.lane_waits(&records, &call);
+    assert_eq!(
+        waits.first().map(|w| w.waiting_for.as_str()),
+        Some("disk guard paused builds")
+    );
+    Ok(())
+}
+
+#[test]
+fn disk_guard_wait_ignores_a_symlinked_or_oversized_marker() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(120, true), &call)?;
+    let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
+    let records = [running];
+    let guard = store.writer_registry().join("disk-guard");
+    std::fs::create_dir_all(&guard)?;
+    let body = r#"{"paused":[{"pid":42,"uid":501,"name":"cargo","started":"x"}],"free":1073741824,"resume_at":2147483648}"#;
+    let elsewhere = temp.path().join("elsewhere.json");
+    std::fs::write(&elsewhere, body)?;
+    std::os::unix::fs::symlink(&elsewhere, guard.join("paused.json"))?;
+    assert!(store.lane_waits(&records, &call).is_empty());
+    std::fs::remove_file(guard.join("paused.json"))?;
+    let padding = " ".repeat(usize::try_from(RECORD_LIMIT)? + 1);
+    std::fs::write(guard.join("paused.json"), format!("{body}{padding}"))?;
+    assert!(store.lane_waits(&records, &call).is_empty());
+    Ok(())
+}

@@ -857,6 +857,40 @@ mod tests {
         assert!(load(&directory).unwrap().paused.is_empty());
     }
     #[test]
+    fn paused_state_follows_free_space_between_the_pause_and_resume_levels() {
+        let mut host = Fake {
+            free: 25 * GIB,
+            processes: vec![process(10, 501, "cargo")],
+            ..Fake::default()
+        };
+        let mut state = State::default();
+        tick(&mut host, &mut state, 0);
+        assert!(host.signals.is_empty());
+        host.free = 24 * GIB;
+        tick(&mut host, &mut state, 1);
+        assert_eq!(state.free, Some(24 * GIB));
+        host.free = 40 * GIB;
+        let mut saved = Vec::new();
+        check(
+            &DiskGuardSettings::default(),
+            &mut state,
+            120,
+            501,
+            &mut host,
+            &mut |state| {
+                saved.push(serde_json::to_vec(state)?);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(state.paused.len(), 1);
+        assert_eq!(state.free, Some(40 * GIB));
+        assert_eq!(state.resume_at, Some(50 * GIB));
+        let last: State = serde_json::from_slice(saved.last().expect("refresh saved")).unwrap();
+        assert_eq!(last.free, Some(40 * GIB));
+        assert_eq!(last.resume_at, Some(50 * GIB));
+    }
+    #[test]
     fn pauses_exact_names_for_this_user_and_resumes_only_at_resume_level() {
         let mut host = Fake {
             free: 25 * GIB,
