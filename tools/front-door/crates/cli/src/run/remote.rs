@@ -1748,6 +1748,36 @@ mod tests {
     }
 
     #[test]
+    fn an_armed_peer_wait_reports_the_last_failed_read() -> Result {
+        let first = running(1);
+        let mut calls = 0;
+        let out = watch::wait(
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(vec![first.clone()])
+                } else {
+                    Err(unavailable("workshop: ssh timed out"))
+                }
+            },
+            Scope {
+                exact: BTreeSet::new(),
+                since: None,
+                entered: WallTime::from_micros(1)?,
+                explicit: false,
+                snapshot: false,
+            },
+            Condition::All,
+            Duration::from_millis(30),
+            Duration::from_millis(1),
+        );
+        let fail = out.err().expect("the final peer read failed");
+        assert_eq!(fail.kind.code(), "PEER_UNAVAILABLE");
+        assert!(fail.message.contains("ssh timed out"));
+        Ok(())
+    }
+
+    #[test]
     fn a_peer_call_is_capped_by_the_time_left_and_the_peer_limit() {
         let secs = Duration::from_secs;
         assert_eq!(call_seconds(secs(1), 30), 1);
