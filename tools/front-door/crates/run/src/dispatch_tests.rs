@@ -4876,6 +4876,90 @@ fn reconcile_retries_reboot_release_for_a_reader() -> TestResult {
     recover_rebooted_writer(false, true, false, NEW_BOOT)
 }
 
+#[test]
+fn cancel_settles_a_placed_writer_whose_reservation_is_gone() -> TestResult {
+    placed_writer_without_reservation(true)
+}
+
+#[test]
+fn reconcile_settles_a_placed_writer_whose_reservation_is_gone() -> TestResult {
+    placed_writer_without_reservation(false)
+}
+
+fn placed_writer_without_reservation(cancel_run: bool) -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    let worktree = temp.path().join("lane");
+    std::fs::create_dir(&worktree)?;
+    run.request.tasks[0].writer = Some(WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store
+        .claim(id, &at_micros(100), &call)?
+        .ok_or("not admitted")?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let custody = store
+        .writer_registry
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&custody)?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&custody)?,
+        scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let summary =
+        serde_json::json!({"schema_version":1, "scope":scope, "requester":context.actor_id});
+    artifacts::seal(
+        &attempt,
+        "launch.json",
+        &serde_json::to_vec(&summary)?,
+        RECORD_LIMIT,
+    )?;
+    // The slot keeps writer.lock but its reservation is gone, and no guardian lives.
+    std::fs::remove_file(custody.join("reservation.json"))?;
+    if cancel_run {
+        assert_eq!(
+            store.cancel(id, "stop", &call)?,
+            CancelReceipt::AlreadyTerminal
+        );
+    } else {
+        assert_eq!(
+            store.reconcile(run.run_id, &Fake::default(), &call)?,
+            vec![(id, Reconciled::Finished)]
+        );
+    }
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    let AttemptState::Terminal { reason, .. } = store.record(id, &call)?.state else {
+        return Err("not terminal".into());
+    };
+    assert!(reason.unwrap_or_default().contains("reservation"));
+    assert!(store.open_runs(10, &call)?.is_empty());
+    Ok(())
+}
+
 const OLD_BOOT: &str = "darwin:00000000-0000-0000-0000-000000000000";
 const NEW_BOOT: &str = "darwin:11111111-1111-1111-1111-111111111111";
 
