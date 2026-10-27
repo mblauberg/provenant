@@ -1556,6 +1556,56 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
 }
 
 #[test]
+fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), ProviderError> {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let prompt = Prompt::new("fixture prompt".into());
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let token = fixture_token();
+    let reader = fixture_access_plan(Access::ReadOnly, None, false);
+    let mut permissions = reader.permissions().clone();
+    for path in ["/fixture/diffs", "/fixture/repo/crates/sub"] {
+        permissions.read_roots.push(PathGrant {
+            path: path.into(),
+            scope: PathScope::Subtree,
+        });
+    }
+    let plan = ConfinedPlan::new(PlanRequest {
+        scope: reader.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture read-only plan");
+    let spec = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo/crates"),
+        Some(&token),
+    ))?;
+    let added: Vec<_> = spec
+        .argv
+        .windows(2)
+        .filter(|pair| pair[0] == "--add-dir")
+        .map(|pair| pair[1].clone())
+        .collect();
+    // The fixture's own /fixture/repo root holds the working directory but
+    // reaches beyond it, so it needs a flag; /fixture/repo/crates/sub sits
+    // inside the working directory, so it does not.
+    assert_eq!(
+        added,
+        [
+            OsString::from("/fixture/repo"),
+            OsString::from("/fixture/diffs")
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("cursor", "fixture-model");

@@ -550,6 +550,16 @@ fn prepare(
         // The following MCP flags terminate --add-dir's variadic paths.
         add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
     }
+    if access == Access::ReadOnly {
+        // dontAsk mode refuses reads outside the working directory and its
+        // added directories, even where the seatbelt profile would allow them.
+        // A root that holds the working directory still reaches beyond it.
+        for root in &plan.read_roots {
+            if !root.path.starts_with(input.cwd) {
+                argv.extend(["--add-dir".into(), root.path.as_os_str().to_owned()]);
+            }
+        }
+    }
 
     let config_dir = input.account.map_or_else(
         || input.home.join(".claude"),
