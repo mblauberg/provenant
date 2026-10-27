@@ -58,10 +58,11 @@ has.
 `lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run
 concurrency, the class's remaining startup spacing, or otherwise host
-capacity. It reads the store and ledger without locking and names only a wait
-it can see. `lanes --host` and the other peer listings show the same two fields:
-the peer derives them from its own store and ledger (peer action `lane_waits`)
-and an older peer that does not know the action simply shows none.
+capacity. It reads the store and the host's ledger without locking, from a nested
+lane too, and names only a wait it can see. `lanes --host` and the other peer
+listings show the same two fields: the peer derives them from its own store and
+ledger (peer action `lane_waits`) and an older peer that does not know the
+action simply shows none.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
@@ -75,6 +76,8 @@ and an older peer that does not know the action simply shows none.
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
+  `::a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_root`;
+  `crates/cli/src/run.rs::a_nested_lane_reads_the_host_ledger_when_it_opens_read_only`;
   `crates/cli/src/run/remote.rs::a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones`;
   `tests/fabric_transport.rs::run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates`;
   `crates/fabric-runtime/src/coordination/input.rs::concurrency_above_the_task_count_is_accepted_up_to_sixteen`;

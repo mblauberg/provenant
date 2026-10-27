@@ -164,6 +164,11 @@ impl RunStore {
         self.writer_registry = state.to_owned();
         self
     }
+    /// The host state root whose admission ledger and registrations this store
+    /// reads, which is not its own directory inside a nested lane.
+    pub fn writer_registry(&self) -> &std::path::Path {
+        &self.writer_registry
+    }
     /// Opens an existing, initialised store without changing durable state.
     /// SQLite may create or update WAL/shared-memory companions.
     /// A missing store or schema is an empty read; unsupported versions fail.

@@ -2519,6 +2519,61 @@ fn the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen() -> Tes
 }
 
 #[test]
+fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_root() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let host = context(temp.path())?;
+    // A nested lane's store is a child directory with no ledger of its own.
+    let mut inputs =
+        provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+    inputs.state_dir = Some(host.state_root.as_path().join("children").join("lane"));
+    let nested = ExecutionContext {
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        ..host.clone()
+    };
+    let mut writable =
+        RunStore::open(&nested, &call)?.with_writer_registry(host.state_root.as_path());
+    writable.set_admission_policy(AdmissionPolicy {
+        read_only_spacing_ms: 600_000,
+        ..AdmissionPolicy::default()
+    });
+    let (first, second) = (lane(110, false), lane(111, false));
+    let first_id = starting(&writable, &first, &call)?;
+    let second_id = starting(&writable, &second, &call)?;
+    let attempt = writable.attempt_dir(first.run_id, first_id, false)?;
+    writable.admit(
+        first_id,
+        &attempt,
+        &Host { available: 100 },
+        &clock,
+        &cancel,
+    )?;
+    let waiting = writable.record(second_id, &call)?;
+    let waits = |registry: Option<&std::path::Path>| -> Result<String> {
+        let reader = RunStore::open_read_only(&nested, &call)?.ok_or(RunError::NotFound)?;
+        let reader = match registry {
+            Some(host) => reader.with_writer_registry(host),
+            None => reader,
+        };
+        let waits = reader.lane_waits(std::slice::from_ref(&waiting), &call);
+        Ok(waits
+            .first()
+            .map(|w| w.waiting_for.clone())
+            .unwrap_or_default())
+    };
+    assert!(
+        waits(Some(host.state_root.as_path()))?.starts_with("read-only startup spacing: "),
+        "the host root shows the class's spacing wait"
+    );
+    assert!(
+        waits(None)?.starts_with("host capacity"),
+        "the child directory has no ledger, so the wait goes unseen"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_recorded_start_only_moves_forward_unless_the_clock_stepped_back_a_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

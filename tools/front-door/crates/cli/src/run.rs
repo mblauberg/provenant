@@ -555,8 +555,20 @@ fn open_read_only(
     call: &run::Request<'_>,
 ) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
     let context = execution_context(edge)?;
-    let store = run::RunStore::open_read_only(&context, call)?;
+    let store = read_only_store(&context, edge.roots.state.as_path(), call)?;
     Ok((context, store))
+}
+/// The read-only open of `context`'s store. Like the writable open, it reads
+/// the host admission ledger from the host state root: in a nested lane
+/// the store is a child directory with no ledger of its own, and without the
+/// host root `lanes` reads no spacing and calls every spacing wait host capacity.
+fn read_only_store(
+    context: &run::ExecutionContext,
+    host_state: &Path,
+    call: &run::Request<'_>,
+) -> Result<Option<run::RunStore>, Fail> {
+    Ok(run::RunStore::open_read_only(context, call)?
+        .map(|store| store.with_writer_registry(host_state)))
 }
 fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
@@ -3437,6 +3449,33 @@ mod tests {
             read_prompts: true,
         };
         Ok(run::RunStore::open(&context, call)?)
+    }
+
+    #[test]
+    fn a_nested_lane_reads_the_host_ledger_when_it_opens_read_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let host = root.join("state");
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(host.join("children").join("lane"));
+        let context = run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        // The store must exist to be opened; the writable open creates it.
+        run::RunStore::open(&context, &call)?;
+        let store = read_only_store(&context, &host, &call)
+            .map_err(|f| f.message)?
+            .ok_or("nested store")?;
+        assert_eq!(store.writer_registry(), host);
+        assert_ne!(store.writer_registry(), context.state_root.as_path());
+        Ok(())
     }
 
     #[test]
