@@ -4,7 +4,10 @@ use crate::launch::{
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
+use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+use provenant_os::fs::{Directory, LockMode};
 use provenant_records::CanonicalV1;
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -222,7 +225,9 @@ fn parse_stored_token(bytes: &[u8], now_ms: u64) -> Result<OauthToken, ProviderE
 /// then reads again and accepts a token with at least a minute left. The
 /// refresh runs with every customisation off (safe mode, no hooks, no MCP
 /// servers, no slash commands, no session file) in the executor's private
-/// working directory. Every subprocess is capped by the caller's `deadline_ms` on the
+/// working directory. Host callers share an exclusive config-directory lock
+/// across a second read, refresh and reread, so only one CLI can rotate its token.
+/// Every subprocess is capped by the caller's `deadline_ms` on the
 /// `now_ms` clock. The token is never logged, printed or persisted.
 pub fn refresh_if_expiring(
     executor: &dyn Executor,
@@ -328,6 +333,33 @@ pub fn refresh_if_expiring(
         Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
         // An expired token was read successfully, so refreshing is safe: no
         // running lane can still be using it. Read failures never refresh.
+        Ok(_) | Err(ProviderError::CredentialExpired) => {}
+        Err(error) => return Err(error),
+    }
+    // Stable inode, never removed: reread storage under this cross-process
+    // lock in case another caller already refreshed the token.
+    let clock = SystemClock::new();
+    // A future deadline preserves sub-second waits despite WaitBudget's
+    // one-second minimum for its duration constructor.
+    let wait_micros = budget(Duration::from_secs(60))?.as_micros() as u64;
+    let deadline = clock
+        .mono_now()
+        .checked_add(DurationMicros::from_micros(wait_micros))
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    let wait = WaitBudget::nonblocking(deadline);
+    let directory = Directory::open_anchor(login.config_dir)
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    let _refresh_lock = directory
+        .lock(
+            OsStr::new("provenant-oauth-refresh.lock"),
+            LockMode::Exclusive,
+            wait,
+            &CancelToken::new(),
+            &clock,
+        )
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    match read() {
+        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
         Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
     }

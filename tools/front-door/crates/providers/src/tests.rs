@@ -2336,6 +2336,132 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
 }
 
 #[test]
+fn claude_fresh_token_does_not_create_refresh_lock() {
+    use crate::claude::{Login, refresh_if_expiring};
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude");
+    let now = 1_000_000_000_u64;
+    let item = format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"fixture-access","refreshToken":"fixture-refresh","expiresAt":{}}}}}"#,
+        now + 3_600_000
+    );
+    let script = FileCredentialScript::new(
+        &config,
+        KeychainScript {
+            items: std::sync::Mutex::new(vec![item.into_bytes()].into()),
+            statuses: Default::default(),
+            calls: Default::default(),
+        },
+    );
+    let login = Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+    refresh_if_expiring(&script, &login, &|| now, now + 60_000, None).expect("fresh token");
+    assert!(!config.join("provenant-oauth-refresh.lock").exists());
+}
+
+#[test]
+fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
+    use crate::claude::{
+        CredentialAuthority, Login, refresh_for_account_authorised, refresh_if_expiring,
+    };
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
+    use std::sync::{Condvar, Mutex, mpsc};
+    use std::time::Duration;
+
+    // Model the CLI reading a single-use refresh token before exchanging it.
+    // Overlapping exchanges revoke that token; a later reader sees the renewal.
+    struct RotatingCli {
+        script: FileCredentialScript,
+        exchanges: Mutex<usize>,
+        overlap: Condvar,
+        entered: mpsc::Sender<()>,
+    }
+    impl Executor for RotatingCli {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            if options.argv.get(1).is_some_and(|arg| arg == "-p") {
+                let mut exchanges = self.exchanges.lock().unwrap();
+                *exchanges += 1;
+                self.entered.send(()).unwrap();
+                if *exchanges > 1 {
+                    self.overlap.notify_all();
+                    return Err(ExecError::Busy); // OAuth token revoked.
+                }
+                let _wait = self
+                    .overlap
+                    .wait_timeout_while(exchanges, Duration::from_secs(1), |count| *count == 1)
+                    .unwrap();
+            }
+            self.script.execute(options)
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude");
+    let now = 1_000_000_000_u64;
+    let item = |access, refresh, expires| {
+        format!(r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":{expires}}}}}"#).into_bytes()
+    };
+    let (entered, started) = mpsc::channel();
+    let executor = RotatingCli {
+        script: FileCredentialScript::new(
+            &config,
+            KeychainScript {
+                items: Mutex::new(
+                    vec![
+                        item("fixture-old", "fixture-single-use", now + 1000),
+                        item("fixture-renewed", "fixture-rotated", now + 3_600_000),
+                    ]
+                    .into(),
+                ),
+                statuses: Mutex::new(
+                    vec![br#"{"loggedIn":true,"email":"fixture@example.test"}"#.to_vec(); 2].into(),
+                ),
+                calls: Default::default(),
+            },
+        ),
+        exchanges: Mutex::new(0),
+        overlap: Condvar::new(),
+        entered,
+    };
+    let login = Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+    let key = crate::identity::fingerprint("fixture@example.test").unwrap();
+    let account = crate::identity::RegisteredAccount::new("claude", &key, config.clone()).unwrap();
+    let authority =
+        CredentialAuthority::for_dispatch("fixture".into(), &login, now + 60_000).unwrap();
+    std::thread::scope(|scope| {
+        // Quota refresh and an authorised dispatch share the same account store.
+        let quota =
+            scope.spawn(|| refresh_if_expiring(&executor, &login, &|| now, now + 60_000, None));
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let dispatch = refresh_for_account_authorised(
+            &executor,
+            &login,
+            &account,
+            &|| now,
+            now + 60_000,
+            &authority,
+        );
+        quota.join().unwrap().expect("quota refresh succeeds");
+        dispatch.expect("concurrent dispatch must not reuse the rotated refresh token");
+    });
+    assert_eq!(
+        *executor.exchanges.lock().unwrap(),
+        1,
+        "only one exchange may consume the refresh token"
+    );
+}
+
+#[test]
 fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token() {
     use crate::claude::{Login, refresh_if_expiring};
     let now = 1_000_000_000_u64;

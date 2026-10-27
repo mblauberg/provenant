@@ -127,11 +127,16 @@ as a non-fatal note. Denials do not override an earlier failure.
 The sandbox never refreshes or writes the keychain. The host refreshes a
 token with under 15 minutes left, using one unconfined CLI run with every
 customisation off, in a fresh private directory removed afterwards, and
-never copies credentials between identities. Shell-capable Claude lanes
-scrub child environments and deny keychain reads. Claude still holds the
+never copies credentials between identities. Host launches and quota refreshes
+serialise the credential read, refresh and reread under one exclusive account
+config-directory lock, bounded by the caller's deadline and a 60-second cap.
+Shell-capable Claude lanes receive only the access token through a pipe,
+use an empty private config directory, scrub child environments and deny
+keychain reads. Claude still holds the
 token and has outbound HTTPS, so isolation is incomplete.
 - Why: credential writes belong to the user's own sign-in flow.
 - Test: `crates/providers/src/tests.rs::claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token`;
+  `::claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token`;
   `::claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools`
 - Owner: `crates/providers/src/claude.rs`, `crates/providers/src/host.rs`
 
