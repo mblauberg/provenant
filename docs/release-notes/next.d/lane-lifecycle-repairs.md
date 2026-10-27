@@ -9,3 +9,5 @@
   legacy flags and manifests. PRs may still target protected base branches.
 - Recreate deleted graph publication refs on retry when the sealed marker
   matches the same head. Conflicting markers and refs still refuse.
+- Preserve accepted dispatch replay when later repository state protects the
+  publication branch; new admission and actual delivery still check protection.

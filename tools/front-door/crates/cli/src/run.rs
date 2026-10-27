@@ -1104,13 +1104,6 @@ fn dispatch_inner(
                 "--worktree-branch requires a host worktree-write dispatch",
             ));
         }
-        if let Some(mode) = &command.deliver {
-            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), branch)? {
-                validate_delivery_target(edge.cwd, &delivery.branch)?;
-            }
-        } else if let Some(target) = &command.deliver_branch {
-            validate_delivery_target(edge.cwd, target)?;
-        }
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         // Initialise the state before entering the shared confinement context.
@@ -1118,6 +1111,13 @@ fn dispatch_inner(
         let session = open(edge, &call)?;
         if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call)? {
             return Ok(replayed);
+        }
+        if let Some(mode) = &command.deliver {
+            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), branch)? {
+                validate_delivery_target(edge.cwd, &delivery.branch)?;
+            }
+        } else if let Some(target) = &command.deliver_branch {
+            validate_delivery_target(edge.cwd, target)?;
         }
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
@@ -1435,9 +1435,18 @@ fn dispatch_inner(
             command.wait,
         );
     }
-    for (_, _, _, _, _, _, delivery, _) in &tasks {
-        if let Some(delivery) = delivery {
-            validate_delivery_target(edge.cwd, &delivery.branch)?;
+    let session = open(edge, &call)?;
+    // Protection governs new admission. Service::dispatch still compares the
+    // immutable inputs when an existing operation is replayed.
+    if session
+        .store
+        .operation(&command.operation_id, &call)?
+        .is_none()
+    {
+        for (_, _, _, _, _, _, delivery, _) in &tasks {
+            if let Some(delivery) = delivery {
+                validate_delivery_target(edge.cwd, &delivery.branch)?;
+            }
         }
     }
     let tasks = tasks
@@ -1458,7 +1467,6 @@ fn dispatch_inner(
             },
         )
         .collect();
-    let session = open(edge, &call)?;
     let (record, started) = submit(
         &session,
         edge,

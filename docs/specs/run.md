@@ -328,6 +328,9 @@ head branch is subject to the same protection.
 Dispatch checks publication targets before admission for concise modes,
 legacy flags and manifests, so a refused target leaves no admitted run.
 Destinations supplied in flags are also checked before creating an owned tree.
+Accepted operations compare and replay their immutable inputs before checking
+current branch protection; later protection changes do not invalidate replay.
+Actual delivery still rechecks protection.
 
 Integration serialises by destination using a stable lock in the common Git
 directory. It fast-forwards when possible, otherwise uses `merge-tree` and

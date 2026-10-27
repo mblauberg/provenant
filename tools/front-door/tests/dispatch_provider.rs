@@ -1039,6 +1039,8 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
         "fixture/owned",
         "--base",
         "main",
+        "--deliver",
+        "push",
         "--prompt-file",
         prompt.to_str().ok_or("prompt")?,
         "--json",
@@ -1054,13 +1056,75 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
     );
     let path = data["worktree"]["path"].as_str().ok_or("worktree path")?;
     assert!(std::path::Path::new(path).exists());
+    // Later repository protection governs new admissions and delivery, not
+    // replay of this already accepted operation.
+    for args in [
+        vec![
+            "remote",
+            "add",
+            "origin",
+            rig.project.to_str().ok_or("project")?,
+        ],
+        vec![
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/fixture/owned",
+        ],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
     let second = rig.command(&args)?;
     let second: Value = serde_json::from_slice(&second.stdout.bytes)?;
     assert_eq!(second["data"]["run_id"], data["run_id"], "{second}");
     assert!(std::path::Path::new(path).exists());
+    // Explicit worktrees use the ordinary admission path, which must also
+    // preserve replay after a publication target becomes protected.
+    let explicit_args = [
+        "dispatch",
+        "--operation-id",
+        "explicit-replay",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree",
+        path,
+        "--base",
+        "main",
+        "--deliver-remote",
+        "origin",
+        "--deliver-branch",
+        "published-explicit",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--json",
+    ];
+    let explicit = rig.command(&explicit_args)?;
+    let explicit: Value = serde_json::from_slice(&explicit.stdout.bytes)?;
+    assert!(explicit["data"]["run_id"].is_string(), "{explicit}");
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/published-explicit",
+            ],
+            None
+        )?),
+        0
+    );
+    let explicit_replay = rig.command(&explicit_args)?;
+    let explicit_replay: Value = serde_json::from_slice(&explicit_replay.stdout.bytes)?;
+    assert_eq!(
+        explicit_replay["data"]["run_id"], explicit["data"]["run_id"],
+        "{explicit_replay}"
+    );
     fs::write(&prompt, "Changed prompt")?;
     let conflict = rig.command(&args)?;
     assert_ne!(code(&conflict), 0);
+    let explicit_conflict = rig.command(&explicit_args)?;
+    assert_ne!(code(&explicit_conflict), 0);
     assert!(std::path::Path::new(path).exists());
     Ok(())
 }
