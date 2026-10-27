@@ -126,6 +126,32 @@ pub(crate) fn lease(
         Ok(true)
     })
 }
+/// Milliseconds before spacing lets a lane of `class` start, read without
+/// creating or upgrading the ledger. `None` when the ledger is absent,
+/// unreadable or older than lane classes, so a caller states no wait it cannot
+/// see.
+pub(crate) fn spacing_left(
+    host: &Path,
+    class: LaneClass,
+    spacing_ms: i64,
+    now_ms: i64,
+) -> Option<i64> {
+    let db = provenant_sqlite::open_connection(&host.join(FILE), true).ok()?;
+    let last: i64 = db
+        .query_row(
+            "SELECT last_start FROM spacing WHERE class=?1",
+            [class.as_str()],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()??;
+    // A wall clock that stepped back does not hold every start.
+    Some(if last <= now_ms && now_ms - last < spacing_ms {
+        spacing_ms - (now_ms - last)
+    } else {
+        0
+    })
+}
 fn full(tx: &Connection, project: ProjectId) -> Result<bool> {
     let (host, project): (i64, i64) = tx.query_row(
         "SELECT COUNT(*), COUNT(*) FILTER (WHERE project=?1) FROM leases",

@@ -64,6 +64,14 @@ impl AdmissionPolicy {
     }
 }
 
+/// What a lane that has not started is waiting for, shown by `lanes`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneWait {
+    pub attempt_id: AttemptId,
+    pub lane_class: LaneClass,
+    pub waiting_for: String,
+}
+
 /// Resource probes. A failed probe queues; it never admits unchecked.
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
@@ -126,6 +134,59 @@ impl RunStore {
             ],
         )?;
         Ok(())
+    }
+    /// What each queued or starting lane in `lanes` is waiting for, in order.
+    /// It reads this store and the host ledger without taking a lock, so it
+    /// names a wait only when it can see one: run concurrency, then startup
+    /// spacing, then the shared host and project caps and resource floors.
+    pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
+        let now_ms = call
+            .clock
+            .wall_now()
+            .map_or(0, |now| now.as_micros() / 1000);
+        lanes
+            .iter()
+            .filter(|lane| matches!(lane.state, AttemptState::Queued | AttemptState::Starting))
+            .filter_map(|lane| {
+                let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
+                let class = ticket.lane_class;
+                let waiting_for = if lane.state == AttemptState::Queued {
+                    "launch: not yet handed to a guardian".to_owned()
+                } else {
+                    let active: i64 = self
+                        .db
+                        .query_row(
+                            "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
+                            [lane.run_id.to_string()],
+                            |r| r.get(0),
+                        )
+                        .ok()?;
+                    let spacing = i64::try_from(ticket.startup_spacing_ms).ok()?;
+                    let left =
+                        crate::ledger::spacing_left(&self.writer_registry, class, spacing, now_ms);
+                    if active >= i64::try_from(ticket.run_concurrency).ok()? {
+                        format!(
+                            "run concurrency: {active} of {} lanes of this run are active",
+                            ticket.run_concurrency
+                        )
+                    } else if let Some(left) = left.filter(|left| *left > 0) {
+                        format!(
+                            "{} startup spacing: {} s left of {} s",
+                            class_name(class),
+                            tenths(left),
+                            tenths(spacing)
+                        )
+                    } else {
+                        "host capacity: active lane caps and memory or disk floors".to_owned()
+                    }
+                };
+                Some(LaneWait {
+                    attempt_id: lane.attempt_id,
+                    lane_class: class,
+                    waiting_for,
+                })
+            })
+            .collect()
     }
     fn ticket(&self, db: &Connection, id: AttemptId) -> Result<AdmissionTicket> {
         let raw: Vec<u8> = db
@@ -339,6 +400,18 @@ impl RunStore {
             Ok(Some(next))
         })
     }
+}
+fn class_name(class: LaneClass) -> &'static str {
+    match class {
+        LaneClass::Writer => "writer",
+        LaneClass::ReadOnly => "read-only",
+    }
+}
+/// Milliseconds as seconds to one decimal place, rounded up so a wait never
+/// reads as zero while it holds.
+fn tenths(ms: i64) -> String {
+    let tenths = (ms.max(0) + 99) / 100;
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
     DurationMicros::from_seconds(seconds)

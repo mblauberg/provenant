@@ -21,7 +21,7 @@ pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 mod writer;
 
 pub use admission::{
-    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
+    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume, UncertainReason};
 pub use delivery::HostDeliveryContext;

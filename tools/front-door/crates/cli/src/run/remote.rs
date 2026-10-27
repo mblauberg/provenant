@@ -553,7 +553,7 @@ fn render(
     selected: &[(HostId, AttemptId)],
     edge: &Edge<'_>,
 ) -> (Value, String) {
-    let (mut data, human) = render_lanes(lanes, None, edge.roots.state.as_path());
+    let (mut data, human) = render_lanes(lanes, &[], None, edge.roots.state.as_path());
     if let Some(rows) = data["lanes"].as_array_mut() {
         for (row, lane) in rows.iter_mut().zip(lanes) {
             let host = selected
@@ -1007,7 +1007,7 @@ pub(super) fn host_lanes(
         .collect();
     let selected: Vec<_> = lanes.iter().map(|lane| (id, lane.attempt_id)).collect();
     let (data, human) = if selected.is_empty() {
-        let (mut data, human) = render_lanes(&[], None, edge.roots.state.as_path());
+        let (mut data, human) = render_lanes(&[], &[], None, edge.roots.state.as_path());
         data["host"] = json!(id);
         (data, format!("host {id}\n{human}"))
     } else {

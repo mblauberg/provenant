@@ -46,6 +46,12 @@ writer; opening a version 1 ledger upgrades it in place and keeps its last
 start as the writer start. A run's own batch concurrency (1 to 16) defaults to
 8 when any lane writes and to 16 when none does, from `lanes.max_concurrency`
 and `lanes.max_concurrency_read_only`; an explicit value wins.
+
+`lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
+and uses the latter as its reason: launch not yet handed to a guardian, run
+concurrency, the class's remaining startup spacing, or otherwise host
+capacity. It reads the store and ledger without locking and names only a wait
+it can see.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
@@ -58,6 +64,8 @@ and `lanes.max_concurrency_read_only`; an explicit value wins.
   `::legacy_rows_without_a_class_are_treated_as_writers`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
+  `::lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for`;
+  `crates/cli/src/run.rs::render_lanes_says_what_an_unstarted_lane_waits_for`;
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`
 

@@ -12,6 +12,10 @@
   `economy` preset sets 8). Batches with a writer keep the `lanes.max_concurrency`
   default of 8. An explicit `--concurrency` or Fabric `concurrency` still wins,
   and its upper bound is now 16.
+- `lanes` now shows `lane_class` and `waiting_for` for queued and starting
+  lanes, and uses the wait as their reason: launch not yet handed to a
+  guardian, run concurrency, the class's remaining startup spacing, or host
+  capacity.
 - The host admission ledger (`admission.sqlite3`) moves to schema version 2 and
   upgrades in place on first use. Its single spacing row becomes the writer
   start, and existing leases and tickets with no class count as writers. A
