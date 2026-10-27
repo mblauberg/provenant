@@ -2344,18 +2344,29 @@ mod lifecycle_tests {
             )
             .is_err()
         );
+        let pushed_policy = WorktreeGcPolicy {
+            upstream: None,
+            ..policy
+        };
         let removed = prune_owned(
             &context,
             &info.path,
             attempt,
             head,
             head,
-            &policy,
+            &pushed_policy,
             &cancel(),
         )?;
         assert_eq!(removed.removed.len(), 1);
         assert!(!info.path.exists());
-        assert!(removed.pruned_refs.contains(&"owned".to_owned()));
+        assert!(removed.pruned_refs.is_empty());
+        assert!(
+            removed
+                .retained
+                .iter()
+                .any(|retained| retained.branch == "owned")
+        );
+        assert!(read_branch_tips(&context, &cancel())?.contains_key(&GitRefName::branch("owned")?));
         Ok(())
     }
 

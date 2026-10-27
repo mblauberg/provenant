@@ -124,6 +124,14 @@ pub fn prune_owned(
     {
         return Err(WorktreeError::IdentityChanged);
     }
+    // A pushed lane ref or an open PR is not an integration target. Its
+    // worktree can be pruned while the local ref remains for landing and GC.
+    let disposition = match policy.upstream {
+        Some(integration) if is_ancestor(context, head, integration, cancel)? => {
+            Disposition::Merged
+        }
+        _ => Disposition::Keep(RetainReason::NotMerged),
+    };
     let removed = remove_tree_when(context, entry, head, cancel, &|| {
         (policy.terminal)(path)
             && (policy.no_live_lanes)(path)
@@ -135,14 +143,7 @@ pub fn prune_owned(
     })?;
     let mut result = RemoveOutcome::default();
     result.removed.push(removed.info.clone());
-    if let Err(error) = settle_branch(
-        context,
-        branch,
-        head,
-        Disposition::Merged,
-        cancel,
-        &mut result,
-    ) {
+    if let Err(error) = settle_branch(context, branch, head, disposition, cancel, &mut result) {
         retain(&mut result, branch, retain_reason(&error));
     }
     if let Some(cache) = removed.lane_cache.as_deref()
