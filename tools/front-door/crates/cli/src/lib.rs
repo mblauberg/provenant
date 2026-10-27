@@ -258,11 +258,7 @@ fn build_model(passive: bool) -> clap::Command {
             .disable_version_flag(true)
             .version(env!("CARGO_PKG_VERSION"));
         if command.get_name() == "resolve" {
-            command = command.group(
-                ArgGroup::new("route_choice")
-                    .args(["model", "route"])
-                    .required(true),
-            );
+            command = command.group(ArgGroup::new("route_choice").args(["name", "model", "route"]));
         }
         if command.get_name() == "dispatch" {
             command = command
@@ -361,7 +357,18 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         return invalid("--json is invalid for hook/MCP/internal execution");
     }
     match &inv.command {
-        Command::Route(Route::Resolve(route)) => route_valid(route)?,
+        Command::Route(Route::Resolve(resolve)) => {
+            if resolve.name.is_none()
+                && resolve.request.model.is_none()
+                && resolve.request.route.is_none()
+            {
+                return invalid(
+                    "route resolve needs a route or model, such as `route resolve utility`, \
+                     `route resolve codex/gpt-6-luna`, `--route utility` or `--model ADAPTER/ID`",
+                );
+            }
+            route_valid(&resolve.request)?
+        }
         Command::Dispatch(dispatch) => {
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
@@ -550,7 +557,7 @@ fn constraints(path: &str) -> Vec<String> {
             "prompt and manifest inputs are at most 1 MiB",
         ],
         "provenant route resolve" => &[
-            "exactly one of model or route",
+            "exactly one of NAME, model or route",
             "fallback has at most two distinct models",
         ],
         "provenant telemetry stats" => &[

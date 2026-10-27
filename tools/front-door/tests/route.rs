@@ -107,6 +107,16 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
             .len(),
         3
     );
+    // A positional name is a route, an exact model, or a unique model by its ID (#1838).
+    for (name, model) in [
+        ("utility", "claude-haiku-5-5"),
+        ("codex/gpt-6.1-terra", "gpt-6.1-terra"),
+        ("gpt-6.1-terra", "gpt-6.1-terra"),
+        ("terra", "gpt-6.1-terra"),
+    ] {
+        let named = call(&rig, &["route", "resolve", name], 0)?;
+        assert_eq!(named["data"]["model"], model, "{name}");
+    }
     let selected = rig.root.join("selected-project");
     fs::create_dir_all(&selected)?;
     let project = selected.to_str().ok_or("fixture project")?;
@@ -341,6 +351,35 @@ fn named_routes_are_read_only_and_fail_closed() -> Result {
     Ok(())
 }
 #[test]
+fn unresolved_names_list_close_matches_and_examples() -> Result {
+    let rig = rig()?.without_state()?;
+    let message = |args: &[&str]| -> Result<String> {
+        let value = call(&rig, args, 2)?;
+        Ok(value["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .to_owned())
+    };
+    // A near miss names the real route and model, and shows how to ask.
+    let near = message(&["route", "resolve", "utilty"])?;
+    assert!(near.contains("close matches:"), "{near}");
+    assert!(near.contains("utility"), "{near}");
+    assert!(near.contains("provenant route resolve "), "{near}");
+    assert!(near.contains("provenant route list"), "{near}");
+    let flag = message(&["route", "resolve", "--route", "utilty"])?;
+    assert!(flag.contains("utility"), "{flag}");
+    // Nothing close still teaches the shapes.
+    let none = message(&["route", "resolve", "zzzzzz-nothing"])?;
+    assert!(!none.contains("close matches"), "{none}");
+    assert!(none.contains("provenant route resolve "), "{none}");
+    // No argument at all is a usage error that shows examples, before any state.
+    let missing = message(&["route", "resolve"])?;
+    assert!(missing.contains("route resolve utility"), "{missing}");
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
 fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     let rig = rig()?.without_state()?;
     for args in [
@@ -365,6 +404,9 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
             "codex/a",
         ],
         vec!["route", "resolve", "--route", "missing"],
+        vec!["route", "resolve", "missing-route"],
+        vec!["route", "resolve", "utility", "--route", "utility"],
+        vec!["route", "resolve", "utility", "--model", "codex/a"],
         vec!["route", "resolve", "--model", "codex/a", "--effort", "high"],
         vec!["route", "resolve", "--model", "codex/a#high"],
         vec!["route", "list", "--adapter", "invented"],
