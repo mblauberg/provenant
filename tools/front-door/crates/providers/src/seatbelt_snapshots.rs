@@ -337,3 +337,121 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
     }
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn agy_read_only_linked_worktree_git_directories_are_not_writable()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::snapshot::compile;
+    use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use provenant_core::{ProjectId, WorkScope};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    for name in ["repo", "scratch", "state", "Library/Keychains", "bin"] {
+        std::fs::create_dir_all(root.join(name))?;
+    }
+    for name in ["scratch", "state"] {
+        std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))?;
+    }
+    let repo = root.join("repo");
+    let run_git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    run_git(&["init"])?;
+    run_git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "fixture",
+    ])?;
+    let worktree = root.join("linked");
+    run_git(&[
+        "worktree",
+        "add",
+        "-b",
+        "fixture",
+        worktree.to_str().unwrap(),
+    ])?;
+    let common = repo.join(".git");
+    let private = common.join("worktrees/linked");
+    assert!(private.is_dir());
+    let executable = root.join("bin/agy");
+    std::fs::write(&executable, "fixture")?;
+    let base = super::tests::read_only_plan(root.to_str().unwrap(), Some("keychain"));
+    let mut permissions = base.permissions().clone();
+    permissions.read_roots = vec![PathGrant {
+        path: worktree.clone(),
+        scope: PathScope::Subtree,
+    }];
+    permissions.read_only = Some(ReadOnlyGrants::for_test(repo, vec![]));
+    let plan = ConfinedPlan::new(PlanRequest {
+        scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })?;
+    let route = route("agy", "fixture-model");
+    let prompt = Prompt::new("fixture".into());
+    let input = PrepareInput {
+        executable: &executable,
+        home: &root,
+        git_context: true,
+        ..fixture_input(&route, &plan, &prompt, &worktree, None)
+    };
+    let adapter = REGISTRY
+        .iter()
+        .find(|entry| entry.adapter.id() == "agy")
+        .unwrap();
+    let spec = adapter.adapter.prepare(input)?;
+    let directories = required_anchors(plan.permissions(), &spec.profile, None)
+        .iter()
+        .map(AnchoredDirectory::open_canonical)
+        .collect::<Result<Vec<_>, _>>()?;
+    let anchors = Anchors {
+        home: &root,
+        directories: &directories,
+        worktree: None,
+    };
+    let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
+    let source = std::str::from_utf8(&compiled.profile)?;
+    assert!(source.contains(&format!(
+        "(allow file-read* (subpath \"{}\"))",
+        common.display()
+    )));
+    for line in source
+        .lines()
+        .filter(|line| line.starts_with("(allow file-write* (subpath "))
+    {
+        let path = line
+            .strip_prefix("(allow file-write* (subpath \"")
+            .unwrap()
+            .strip_suffix("\"))")
+            .unwrap();
+        for git_dir in [&private, &common] {
+            assert!(
+                !git_dir.starts_with(path) && !Path::new(path).starts_with(git_dir),
+                "Git directory is writable via {line}"
+            );
+        }
+    }
+    Ok(())
+}
