@@ -34,7 +34,7 @@ pub fn ensure(
     let _lock = info.lock(
         OsStr::new("provenant-exclude.lock"),
         LockMode::Exclusive,
-        WaitBudget::nonblocking(clock.mono_now()),
+        WaitBudget::cli(clock.mono_now(), 30).map_err(|_| WorktreeError::InvalidRequest)?,
         cancel,
         clock,
     )?;
@@ -72,6 +72,38 @@ mod tests {
     use super::*;
     use crate::test_support::Fixture;
     use provenant_os::clock::SystemClock;
+
+    #[test]
+    #[allow(clippy::disallowed_methods, reason = "real OS lock contention fixture")]
+    fn concurrent_scratch_waits_for_the_exclude_lock() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        ensure(&fixture.repo, &SystemClock, &CancelToken::new())?;
+        let info = Directory::open_anchor(&fixture.repo.common_git_dir().join("info"))?;
+        let held = info.lock(
+            OsStr::new("provenant-exclude.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(SystemClock.mono_now()),
+            &CancelToken::new(),
+            &SystemClock,
+        )?;
+        std::thread::scope(|scope| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let repo = &fixture.repo;
+            let worker = scope.spawn(move || {
+                sender.send(()).unwrap();
+                ensure(repo, &SystemClock, &CancelToken::new())
+            });
+            receiver.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                !worker.is_finished(),
+                "scratch contender must wait for exclusion"
+            );
+            drop(held);
+            worker.join().unwrap()
+        })?;
+        Ok(())
+    }
 
     #[test]
     fn scratch_is_local_excluded_idempotent_and_refuses_links()
