@@ -78,7 +78,11 @@ must print the new worktree's absolute path and nothing else on stdout.
   branch `claude/<name>` from the session's current head. The path is
   `<repo>/.worktrees/claude-<name>`, owned and listed by
   `provenant worktree list`. A name Claude reuses finds its earlier worktree
-  unless a writer is live in it.
+  only when that is a linked worktree at the exact path above, on
+  `claude/<name>`, clean, with no live writer, and marked as made by this hook
+  (a `provenant-claude-hook` file in the worktree's Git admin directory). The
+  primary checkout, a tree made by hand or by another tool, a tree elsewhere
+  and a dirty tree are never reused: the hook exits 2 and names the reason.
 - `worktree-remove` removes only a linked worktree that `provenant worktree
   list` shows for the project, through `provenant worktree remove <name>`
   without `--discard`. The owner refuses dirty trees, live writers and the
@@ -86,6 +90,12 @@ must print the new worktree's absolute path and nothing else on stdout.
   A refusal exits 2 with the cause on stderr and the worktree stays.
   The hook never forces removal; use `provenant worktree remove` yourself
   once the cause is cleared.
+- Ignored build output (for example `target/`) counts as dirty for removal
+  today, so Claude's cleanup of a tree that was built in exits 2 with
+  `worktree-remove: refused: ... dirty` and leaves the tree. The hook does not
+  change that policy; clearing ignored output on removal is owned by #1816.
+  Until it lands, delete the ignored output and run `provenant worktree remove
+  <name>` yourself.
 - The CLI inherits the hook's environment and `--state-dir`. Failures mean the
   worktree is not created; fix the cause or run `provenant install --hooks off`
   to return to Claude's own worktrees.

@@ -403,3 +403,84 @@ fn worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths() -> Result {
     }
     Ok(())
 }
+
+fn refused_create(rig: &TestRig, name: &str) -> Result<String> {
+    let output = run_hook(rig, "worktree-create", &worktree_input(rig, name))?;
+    assert_eq!(code(&output), 2, "{name}");
+    assert!(output.stdout.bytes.is_empty(), "{name}");
+    Ok(String::from_utf8(output.stderr.bytes)?)
+}
+
+#[test]
+fn worktree_create_never_reuses_primary_unowned_misplaced_or_dirty_trees() -> Result {
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    // The chair's own checkout holds the branch.
+    git(&rig, &["checkout", "-q", "-b", "claude/primary-held"])?;
+    let stderr = refused_create(&rig, "primary-held")?;
+    assert!(stderr.contains("primary checkout"), "{stderr}");
+    git(&rig, &["checkout", "-q", "-"])?;
+    // A tree at the hook's exact path that the owner never registered.
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "claude/unowned",
+            ".worktrees/claude-unowned",
+        ],
+    )?;
+    let stderr = refused_create(&rig, "unowned")?;
+    assert!(stderr.contains("was not created by this hook"), "{stderr}");
+    // A tree on the branch somewhere the hook would not have put it.
+    let elsewhere = rig.root.join("elsewhere");
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "claude/misplaced",
+            elsewhere.to_str().ok_or("path")?,
+        ],
+    )?;
+    let stderr = refused_create(&rig, "misplaced")?;
+    assert!(stderr.contains("not at the path"), "{stderr}");
+    // The hook's own tree is reused when clean and refused once it has work.
+    let made = run_hook(&rig, "worktree-create", &worktree_input(&rig, "mine"))?;
+    assert_eq!(code(&made), 0);
+    let path = PathBuf::from(String::from_utf8(made.stdout.bytes)?.trim_end());
+    fs::write(path.join("scratch.txt"), "work")?;
+    let stderr = refused_create(&rig, "mine")?;
+    assert!(stderr.contains("uncommitted or ignored"), "{stderr}");
+    assert!(path.join("scratch.txt").is_file());
+    Ok(())
+}
+
+#[test]
+fn worktree_remove_keeps_a_tree_with_only_ignored_output_and_says_why() -> Result {
+    // Removal policy belongs to the worktree owner (#1816); until it clears
+    // ignored build output, the hook leaves the tree and exits 2 with the reason.
+    let rig = TestRig::new()?;
+    fs::write(rig.project.join(".gitignore"), "target/\n")?;
+    git(&rig, &["add", ".gitignore"])?;
+    commit_file(&rig)?;
+    let made = run_hook(&rig, "worktree-create", &worktree_input(&rig, "built"))?;
+    assert_eq!(code(&made), 0);
+    let path = PathBuf::from(String::from_utf8(made.stdout.bytes)?.trim_end());
+    fs::create_dir(path.join("target"))?;
+    fs::write(path.join("target/out.o"), "object")?;
+    let refused = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
+    assert_eq!(code(&refused), 2);
+    assert!(refused.stdout.bytes.is_empty());
+    let stderr = String::from_utf8(refused.stderr.bytes)?;
+    assert!(
+        stderr.starts_with("worktree-remove: refused:") && stderr.contains("dirty"),
+        "{stderr}"
+    );
+    assert!(path.join("target/out.o").is_file());
+    Ok(())
+}

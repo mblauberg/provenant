@@ -70,6 +70,66 @@ fn entry_path(entry: &serde_json::Value) -> Option<PathBuf> {
     Some(Path::new(root).join(relative.trim_start_matches('/')))
 }
 
+/// The worktree an earlier call of this hook made for `branch`, if it can be
+/// reused. Only the linked worktree at the exact path `worktree create` gives
+/// the branch qualifies, and only when it is clean, has no live writer and
+/// carries this hook's ownership mark. The primary checkout never qualifies. `Err(None)` means no worktree holds
+/// the branch, so the create failure stands alone.
+fn reusable(list: &serde_json::Value, branch: &str) -> Result<PathBuf, Option<String>> {
+    let wanted = format!("refs/heads/{branch}");
+    let entries = list.as_array().map_or(&[][..], Vec::as_slice);
+    let Some(holder) = entries.iter().find(|e| e["branch"] == wanted.as_str()) else {
+        return Err(None);
+    };
+    let refuse = |why: &str| Err(Some(why.to_owned()));
+    let (Some(primary), Some(path)) = (entries.first().and_then(entry_path), entry_path(holder))
+    else {
+        return refuse("its path is unknown");
+    };
+    if path == primary {
+        return refuse("the branch is checked out in the primary checkout");
+    }
+    if path != primary.join(".worktrees").join(branch.replace('/', "-")) {
+        return refuse("it is not at the path this hook creates for that name");
+    }
+    // `unknown` is common (any process the owner cannot inspect makes every
+    // writer unknown), so only a live writer refuses here; ownership is the
+    // hook's own record below.
+    if holder["writer"] == "live" {
+        return refuse("a writer is live in it");
+    }
+    if holder["dirty"] != "clean" {
+        return refuse("it has uncommitted or ignored files");
+    }
+    if !hook_owned(&path, branch) {
+        return refuse("it was not created by this hook");
+    }
+    Ok(path)
+}
+
+/// Marker the hook leaves in a worktree's Git admin directory (not in the
+/// tree, so it never shows as a change, and Git deletes it with the worktree).
+const OWNER_MARKER: &str = "provenant-claude-hook";
+
+/// The admin directory a linked worktree's `.git` file points at.
+fn admin_dir(worktree: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let dir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    (dir.is_absolute() && dir.parent()?.file_name()? == "worktrees").then_some(dir)
+}
+
+fn mark_owned(worktree: &Path, branch: &str) -> Result<(), Error> {
+    let dir = admin_dir(worktree).ok_or("no Git admin directory for the worktree")?;
+    std::fs::write(dir.join(OWNER_MARKER), branch)?;
+    Ok(())
+}
+
+fn hook_owned(worktree: &Path, branch: &str) -> bool {
+    admin_dir(worktree)
+        .and_then(|dir| std::fs::read_to_string(dir.join(OWNER_MARKER)).ok())
+        .is_some_and(|recorded| recorded == branch)
+}
+
 // Hook I/O is bounded by real monotonic deadlines.
 #[allow(clippy::disallowed_methods)]
 pub fn create(globals: &Globals) -> u8 {
@@ -85,22 +145,24 @@ pub fn create(globals: &Globals) -> u8 {
         let cli = Cli::new(globals, &input.cwd, &executor).ok_or("cannot find this executable")?;
         let created = cli.data(&["worktree", "create", &branch], WORK_TIME, deadline);
         let path = match created {
-            Ok(data) => entry_path(&data).ok_or("worktree create returned no path")?,
+            Ok(data) => {
+                let path = entry_path(&data).ok_or("worktree create returned no path")?;
+                if let Err(error) = mark_owned(&path, &branch) {
+                    // Without the mark a later call cannot reuse this tree.
+                    let _ = writeln!(io::stderr().lock(), "worktree-create: not marked: {error}");
+                }
+                path
+            }
             Err(cause) => {
-                // A name Claude reuses finds its own earlier worktree, unless a
-                // writer holds it.
+                // A name Claude reuses finds its own earlier worktree, and
+                // nothing else.
                 let list = cli
                     .data(&["worktree", "list"], LIST_TIME, deadline)
                     .map_err(|_| cause.clone())?;
-                let wanted = format!("refs/heads/{branch}");
-                list.as_array()
-                    .and_then(|entries| {
-                        entries
-                            .iter()
-                            .find(|e| e["branch"] == wanted.as_str() && e["writer"] != "live")
-                    })
-                    .and_then(entry_path)
-                    .ok_or(cause)?
+                reusable(&list, &branch).map_err(|reason| match reason {
+                    Some(reason) => format!("{cause}; not reusing the existing worktree: {reason}"),
+                    None => cause,
+                })?
             }
         };
         if !path.is_absolute() || !path.is_dir() {
