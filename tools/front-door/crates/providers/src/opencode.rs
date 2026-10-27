@@ -155,6 +155,8 @@ fn prepare(
         Vec::new()
     };
     env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         (
             "XDG_CONFIG_HOME".into(),
             config_home.clone().into_os_string(),
@@ -437,6 +439,35 @@ mod tests {
                     ]
                 }
             );
+        }
+    }
+
+    #[test]
+    fn git_discovery_ignores_host_config_in_both_access_modes() {
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let plan = crate::tests::fixture_access_plan(access, None, false);
+            let spec = OpenCode
+                .prepare(crate::tests::fixture_input(
+                    &route,
+                    &plan,
+                    &prompt,
+                    std::path::Path::new("/fixture/repo"),
+                    None,
+                ))
+                .unwrap();
+            for (key, value) in [
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ] {
+                let actual = spec.env.iter().find(|(name, _)| name == key);
+                assert_eq!(
+                    actual.map(|(_, value)| value.as_os_str()),
+                    Some(value.as_ref()),
+                    "{access:?} {key}"
+                );
+            }
         }
     }
 
