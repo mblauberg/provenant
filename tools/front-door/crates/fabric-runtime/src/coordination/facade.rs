@@ -182,6 +182,8 @@ pub enum FacadeError {
     LaneCoordinationRefused,
     #[error("request violates confinement")]
     ConfinementRefused,
+    #[error("{reason}")]
+    DispatchRefused { reason: String },
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
     #[error(
@@ -232,6 +234,7 @@ impl FacadeError {
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",
+            Self::DispatchRefused { .. } => "dispatch_refused",
             Self::WorktreeMissing => "worktree_missing",
             Self::WorktreeUnregistered { .. } => "worktree_unregistered",
             Self::BaseUnreachable => "base_unreachable",

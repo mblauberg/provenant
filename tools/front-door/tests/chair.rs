@@ -394,6 +394,7 @@ fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Res
         ),
     )?;
     fs::set_permissions(&git, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
     rig.env.push(("PROVENANT_GIT".into(), git.into_os_string()));
     let output = hook(&rig, false, "slow-identity")?;
     let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes).map_err(|e| {

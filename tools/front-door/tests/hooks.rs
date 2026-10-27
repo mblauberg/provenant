@@ -187,7 +187,11 @@ fn denial_write_failure_uses_recorded_exit_two_fallback() -> Result {
     Ok(())
 }
 fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let output = rig.execute(Path::new("/usr/bin/git"), args, None)?;
+    let output = rig.execute(
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
+        args,
+        None,
+    )?;
     assert_eq!(
         code(&output),
         0,
@@ -355,7 +359,7 @@ fn publish_checkpoint(rig: &TestRig) -> Result {
 
     use provenant_workflow::session::{HostSessionId, SessionStore};
     use std::os::unix::fs::PermissionsExt;
-    fs::create_dir(&rig.state)?;
+    fs::create_dir_all(&rig.state)?;
     fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());

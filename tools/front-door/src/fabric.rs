@@ -2693,6 +2693,10 @@ pub fn graph(
                 Some(FacadeError::NotFound)
             ) {
                 (provenant_records::Outcome::Invalid, "not_found")
+            } else if let Some(error @ FacadeError::DispatchRefused { .. }) =
+                error.downcast_ref::<FacadeError>()
+            {
+                (provenant_records::Outcome::Refused, error.code())
             } else {
                 (provenant_records::Outcome::Error, "graph_owner")
             };

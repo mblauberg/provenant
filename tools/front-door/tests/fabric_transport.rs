@@ -141,7 +141,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     std::fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
              [domains.fabric.peers.first]\nhost='{}'\ndestination='127.0.0.1'\n\
              [domains.fabric.peers.second]\nhost='{}'\ndestination='127.0.0.1'\n",
             ssh.to_string_lossy(),
@@ -1263,7 +1263,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     std::fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
              [domains.fabric.peers.fixture]\nhost='{}'\ndestination='fixture'\n",
             ssh.to_string_lossy(),
             remote_host
@@ -2188,10 +2188,10 @@ fn submission_does_not_advertise_unsupported_inputs() -> Result {
 fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
-    std::fs::DirBuilder::new().mode(0o700).create(&rig.state)?;
+    std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\nprofile='rigorous'\n[knobs]\n'lanes.max_concurrency'=3\n",
+        "schema_version=1\nprofile='rigorous'\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_concurrency'=3\n",
     )?;
     for (operation, explicit, knobs, expected) in [
         ("config-capacity", None, vec![], 3),
@@ -2237,10 +2237,10 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
 fn silence_knob_controls_capture_plan_observations() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
-    std::fs::DirBuilder::new().mode(0o700).create(&rig.state)?;
+    std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[knobs]\n'lanes.silence_seconds'=2\n",
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.silence_seconds'=2\n",
     )?;
     for (operation, knobs, threshold) in [
         ("config-silence", vec![], 2000),
@@ -2275,7 +2275,7 @@ fn loopback_peer(rig: &mut TestRig) -> Result<provenant_core::HostId> {
     std::fs::write(
         peer_state.join("config.toml"),
         format!(
-            "schema_version=1\n[domains.fabric.peers.laptop]\nhost='{local}'\ndestination='laptop'\n"
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.peers.laptop]\nhost='{local}'\ndestination='laptop'\n"
         ),
     )?;
     let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
@@ -2318,7 +2318,7 @@ fn loopback_peer(rig: &mut TestRig) -> Result<provenant_core::HostId> {
     std::fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
              [domains.fabric.peers.workshop]\nhost='{peer}'\ndestination='workshop'\n",
             ssh.to_string_lossy(),
         ),
@@ -2336,6 +2336,131 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
         )
     })?;
     Ok((code(&output), value))
+}
+
+#[test]
+fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Result {
+    let rig = TestRig::new()?;
+    let commit = rig.execute(
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Initial",
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&commit),
+        0,
+        "{}",
+        String::from_utf8_lossy(&commit.stderr.bytes)
+    );
+    let (status, created) = json_command(
+        &rig,
+        &["worktree", "create", "low-disk", "--base", "HEAD", "--json"],
+    )?;
+    assert_eq!(status, 0, "{created}");
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let worktree = rig.project.join(".worktrees/low-disk");
+    let worktree = worktree.to_str().ok_or("worktree path")?;
+    let route = json!({"kind":"model","provider":"codex","model":"gpt-6-luna"});
+    std::fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({"schema_version":1,"graph_id":"low-disk","nodes":[
+            {"id":"write","prompt":"fixture","access":"worktree_write","worktree":worktree,
+             "route":{"adapter":"codex","model":"codex/gpt-6-luna","effort":"low"}}
+        ]}))?,
+    )?;
+    let reason = |message: &Value| -> Result {
+        let message = message.as_str().ok_or("refusal reason")?;
+        assert!(message.contains("insufficient disk space on "), "{message}");
+        assert!(
+            message.contains(worktree)
+                || message.contains(rig.state.to_str().ok_or("state")?)
+                || message.contains(rig.home.to_str().ok_or("home")?),
+            "{message}"
+        );
+        let (_, available) = message.rsplit_once(": ").ok_or("available bytes")?;
+        let (bytes, _) = available
+            .split_once(" bytes available, floor ")
+            .ok_or("floor")?;
+        assert!(bytes.parse::<u64>()? < u64::MAX, "{message}");
+        assert!(
+            message.contains("floor 18446744073709551615 bytes"),
+            "{message}"
+        );
+        assert!(message.contains("provenant gc"), "{message}");
+        Ok(())
+    };
+    let (status, graph) = json_command(
+        &rig,
+        &[
+            "fabric",
+            "graph",
+            "run",
+            "--document",
+            "graph.json",
+            "--json",
+        ],
+    )?;
+    assert_eq!(status, 1, "{graph}");
+    assert_eq!(graph["status"], "refused", "{graph}");
+    assert_eq!(graph["error"]["code"], "dispatch_refused", "{graph}");
+    reason(&graph["error"]["message"])?;
+
+    // Submission is exposed as fabric_run op=submit in the current MCP schema.
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"fabric_run","arguments":{"op":"submit","operation_id":"low-disk-mcp","tasks":[
+                    {"prompt":"fixture","route":route,"access":"worktree_write","worktree":worktree,"timeout_seconds":60}
+                ]}
+            }}),
+        ],
+    )?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(
+        result["structuredContent"]["code"], "dispatch_refused",
+        "{result}"
+    );
+    reason(&result["structuredContent"]["message"])?;
+
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "fixture")?;
+    let (status, dispatch) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--model",
+            "codex/gpt-6-luna",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree,
+            "--operation-id",
+            "low-disk-cli",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt path")?,
+            "--json",
+        ],
+    )?;
+    assert_eq!(status, 1, "{dispatch}");
+    assert_eq!(dispatch["status"], "refused", "{dispatch}");
+    assert_eq!(dispatch["error"]["code"], "REFUSED", "{dispatch}");
+    reason(&dispatch["error"]["message"])?;
+    assert!(!rig.state.join("runs").exists());
+    rig.assert_legacy_unchanged()
 }
 
 #[test]
@@ -2360,7 +2485,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
     std::fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n\
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
          [domains.fabric.peers.workshop]\nhost='{host}'\ndestination='workshop'\n",
             ssh.to_string_lossy(),
         ),
