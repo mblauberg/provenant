@@ -46,6 +46,16 @@ fn configured() -> Result<TestRig> {
     Ok(rig)
 }
 
+/// Write an executable stub under the spawn lock so no concurrent fork in this
+/// test binary can inherit the open write descriptor and make the exec fail.
+fn write_script(rig: &TestRig, path: &std::path::Path, text: &str) -> Result {
+    rig.with_process_spawn_lock(|| {
+        fs::write(path, text)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    })
+}
+
 fn register_pair(rig: &TestRig) -> Result {
     register_account(
         rig,
@@ -137,11 +147,11 @@ fn chair_dry_run_reports_registered_target_and_creates_no_checkpoint() -> Result
     let bin = rig.root.join("bin");
     fs::create_dir(&bin)?;
     let claude = bin.join("claude");
-    fs::write(
+    write_script(
+        &rig,
         &claude,
         "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\"\n",
     )?;
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o700))?;
     rig.env.retain(|(key, _)| key != "PATH");
     rig.env.push((
         "PATH".into(),
@@ -302,7 +312,8 @@ fn chair_herdr_launch_uses_only_the_returned_new_pane_and_runs_once() -> Result 
     let bin = rig.root.join("bin");
     fs::create_dir(&bin)?;
     let herdr = bin.join("herdr");
-    fs::write(
+    write_script(
+        &rig,
         &herdr,
         r#"#!/bin/sh
 printf '%s\n' "$@" >> "$HERDR_CALL_LOG"
@@ -313,7 +324,6 @@ run) printf '%s\n' '{"result":{}}' ;;
 esac
 "#,
     )?;
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700))?;
     let log = rig.root.join("herdr.log");
     rig.env.retain(|(k, _)| k != "PATH");
     rig.env.extend([
@@ -387,15 +397,16 @@ fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Res
     let real_git = real_git.to_str().ok_or("git path")?.replace('\'', "'\\''");
     // Identity discovery has a bounded utility budget of its own. Simulate a
     // slow first Git probe without spending the snapshot's store budget.
-    fs::write(
+    write_script(
+        &rig,
         &git,
-        format!(
-            "#!/bin/sh\nif [ ! -e \"$0.started\" ]; then\n  : > \"$0.started\"\n  sleep 1.1\nfi\nexec '{real_git}' \"$@\"\n"
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.log\"\nif [ ! -e \"$0.started\" ]; then\n  : > \"$0.started\"\n  sleep 1.1\nfi\nexec '{real_git}' \"$@\"\n"
         ),
     )?;
-    fs::set_permissions(&git, fs::Permissions::from_mode(0o700))?;
     rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
-    rig.env.push(("PROVENANT_GIT".into(), git.into_os_string()));
+    rig.env
+        .push(("PROVENANT_GIT".into(), git.clone().into_os_string()));
     let output = hook(&rig, false, "slow-identity")?;
     let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes).map_err(|e| {
         format!(
@@ -404,7 +415,15 @@ fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Res
         )
     })?;
     assert_eq!(value["continue"], false, "{value}");
-    assert!(rig.root.join("git.started").exists());
+    assert!(
+        rig.root.join("git.started").exists(),
+        "fake git never ran; PROVENANT_GIT={}; exit={:?}; stdout={}; stderr={}; git.log={}",
+        git.display(),
+        output.termination,
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes),
+        fs::read_to_string(rig.root.join("git.log")).unwrap_or_else(|_| "absent".into())
+    );
     assert!(!rig.state.join("run.sqlite3").exists());
     assert!(!rig.state.join("run.sqlite3.lock").exists());
     Ok(())
