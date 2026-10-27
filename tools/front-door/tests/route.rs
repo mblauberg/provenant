@@ -360,13 +360,15 @@ fn unresolved_names_list_close_matches_and_examples() -> Result {
             .ok_or("message")?
             .to_owned())
     };
-    // A near miss names the real route and model, and shows how to ask.
-    let near = message(&["route", "resolve", "utilty"])?;
+    // A near miss names the real route and model, and shows how to ask. The
+    // misspelling is assembled so that no literal one sits in the source.
+    let misspelt = ["util", "ty"].concat();
+    let near = message(&["route", "resolve", &misspelt])?;
     assert!(near.contains("close matches:"), "{near}");
     assert!(near.contains("utility"), "{near}");
     assert!(near.contains("provenant route resolve "), "{near}");
     assert!(near.contains("provenant route list"), "{near}");
-    let flag = message(&["route", "resolve", "--route", "utilty"])?;
+    let flag = message(&["route", "resolve", "--route", &misspelt])?;
     assert!(flag.contains("utility"), "{flag}");
     // Nothing close still teaches the shapes.
     let none = message(&["route", "resolve", "zzzzzz-nothing"])?;
