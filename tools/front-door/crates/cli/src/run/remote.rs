@@ -32,6 +32,7 @@ use run::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     time::{Duration, Instant},
@@ -333,53 +334,21 @@ impl Peer {
     fn records(&self, selected: &[(HostId, AttemptId)]) -> Result<Vec<run::AttemptRecord>, Fail> {
         self.records_within(selected, Duration::MAX)
     }
+    /// Every read together takes no longer than `remaining`.
     fn records_within(
         &self,
         selected: &[(HostId, AttemptId)],
         remaining: Duration,
     ) -> Result<Vec<run::AttemptRecord>, Fail> {
-        let mut by_host: BTreeMap<HostId, Vec<usize>> = BTreeMap::new();
-        for (index, (host, _)) in selected.iter().enumerate() {
-            by_host.entry(*host).or_default().push(index);
-        }
-        let mut records: Vec<Option<run::AttemptRecord>> = std::iter::repeat_with(|| None)
-            .take(selected.len())
-            .collect();
-        for (host, indices) in by_host {
-            for chunk in indices.chunks(100) {
-                let targets = chunk
-                    .iter()
-                    .map(|i| AttemptTarget {
-                        attempt: selected[*i].1,
-                        host: Some(host),
-                    })
-                    .collect();
-                let PeerResult::RunStatuses(page) =
-                    self.call_within(host, PeerAction::RunStatuses { targets }, remaining)?
-                else {
-                    return Err(corrupt());
-                };
-                if page.len() != chunk.len() {
-                    return Err(corrupt());
-                }
-                for (index, record) in chunk.iter().zip(page) {
-                    if record.attempt_id != selected[*index].1 {
-                        return Err(corrupt());
-                    }
-                    records[*index] = Some(record);
-                }
-            }
-        }
-        records
-            .into_iter()
-            .collect::<Option<_>>()
-            .ok_or_else(corrupt)
+        read_records(
+            selected,
+            &Window::new(remaining),
+            &mut |host, action, left| self.call_within(host, action, left),
+        )
     }
     /// The peer's newest lanes that `keep` accepts, plus every lane `tracked`
     /// has seen running that those no longer include. Both reads together take
     /// no longer than `remaining`.
-    // Remote peer polling uses a hard real-time budget.
-    #[allow(clippy::disallowed_methods)]
     fn newest(
         &self,
         host: HostId,
@@ -387,26 +356,13 @@ impl Peer {
         tracked: &mut watch::Tracked,
         keep: &dyn Fn(&run::AttemptRecord) -> bool,
     ) -> Result<Vec<run::AttemptRecord>, Fail> {
-        let started = Instant::now();
-        let PeerResult::RunStatuses(records) = self.call_within(
+        read_newest(
             host,
-            PeerAction::Lanes {
-                all: true,
-                limit: PEER_LANES,
-            },
-            remaining,
-        )?
-        else {
-            return Err(corrupt());
-        };
-        if records.len() > usize::from(PEER_LANES) {
-            return Err(corrupt());
-        }
-        let page = records.into_iter().filter(|lane| keep(lane)).collect();
-        tracked.complete(page, |missing| {
-            let targets: Vec<_> = missing.iter().map(|attempt| (host, *attempt)).collect();
-            self.records_within(&targets, remaining.saturating_sub(started.elapsed()))
-        })
+            &Window::new(remaining),
+            tracked,
+            keep,
+            &mut |host, action, left| self.call_within(host, action, left),
+        )
     }
     /// Poll the owner until the condition holds or the reader deadline passes.
     /// Expiry never stops a provider. A transient peer failure is retried within
@@ -424,6 +380,123 @@ impl Peer {
             POLL,
         )
     }
+}
+
+/// The one deadline every transport call of a fetch shares. It is fixed when
+/// the fetch starts, so each call sees what the earlier ones left, not the
+/// fetch's whole budget.
+struct Window {
+    /// Unbounded when the budget is too large to represent.
+    deadline: Option<Instant>,
+    called: Cell<bool>,
+}
+impl Window {
+    // A reader deadline is a real transport boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn new(remaining: Duration) -> Self {
+        Self {
+            deadline: Instant::now().checked_add(remaining),
+            called: Cell::new(false),
+        }
+    }
+    /// The time the next transport call may take. The first call of a fetch
+    /// always runs, because a wait of zero seconds is one read. Every later
+    /// call refuses to start at or after the deadline, as a transient failure
+    /// the wait reports like any other that outlasts its budget.
+    // A reader deadline is a real transport boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn next(&self) -> Result<Duration, Fail> {
+        let first = !self.called.replace(true);
+        let Some(deadline) = self.deadline else {
+            return Ok(Duration::MAX);
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() && !first {
+            return Err(Fail::new(
+                Status::Error,
+                ErrorKind::PeerUnavailable,
+                "the wait's time ran out before the next peer read",
+            ));
+        }
+        Ok(left)
+    }
+}
+
+/// One peer request: the host, the action, and the time it may take.
+type Call<'a> = dyn FnMut(HostId, PeerAction, Duration) -> Result<PeerResult, Fail> + 'a;
+
+/// Current owner records, one batched status read per host and per 100 lanes.
+fn read_records(
+    selected: &[(HostId, AttemptId)],
+    window: &Window,
+    call: &mut Call<'_>,
+) -> Result<Vec<run::AttemptRecord>, Fail> {
+    let mut by_host: BTreeMap<HostId, Vec<usize>> = BTreeMap::new();
+    for (index, (host, _)) in selected.iter().enumerate() {
+        by_host.entry(*host).or_default().push(index);
+    }
+    let mut records: Vec<Option<run::AttemptRecord>> = std::iter::repeat_with(|| None)
+        .take(selected.len())
+        .collect();
+    for (host, indices) in by_host {
+        for chunk in indices.chunks(100) {
+            let targets = chunk
+                .iter()
+                .map(|i| AttemptTarget {
+                    attempt: selected[*i].1,
+                    host: Some(host),
+                })
+                .collect();
+            let PeerResult::RunStatuses(page) =
+                call(host, PeerAction::RunStatuses { targets }, window.next()?)?
+            else {
+                return Err(corrupt());
+            };
+            if page.len() != chunk.len() {
+                return Err(corrupt());
+            }
+            for (index, record) in chunk.iter().zip(page) {
+                if record.attempt_id != selected[*index].1 {
+                    return Err(corrupt());
+                }
+                records[*index] = Some(record);
+            }
+        }
+    }
+    records
+        .into_iter()
+        .collect::<Option<_>>()
+        .ok_or_else(corrupt)
+}
+
+/// A peer's newest lanes that `keep` accepts, then the tracked lanes they
+/// dropped. The lookup of those draws on the same window as the first read.
+fn read_newest(
+    host: HostId,
+    window: &Window,
+    tracked: &mut watch::Tracked,
+    keep: &dyn Fn(&run::AttemptRecord) -> bool,
+    call: &mut Call<'_>,
+) -> Result<Vec<run::AttemptRecord>, Fail> {
+    let PeerResult::RunStatuses(records) = call(
+        host,
+        PeerAction::Lanes {
+            all: true,
+            limit: PEER_LANES,
+        },
+        window.next()?,
+    )?
+    else {
+        return Err(corrupt());
+    };
+    if records.len() > usize::from(PEER_LANES) {
+        return Err(corrupt());
+    }
+    let page = records.into_iter().filter(|lane| keep(lane)).collect();
+    tracked.complete(page, |missing| {
+        let targets: Vec<_> = missing.iter().map(|attempt| (host, *attempt)).collect();
+        read_records(&targets, window, call)
+    })
 }
 
 /// Whole seconds one peer request may take: what is left of the wait, rounded
@@ -1528,6 +1601,152 @@ mod tests {
         assert_eq!(starts.len(), 1);
         assert!(starts[0].1 <= Duration::from_millis(40), "{starts:?}");
         assert!(starts[0].0 < begun + Duration::from_millis(40));
+    }
+
+    fn running(id: u8) -> run::AttemptRecord {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([id; 16]),
+            "run_id": RunId::from_bytes([9; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "remote-fixture",
+            "attempt_number": u64::from(id),
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(1).expect("time"),
+            "state": {"state":"running"},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": provenant_records::CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))
+        .expect("attempt record")
+    }
+    fn attempt(id: u8) -> AttemptId {
+        AttemptId::from_bytes([id; 16])
+    }
+    /// What a peer answers: a status record for each target, and an empty
+    /// newest page. Each call first takes `delay`, as a slow transport would.
+    #[allow(clippy::disallowed_methods)]
+    fn answer(action: PeerAction, delay: Duration) -> std::result::Result<PeerResult, Fail> {
+        std::thread::sleep(delay);
+        Ok(PeerResult::RunStatuses(match action {
+            PeerAction::RunStatuses { targets } => targets
+                .iter()
+                .map(|target| running(target.attempt.as_bytes()[0]))
+                .collect(),
+            _ => Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn every_read_of_a_fetch_gets_only_the_time_the_earlier_ones_left() {
+        // One host with 101 lanes reads in two chunks, then a second host.
+        let mut selected: Vec<_> = (1..=101)
+            .map(|id| (HostId::from_bytes([1; 16]), attempt(id)))
+            .collect();
+        selected.push((HostId::from_bytes([2; 16]), attempt(102)));
+        let mut left = Vec::new();
+        let window = Window::new(Duration::from_millis(900));
+        let records = read_records(&selected, &window, &mut |_, action, budget| {
+            left.push(budget);
+            answer(action, Duration::from_millis(250))
+        })
+        .expect("three reads fit the budget");
+        assert_eq!(records.len(), 102);
+        assert_eq!(left.len(), 3);
+        // Each read is bounded by what the earlier ones left, not by 900 ms.
+        assert!(left[1] <= Duration::from_millis(700), "{left:?}");
+        assert!(left[2] <= Duration::from_millis(450), "{left:?}");
+        assert!(left[2] < left[1] && left[1] < left[0], "{left:?}");
+    }
+
+    #[test]
+    fn no_read_starts_at_or_after_the_deadline() {
+        let selected = [
+            (HostId::from_bytes([1; 16]), attempt(1)),
+            (HostId::from_bytes([2; 16]), attempt(2)),
+            (HostId::from_bytes([3; 16]), attempt(3)),
+        ];
+        let mut starts = 0;
+        let window = Window::new(Duration::from_millis(100));
+        let failure = read_records(&selected, &window, &mut |_, action, _| {
+            starts += 1;
+            answer(action, Duration::from_millis(150))
+        })
+        .expect_err("the first read used the whole budget");
+        assert_eq!(failure.kind.code(), "PEER_UNAVAILABLE");
+        assert_eq!(starts, 1, "later hosts are never asked");
+    }
+
+    #[test]
+    fn a_zero_second_budget_still_makes_its_one_read() {
+        let selected = [(HostId::from_bytes([1; 16]), attempt(1))];
+        let mut starts = 0;
+        let window = Window::new(Duration::ZERO);
+        let records = read_records(&selected, &window, &mut |_, action, _| {
+            starts += 1;
+            answer(action, Duration::ZERO)
+        })
+        .expect("the initial read runs");
+        assert_eq!((records.len(), starts), (1, 1));
+    }
+
+    /// A tracker that has seen lane 1 running, so a page without it needs a
+    /// lookup.
+    fn tracking_one() -> watch::Tracked {
+        let mut tracked = watch::Tracked::default();
+        tracked
+            .complete(vec![running(1)], |_| Err(corrupt()))
+            .expect("a page that holds the lane needs no lookup");
+        tracked
+    }
+
+    #[test]
+    fn the_missing_lane_lookup_shares_the_first_reads_deadline() {
+        let host = HostId::from_bytes([1; 16]);
+        let keep = |_: &run::AttemptRecord| true;
+        // The first read leaves time for the lookup, but only what it left.
+        let mut left = Vec::new();
+        let window = Window::new(Duration::from_millis(800));
+        let lanes = read_newest(
+            host,
+            &window,
+            &mut tracking_one(),
+            &keep,
+            &mut |_, action, budget| {
+                left.push(budget);
+                answer(action, Duration::from_millis(300))
+            },
+        )
+        .expect("both reads fit");
+        assert_eq!((lanes.len(), left.len()), (1, 2));
+        assert!(left[1] <= Duration::from_millis(500), "{left:?}");
+
+        // The first read used everything: the lookup must not start, even
+        // though a zero remainder would round up to a one-second budget.
+        let mut starts = 0;
+        let window = Window::new(Duration::from_millis(100));
+        let failure = read_newest(
+            host,
+            &window,
+            &mut tracking_one(),
+            &keep,
+            &mut |_, action, _| {
+                starts += 1;
+                answer(action, Duration::from_millis(150))
+            },
+        )
+        .expect_err("the budget ran out before the lookup");
+        assert_eq!(failure.kind.code(), "PEER_UNAVAILABLE");
+        assert_eq!(starts, 1);
     }
 
     #[test]
