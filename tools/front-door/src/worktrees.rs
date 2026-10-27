@@ -684,7 +684,7 @@ pub(crate) fn land_cleanup(
 
 /// How long an event caller (settlement or landing) waits for a busy
 /// collection pass before deferring to the next sweep.
-pub(crate) const EVENT_LOCK_WAIT_SECS: u64 = if cfg!(test) { 1 } else { 30 };
+pub(crate) const EVENT_LOCK_WAIT_SECS: u64 = if cfg!(test) { 1 } else { 5 };
 pub(crate) const COLLECTION_BUSY: &str = "GC collection busy; the next sweep collects it";
 
 pub(crate) fn collection_lock(
