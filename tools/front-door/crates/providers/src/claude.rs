@@ -553,8 +553,9 @@ fn prepare(
     if access == Access::ReadOnly {
         // dontAsk mode refuses reads outside the working directory and its
         // added directories, even where the seatbelt profile would allow them.
+        // A root that holds the working directory still reaches beyond it.
         for root in &plan.read_roots {
-            if !root.path.starts_with(input.cwd) && !input.cwd.starts_with(&root.path) {
+            if !root.path.starts_with(input.cwd) {
                 argv.extend(["--add-dir".into(), root.path.as_os_str().to_owned()]);
             }
         }

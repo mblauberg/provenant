@@ -1592,9 +1592,16 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
         .filter(|pair| pair[0] == "--add-dir")
         .map(|pair| pair[1].clone())
         .collect();
-    // The fixture's own /fixture/repo root holds the working directory, and
-    // /fixture/repo/crates/sub sits inside it, so neither needs a flag.
-    assert_eq!(added, [OsString::from("/fixture/diffs")]);
+    // The fixture's own /fixture/repo root holds the working directory but
+    // reaches beyond it, so it needs a flag; /fixture/repo/crates/sub sits
+    // inside the working directory, so it does not.
+    assert_eq!(
+        added,
+        [
+            OsString::from("/fixture/repo"),
+            OsString::from("/fixture/diffs")
+        ]
+    );
     Ok(())
 }
 
