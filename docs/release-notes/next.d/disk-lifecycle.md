@@ -15,9 +15,9 @@ runs, including child stores, expire with a 64 KiB tail retained. Disk reports
 measure captures separately as `attempt_logs`.
 
 Scheduled GC excludes stale, transient and non-Git project roots.
-**Breaking JSON change:** `gc.data.unobserved_projects` is a count rather than
-a list of paths. New transient invocation roots no longer create persistent
-project registrations.
+`gc.data.unobserved_projects` remains an array of paths; `skipped_transient`
+reports excluded transient common directories. New transient invocation roots
+no longer create persistent project registrations.
 
 Large declared output no longer exhausts the idleness budget for explicit or
 foreign removal. Foreign output age uses directory-entry mtimes.

@@ -41,6 +41,7 @@ pub(crate) enum Error {
     CacheGc(
         Box<provenant_confinement::cache::CacheGcError>,
         Vec<PathBuf>,
+        Vec<PathBuf>,
         Box<provenant_run::ProviderStateGc>,
         Vec<worktrees::WorktreeGcReport>,
         Vec<String>,
@@ -240,7 +241,8 @@ struct GcData {
     provider_state: provenant_run::ProviderStateGc,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
-    unobserved_projects: usize,
+    unobserved_projects: Vec<PathBuf>,
+    skipped_transient: Vec<PathBuf>,
 }
 
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
@@ -270,6 +272,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         Err(Error::CacheGc(
             error,
             unobserved_projects,
+            skipped_transient,
             provider_state,
             worktree_cleanup,
             alerts,
@@ -279,7 +282,8 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let data = GcData {
                 report: error.report,
                 idle_days: command.idle_days,
-                unobserved_projects: unobserved_projects.len(),
+                unobserved_projects,
+                skipped_transient,
                 provider_state: *provider_state,
                 worktree_cleanup,
                 alerts,
@@ -349,6 +353,9 @@ fn gc_data_summary(data: &GcData) -> String {
             log.bytes,
             log.tail_bytes
         ));
+    }
+    for path in &data.skipped_transient {
+        human.push_str(&format!("skipped transient project {}\n", path.display()));
     }
     for alert in &data.alerts {
         human.push_str(&format!("{alert}\n"));
@@ -475,6 +482,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
+    let mut skipped_transient = Vec::new();
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
     if command.scheduled || command.pressure {
         if !config.gc.schedule {
@@ -485,13 +493,16 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 },
                 idle_days: command.idle_days,
                 provider_state: Default::default(),
-                unobserved_projects: unobserved_projects.len(),
+                unobserved_projects,
+                skipped_transient,
                 ..Default::default()
             });
         }
     }
     if command.scheduled {
-        for binding in provenant_config::registered_gc_projects(&roots)? {
+        let selection = provenant_config::registered_gc_project_selection(&roots)?;
+        skipped_transient = selection.skipped_transient;
+        for binding in selection.projects {
             let common = binding.common_dir();
             let path = if common.file_name() == Some(OsStr::new(".git")) {
                 common.parent().ok_or(Error::InvalidScope)?
@@ -507,6 +518,19 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             }
         }
     } else {
+        let common = project.join(".git");
+        if provenant_config::transient_location(&roots, &common) {
+            skipped_transient.push(common);
+            return Ok(GcData {
+                report: provenant_confinement::cache::CacheGcReport {
+                    dry_run: command.dry_run,
+                    ..Default::default()
+                },
+                idle_days: command.idle_days,
+                skipped_transient,
+                ..Default::default()
+            });
+        }
         let selected = gc_project(&roots, &home, &project, workers, command.dry_run)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
@@ -696,6 +720,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             return Err(Error::CacheGc(
                 Box::new(error),
                 unobserved_projects,
+                skipped_transient,
                 Box::new(provider_state),
                 worktree_cleanup,
                 alerts,
@@ -706,7 +731,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         report,
         idle_days: command.idle_days,
         provider_state,
-        unobserved_projects: unobserved_projects.len(),
+        unobserved_projects,
+        skipped_transient,
         worktree_cleanup,
         alerts,
     })

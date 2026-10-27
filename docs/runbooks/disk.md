@@ -93,3 +93,8 @@ record. This provides exclusion through removal and does not adopt the tree.
 
 After capture retention, `output --part stderr` reads the retained tail and
 marks it truncated (`complete=false` in JSON).
+
+Inspect `gc.data.skipped_transient` for excluded common directories under
+`scratchpads`, `.provenant-staging.` or runtime scratch roots. Scheduled
+scans report only registered locations; explicit GC also reports an unregistered
+selected transient checkout. `unobserved_projects` remains an array of paths.

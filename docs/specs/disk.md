@@ -128,7 +128,12 @@ Scheduled enumeration excludes stale, non-Git and known transient locations
 before collecting project IDs for disk alerts. Existing identity records are
 retained for indexed evidence. New transient and non-Git invocation locations
 use deterministic in-memory identities without persistent project records.
-GC reports an unobserved-project count.
+GC preserves `unobserved_projects` as an array of paths. The separate
+`skipped_transient` array reports excluded registered common directories,
+including those beneath `scratchpads` or a `.provenant-staging.` component.
+Explicit GC on a transient checkout reports its common directory and skips
+collection. Unregistered transient roots cannot be discovered by a scheduled
+registry scan.
 - Why: invocation scratch paths must not accumulate as scheduled projects.
 - Test: `crates/config/src/project_binding.rs::transient_roots_have_identity_without_persistent_registration`;
   `::scheduled_projects_exclude_missing_non_git_and_old_transient_bindings`

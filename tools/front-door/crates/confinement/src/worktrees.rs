@@ -2856,7 +2856,9 @@ mod lifecycle_tests {
                 .stdin(std::process::Stdio::piped())
                 .spawn()?,
         );
-        let ProcessObservation::Present(fact) = SystemProcessObserver.observe(i64::from(child.0.id())) else {
+        let ProcessObservation::Present(fact) =
+            SystemProcessObserver.observe(i64::from(child.0.id()))
+        else {
             return Err("child process unobservable".into());
         };
         let worker = CwdWorker(fact);
@@ -2916,11 +2918,12 @@ mod lifecycle_tests {
         );
         let final_writer_held = std::cell::Cell::new(false);
         let no_live = |_: &Path| {
-            if context
-                .project_state
-                .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-                .is_err()
-            {
+            if matches!(
+                context
+                    .project_state
+                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive),
+                Err(FsError::LockTimeout { .. })
+            ) {
                 let Ok(state) = context.project_state.open_verified_directory(&state_name) else {
                     return false;
                 };

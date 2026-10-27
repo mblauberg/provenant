@@ -125,6 +125,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
+            "gc_reports_transient_and_preserves_unobserved_project_array",
             "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
             "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
@@ -179,6 +180,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "provider_state_gc_sweeps_children_and_refuses_replaced_roots" => {
                     crate::provider_retention::provider_state_gc_sweeps_children_and_refuses_replaced_roots()
                 }
+                "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()
                 }
@@ -1314,6 +1316,29 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let cache = authority.cargo_cache().path.clone();
     fs::write(cache.join("artifact"), b"lane build output")?;
     Ok(cache)
+}
+
+fn gc_reports_transient_and_preserves_unobserved_project_array() -> Result {
+    let mut rig = repository()?;
+    let parent = rig.root.join("scratchpads");
+    fs::create_dir(&parent)?;
+    let moved = parent.join("repository");
+    fs::rename(&rig.project, &moved)?;
+    rig.project = moved;
+    let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    assert_eq!(
+        preview["data"]["unobserved_projects"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        preview["data"]["skipped_transient"],
+        serde_json::json!([rig.project.join(".git")])
+    );
+    let output = command(&rig, &["gc", "--dry-run"])?;
+    assert_eq!(code(&output), 0);
+    let text = String::from_utf8(output.stdout.bytes)?;
+    assert!(text.contains("skipped transient project"), "{text}");
+    Ok(())
 }
 
 fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> Result {
