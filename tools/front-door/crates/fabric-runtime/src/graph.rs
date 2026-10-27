@@ -80,6 +80,8 @@ pub struct GraphNode {
     pub route: Option<GraphRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<GraphRoute>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<bool>,
 }
 
 /// Fallback after provider launch is safe only for a confined read-only node.
@@ -157,6 +159,8 @@ pub enum NodeState {
     Succeeded,
     Failed,
     Blocked,
+    #[serde(rename = "no verdict", alias = "no_verdict")]
+    NoVerdict,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +204,7 @@ pub enum AttemptObservation {
         attempt_ref: Option<String>,
         outcome: AttemptOutcome,
         launched: bool,
+        result: Option<String>,
     },
 }
 
@@ -716,6 +721,8 @@ struct PlannedNode {
     prompt: String,
     depends_on: Vec<String>,
     routes: Vec<GraphRoute>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<bool>,
 }
 
 /// Advance all currently ready nodes once. Independent nodes can progress
@@ -918,6 +925,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attempt_ref,
                         outcome,
                         launched,
+                        result: _result,
                     } => {
                         attempt.launched = launched;
                         attempt.state = AttemptState::Terminal;
@@ -1104,6 +1112,7 @@ fn validate_plan(
             prompt: node.prompt.clone(),
             depends_on,
             routes,
+            review: node.review,
         });
     }
 
@@ -1229,7 +1238,7 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 }
                 None => false,
             },
-            NodeState::Succeeded => last.is_some_and(|attempt| {
+            NodeState::Succeeded | NodeState::NoVerdict => last.is_some_and(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && attempt.outcome == Some(AttemptOutcome::Succeeded)
             }),
@@ -1354,6 +1363,7 @@ mod tests {
             depends_on: Vec::new(),
             route: Some(route),
             routes: None,
+            review: None,
         }
     }
 
@@ -1372,6 +1382,16 @@ mod tests {
             attempt_ref: None,
             outcome,
             launched: true,
+            result: None,
+        }
+    }
+
+    fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObservation {
+        AttemptObservation::Terminal {
+            attempt_ref: None,
+            outcome,
+            launched: true,
+            result: Some(result.to_string()),
         }
     }
 
@@ -1486,6 +1506,7 @@ mod tests {
             depends_on: Vec::new(),
             route: None,
             routes: Some(routes.clone()),
+            review: None,
         }]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([
@@ -1591,6 +1612,7 @@ mod tests {
                 depends_on: Vec::new(),
                 route: None,
                 routes: Some(routes.clone()),
+                review: None,
             }]);
             let mut owner = FakeOwner {
                 observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
@@ -1646,6 +1668,7 @@ mod tests {
                     attempt_ref: Some("host/attempt".into()),
                     outcome,
                     launched,
+                    result: None,
                 },
                 terminal(AttemptOutcome::Succeeded),
             ]),
@@ -1825,6 +1848,7 @@ mod tests {
             depends_on: Vec::new(),
             route: None,
             routes: Some(vec![route("first"), route("second")]),
+            review: None,
         }]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([terminal(AttemptOutcome::TaskFailed)]),
@@ -1866,6 +1890,23 @@ mod tests {
         assert_eq!(owner.calls[2].0.node_id, "child");
         assert_eq!(complete.checkpoint.nodes[0].state, NodeState::Succeeded);
         assert_eq!(complete.checkpoint.nodes[1].state, NodeState::Succeeded);
+    }
+
+    #[test]
+    fn review_node_without_verdict_is_labelled_no_verdict() {
+        let mut review = node("review", route("fixture"));
+        review.prompt = "Review the change in .worktrees/feature.".into();
+        let document = graph(vec![review]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal_with_result(
+                AttemptOutcome::Succeeded,
+                "I have no shell and cannot review",
+            )]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let result = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(result.checkpoint.nodes[0].state, NodeState::NoVerdict);
     }
 }
 

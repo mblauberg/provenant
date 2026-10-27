@@ -2992,6 +2992,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
+                let result = if outcome == Outcome::Succeeded {
+                    provenant_run::Service::new(&store)
+                        .output(
+                            attempt.attempt_id,
+                            provenant_run::ArtifactPart::Result,
+                            provenant_run::ByteRange {
+                                offset: 0,
+                                max_bytes: provenant_records::run::OUTPUT_LIMIT,
+                            },
+                            &call,
+                        )
+                        .ok()
+                        .and_then(|c| String::from_utf8(c.bytes).ok())
+                } else {
+                    None
+                };
                 Ok(AttemptObservation::Terminal {
                     launched,
                     attempt_ref: reference,
@@ -3020,6 +3036,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         Outcome::Uncommitted => AttemptOutcome::OtherFailure,
                         _ => AttemptOutcome::OtherFailure,
                     },
+                    result,
                 })
             }
             _ => Ok(AttemptObservation::Pending {
