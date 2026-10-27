@@ -127,32 +127,31 @@ fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, 
                 }
             }
         };
-        let names = |file: &str, wanted: &str| -> Result<bool> {
-            Ok(read(file)?.as_deref() == Some(wanted))
+        // A present state file must hold what Git writes there; anything else
+        // (an empty or truncated file, say) refuses rather than reads as free.
+        let names = |file: &str, wanted: &str, valid: fn(&str) -> bool| -> Result<bool> {
+            match read(file)? {
+                Some(text) if valid(&text) => Ok(text == wanted),
+                Some(_) => Err(format!("cannot parse {file} in {}", dir.display()).into()),
+                None => Ok(false),
+            }
         };
         let how = match read("HEAD")? {
-            Some(text)
-                if text
-                    .strip_prefix("ref: ")
-                    .is_some_and(|to| to.trim() == head) =>
-            {
-                Some(Use::CheckedOut)
-            }
-            Some(text)
-                if text.starts_with("ref: ")
-                    || (!text.is_empty() && text.chars().all(|c| c.is_ascii_hexdigit())) =>
-            {
-                None
-            }
-            Some(_) => return Err(format!("cannot parse HEAD in {}", dir.display()).into()),
+            Some(text) => match text.strip_prefix("ref: ").map(str::trim) {
+                Some(to) if to == head => Some(Use::CheckedOut),
+                Some(to) if is_ref(to) => None,
+                None if is_object_id(&text) => None,
+                _ => return Err(format!("cannot parse HEAD in {}", dir.display()).into()),
+            },
             None => None,
         };
         let how = if how.is_some() {
             how
-        } else if names("rebase-merge/head-name", &head)? || names("rebase-apply/head-name", &head)?
+        } else if names("rebase-merge/head-name", &head, is_head_name)?
+            || names("rebase-apply/head-name", &head, is_head_name)?
         {
             Some(Use::Rebased)
-        } else if names("BISECT_START", branch)? {
+        } else if names("BISECT_START", branch, is_bisect_start)? {
             Some(Use::Bisected)
         } else {
             None
@@ -162,6 +161,26 @@ fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, 
         }
     }
     Ok(None)
+}
+
+/// A full ref name as Git writes it into `HEAD`.
+fn is_ref(text: &str) -> bool {
+    text.starts_with("refs/") && !text.contains(char::is_whitespace)
+}
+
+/// A full SHA-1 or SHA-256 object id.
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A rebase's `head-name`: the branch being rebased, or `detached HEAD`.
+fn is_head_name(text: &str) -> bool {
+    text == "detached HEAD" || is_ref(text)
+}
+
+/// `BISECT_START`: the branch name or commit the bisect started from.
+fn is_bisect_start(text: &str) -> bool {
+    !text.is_empty() && !text.contains(char::is_whitespace)
 }
 
 /// The checkout that the administrative directory `dir` belongs to, or the

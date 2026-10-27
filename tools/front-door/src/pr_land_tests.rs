@@ -378,6 +378,37 @@ pub(crate) fn pr_land_refuses_when_a_worktree_entry_cannot_be_read() -> Result {
     Ok(())
 }
 
+pub(crate) fn pr_land_refuses_when_worktree_state_is_malformed() -> Result {
+    // A truncated rebase record or an unparseable HEAD must refuse, not read
+    // as a worktree that holds nothing.
+    let landing = landing()?;
+    hold(&landing, "rebase")?;
+    let entry = landing.rig.project.join(".git/worktrees/held");
+    let head_name = ["rebase-merge", "rebase-apply"]
+        .iter()
+        .map(|dir| entry.join(dir).join("head-name"))
+        .find(|path| path.is_file())
+        .ok_or("no rebase head-name")?;
+    let original = fs::read(&head_name)?;
+    fs::write(&head_name, "")?;
+    let (status, detail) = race(&landing, &[])?;
+    assert_eq!(status, "refused", "{detail}");
+    assert!(detail.contains("cannot parse"), "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    fs::write(&head_name, original)?;
+
+    let head = entry.join("HEAD");
+    let original = fs::read(&head)?;
+    fs::write(&head, "abc\n")?;
+    let outcome = race(&landing, &[]);
+    fs::write(&head, original)?;
+    let (status, detail) = outcome?;
+    assert_eq!(status, "refused", "{detail}");
+    assert!(detail.contains("cannot parse HEAD"), "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    Ok(())
+}
+
 /// A second worktree that has `feat` mid-`operation` on a detached HEAD, with
 /// the registered `feat` worktree dropped.
 fn hold(landing: &Landing, operation: &str) -> Result<PathBuf> {
