@@ -217,11 +217,13 @@ fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec:
 #[test]
 fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     let rig = configured()?;
+    assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
     let config = rig.state.join("config.toml");
     let text = fs::read_to_string(&config)?;
     fs::write(
         config,
-        text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true"),
+        text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true")
+            .replace("label = \"current\"", "label = \"primary\""),
     )?;
     for _ in 0..2 {
         let output = hook(&rig, true, "ordinary-session")?;
@@ -253,7 +255,7 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     let rows = report["data"]["rows"].as_array().ok_or("usage rows")?;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["account"], "current");
+    assert_eq!(rows[0]["account"], "primary");
     assert_eq!(rows[0]["chair_sessions"], 1);
     assert!(
         report["data"]["chair_usage_note"]
@@ -280,6 +282,29 @@ fn chair_start_obeys_project_attribution_opt_in() -> Result {
     assert!(
         event.get("trace").is_none(),
         "project attribution is off: {event}"
+    );
+    let report = rig.command(&["quota", "usage", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
+    assert!(report["data"]["rows"][0]["project"].is_null());
+    assert_eq!(report["data"]["rows"][0]["chair_sessions"], 1);
+    Ok(())
+}
+
+#[test]
+fn chair_attribution_does_not_register_unbound_projects() -> Result {
+    let rig = configured()?;
+    let config = rig.state.join("config.toml");
+    let text = fs::read_to_string(&config)?;
+    fs::write(
+        config,
+        text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true"),
+    )?;
+    assert!(!rig.state.join("projects").exists());
+    let output = hook(&rig, true, "unbound-project")?;
+    assert_eq!(code(&output), 0);
+    assert!(
+        !rig.state.join("projects").exists(),
+        "telemetry registered the project"
     );
     let report = rig.command(&["quota", "usage", "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
