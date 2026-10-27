@@ -567,18 +567,28 @@ mod tests {
     }
 
     #[test]
-    fn final_scan_drains_queued_children_for_each_parent_state()
+    fn final_scan_refuses_deferred_children_after_normal_parent_completion()
     -> Result<(), Box<dyn std::error::Error>> {
-        for (reason, unobservable_child) in [
-            (None, false),
-            (Some(StopReason::ExplicitCancellation), false),
-            (Some(StopReason::WallDeadline), false),
-            (Some(StopReason::SupervisorSignal), false),
-            (Some(StopReason::ExplicitCancellation), true),
+        final_scan_drains_queue(None, false)
+    }
+
+    #[test]
+    fn final_scan_drains_all_queued_children_after_parent_stop()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            StopReason::ExplicitCancellation,
+            StopReason::WallDeadline,
+            StopReason::SupervisorSignal,
         ] {
-            final_scan_drains_queue(reason, unobservable_child)?;
+            final_scan_drains_queue(Some(reason), false)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn final_scan_drains_queue_even_when_an_accepted_child_cannot_be_stopped()
+    -> Result<(), Box<dyn std::error::Error>> {
+        final_scan_drains_queue(Some(StopReason::ExplicitCancellation), true)
     }
 
     fn final_scan_drains_queue(
