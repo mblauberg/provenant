@@ -407,7 +407,7 @@ fn autosave(
         }
     ))
 }
-fn with_git<T>(
+pub(crate) fn with_git<T>(
     operation: impl FnOnce(
         &UtilityRuntime,
         &SystemExecutor,

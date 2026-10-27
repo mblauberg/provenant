@@ -2,6 +2,82 @@ mod support;
 use support::{Result, TestRig, code};
 
 #[test]
+fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Result {
+    let mut rig = TestRig::new()?;
+    let original = rig.project.clone();
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
+    for (project, operation) in [
+        (original.clone(), "first"),
+        (rig.root.join("second"), "second"),
+    ] {
+        std::fs::create_dir_all(&project)?;
+        rig.project = project;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        assert_eq!(code(&rig.execute(&git, &["init", "-q"], None)?), 0);
+        let output = rig.execute(
+            binary,
+            &[
+                "dispatch",
+                "--prompt-stdin",
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                operation,
+                "--json",
+            ],
+            Some(b"private fixture prompt"),
+        )?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+    }
+    rig.project = original;
+    let output = rig.command(&["quota", "usage", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let rows = report["data"]["rows"].as_array().ok_or("rows")?;
+    assert_eq!(rows.len(), 2, "{report}");
+    assert_ne!(rows[0]["project"], rows[1]["project"]);
+    for row in rows {
+        assert_eq!(row["lane_attempts"], 1);
+        assert_eq!(row["chair_sessions"], 0);
+        assert!(row["account"].is_null());
+        assert_eq!(row["lane_usage"]["uncached_input"]["missing"], 1);
+    }
+    assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("private fixture prompt"));
+    let human = rig.command(&["quota", "usage"])?;
+    let human = String::from_utf8(human.stdout.bytes)?;
+    assert!(human.contains("Chair token usage is not recorded"));
+    assert!(human.contains("unknown account"));
+    assert!(human.contains("attempts missing this category"));
+    assert!(!rig.state.join("quota").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn usage_with_missing_state_creates_nothing_and_rejects_invalid_windows() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let output = rig.command(&["quota", "usage", "--json"])?;
+    assert_eq!(code(&output), 0);
+    assert!(!rig.state.exists());
+    for days in ["0", "366"] {
+        assert_eq!(
+            code(&rig.command(&["quota", "usage", "--days", days, "--json"])?),
+            2
+        );
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn tick_does_not_create_missing_state_ancestors() -> Result {
     let mut rig = quota_rig()?;
     let missing = rig.root.join("missing");

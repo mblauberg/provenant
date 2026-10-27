@@ -530,6 +530,35 @@ fn message(value: &Value) -> String {
         value["command"].as_str().unwrap_or("")
     )
 }
+// Attribution is best effort and must not prevent consuming a handoff.
+fn record_start(context: &Context, input: &Input) {
+    let Ok(accounts) = crate::registered_claude(&context.roots) else {
+        return;
+    };
+    let Ok(target) = current(&accounts, context) else {
+        return;
+    };
+    let project = if crate::usage::attribution_enabled(&context.roots) {
+        crate::hooks::with_git(|runtime, executor, budget, cancel| {
+            let location = runtime
+                .project_location(executor, &context.cwd, budget, cancel)?
+                .location;
+            Ok(provenant_config::lookup_project(&context.roots, &location)?
+                .map(|binding| binding.project_id()))
+        })
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    provenant_telemetry::usage::record_chair(
+        &context.roots,
+        &provenant_os::clock::SystemClock::new(),
+        target.key(),
+        input.session_id.as_str(),
+        project,
+    );
+}
 // The hook protocol imposes real wall-time input and execution caps.
 #[allow(clippy::disallowed_methods)]
 pub fn hook(start: bool, globals: &Globals) -> u8 {
@@ -552,16 +581,19 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         let context = Context::new(globals, &input.cwd)?;
         check_time(Some(deadline))?;
         if start {
-            if context.store().pending(now())?.is_none() {
-                return Ok(None);
-            }
-            let accounts = crate::registered_claude(&context.roots)?;
-            let target = current(&accounts, &context)?;
-            check_time(Some(deadline))?;
-            let Some(handoff) = context
-                .store()
-                .consume(target.key(), &input.session_id, now())?
-            else {
+            // Consume any handoff first, so attribution never spends its deadline.
+            let handoff = if context.store().pending(now())?.is_some() {
+                let accounts = crate::registered_claude(&context.roots)?;
+                let target = current(&accounts, &context)?;
+                check_time(Some(deadline))?;
+                context
+                    .store()
+                    .consume(target.key(), &input.session_id, now())?
+            } else {
+                None
+            };
+            record_start(&context, &input);
+            let Some(handoff) = handoff else {
                 return Ok(None);
             };
             let path = context.store().path(&handoff.session_id);

@@ -45,6 +45,79 @@ pub struct TokenTotal {
     pub known: u64,
     pub missing: u64,
 }
+
+#[derive(Debug, Serialize)]
+pub struct AccountUsage {
+    pub adapter: Option<String>,
+    pub account: Option<String>,
+    pub project: Option<ProjectId>,
+    pub lane_attempts: u64,
+    pub lane_usage: Categories<TokenTotal>,
+    pub chair_sessions: u64,
+}
+
+/// Recorded lane tokens and observed chair session counts, grouped by account
+/// label and project. Chair records have no token measurements.
+pub fn quota_usage(
+    facts: impl IntoIterator<Item = AttemptFact>,
+    chairs: impl IntoIterator<Item = crate::usage::ChairSession>,
+    window: &Window,
+) -> Result<Vec<AccountUsage>, TelemetryError> {
+    if window.since.zip(window.until).is_some_and(|(s, u)| s >= u) {
+        return Err(TelemetryError::InvalidWindow);
+    }
+    let mut rows = BTreeMap::<_, (Accumulator, u64)>::new();
+    let mut attempts = BTreeSet::new();
+    for fact in facts {
+        if !window.includes(&fact) {
+            continue;
+        }
+        if attempts.len() as u64 >= MAX_ATTEMPTS {
+            return Err(TelemetryError::TooLarge("100,000 selected attempts"));
+        }
+        if !attempts.insert(fact.attempt_id) {
+            return Err(TelemetryError::InvalidFact("duplicate attempt ID"));
+        }
+        let route = fact.resolved_route.clone().unwrap_or(RouteFact {
+            provider: None,
+            model: None,
+            effort: None,
+            account_label: None,
+        });
+        let key = (route.provider, route.account_label, Some(fact.project_id));
+        rows.entry(key).or_default().0.record(&fact, 0, false)?;
+        if rows.len() as u64 > MAX_GROUPS {
+            return Err(TelemetryError::TooLarge("10,000 groups"));
+        }
+    }
+    let mut sessions = BTreeSet::new();
+    for chair in chairs {
+        if window.project.is_some_and(|p| Some(p) != chair.project) {
+            continue;
+        }
+        let key = (Some(chair.adapter), Some(chair.account), chair.project);
+        if sessions.insert((key.clone(), chair.session)) {
+            add(&mut rows.entry(key).or_default().1, 1)?;
+        }
+        if rows.len() as u64 > MAX_GROUPS {
+            return Err(TelemetryError::TooLarge("10,000 groups"));
+        }
+    }
+    Ok(rows
+        .into_iter()
+        .map(
+            |((adapter, account, project), (lane, chair_sessions))| AccountUsage {
+                adapter,
+                account,
+                project,
+                lane_attempts: lane.attempts,
+                lane_usage: lane.usage,
+                chair_sessions,
+            },
+        )
+        .collect())
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Money {
     pub microdollars: u64,

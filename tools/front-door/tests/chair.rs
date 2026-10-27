@@ -215,6 +215,105 @@ fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec:
     }))?))
 }
 #[test]
+fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
+    let rig = configured()?;
+    assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
+    let config = rig.state.join("config.toml");
+    let text = fs::read_to_string(&config)?;
+    fs::write(
+        config,
+        text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true")
+            .replace("label = \"current\"", "label = \"primary\""),
+    )?;
+    for _ in 0..2 {
+        let output = hook(&rig, true, "ordinary-session")?;
+        assert_eq!(code(&output), 0);
+        assert!(output.stdout.bytes.is_empty());
+    }
+    let log = fs::read_to_string(rig.state.join("usage.jsonl"))?;
+    let events = log
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let event = events
+        .iter()
+        .find(|e| e["kind"] == "chair.session")
+        .ok_or("SessionStart did not record the serving account without a handoff")?;
+    assert_eq!(event["unit"], "claude");
+    assert_eq!(event["account"], "current");
+    assert_eq!(event["session"], "ordinary-session");
+    assert!(event["trace"]["project"].is_string());
+    assert!(!log.contains("PRIVATE PROMPT"));
+    assert!(!log.contains("transcript.jsonl"));
+    let output = rig.command(&["quota", "usage", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let rows = report["data"]["rows"].as_array().ok_or("usage rows")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["account"], "primary");
+    assert_eq!(rows[0]["chair_sessions"], 1);
+    assert!(
+        report["data"]["chair_usage_note"]
+            .as_str()
+            .is_some_and(|s| s.contains("not recorded"))
+    );
+    Ok(())
+}
+
+#[test]
+fn chair_start_obeys_project_attribution_opt_in() -> Result {
+    let rig = configured()?;
+    let output = hook(&rig, true, "private-project")?;
+    assert_eq!(code(&output), 0);
+    let log = fs::read_to_string(rig.state.join("usage.jsonl"))?;
+    let event = log
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|e| e["kind"] == "chair.session")
+        .ok_or("chair event")?;
+    assert_eq!(event["account"], "current");
+    assert!(
+        event.get("trace").is_none(),
+        "project attribution is off: {event}"
+    );
+    let report = rig.command(&["quota", "usage", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
+    assert!(report["data"]["rows"][0]["project"].is_null());
+    assert_eq!(report["data"]["rows"][0]["chair_sessions"], 1);
+    Ok(())
+}
+
+#[test]
+fn chair_attribution_does_not_register_unbound_projects() -> Result {
+    let rig = configured()?;
+    let config = rig.state.join("config.toml");
+    let text = fs::read_to_string(&config)?;
+    fs::write(
+        config,
+        text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true"),
+    )?;
+    assert!(!rig.state.join("projects").exists());
+    let output = hook(&rig, true, "unbound-project")?;
+    assert_eq!(code(&output), 0);
+    assert!(
+        !rig.state.join("projects").exists(),
+        "telemetry registered the project"
+    );
+    let report = rig.command(&["quota", "usage", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
+    assert!(report["data"]["rows"][0]["project"].is_null());
+    assert_eq!(report["data"]["rows"][0]["chair_sessions"], 1);
+    Ok(())
+}
+
+#[test]
 fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
     let mut rig = configured()?;
     let state_text = rig.root.join("handoff.md");
@@ -271,6 +370,18 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
     rig.env.push((
         "CLAUDE_CONFIG_DIR".into(),
         rig.root.join("spare's account").into_os_string(),
+    ));
+    // Project-attribution failures must not prevent checkpoint consumption.
+    let config = rig.state.join("config.toml");
+    let text = fs::read_to_string(&config)?;
+    fs::write(
+        config,
+        format!("{text}\n[knobs]\n\"usage.project_attribution\" = true\n"),
+    )?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
+    rig.env.push((
+        "PROVENANT_GIT".into(),
+        rig.root.join("missing-git").into_os_string(),
     ));
     let resumed = hook(&rig, true, "new")?;
     let value: serde_json::Value = serde_json::from_slice(&resumed.stdout.bytes)?;
