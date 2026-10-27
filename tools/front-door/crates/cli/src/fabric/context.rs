@@ -356,6 +356,7 @@ pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
         PeerError::Failed(cause) => Some(format!("{destination}: {cause}")),
         PeerError::Unavailable => Some(format!("{destination}: peer is unavailable")),
         PeerError::Frame => Some(format!("{destination}: invalid peer frame")),
+        PeerError::RequestTooLarge => Some(format!("{destination}: {error}")),
         _ => None,
     };
     PeerFailure {

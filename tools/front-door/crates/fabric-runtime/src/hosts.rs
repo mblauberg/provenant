@@ -58,6 +58,8 @@ pub enum PeerError {
     Cancelled,
     #[error("malformed peer frame")]
     Frame,
+    #[error("encoded peer request exceeds 1 MiB; shorten the prompt or split the batch")]
+    RequestTooLarge,
     #[error("peer refused the operation: {error}")]
     Refused { error: facade::FacadeError },
 }
@@ -538,7 +540,7 @@ impl SshTransport<'_> {
         }
         let mut input = serde_json::to_vec(request).map_err(|_| PeerError::Frame)?;
         if input.len() >= MAX_FRAME {
-            return Err(PeerError::Frame);
+            return Err(PeerError::RequestTooLarge);
         }
         input.push(b'\n');
         let mut timeout =

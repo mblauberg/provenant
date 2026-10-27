@@ -351,7 +351,7 @@ impl ValidateInput for GraphInput {
 }
 
 impl ValidateInput for SubmitInput {
-    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
+    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Submit {
                 tasks,
@@ -373,7 +373,13 @@ impl ValidateInput for SubmitInput {
                 }
                 for (index, task) in tasks.iter().enumerate() {
                     let path = format!("tasks[{index}]");
-                    task_text(&task.prompt, &format!("{path}.prompt"))?;
+                    // Peer dispatch uses the CLI launch limit; MCP retains its
+                    // smaller tool input bound.
+                    let prompt_limit = match transport {
+                        WaitTransport::Cli => 1_048_576,
+                        WaitTransport::Mcp => MAX_TEXT_BYTES,
+                    };
+                    bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
                     optional_text(
                         task.base.as_deref(),
                         &format!("{path}.base"),

@@ -300,7 +300,9 @@ impl From<&crate::hosts::PeerError> for FacadeError {
                 peer: peer.clone(),
                 remote: *remote,
             },
-            PeerError::Project | PeerError::SourceHost => Self::InvalidInput,
+            PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
+                Self::InvalidInput
+            }
             PeerError::Unavailable | PeerError::Failed(_) => Self::HomeUnavailable,
             PeerError::Unknown { operation_id } => Self::LaunchUnknown {
                 operation_id: operation_id.clone(),
