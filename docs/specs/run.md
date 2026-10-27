@@ -44,7 +44,7 @@ read-only lane never waits behind a writer. Spacing is measured on the host's
 monotonic clock since boot (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on
 Linux, both counting sleep), never the wall clock. Every process on the host
 shares that clock, and the ledger records each class's last start as a reading
-of it with the boot identity it was read under (`kern.boottime` on macOS,
+of it with the boot identity it was read under (`kern.bootsessionuuid` on macOS,
 `/proc/sys/kernel/random/boot_id` on Linux). The ledger reads the clock inside
 the transaction that checks and records spacing, never before a probe or the
 lock, so lock order is clock order and an admission delayed behind another

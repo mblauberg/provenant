@@ -56,11 +56,32 @@ pub(crate) fn boot_unix_seconds() -> io::Result<i64> {
     ))
 }
 
-/// Names the current boot: `kern.boottime` to the microsecond.
+/// Names the current boot: the kernel's boot session UUID. `kern.boottime`
+/// is not used because XNU shifts it when the wall clock is stepped.
 #[cfg(target_os = "macos")]
 pub(crate) fn boot_identity() -> io::Result<String> {
-    let boot = kern_boottime()?;
-    Ok(format!("{}.{:06}", boot.tv_sec, boot.tv_usec))
+    let mut buffer = [0u8; 64];
+    let mut length = buffer.len();
+    // SAFETY: the name is NUL-terminated and read-only; buffer is writable
+    // storage of length bytes. sysctl retains no pointers.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let text = buffer.get(..length).unwrap_or_default();
+    let text = text.strip_suffix(&[0]).unwrap_or(text);
+    parse_boot_id(
+        std::str::from_utf8(text)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid boot session id"))?,
+    )
 }
 
 /// Names the current boot: the kernel's random boot id.
@@ -122,7 +143,7 @@ fn micros_since_boot(seconds: i64, nanos: i64) -> io::Result<u64> {
         .ok_or_else(invalid)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn parse_boot_id(text: &str) -> io::Result<String> {
     let id = text.trim();
     if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
