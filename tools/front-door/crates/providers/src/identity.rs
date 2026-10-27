@@ -13,7 +13,7 @@ pub fn fingerprint(identity: &str) -> Option<String> {
 pub fn org_fingerprint(org_id: &str) -> Option<String> {
     digest(&org_id.trim().to_lowercase())
 }
-fn digest(identity: &str) -> Option<String> {
+pub(crate) fn digest(identity: &str) -> Option<String> {
     if identity.is_empty() || identity.len() > 4096 || identity.chars().any(char::is_control) {
         return None;
     }

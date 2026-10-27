@@ -119,6 +119,8 @@
 (deny file-write* (subpath "/fixture/home/.gnupg"))
 (deny file-read* (subpath "/fixture/home/.config/gh"))
 (deny file-write* (subpath "/fixture/home/.config/gh"))
+(deny file-read* (subpath "/fixture/home/Library/Application Support/GitHub CLI"))
+(deny file-write* (subpath "/fixture/home/Library/Application Support/GitHub CLI"))
 (deny file-read* (subpath "/fixture/home/.kube"))
 (deny file-write* (subpath "/fixture/home/.kube"))
 (deny file-read* (subpath "/fixture/home/.secrets"))
