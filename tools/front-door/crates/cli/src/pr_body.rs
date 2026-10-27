@@ -414,10 +414,7 @@ mod tests {
                 (cells.get(1) == Some(&"Harness style")).then_some(cells)
             })
             .expect("harness style row");
-        assert_eq!(
-            &harness[2..4],
-            ["`provenant check harness`", "pending"]
-        );
+        assert_eq!(&harness[2..4], ["`provenant check harness`", "pending"]);
         assert!(text.contains("| Writer attempt |"));
         assert!(text.contains("| Independent review |"));
     }

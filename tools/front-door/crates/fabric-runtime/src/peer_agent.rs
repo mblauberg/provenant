@@ -1340,11 +1340,7 @@ mod tests {
             assert_eq!(value["Label"], "dev.provenant.peer");
             assert_eq!(
                 value["ProgramArguments"],
-                serde_json::json!([
-                    "/Users/a&b/.local/bin/provenant",
-                    "fabric",
-                    "peer-agent"
-                ])
+                serde_json::json!(["/Users/a&b/.local/bin/provenant", "fabric", "peer-agent"])
             );
             assert_eq!(
                 value["EnvironmentVariables"]["PATH"],

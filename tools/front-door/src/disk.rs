@@ -542,11 +542,7 @@ mod tests {
             assert_eq!(render(&result, json, &human, &mut output, &mut errors), 0);
             assert!(errors.is_empty());
             assert!(!output.is_empty());
-            assert!(
-                output.len() < RUNS as usize * 16,
-                "{} bytes",
-                output.len()
-            );
+            assert!(output.len() < RUNS as usize * 16, "{} bytes", output.len());
         }
         Ok(())
     }
