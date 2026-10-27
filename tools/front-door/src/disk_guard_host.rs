@@ -130,7 +130,7 @@ impl Host for System {
         Ok(())
     }
     fn gc(&mut self) -> io::Result<()> {
-        self.log("gc --scheduled --apply")?;
+        self.log("gc --scheduled --pressure --apply")?;
         // The bounded shell exits after starting GC, with all inherited pipes
         // redirected. Arguments, including paths, never become shell source.
         let program = std::env::current_exe()?;
@@ -144,7 +144,7 @@ impl Host for System {
     }
 }
 
-fn gc_arguments(program: PathBuf, log: PathBuf) -> [OsString; 9] {
+fn gc_arguments(program: PathBuf, log: PathBuf) -> [OsString; 10] {
     [
         "/bin/sh".into(),
         "-c".into(),
@@ -154,6 +154,7 @@ fn gc_arguments(program: PathBuf, log: PathBuf) -> [OsString; 9] {
         program.into_os_string(),
         "gc".into(),
         "--scheduled".into(),
+        "--pressure".into(),
         "--apply".into(),
     ]
 }
@@ -205,7 +206,7 @@ mod tests {
             .skip(6)
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(arguments, ["gc", "--scheduled", "--apply"]);
+        assert_eq!(arguments, ["gc", "--scheduled", "--pressure", "--apply"]);
     }
     #[test]
     fn malformed_records_do_not_hide_valid_builds() {

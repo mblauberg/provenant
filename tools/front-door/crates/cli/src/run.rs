@@ -794,29 +794,89 @@ fn check_writer_disk(
     worktree: &Path,
     home: &Path,
 ) -> Result<(), String> {
-    check_writer_disk_with(settings, state, worktree, home, |mut path| {
-        loop {
-            match provenant_os::fs::Directory::open_anchor(path) {
-                Ok(directory) => {
-                    return directory
-                        .available_bytes()
-                        .map_err(|error| error.to_string());
+    check_writer_disk_with_collection(
+        settings,
+        state,
+        worktree,
+        home,
+        |mut path| {
+            loop {
+                match provenant_os::fs::Directory::open_anchor(path) {
+                    Ok(directory) => {
+                        return directory
+                            .available_bytes()
+                            .map_err(|error| error.to_string());
+                    }
+                    Err(error) if error.is_not_found() => {
+                        path = path.parent().ok_or_else(|| error.to_string())?;
+                    }
+                    Err(error) => return Err(error.to_string()),
                 }
-                Err(error) if error.is_not_found() => {
-                    path = path.parent().ok_or_else(|| error.to_string())?;
-                }
-                Err(error) => return Err(error.to_string()),
             }
-        }
-    })
+        },
+        || pressure_collection(state, home),
+    )
 }
 
+/// Run the same pressure classes as GC in a separate bounded process. A killed
+/// collector leaves identity-bearing tombstones for the next sweep.
+fn pressure_collection(state: &Path, home: &Path) -> u64 {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    let collect = || -> Result<u64, Box<dyn std::error::Error>> {
+        let program = std::env::current_exe()?;
+        let argv = vec![
+            program.into_os_string(),
+            "--state-dir".into(),
+            state.as_os_str().to_owned(),
+            "gc".into(),
+            "--scheduled".into(),
+            "--pressure".into(),
+            "--apply".into(),
+            "--json".into(),
+        ];
+        let mut options = ExecOptions::new(&argv, home, Duration::from_secs(5));
+        options.stdin = Some(b"");
+        options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        if output.stdout.truncated || output.drain_truncated || output.stdout.sink_lost_bytes != 0 {
+            return Ok(0);
+        }
+        let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let data = &value["data"];
+        let temporary = data["provider_state"]["attempt_tmp"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["bytes"].as_u64())
+            .fold(0_u64, u64::saturating_add);
+        Ok(data["bytes_freed"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(temporary))
+    };
+    collect().unwrap_or(0)
+}
+
+#[cfg(test)]
 fn check_writer_disk_with(
     settings: &provenant_config::GcSettings,
     state: &Path,
     worktree: &Path,
     home: &Path,
+    available: impl FnMut(&Path) -> Result<u64, String>,
+) -> Result<(), String> {
+    check_writer_disk_with_collection(settings, state, worktree, home, available, || 0)
+}
+
+fn check_writer_disk_with_collection(
+    settings: &provenant_config::GcSettings,
+    state: &Path,
+    worktree: &Path,
+    home: &Path,
     mut available: impl FnMut(&Path) -> Result<u64, String>,
+    mut collect: impl FnMut() -> u64,
 ) -> Result<(), String> {
     let floor = settings
         .free_floor_bytes(state)
@@ -830,10 +890,20 @@ fn check_writer_disk_with(
         }
     }
     if minimum < floor {
-        return Err(format!(
-            "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; run `provenant gc` before dispatching a writer",
-            limiting.display()
-        ));
+        let reclaimed = collect();
+        minimum = u64::MAX;
+        for path in [worktree, state, cache.as_path()] {
+            let bytes = available(path)?;
+            if bytes < minimum {
+                (limiting, minimum) = (path, bytes);
+            }
+        }
+        if minimum < floor {
+            return Err(format!(
+                "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                limiting.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -2668,6 +2738,54 @@ mod writer_disk_tests {
             assert!(observed.contains(&low.to_path_buf()));
         }
         check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
+        Ok(())
+    }
+
+    #[test]
+    fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result<(), String> {
+        use std::cell::Cell;
+        let settings = provenant_config::GcSettings {
+            free_floor: Some("100B".into()),
+            ..Default::default()
+        };
+        for remaining in [99, 100] {
+            let collected = Cell::new(false);
+            let samples = Cell::new(0);
+            let result = check_writer_disk_with_collection(
+                &settings,
+                Path::new("/state"),
+                Path::new("/tree"),
+                Path::new("/home"),
+                |_| {
+                    samples.set(samples.get() + 1);
+                    Ok(if collected.get() { remaining } else { 50 })
+                },
+                || {
+                    assert!(!collected.replace(true));
+                    49
+                },
+            );
+            assert_eq!(samples.get(), 6);
+            if remaining == 100 {
+                result?;
+            } else {
+                let error = result.err().ok_or("writer accepted low disk")?;
+                assert!(error.contains("reported 49 bytes reclaimed"), "{error}");
+            }
+        }
+        let calls = Cell::new(0);
+        check_writer_disk_with_collection(
+            &settings,
+            Path::new("/state"),
+            Path::new("/tree"),
+            Path::new("/home"),
+            |_| Ok(100),
+            || {
+                calls.set(calls.get() + 1);
+                0
+            },
+        )?;
+        assert_eq!(calls.get(), 0);
         Ok(())
     }
 

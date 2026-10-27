@@ -87,6 +87,7 @@ impl Error {
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::Dirty
+                | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter
                 | WorktreeError::UnknownWriter
@@ -204,7 +205,17 @@ fn execute(
                             },
                         }
                     };
-                    let removed = worktrees::remove(context, request, cancel)?;
+                    let config = provenant_config::read_with_domains(
+                        roots,
+                        &provenant_cli::domains::SECTIONS,
+                    )?;
+                    let output = config
+                        .gc
+                        .projects
+                        .get(&context.binding.project_id().to_string())
+                        .cloned()
+                        .unwrap_or_default();
+                    let removed = worktrees::remove_with_output(context, request, cancel, &output)?;
                     if named
                         && !args.discard
                         && removed
@@ -229,8 +240,7 @@ struct GcData {
     provider_state: provenant_run::ProviderStateGc,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    unobserved_projects: Vec<PathBuf>,
+    unobserved_projects: usize,
 }
 
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
@@ -269,7 +279,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let data = GcData {
                 report: error.report,
                 idle_days: command.idle_days,
-                unobserved_projects,
+                unobserved_projects: unobserved_projects.len(),
                 provider_state: *provider_state,
                 worktree_cleanup,
                 alerts,
@@ -311,7 +321,7 @@ fn gc_data_summary(data: &GcData) -> String {
                 tree.path.display()
             ));
         }
-        for output in &project.output {
+        for output in project.output.iter().chain(&project.idle_output) {
             human.push_str(&format!("{} {}\n", output.reason, output.path.display()));
         }
     }
@@ -325,6 +335,19 @@ fn gc_data_summary(data: &GcData) -> String {
             },
             temporary.path.display(),
             temporary.bytes
+        ));
+    }
+    for log in &data.provider_state.attempt_logs {
+        human.push_str(&format!(
+            "{} capture {} ({} bytes, {} byte tail retained)\n",
+            if data.report.dry_run {
+                "would expire"
+            } else {
+                "expired"
+            },
+            log.path.display(),
+            log.bytes,
+            log.tail_bytes
         ));
     }
     for alert in &data.alerts {
@@ -393,13 +416,15 @@ fn gc_project(
     home: &Path,
     project: &Path,
     workers: &dyn WorkerObserver,
+    read_only: bool,
 ) -> Result<GcProject, Error> {
-    with_context(
+    with_context_mode(
         roots,
         home,
         project,
         MUTATION_TIMEOUT,
         workers,
+        read_only,
         |context, cancel| {
             Ok(GcProject {
                 binding: context.binding.clone(),
@@ -433,12 +458,26 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         roots,
         ..
     } = roots::resolve(globals, workspace, roots::Product::Required)?;
+    let _collection = if command.dry_run {
+        None
+    } else {
+        provenant_config::private_directory(&roots.state.as_path().join("gc"), true)
+            .map_err(|_| Error::GcObservation("cannot establish GC lock directory"))?;
+        let directory = Directory::open_anchor(&roots.state.as_path().join("gc"))?;
+        Some(directory.lock(
+            OsStr::new("collection.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            WaitBudget::nonblocking(SystemClock.mono_now()),
+            &CancelToken::new(),
+            &SystemClock,
+        )?)
+    };
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
     if command.scheduled {
-        if !config.gc.schedule {
+        if !config.gc.schedule && !command.pressure {
             return Ok(GcData {
                 report: provenant_confinement::cache::CacheGcReport {
                     dry_run: command.dry_run,
@@ -446,25 +485,27 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 },
                 idle_days: command.idle_days,
                 provider_state: Default::default(),
-                unobserved_projects,
+                unobserved_projects: unobserved_projects.len(),
                 ..Default::default()
             });
         }
-        for binding in provenant_config::registered_projects(&roots)? {
-            project_ids.push(binding.project_id());
+        for binding in provenant_config::registered_gc_projects(&roots)? {
             let common = binding.common_dir();
             let path = if common.file_name() == Some(OsStr::new(".git")) {
                 common.parent().ok_or(Error::InvalidScope)?
             } else {
                 common
             };
-            match gc_project(&roots, &home, path, workers) {
-                Ok(project) => projects.push(project),
+            match gc_project(&roots, &home, path, workers, command.dry_run) {
+                Ok(project) => {
+                    project_ids.push(project.binding.project_id());
+                    projects.push(project);
+                }
                 Err(_) => unobserved_projects.push(path.to_owned()),
             }
         }
     } else {
-        let selected = gc_project(&roots, &home, &project, workers)?;
+        let selected = gc_project(&roots, &home, &project, workers, command.dry_run)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
@@ -473,20 +514,30 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map(Ok)
         .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
         .map_err(Error::DiskSpace)?;
+    let output_idle_days = if Directory::open_anchor(roots.state.as_path())?
+        .available_bytes()
+        .map_err(Error::DiskSpace)?
+        < free_floor
+    {
+        1
+    } else {
+        command.idle_days
+    };
     let mut worktree_cleanup = Vec::new();
-    for project in &mut projects {
+    for project in projects.iter_mut().filter(|_| !command.pressure) {
         let settings = config
             .gc
             .projects
             .get(&project.binding.project_id().to_string())
             .cloned()
             .unwrap_or_default();
-        let cleanup = with_context(
+        let cleanup = with_context_mode(
             &roots,
             &home,
             &project.path,
             MUTATION_TIMEOUT,
             workers,
+            command.dry_run,
             |context, cancel| {
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
@@ -552,7 +603,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         no_live_lanes: &no_live_lanes,
                         regenerable: &settings.regenerable,
                         keep: &settings.keep,
-                        written_before_ns: now_ns - 86_400 * 1_000_000_000,
+                        written_before_ns: now_ns
+                            - i128::from(output_idle_days) * 86_400 * 1_000_000_000,
+                        foreign_idle_before_ns: Some(
+                            now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
+                        ),
+                        foreign_merged_clean: settings.foreign_worktrees
+                            == provenant_config::ForeignWorktrees::MergedClean,
                         dry_run: command.dry_run || !command.apply,
                     },
                     cancel,
@@ -566,13 +623,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             Err(_) => unobserved_projects.push(project.path.clone()),
         }
     }
-    let provider_state = crate::provider_retention::collect(
-        &roots,
-        &home,
-        &assets,
-        config.retention.provider_state_days,
-        command.dry_run,
-    );
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
         .wall_now()
@@ -602,6 +652,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         }
         Err(WorkerState::Unknown)
     });
+    let provider_state = if command.pressure {
+        crate::provider_retention::collect_pressure(&roots, &home, &assets, command.dry_run)
+    } else {
+        crate::provider_retention::collect_with_logs(
+            &roots,
+            &home,
+            &assets,
+            config.retention.provider_state_days,
+            config.retention.logs_days,
+            command.dry_run,
+        )
+    };
     let alert_floor = config
         .gc
         .alert_below
@@ -630,7 +692,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         report,
         idle_days: command.idle_days,
         provider_state,
-        unobserved_projects,
+        unobserved_projects: unobserved_projects.len(),
         worktree_cleanup,
         alerts,
     })
@@ -648,14 +710,29 @@ pub(crate) fn with_context<T>(
     workers: &dyn WorkerObserver,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    // Create the fresh state hierarchy through held, no-follow directories.
+    with_context_mode(roots, home, project, mutation, workers, false, action)
+}
+
+fn with_context_mode<T>(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    mutation: Duration,
+    workers: &dyn WorkerObserver,
+    read_only: bool,
+    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
+) -> Result<T, Error> {
+    // Preview only existing custody; an unbound project cannot grant mutation
+    // authority and preview must not allocate its registration or lock files.
     let mut state = Directory::root(true)?;
     for component in roots.state.as_path().components() {
         if let Component::Normal(name) = component {
-            match state.mkdir(name, 0o700) {
-                Ok(()) => state.sync()?,
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error.into()),
+            if !read_only {
+                match state.mkdir(name, 0o700) {
+                    Ok(()) => state.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
             state = match state.open_verified_directory(name) {
                 Ok(child) => child,
@@ -678,7 +755,11 @@ pub(crate) fn with_context<T>(
             };
         }
     }
-    let utility_home = child(&state, "utility-home")?;
+    let utility_home = if read_only {
+        state.open_verified_directory(OsStr::new("utility-home"))?
+    } else {
+        child(&state, "utility-home")?
+    };
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let runtime = UtilityRuntime::new(
         canonicalize(&git)?,
@@ -688,12 +769,27 @@ pub(crate) fn with_context<T>(
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = runtime.open_repo(&executor, project, budget, &cancel)?;
-    let binding = provenant_config::bind_project(
-        roots,
-        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
-    )?;
-    let worktrees_state = child(&state, "worktrees")?;
-    let project_state = child(&worktrees_state, &binding.project_id().to_string())?;
+    let location = provenant_config::ProjectLocation::new(repo.common_git_dir())?;
+    let binding = if read_only {
+        provenant_config::lookup_project(roots, &location)?.ok_or(Error::GcObservation(
+            "GC preview requires an existing project binding",
+        ))?
+    } else {
+        provenant_config::bind_project(roots, location)?
+    };
+    let worktrees_state = if read_only {
+        state.open_verified_directory(OsStr::new("worktrees"))?
+    } else {
+        child(&state, "worktrees")?
+    };
+    let name = binding.project_id().to_string();
+    let project_state = if read_only {
+        let project_state = worktrees_state.open_verified_directory(OsStr::new(&name))?;
+        project_state.metadata_at(OsStr::new("worktrees.lock"), false)?;
+        project_state
+    } else {
+        child(&worktrees_state, &name)?
+    };
     let clock = SystemClock;
     let context = WorktreeContext {
         home,
@@ -724,4 +820,33 @@ fn child(
         Err(error) => return Err(error.into()),
     }
     Ok(parent.open_verified_directory(name)?)
+}
+
+#[cfg(test)]
+mod gc_preview_tests {
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
+    use super::*;
+    #[test]
+    fn gc_preview_does_not_initialise_absent_state() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let assets = base.join("assets");
+        std::fs::create_dir(&home)?;
+        std::fs::create_dir(&assets)?;
+        let state = base.join("absent");
+        let roots = crate::roots::child(&home, &assets, state.clone())?;
+        let result = with_context_mode(
+            &roots,
+            &home,
+            &base,
+            MUTATION_TIMEOUT,
+            &worktrees::SystemWorkerObserver,
+            true,
+            |_, _| Ok(()),
+        );
+        assert!(result.is_err());
+        assert!(!state.exists());
+        Ok(())
+    }
 }

@@ -113,6 +113,11 @@ fn scan_runs(
             path: run_path.clone(),
             ..Default::default()
         };
+        let mut logs = DiskEntry {
+            class: "attempt_logs".into(),
+            path: run_path.clone(),
+            ..Default::default()
+        };
         let mut retained = DiskEntry {
             class: "attempt_retained".into(),
             path: run_path.clone(),
@@ -140,6 +145,19 @@ fn scan_runs(
                     .and_then(|(run, attempt)| terminal.get(&(run.into(), attempt.into())))
                     .copied();
                 for part in entries(&attempt, &attempt_path, report) {
+                    if matches!(
+                        part.to_str(),
+                        Some("stdout.log" | "stderr.log" | "stdout.log.tail" | "stderr.log.tail")
+                    ) {
+                        report.measure_into_at(
+                            &mut logs,
+                            &attempt,
+                            &part,
+                            &attempt_path.join(&part),
+                        );
+                        logs.count = Some(logs.count.unwrap_or(0) + 1);
+                        continue;
+                    }
                     let class = match part
                         .to_str()
                         .and_then(AttemptFile::from_name)
@@ -179,6 +197,9 @@ fn scan_runs(
                     }
                 }
             }
+        }
+        if logs.count.is_some() {
+            report.add_rollup(logs);
         }
         if observed_other {
             report.add_rollup(other);
@@ -457,6 +478,13 @@ mod tests {
         RunStore::disk_usage_unindexed(&context.state_root, &mut report)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.entries.len(), 3);
+        let logs = report
+            .entries
+            .iter()
+            .find(|row| row.class == "attempt_logs")
+            .ok_or("capture class missing")?;
+        assert_eq!(logs.count, Some(200));
+        assert!(logs.allocated_bytes >= 200 * 4096);
         let (provider, runs): (Vec<_>, Vec<_>) = report
             .entries
             .iter()

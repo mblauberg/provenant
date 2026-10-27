@@ -50,7 +50,7 @@ pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec
     <string>{state}</string>
   </dict>
   <key>StartInterval</key>
-  <integer>3600</integer>
+  <integer>86400</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
@@ -73,7 +73,7 @@ pub enum Installed {
 impl Installed {
     pub fn describe(&self) -> String {
         match self {
-            Self::Started => format!("{LABEL} scheduled at load and hourly"),
+            Self::Started => format!("{LABEL} scheduled at load and daily"),
             Self::Skipped => {
                 "not installed (disabled or outside the macOS default state root)".into()
             }
@@ -183,7 +183,7 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("<string>dev.provenant.gc</string>"));
-        assert!(text.contains("<key>StartInterval</key>\n  <integer>3600</integer>"));
+        assert!(text.contains("<key>StartInterval</key>\n  <integer>86400</integer>"));
         assert!(text.contains("<string>/bin/a&amp;b</string>"));
         assert!(text.contains("<string>--scheduled</string>"));
         assert!(text.contains("<string>--apply</string>"));

@@ -55,6 +55,8 @@ pub enum WorktreeError {
     StaleRegistration,
     #[error("worktree is dirty")]
     Dirty,
+    #[error("worktree has undeclared ignored paths: {0}")]
+    IgnoredPaths(String),
     #[error("worktree has an in-progress Git operation")]
     GitOperationInProgress,
     #[error("worktree writer is live")]
@@ -1549,8 +1551,16 @@ fn remove_tree(
     entry: &GitWorktree,
     expected_head: GitOid,
     cancel: &CancelToken,
+    output: &provenant_config::ProjectGcSettings,
 ) -> Result<RemovedTree, WorktreeError> {
-    remove_tree_when(context, entry, expected_head, cancel, &|| true)
+    remove_tree_when(
+        context,
+        entry,
+        expected_head,
+        cancel,
+        &|| true,
+        Some(output),
+    )
 }
 
 fn remove_tree_when(
@@ -1559,6 +1569,7 @@ fn remove_tree_when(
     expected_head: GitOid,
     cancel: &CancelToken,
     eligible: &dyn Fn() -> bool,
+    output: Option<&provenant_config::ProjectGcSettings>,
 ) -> Result<RemovedTree, WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::UnknownWriter);
@@ -1582,6 +1593,16 @@ fn remove_tree_when(
     }
     if !eligible() {
         return Err(WorktreeError::UnknownWriter);
+    }
+    if worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored {
+        let settings = output.cloned().unwrap_or_default();
+        gc::prepare_removal(
+            context,
+            locked.verified.repo(),
+            &settings.regenerable,
+            &settings.keep,
+            cancel,
+        )?;
     }
     match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}
@@ -1715,7 +1736,7 @@ fn pin_branch_ref(
 
 fn retain_reason(error: &WorktreeError) -> RetainReason {
     match error {
-        WorktreeError::Dirty => RetainReason::Dirty,
+        WorktreeError::Dirty | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter => RetainReason::LiveWriter,
         WorktreeError::UnknownWriter | WorktreeError::Cancelled => RetainReason::UnknownWriter,
@@ -1873,6 +1894,7 @@ fn remove_merged_candidate(
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
     detached: &mut Vec<RemovedTree>,
+    output: &provenant_config::ProjectGcSettings,
 ) -> Result<(), WorktreeError> {
     let Some(tip) = branch_tips.get(branch).copied() else {
         retain(outcome, branch, RetainReason::Changed);
@@ -1902,7 +1924,7 @@ fn remove_merged_candidate(
                 retain(outcome, branch, RetainReason::LockedOrPrunable);
                 return Ok(());
             }
-            match remove_tree(context, entry, tip, cancel) {
+            match remove_tree(context, entry, tip, cancel, output) {
                 Ok(removed) => {
                     outcome.removed.push(removed.info.clone());
                     detached.push(removed);
@@ -1941,6 +1963,15 @@ pub fn remove(
     request: WorktreeRemove,
     cancel: &CancelToken,
 ) -> Result<RemoveOutcome, WorktreeError> {
+    remove_with_output(context, request, cancel, &Default::default())
+}
+
+pub fn remove_with_output(
+    context: &WorktreeContext<'_>,
+    request: WorktreeRemove,
+    cancel: &CancelToken,
+    output: &provenant_config::ProjectGcSettings,
+) -> Result<RemoveOutcome, WorktreeError> {
     validate_binding(context)?;
     let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let mut detached = Vec::new();
@@ -1978,7 +2009,7 @@ pub fn remove(
                     cancel,
                 );
                 // A dirty or live worktree fails here, before any branch changes.
-                let removed = remove_tree(context, entry, tip, cancel)?;
+                let removed = remove_tree(context, entry, tip, cancel, output)?;
                 outcome.removed.push(removed.info.clone());
                 detached.push(removed);
                 settle_branch(context, &branch, tip, disposition, cancel, &mut outcome)?;
@@ -2032,6 +2063,7 @@ pub fn remove(
                         cancel,
                         &mut outcome,
                         &mut detached,
+                        output,
                     )?;
                 }
             }
@@ -2319,6 +2351,198 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn Error>> {
+        for scenario in ["idle", "recent", "lease", "tracked", "untracked", "lane"] {
+            let fixture = Fixture::new()?;
+            fs::write(
+                fixture.root.join(".gitignore"),
+                if scenario == "untracked" {
+                    ".env\n"
+                } else {
+                    "target/\n.env\n"
+                },
+            )?;
+            if scenario == "tracked" {
+                fs::create_dir(fixture.root.join("target"))?;
+                fs::write(fixture.root.join("target/source"), "tracked")?;
+                fixture.run(&["add", "-f", "target/source"])?;
+            }
+            fixture.run(&["add", ".gitignore"])?;
+            fixture.run(&["commit", "-m", "output rules"])?;
+            let test_context = TestContext::new(&fixture)?;
+            let context = test_context.context();
+            let created = create(
+                &context,
+                WorktreeCreate {
+                    branch: "idle-output".into(),
+                    base: None,
+                },
+                &cancel(),
+            )?;
+            fs::create_dir_all(created.path.join("target"))?;
+            fs::write(created.path.join("target/cache"), "output")?;
+            let lanes = list(&context, &cancel())?;
+            let state = context
+                .project_state
+                .open_verified_directory(&state_dir_name(&created.path))?;
+            let lease = if scenario == "lease" {
+                Some(state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?)
+            } else {
+                None
+            };
+            let report = collect(
+                &context,
+                &lanes,
+                &WorktreeGcPolicy {
+                    foreign_idle_before_ns: None,
+                    foreign_merged_clean: false,
+                    upstream: None,
+                    terminal: &|_| false,
+                    no_live_lanes: &|_| scenario != "lane",
+                    regenerable: &["target".into()],
+                    keep: &[],
+                    written_before_ns: if scenario == "recent" { 0 } else { i128::MAX },
+                    dry_run: false,
+                },
+                &cancel(),
+            )?;
+            assert_eq!(
+                created.path.join("target/cache").exists(),
+                scenario != "idle",
+                "{scenario}"
+            );
+            assert_eq!(
+                report.idle_output.iter().filter(|row| row.removed).count(),
+                usize::from(scenario == "idle"),
+                "{scenario}"
+            );
+            assert!(created.path.is_dir());
+            drop(lease);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remove_declared_ignored_output_but_names_undeclared_env() -> Result<(), Box<dyn Error>> {
+        for secret in [false, true] {
+            let fixture = Fixture::new()?;
+            fs::write(fixture.root.join(".gitignore"), "target/\n.env\n")?;
+            fixture.run(&["add", ".gitignore"])?;
+            fixture.run(&["commit", "-m", "output rules"])?;
+            let test_context = TestContext::new(&fixture)?;
+            let context = test_context.context();
+            let created = create(
+                &context,
+                WorktreeCreate {
+                    branch: "remove-output".into(),
+                    base: None,
+                },
+                &cancel(),
+            )?;
+            fs::create_dir(created.path.join("target"))?;
+            fs::write(created.path.join("target/artifact"), "output")?;
+            if secret {
+                fs::write(created.path.join(".env"), "private")?;
+            }
+            let result = remove_with_output(
+                &context,
+                WorktreeRemove::Name {
+                    name: "remove-output".into(),
+                    discard: false,
+                    integration: None,
+                },
+                &cancel(),
+                &provenant_config::ProjectGcSettings {
+                    regenerable: vec!["target".into()],
+                    ..Default::default()
+                },
+            );
+            if secret {
+                let error = result.err().ok_or("removed ignored secret")?;
+                assert!(error.to_string().contains(".env"), "{error}");
+                assert_eq!(fs::read_to_string(created.path.join(".env"))?, "private");
+                assert!(
+                    created.path.join("target/artifact").exists(),
+                    "preview must refuse before pruning"
+                );
+            } else {
+                assert_eq!(result?.removed.len(), 1);
+                assert!(!created.path.exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census()
+    -> Result<(), Box<dyn Error>> {
+        for scenario in [
+            "default",
+            "recent",
+            "unknown",
+            "unmerged",
+            "live-lane",
+            "dirty",
+            "preview",
+            "apply",
+        ] {
+            let fixture = Fixture::new()?;
+            let test_context = TestContext::new(&fixture)?;
+            let mut context = test_context.context();
+            let path = fixture._temp.path().join("native");
+            fixture.run(&[
+                "worktree",
+                "add",
+                "-b",
+                "native",
+                path.to_str().ok_or("path")?,
+            ])?;
+            if scenario == "unmerged" {
+                run_in_worktree(
+                    &fixture,
+                    &path,
+                    &["commit", "--allow-empty", "-m", "unmerged"],
+                )?;
+            }
+            if scenario == "dirty" {
+                fs::write(path.join("notes"), "keep")?;
+            }
+            let unknown = UnknownWorkers;
+            if scenario == "unknown" {
+                context.workers = &unknown;
+            }
+            let lanes = list(&context, &cancel())?;
+            let report = collect(
+                &context,
+                &lanes,
+                &WorktreeGcPolicy {
+                    foreign_idle_before_ns: None,
+                    foreign_merged_clean: scenario != "default",
+                    upstream: Some(fixture.head()?),
+                    terminal: &|_| false,
+                    no_live_lanes: &|_| scenario != "live-lane",
+                    regenerable: &[],
+                    keep: &[],
+                    written_before_ns: if scenario == "recent" { 0 } else { i128::MAX },
+                    dry_run: scenario == "preview",
+                },
+                &cancel(),
+            )?;
+            assert_eq!(
+                report.worktrees.removed.len(),
+                usize::from(matches!(scenario, "preview" | "apply")),
+                "{scenario}: {report:?}"
+            );
+            assert_eq!(path.exists(), scenario != "apply", "{scenario}");
+            assert!(
+                branch_exists(&fixture, "native"),
+                "foreign collection preserves refs"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), "target/\n")?;
@@ -2356,6 +2580,8 @@ mod lifecycle_tests {
             &context,
             &[lane],
             &WorktreeGcPolicy {
+                foreign_idle_before_ns: None,
+                foreign_merged_clean: false,
                 upstream: None,
                 terminal: &terminal,
                 no_live_lanes: &|_| true,
@@ -2393,6 +2619,8 @@ mod lifecycle_tests {
             &context,
             &[first.clone(), second.clone()],
             &WorktreeGcPolicy {
+                foreign_idle_before_ns: None,
+                foreign_merged_clean: false,
                 upstream: Some(fixture.head()?),
                 terminal: &terminal,
                 no_live_lanes: &|_| true,
@@ -2452,6 +2680,8 @@ mod lifecycle_tests {
             &context,
             &[lane],
             &WorktreeGcPolicy {
+                foreign_idle_before_ns: None,
+                foreign_merged_clean: false,
                 upstream: Some(fixture.head()?),
                 terminal: &|_| true,
                 no_live_lanes: &|_| true,
@@ -2481,6 +2711,8 @@ mod lifecycle_tests {
             &context,
             &[lane],
             &WorktreeGcPolicy {
+                foreign_idle_before_ns: None,
+                foreign_merged_clean: false,
                 upstream: Some(fixture.head()?),
                 terminal: &|_| false,
                 no_live_lanes: &|_| true,
@@ -2518,6 +2750,8 @@ mod lifecycle_tests {
             &context,
             &[lane.clone()],
             &WorktreeGcPolicy {
+                foreign_idle_before_ns: None,
+                foreign_merged_clean: false,
                 upstream: Some(fixture.head()?),
                 terminal: &|_| true,
                 no_live_lanes: &|_| true,
@@ -2582,6 +2816,8 @@ mod lifecycle_tests {
             &context,
             &[first.clone(), second.clone()],
             &WorktreeGcPolicy {
+                foreign_idle_before_ns: None,
+                foreign_merged_clean: false,
                 upstream: Some(fixture.head()?),
                 terminal: &|_| true,
                 no_live_lanes: &|_| true,

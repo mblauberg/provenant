@@ -4,12 +4,45 @@ use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
 use std::{ffi::OsStr, path::Path};
 
+#[cfg(test)]
 pub(crate) fn collect(
     roots: &Roots,
     home: &Path,
     assets: &Path,
     days: u64,
     dry_run: bool,
+) -> ProviderStateGc {
+    collect_with_logs(roots, home, assets, days, 30, dry_run)
+}
+
+pub(crate) fn collect_with_logs(
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+    days: u64,
+    logs_days: u64,
+    dry_run: bool,
+) -> ProviderStateGc {
+    collect_retention(roots, home, assets, days, logs_days, dry_run, false)
+}
+
+pub(crate) fn collect_pressure(
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+    dry_run: bool,
+) -> ProviderStateGc {
+    collect_retention(roots, home, assets, 7, 30, dry_run, true)
+}
+
+fn collect_retention(
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+    days: u64,
+    logs_days: u64,
+    dry_run: bool,
+    temporary_only: bool,
 ) -> ProviderStateGc {
     let mut report = ProviderStateGc::default();
     collect_store(
@@ -18,7 +51,9 @@ pub(crate) fn collect(
         home,
         assets,
         days,
+        logs_days,
         dry_run,
+        temporary_only,
         0,
         None,
         &mut report,
@@ -33,7 +68,9 @@ fn collect_store(
     home: &Path,
     assets: &Path,
     days: u64,
+    logs_days: u64,
     dry_run: bool,
+    temporary_only: bool,
     depth: usize,
     expected: Option<&Directory>,
     report: &mut ProviderStateGc,
@@ -77,11 +114,22 @@ fn collect_store(
                 drop(reader);
                 RunStore::open(&context, &call)?
             };
-            let mut collected = store
-                .with_writer_registry(host.state.as_path())
-                .gc_provider_state(&directory, days, clock.wall_now()?, dry_run, &call)?;
+            let store = store.with_writer_registry(host.state.as_path());
+            let mut collected = if temporary_only {
+                store.gc_temporary(&directory, clock.wall_now()?, dry_run, &call)?
+            } else {
+                store.gc_provider_state_with_logs(
+                    &directory,
+                    days,
+                    logs_days,
+                    clock.wall_now()?,
+                    dry_run,
+                    &call,
+                )?
+            };
             report.removed.append(&mut collected.removed);
             report.attempt_tmp.append(&mut collected.attempt_tmp);
+            report.attempt_logs.append(&mut collected.attempt_logs);
             report.kept.append(&mut collected.kept);
             report.errors.append(&mut collected.errors);
         }
@@ -100,7 +148,9 @@ fn collect_store(
                 home,
                 assets,
                 days,
+                logs_days,
                 dry_run,
+                temporary_only,
                 depth + 1,
                 Some(&child),
                 report,
@@ -222,6 +272,8 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         &home,
         &assets,
         7,
+        30,
+        false,
         false,
         1,
         Some(&expected),

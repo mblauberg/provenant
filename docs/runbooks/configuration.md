@@ -67,8 +67,14 @@ after 24 hours, across the state run store and its child stores. Nonterminal
 attempts, writer locks and retained reservations prevent deletion. GC JSON
 reports the paths and observed allocated bytes in `provider_state.attempt_tmp`;
 text output lists each path and byte count. `--dry-run` previews these removals.
+`retention.logs_days = 30` (range 1 to 3650) expires stdout and stderr
+captures larger than 64 KiB from runs whose attempts are all terminal.
+The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
+results, exit evidence, recorded digests and small captures survive. The same
+rule applies inside child stores, whose databases and retained evidence stay.
+GC reports `provider_state.attempt_logs`; disk reports measure `attempt_logs`.
 `gc.schedule = false` disables scheduled retention sweeps too;
-settlement cache pruning still runs.
+settlement pruning and low-space collection still run.
 
 The optional `[gc]` section controls the macOS per-user schedule:
 
@@ -83,6 +89,7 @@ idle_days = 7
 [gc.projects."PROJECT_ID"]
 regenerable = ["node_modules", "target"]
 keep = ["web/target"]
+foreign_worktrees = "keep" # opt in with "merged-clean"
 ```
 
 `gc.schedule` defaults to true. Setting it to false prevents subsequent
@@ -99,7 +106,7 @@ Rerun `install` after changing the idle threshold or floor to update the
 agent's arguments. Edit these keys in `config.toml`; they are separate from
 the harness knob registry.
 
-The schedule runs at load and hourly, only for installations in the account's
+The schedule runs at load and daily, only for installations in the account's
 default state root. Logs are `<state>/gc/stdout.log` and
 `<state>/gc/stderr.log`. It discovers registered projects without requiring a
 checkout as its working directory. Unobservable projects keep their caches.
@@ -107,10 +114,14 @@ Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
 
-Writer dispatch and resume refuse to launch when the minimum available space
-across the worktree, state and lane-cache volumes is below the floor. The error
-names the limiting path, available bytes and the floor and directs you to
-`provenant gc`. Read-only dispatch remains available. This is a point-in-time
+Writer dispatch and resume check available space across the worktree, state
+and lane-cache volumes. Below the floor, admission makes one collection
+attempt, capped at five seconds, and samples all three volumes again. The
+pressure collection skips worktree deletion and network fetches and shares
+GC's collection lock. If space remains low, the refusal names the limiting
+path, available bytes, floor and bytes reported reclaimed. Interrupted
+collection can reclaim space without returning a byte report, so zero reported
+bytes does not prove no removal occurred. Run `provenant gc` for a full sweep. Read-only dispatch remains available. This is a point-in-time
 check with no space reservation: concurrent writers can each pass and then
 consume the same free space.
 
@@ -128,9 +139,30 @@ registered linked worktrees. The default is an empty list, which prunes
 nothing. `keep` contains optional paths relative to the worktree; those paths,
 their descendants and any matching directory containing them are preserved.
 Tracked paths are also preserved. `.git`, `.worktrees`, absolute names and
-parent traversal are refused. Unknown or non-terminal lanes, dirty worktrees,
-recent writes within 24 hours and symlinks prevent pruning. Failures skip
-individual entries. Lane caches still use their existing GC path.
+parent traversal are refused. Declared output must be Git-ignored. An idle
+registered linked worktree can qualify without a terminal lane when no lane
+or writer lease is live. The minimum idle age is `--idle-days`, or one day
+below the free-space floor. The primary checkout and unknown writers remain
+protected. JSON reports this class separately as `worktree_cleanup[].idle_output`.
+Failures skip individual entries. Lane caches still use their existing GC path.
+
+`foreign_worktrees = "merged-clean"` opts this project into removing linked
+worktrees that otherwise report `unknown_writer`. GC requires fetched-default
+ancestry, a clean tree after only declared ignored output is removed, no live
+lanes or reservations, a free existing writer lock where present, a complete
+free-process census and the full `--idle-days` age, including below the floor. Missing process observations
+refuse removal. It verifies Git registration and filesystem identity again
+under repository custody. This policy also covers Git-registered worktrees
+outside `.worktrees/`; it preserves their local branch refs. The default
+`"keep"` retains the existing terminal-lane requirement.
+
+Scheduled GC excludes missing Git roots, non-Git workspaces and known staging,
+probe, run and scratch roots before collecting project IDs for disk alerts.
+Old identity records stay available for indexed run evidence and keep their
+existing IDs. New transient
+and non-Git invocation roots receive a deterministic in-memory identity
+without a persistent registration. `unobserved_projects` in GC JSON is a
+count, not a list of paths.
 
 After collection, GC checks available space on the state volume against the
 floor. `gc.alert_below` can raise the alert threshold and accepts the same

@@ -68,7 +68,7 @@ The disk-use epic #1570 closes with these decisions:
 - No byte budget (`disk.budget_bytes`) or LRU eviction by `last_used` at
   lease release. Free-space triggers cover single-user hosts: the GC free
   floor defaults to 10% of the state volume, at least 50 GiB; GC also runs
-  hourly, and `gc.alert_below` raises a low-space alert. The disk guard warns
+  daily, and `gc.alert_below` raises a low-space alert. The disk guard warns
   and collects below 60 GiB, pauses builds below 25 GiB and resumes them at
   50 GiB. Reopen this decision if a host runs out of space with all of these
   active.
@@ -82,7 +82,73 @@ The disk-use epic #1570 closes with these decisions:
 - No `git worktree lock` while a lane runs. Writer leases and custody records
   serve that purpose; the lock was dropped during Stage 1.
 
-Remaining work is tracked separately: #1814 for admission freeing space before
-refusing a writer, #1815 for idle build output in live worktrees, #1816 for
-worktree removal blocked by ignored build output, and #1817 for expiry of
-closed-run logs and child stores.
+## Idle declared output and explicit removal
+
+GC may prune a declared directory in a registered linked worktree without a
+terminal lane, under free writer custody and a fresh no-live-lane proof.
+The directory must be Git-ignored, contain no tracked or kept path, and have
+no writes within the idle age (one day under the free floor). The primary
+checkout and unknown writers stay protected. JSON separates `idle_output`.
+Explicit removal previews all ignored paths before pruning declared output;
+undeclared ignored paths refuse removal and appear in the error.
+- Why: rebuildable output should not require ending a long-lived worktree,
+  while ignored secrets and tracked directories remain protected.
+- Test: `crates/confinement/src/worktrees.rs::gc_idle_output_requires_ignored_idle_and_free_writer`;
+  `::remove_declared_ignored_output_but_names_undeclared_env`
+- Owner: `crates/confinement/src/worktrees/gc.rs`, `src/worktrees.rs`
+
+## Opt-in foreign collection
+
+`gc.projects.<id>.foreign_worktrees = "merged-clean"` applies exactly where
+GC otherwise reports unknown writer evidence. The default is `"keep"`.
+Fetched-default ancestry, idle writes, clean Git state, no live lanes or
+reservations, free existing writer locks and a complete free process census
+are required. Repository custody protects registration rechecks; every
+worktree is verified against the Git common directory. The primary stays
+protected and local refs survive this policy's removals.
+- Why: native worktrees need an explicit alternative to terminal-lane evidence.
+- Test: `crates/confinement/src/worktrees.rs::gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census`
+- Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`
+
+## Registration hygiene
+
+Scheduled enumeration excludes stale, non-Git and known transient locations
+before collecting project IDs for disk alerts. Existing identity records are
+retained for indexed evidence. New transient and non-Git invocation locations
+use deterministic in-memory identities without persistent project records.
+GC reports an unobserved-project count.
+- Why: invocation scratch paths must not accumulate as scheduled projects.
+- Test: `crates/config/src/project_binding.rs::transient_roots_have_identity_without_persistent_registration`;
+  `::scheduled_projects_exclude_missing_non_git_and_old_transient_bindings`
+- Owner: `crates/config/src/project_binding.rs`, `src/worktrees.rs`
+
+## Closed-run captures
+
+`retention.logs_days` defaults to 30 (range 1 to 3650). Under the existing
+publication, continuation, reservation and writer checks, GC expires stdout
+and stderr captures larger than 64 KiB only when all sibling attempts are
+terminal. A distinct `.log.tail` file retains the final 64 KiB. Results, exit
+evidence, original digest records, small captures and child-store databases
+survive. The same policy visits indexed child stores. Disk inventory reports
+`attempt_logs`; GC reports `provider_state.attempt_logs`.
+- Why: bound bulky captures without rewriting what sealed digests describe.
+- Test: `crates/run/src/retention.rs::gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview`;
+  `::gc_logs_refuse_symlinks`; `crates/run/src/disk.rs::disk_usage_rolls_many_attempts_up_per_run`
+- Owner: `crates/run/src/retention.rs`, `crates/run/src/disk.rs`
+
+## Pressure collection and daily backstop
+
+Writer admission makes one collection attempt bounded to five seconds before
+refusing low disk, then rechecks the worktree, state and cache volumes.
+Refusals include reported reclaimed bytes. A timeout can remove data without
+returning a byte report. Pressure collection skips Git fetches and worktree
+deletion and bypasses the scheduled-sweep disable switch. Applied sweeps share
+a nonblocking collection lock. The scheduled agent runs at load and daily.
+Settlement already prunes provider caches and temporary state; removal prunes
+the removed worktree's cache. Settlement lane-cache and delivery-integration
+event wiring remains with those callers.
+- Why: free reclaimable space before sending the chair a manual remedy.
+- Test: `crates/cli/src/run.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`;
+  `src/gc_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
+  `src/disk_guard_host.rs::pressure_gc_leaves_the_configured_free_floor_in_effect`
+- Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/gc_agent.rs`

@@ -381,6 +381,11 @@ fn inspect<T: DeserializeOwned + Serialize>(
             origins.insert(key.into(), user_origin.clone());
         });
     }
+    for project in gc.projects.keys() {
+        origins
+            .entry(format!("gc.projects.{project}.foreign_worktrees"))
+            .or_insert_with(|| compiled.clone());
+    }
     for key in ["enabled", "warn", "pause", "resume", "processes"] {
         origins.insert(format!("disk_guard.{key}"), compiled.clone());
     }
@@ -406,6 +411,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     }
     origins.insert("install.targets".into(), compiled.clone());
     origins.insert("retention.provider_state_days".into(), compiled.clone());
+    origins.insert("retention.logs_days".into(), compiled.clone());
     if let Some(item) = &retention_item {
         walk_item(item, "retention", None, &mut |key, _, _| {
             origins.insert(key.into(), user_origin.clone());
