@@ -581,17 +581,19 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         let context = Context::new(globals, &input.cwd)?;
         check_time(Some(deadline))?;
         if start {
+            // Consume any handoff first, so attribution never spends its deadline.
+            let handoff = if context.store().pending(now())?.is_some() {
+                let accounts = crate::registered_claude(&context.roots)?;
+                let target = current(&accounts, &context)?;
+                check_time(Some(deadline))?;
+                context
+                    .store()
+                    .consume(target.key(), &input.session_id, now())?
+            } else {
+                None
+            };
             record_start(&context, &input);
-            if context.store().pending(now())?.is_none() {
-                return Ok(None);
-            }
-            let accounts = crate::registered_claude(&context.roots)?;
-            let target = current(&accounts, &context)?;
-            check_time(Some(deadline))?;
-            let Some(handoff) = context
-                .store()
-                .consume(target.key(), &input.session_id, now())?
-            else {
+            let Some(handoff) = handoff else {
                 return Ok(None);
             };
             let path = context.store().path(&handoff.session_id);

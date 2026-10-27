@@ -61,7 +61,7 @@ pub enum Quota {
     Usage {
         #[command(flatten)]
         adapter: Filter,
-        /// Recent UTC days to include
+        /// Days to include, as a rolling window back from now
         #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
         days: u32,
     },
