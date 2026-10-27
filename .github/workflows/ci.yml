@@ -208,6 +208,8 @@ jobs:
     timeout-minutes: 20
     needs: macos-scope
     if: needs.macos-scope.outputs.run_macos == 'true'
+    env:
+      CARGO_INCREMENTAL: "0"
     permissions:
       contents: read
     steps:
