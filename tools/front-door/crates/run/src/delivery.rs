@@ -177,7 +177,13 @@ impl HostDeliveryContext {
     }
     /// Final graph delivery publishes its integration ref, with a body built
     /// from settled node receipts. No checkout is switched or edited.
-    pub fn deliver_graph_pr(self, project: &Path, branch: &str, body: &str) -> Result<String> {
+    pub fn deliver_graph_pr(
+        self,
+        project: &Path,
+        branch: &str,
+        base: GitOid,
+        body: &str,
+    ) -> Result<String> {
         Self::validate_integration_target(project, branch)?;
         let local = !branch.starts_with("origin/");
         let source = if let Some(branch) = branch.strip_prefix("origin/") {
@@ -252,7 +258,7 @@ impl HostDeliveryContext {
         if let Some(url) = host.existing_pr(project, repo, branch, head)? {
             return Ok(url);
         }
-        let commits = host.commit_body(&writer, head, body)?;
+        let commits = host.commit_range_body(&writer, &format!("{base}..{head}"), body)?;
         let url = host.command_with_input(
             project,
             "gh",
@@ -891,10 +897,19 @@ impl HostDeliveryContext {
         } else {
             format!("{}..{head}", bound.base_head)
         };
+        self.commit_range_body(writer, &range, identity)
+    }
+
+    fn commit_range_body(
+        &self,
+        writer: &WriterRequest,
+        range: &str,
+        identity: &str,
+    ) -> Result<String> {
         let commits = self.command(
             &writer.worktree,
             "git",
-            &["log", "--max-count=100", "--format=%s%n%b", &range, "--"],
+            &["log", "--max-count=100", "--format=%s%n%b", range, "--"],
             Stage::Head,
         )?;
         Ok(cap_pr_body(format!("{identity}\n\n{commits}")))

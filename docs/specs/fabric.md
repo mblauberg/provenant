@@ -305,8 +305,13 @@ lock. A failed or unattempted delivery fails the node and blocks dependants.
 
 Before dispatch, every integration target is checked against the default and
 primary checkout branches, and node targets must match the graph's declared
-integration branch. Once every node succeeds and custody is released, the
-graph publishes local integration through a separately created graph branch,
+integration branch. The graph uses the integration base OID pinned in its host
+execution record before the first node is admitted. Replays preserve that base;
+final PR commit messages
+cover only `base..integration-head`, regardless of the primary checkout's HEAD.
+A legacy graph without a recorded base must use a new graph ID for PR delivery.
+Once every node succeeds and custody is released, the graph publishes local
+integration through a separately created graph branch,
 recovering an interrupted publication only when its unmarked ref still points
 at the exact graph head. A different head or symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
@@ -319,5 +324,7 @@ launches are auto-resolved.
   review boundary and reuses run's delivery checks.
 - Test: `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
   `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
+  `src/fabric.rs::graph_submission_pins_the_integration_base_across_replay`;
+  `crates/run/src/delivery_tests.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
   `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`

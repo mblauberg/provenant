@@ -55,6 +55,9 @@ pub struct GraphRoute {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphExecution {
+    /// Integration head pinned before the graph's first node is admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_base: Option<provenant_core::GitOid>,
     pub directory: std::path::PathBuf,
     pub document: GraphDocument,
 }
@@ -407,8 +410,19 @@ impl FileJournal {
         if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
             return Err(JournalError::GraphMismatch);
         }
+        if self.integration_base().is_some()
+            && self.integration_base() != execution.integration_base
+        {
+            return Err(JournalError::GraphMismatch);
+        }
         self.execution = Some(execution);
         Ok(())
+    }
+
+    pub fn integration_base(&self) -> Option<provenant_core::GitOid> {
+        self.execution
+            .as_ref()
+            .and_then(|execution| execution.integration_base)
     }
 
     /// Discover journals without creating directories. Each is read separately
@@ -1970,6 +1984,7 @@ mod file_tests {
         for directory in [base.clone(), base.join("state")] {
             journal
                 .bind(GraphExecution {
+                    integration_base: None,
                     directory,
                     document: document.clone(),
                 })
@@ -2015,6 +2030,7 @@ mod file_tests {
                 FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
             journal
                 .bind(GraphExecution {
+                    integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
                     directory: base.clone(),
                     document: document.clone(),
                 })
@@ -2036,6 +2052,7 @@ mod file_tests {
         assert_eq!(
             FileJournal::pending_execution(&root, project, "reopen").unwrap(),
             Some(GraphExecution {
+                integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
                 directory: base.clone(),
                 document: document.clone()
             })
@@ -2044,6 +2061,18 @@ mod file_tests {
             let mut journal =
                 FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
             assert_eq!(journal.load("reopen").unwrap(), Some(checkpoint));
+            assert_eq!(
+                journal.integration_base(),
+                Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap())
+            );
+            assert!(matches!(
+                journal.bind(GraphExecution {
+                    integration_base: None,
+                    directory: base.clone(),
+                    document: document.clone()
+                }),
+                Err(JournalError::GraphMismatch)
+            ));
         }
         {
             let other_project = ProjectId::from_bytes([2; 16]);

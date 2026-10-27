@@ -2218,6 +2218,7 @@ impl BinaryRunOwner<'_> {
 
 struct BoundGraphOwner<'a> {
     factory: &'a Factory,
+    integration_base: Option<provenant_core::GitOid>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
 }
@@ -2282,6 +2283,7 @@ pub(crate) fn advance_settled_graphs(
             )?;
             let mut owner = BoundGraphOwner {
                 factory: &factory,
+                integration_base: execution.integration_base,
                 budget,
                 cancel: &cancel,
             };
@@ -2769,7 +2771,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             ));
         }
         let url = provenant_run::HostDeliveryContext::capture()
-            .deliver_graph_pr(&self.factory.cwd, branch, &body)
+            .deliver_graph_pr(
+                &self.factory.cwd,
+                branch,
+                self.integration_base.ok_or(FacadeError::Conflict)?,
+                &body,
+            )
             .map_err(run_error)?;
         Ok(Some(url))
     }
@@ -3064,14 +3071,37 @@ impl Factory {
         )
         .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
+            let integration_base = if journal
+                .load(id)
+                .map_err(|_| FacadeError::StateCorrupt)?
+                .is_some()
+            {
+                journal.integration_base()
+            } else if let Some(branch) = &document.integration_branch {
+                let reference = match branch.strip_prefix("origin/") {
+                    Some(branch) => format!("refs/remotes/origin/{branch}"),
+                    None => format!("refs/heads/{branch}"),
+                };
+                let git = provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+                Some(
+                    provenant_run::resolve_git_base(&git, &self.cwd, &reference)
+                        .map_err(run_error)?
+                        .parse()
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                )
+            } else {
+                None
+            };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
+                    integration_base,
                     directory: self.cwd.clone(),
                     document: document.clone(),
                 })
                 .map_err(|_| FacadeError::Conflict)?;
             let mut owner = BoundGraphOwner {
                 factory: self,
+                integration_base,
                 budget,
                 cancel,
             };
@@ -3807,6 +3837,112 @@ mod peer_tests {
                 worktree: info.path,
             })
         }
+    }
+
+    #[test]
+    fn graph_submission_pins_the_integration_base_across_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_pins_the_integration_base_across_replay",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::FileJournal;
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture
+            .rig
+            .execute(&git, &["branch", "integration"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join("base-graph.json");
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":"pinned-base", "integration_branch":"integration", "delivery":"pr",
+                "nodes":[{"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?,
+        )?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        // The fixture adapter is unavailable, so no provider launches. The
+        // first graph checkpoint must already contain its integration base.
+        let run = factory.graph(
+            GraphInput::Run {
+                document: document.clone(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            provenant_fabric_runtime::graph::NodeState::Failed
+        );
+        assert!(!run.checkpoint.nodes[0].attempts[0].launched);
+        let base = {
+            let journal = FileJournal::open(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "pinned-base",
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.integration_base().ok_or("graph base missing")?
+        };
+        assert_eq!(
+            Some(base),
+            fixture
+                .store
+                .record(
+                    fixture.settled.attempt_id,
+                    &provenant_run::Request {
+                        clock: &factory.clock,
+                        cancel: &cancel,
+                        budget
+                    }
+                )?
+                .head
+        );
+        for args in [
+            vec![
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Unrelated primary checkout",
+            ],
+            vec!["branch", "-f", "integration", "HEAD"],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
+        let replay = factory.graph(GraphInput::Resume { document }, budget, &cancel)?;
+        assert_eq!(replay.checkpoint, run.checkpoint);
+        let journal = FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            "pinned-base",
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        assert_eq!(journal.integration_base(), Some(base));
+        Ok(())
     }
 
     #[test]

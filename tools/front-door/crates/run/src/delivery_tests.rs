@@ -301,6 +301,60 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
 }
 
 #[test]
+fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.commit(&fixture.writer.worktree, "Unrelated integration history")?;
+    let host = fixture.prepare()?;
+    let base = host.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "Graph work")?;
+    fixture.git(&["branch", "integration", "lane"])?;
+    fixture.commit(&fixture.writer.project, "Unrelated primary checkout")?;
+    // Only credential/hosting boundaries are synthetic. Git publication uses
+    // the real repository and a local bare remote, with no network access.
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(&gh, "#!/bin/sh\nif [ \"$2\" = view ]; then exit 1; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n")?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+    let url = HostDeliveryContext::new(fixture.environment.clone()).deliver_graph_pr(
+        &fixture.writer.project,
+        "integration",
+        base,
+        "Graph fixture\nRun fixture\nAttempt fixture",
+    )?;
+    assert_eq!(url, "https://github.com/fixture/repo/pull/1");
+    let body = std::fs::read_to_string(fixture.root.join("graph-body"))?;
+    assert!(
+        body.contains("Graph work") && body.contains("Attempt fixture"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("Unrelated integration history")
+            && !body.contains("Unrelated primary checkout")
+            && !body.contains("Initial"),
+        "{body}"
+    );
+    Ok(())
+}
+
+#[test]
 fn commit_pr_body_is_bounded_and_contains_commit_messages()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
