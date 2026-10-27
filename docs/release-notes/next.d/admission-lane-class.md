@@ -24,7 +24,7 @@
   upgrades in place on first use. Existing leases and tickets with no class
   count as writers, and any old wall-time start, whatever its age, is carried
   across for each class as a start at the upgrade, so the one-time upgrade holds
-  each class for one spacing. The wall clock is not read. The upgrade is refused if the host's clock or boot
+  each class for one spacing; a ledger that recorded no start holds neither. The wall clock is not read. The upgrade is refused if the host's clock or boot
   identity cannot be read. A binary from before this release refuses the upgraded ledger,
   so upgrade every host together.
 - Startup spacing no longer depends on the wall clock. It is measured on the

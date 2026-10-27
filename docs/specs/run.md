@@ -52,9 +52,9 @@ process's newer start still waits for it. When the stored boot identity is the
 current one, spacing is the clock now minus the start, and no wall-clock step,
 forward or back, moves it. The guarantee is: within one boot, no two lanes of a
 class start less than one spacing apart. A reboot resets spacing: a start from
-another boot, or none, leaves the class free, apart from the one-time version 1
-upgrade below, which holds each class for one spacing. If the clock or the boot identity
-cannot be read the claim is refused with a reason (`startup spacing cannot be
+another boot, or none, leaves the class free, apart from the one-time upgrade
+below of a version 1 ledger that recorded a start, which holds each class for
+one spacing. If the clock or the boot identity cannot be read the claim is refused with a reason (`startup spacing cannot be
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
@@ -62,7 +62,8 @@ memory floor (5 %) and disk floor (500 MiB) refuse both classes. A ledger row
 or ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
-one-time upgrade holds each class for one spacing; it refuses the upgrade if the
+one-time upgrade holds each class for one spacing (a version 1 ledger with no
+start holds neither); it refuses the upgrade if the
 clock or boot identity cannot be read. Spacing is enforced at
 admission, the ledger commit, not at provider spawn, so a guardian suspended
 between the two can spawn alongside a later lane. A run's own batch concurrency (1 to 16) defaults to
