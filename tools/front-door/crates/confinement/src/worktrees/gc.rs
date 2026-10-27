@@ -466,33 +466,44 @@ fn contains_repository(directory: &Directory) -> Result<bool, FsError> {
     }
 }
 
-// This is the explicit real-time boundary for no-follow idle proofs.
+// Real time bounds the idle proof; explicit removal needs only repository protection.
 #[allow(clippy::disallowed_methods)]
-pub(super) fn newest(directory: &Directory, depth: usize) -> Result<i128, FsError> {
-    newest_bounded(directory, depth, &mut 1_000_000, std::time::Instant::now())
+fn check_output_before(directory: &Directory, before: i128) -> Result<(), FsError> {
+    check_output_bounded(directory, before, &mut 1_000_000, std::time::Instant::now())
 }
 
-fn output_newest(directory: &Directory, depth: usize) -> Result<i128, FsError> {
+fn check_output_bounded(
+    directory: &Directory,
+    before: i128,
+    remaining: &mut usize,
+    started: std::time::Instant,
+) -> Result<(), FsError> {
+    if before == i128::MAX {
+        return protect_repositories(directory, 0);
+    }
+    if newest_bounded(directory, 0, remaining, started)? >= before {
+        return Err(FsError::RaceRefused {
+            name: "recent output".into(),
+        });
+    }
+    Ok(())
+}
+
+fn protect_repositories(directory: &Directory, depth: usize) -> Result<(), FsError> {
+    if depth >= 64 {
+        return Err(FsError::EntryLimit { limit: 64 });
+    }
     if contains_repository(directory)? {
         return Err(FsError::RaceRefused {
             name: ".git".into(),
         });
     }
-    let mut time = directory.metadata()?.modified_ns;
     for name in entry_names(directory, 100_000)? {
-        let meta = directory.metadata_at(&name, false)?;
-        time = time.max(meta.modified_ns);
-        if meta.kind == FileKind::Directory {
-            if depth >= 64 {
-                return Err(FsError::EntryLimit { limit: 64 });
-            }
-            time = time.max(output_newest(
-                &directory.open_verified_directory(&name)?,
-                depth + 1,
-            )?);
+        if directory.metadata_at(&name, false)?.kind == FileKind::Directory {
+            protect_repositories(&directory.open_verified_directory(&name)?, depth + 1)?;
         }
     }
-    Ok(time)
+    Ok(())
 }
 
 fn newest_bounded(
@@ -503,6 +514,11 @@ fn newest_bounded(
 ) -> Result<i128, FsError> {
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
+    }
+    if contains_repository(directory)? {
+        return Err(FsError::RaceRefused {
+            name: ".git".into(),
+        });
     }
     let mut time = directory.metadata()?.modified_ns;
     for name in entry_names(directory, 100_000)? {
@@ -531,9 +547,7 @@ fn prune_output(
 ) -> Result<(), FsError> {
     let directory = parent.open_verified_directory(name)?;
     let identity = directory.metadata()?;
-    if output_newest(&directory, 0)? >= policy.written_before_ns {
-        return Err(FsError::RaceRefused { name: name.into() });
-    }
+    check_output_before(&directory, policy.written_before_ns)?;
     if policy.dry_run {
         return Ok(());
     }
@@ -549,11 +563,10 @@ fn prune_output(
     }
     let removed = || -> Result<(), FsError> {
         let detached = payload.child(OsStr::new("output"))?;
-        if !identity.same_identity(&detached.metadata()?)
-            || output_newest(detached.directory(), 0)? >= policy.written_before_ns
-        {
+        if !identity.same_identity(&detached.metadata()?) {
             return Err(FsError::RaceRefused { name: name.into() });
         }
+        check_output_before(detached.directory(), policy.written_before_ns)?;
         remove_output(&detached, 0)?;
         payload.rmdir(OsStr::new("output"))
     };
@@ -588,7 +601,7 @@ fn remove_output(tree: &PayloadTree, depth: usize) -> Result<(), FsError> {
 }
 
 /// Prove all ignored paths are disposable before removing any output.
-/// The caller holds repository and writer custody.
+/// The caller holds writer custody.
 pub(super) fn prepare_removal(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
@@ -723,6 +736,74 @@ fn protect_nonignored(
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)]
+fn newest_foreign(
+    directory: &Directory,
+    protected: &ProtectedPaths,
+    policy: &WorktreeGcPolicy<'_>,
+) -> Result<i128, FsError> {
+    newest_foreign_bounded(
+        directory,
+        Path::new(""),
+        protected,
+        policy,
+        &mut 1_000_000,
+        std::time::Instant::now(),
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn newest_foreign_bounded(
+    directory: &Directory,
+    relative: &Path,
+    protected: &ProtectedPaths,
+    policy: &WorktreeGcPolicy<'_>,
+    remaining: &mut usize,
+    started: std::time::Instant,
+    depth: usize,
+) -> Result<i128, FsError> {
+    if depth >= 64 {
+        return Err(FsError::EntryLimit { limit: 64 });
+    }
+    if depth > 0 && contains_repository(directory)? {
+        return Err(FsError::RaceRefused {
+            name: ".git".into(),
+        });
+    }
+    let mut time = directory.metadata()?.modified_ns;
+    for name in entry_names(directory, 100_000)? {
+        if *remaining == 0 || started.elapsed() >= std::time::Duration::from_secs(5) {
+            return Err(FsError::EntryLimit { limit: 1_000_000 });
+        }
+        *remaining -= 1;
+        let meta = directory.metadata_at(&name, false)?;
+        time = time.max(meta.modified_ns);
+        let path = relative.join(&name);
+        let declared = policy
+            .regenerable
+            .iter()
+            .any(|configured| name == OsStr::new(configured))
+            && !protected.covers(&path)
+            && !protected.ancestors.contains(&path)
+            && path
+                .ancestors()
+                .any(|ancestor| protected.ignored.contains(ancestor));
+        if meta.kind == FileKind::Directory && !declared {
+            time = time.max(newest_foreign_bounded(
+                &directory.open_verified_directory(&name)?,
+                &path,
+                protected,
+                policy,
+                remaining,
+                started,
+                depth + 1,
+            )?);
+        }
+    }
+    Ok(time)
+}
+
 /// Foreign worktrees need a complete free process census in place of a
 /// Provenant custody proof. Preserve local refs and never create ownership records.
 fn collect_foreign(
@@ -785,16 +866,17 @@ fn collect_foreign(
         }
     };
     recheck()?;
-    if newest(verified.repo().root_dir(), 0)?
+    let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
+    if newest_foreign(verified.repo().root_dir(), &protected, policy)?
         >= policy
             .foreign_idle_before_ns
             .unwrap_or(policy.written_before_ns)
     {
         return Err(WorktreeError::UnknownWriter);
     }
-    let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
     let mut output = Vec::new();
     let preview = WorktreeGcPolicy {
+        written_before_ns: i128::MAX,
         dry_run: true,
         ..*policy
     };
@@ -811,7 +893,7 @@ fn collect_foreign(
         return Err(WorktreeError::Dirty);
     }
     recheck()?;
-    if newest(verified.repo().root_dir(), 0)?
+    if newest_foreign(verified.repo().root_dir(), &protected, policy)?
         >= policy
             .foreign_idle_before_ns
             .unwrap_or(policy.written_before_ns)
@@ -820,14 +902,11 @@ fn collect_foreign(
     }
     if !policy.dry_run {
         if !output.is_empty() {
-            prepare_removal_before(
+            prepare_removal(
                 context,
                 verified.repo(),
                 policy.regenerable,
                 policy.keep,
-                policy
-                    .foreign_idle_before_ns
-                    .unwrap_or(policy.written_before_ns),
                 cancel,
             )?;
         }
@@ -847,4 +926,68 @@ fn collect_foreign(
         )?;
     }
     Ok(Some(lane.clone()))
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removal_skips_idle_cap_and_foreign_skips_declared_output_contents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir(temp.path().join("target"))?;
+        for i in 0..16 {
+            std::fs::write(temp.path().join(format!("target/{i}")), "output")?;
+        }
+        std::fs::write(temp.path().join("source"), "source")?;
+        let root = Directory::open_anchor(temp.path())?;
+        let target = root.open_verified_directory(OsStr::new("target"))?;
+        assert!(matches!(
+            newest_bounded(&target, 0, &mut 2, std::time::Instant::now()),
+            Err(FsError::EntryLimit { .. })
+        ));
+        check_output_bounded(&target, i128::MAX, &mut 0, std::time::Instant::now())?;
+        let mut protected = ProtectedPaths::new(&[]);
+        protected.ignored.insert("target".into());
+        let policy = WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &["target".into()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            foreign_merged_clean: true,
+            foreign_idle_before_ns: None,
+        };
+        newest_foreign_bounded(
+            &root,
+            Path::new(""),
+            &protected,
+            &policy,
+            &mut 2,
+            std::time::Instant::now(),
+            0,
+        )?;
+        protected.ignored.clear();
+        assert!(matches!(
+            newest_foreign_bounded(
+                &root,
+                Path::new(""),
+                &protected,
+                &policy,
+                &mut 2,
+                std::time::Instant::now(),
+                0
+            ),
+            Err(FsError::EntryLimit { .. })
+        ));
+        std::fs::write(temp.path().join("target/.git"), "gitdir: native")?;
+        assert!(
+            check_output_bounded(&target, i128::MAX, &mut 0, std::time::Instant::now()).is_err()
+        );
+        Ok(())
+    }
 }

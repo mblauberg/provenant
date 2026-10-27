@@ -90,7 +90,8 @@ The directory must be Git-ignored, contain no tracked or kept path, and have
 no writes within the idle age (one day under the free floor). The primary
 checkout and unknown writers stay protected. JSON separates `idle_output`.
 Explicit removal previews all ignored paths before pruning declared output;
-undeclared ignored paths refuse removal and appear in the error.
+undeclared ignored paths refuse removal and appear in the error. Explicit
+removal skips the bounded idleness scan but still checks repository boundaries.
 Every nested `.git` entry, file or directory, protects its repository and any
 declared output containing it, including beneath ignored parents.
 - Why: rebuildable output should not require ending a long-lived worktree,
@@ -108,6 +109,9 @@ reservations, free existing writer locks and a complete free process census
 are required. Repository custody protects registration rechecks; every
 worktree is verified against the Git common directory. The primary stays
 protected and local refs survive this policy's removals.
+Foreign idleness scans the non-output tree within 1,000,000 entries and five
+seconds. Declared ignored output contributes its directory-entry mtime rather
+than a recursive idle scan. Removal still checks nested repository boundaries.
 Bulk output pruning holds writer custody only. An exclusive repository lock
 is acquired after pruning, for the final recheck and Git removal.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.

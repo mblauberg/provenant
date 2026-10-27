@@ -80,3 +80,7 @@ Automatic pressure collection honours `gc.schedule=false`. Writer admission
 collects only the launching project; the disk guard uses scheduled enumeration.
 Pressure sweeps prune declared idle output, with a one-day floor below the
 configured free-space floor, while retaining worktrees and skipping fetches.
+
+Explicit removal does not require idle output. Foreign collection uses declared
+ignored output directory mtimes and scans the remaining tree within its idle
+proof budget; repository boundaries remain protected in both paths.
