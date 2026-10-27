@@ -314,10 +314,15 @@ fn check(
         && (state.free != Some(free) || state.resume_at != Some(resume_bytes))
     {
         // Builds stay stopped until the resume level, so `lanes` needs the
-        // current figures on every tick, not only below the pause level.
+        // current figures on every tick, not only below the pause level. A
+        // failed save restores the old figures so the next tick retries it.
+        let previous = (state.free, state.resume_at);
         state.free = Some(free);
         state.resume_at = Some(resume_bytes);
-        save(state)?;
+        if let Err(error) = save(state) {
+            (state.free, state.resume_at) = previous;
+            return Err(error);
+        }
     }
     if free < pause {
         state.free = Some(free);
@@ -899,6 +904,33 @@ mod tests {
         let last: State = serde_json::from_slice(saved.last().expect("refresh saved")).unwrap();
         assert_eq!(last.free, Some(40 * GIB));
         assert_eq!(last.resume_at, Some(50 * GIB));
+        // A failed refresh save is retried on the next tick at the same free space.
+        host.free = 41 * GIB;
+        let refused = check(
+            &DiskGuardSettings::default(),
+            &mut state,
+            240,
+            501,
+            &mut host,
+            &mut |_| Err(io::Error::other("disk full")),
+        );
+        assert!(refused.is_err());
+        assert_eq!(state.free, Some(40 * GIB));
+        let mut saved = Vec::new();
+        check(
+            &DiskGuardSettings::default(),
+            &mut state,
+            360,
+            501,
+            &mut host,
+            &mut |state| {
+                saved.push(serde_json::to_vec(state)?);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let last: State = serde_json::from_slice(saved.last().expect("retry saved")).unwrap();
+        assert_eq!(last.free, Some(41 * GIB));
     }
     #[test]
     fn pauses_exact_names_for_this_user_and_resumes_only_at_resume_level() {
