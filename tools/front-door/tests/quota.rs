@@ -55,7 +55,8 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     );
     let tick: serde_json::Value = serde_json::from_slice(&tick.stdout.bytes)?;
     assert_eq!(tick["command"], "quota tick");
-    assert_eq!(tick["data"]["coverage"]["total"], 5);
+    // Only registered adapters count toward coverage (#1810).
+    assert_eq!(tick["data"]["coverage"]["total"], 1);
     assert_eq!(tick["data"]["accounts"].as_array().unwrap().len(), 1);
     assert_eq!(tick["data"]["accounts"][0]["status"], "unknown");
     assert_eq!(tick["data"]["accounts"][0]["error"], "missing_cli");
@@ -217,7 +218,9 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
     // Leave one slot for the configured Codex account.
     for i in 0..127 {
         let key = format!("account-{i}");
-        let account = serde_json::json!({"adapter":"claude","account_key":key,"label":"work"});
+        let label = format!("work-{i}");
+        support::register_account(&rig, "claude", &label, &key, &rig.root.join(&key))?;
+        let account = serde_json::json!({"adapter":"claude","account_key":key,"label":label});
         let record = serde_json::json!({"schema_version":1,"account":account,"revision":1,
             "snapshot":{"schema_version":1,"account":account,"revision":1,"status":"available","observed_unix_seconds":1,"source_ref":"fixture","authority_ref":null,"windows":windows},
             "claim":null,"last_attempt_unix_seconds":1,"backoff_until_unix_seconds":null,"failures":0,"last_error":null,"refusals":[]});
