@@ -4222,18 +4222,15 @@ mod tests {
             .enumerate()
         {
             let operation = format!("protected-integration-{index}");
-            let mut args: Vec<OsString> = [
-                "dispatch",
-                "--operation-id",
-                &operation,
-                "--base",
-                "HEAD",
-            ]
-            .map(OsString::from)
-            .into();
+            let mut args: Vec<OsString> =
+                ["dispatch", "--operation-id", &operation, "--base", "HEAD"]
+                    .map(OsString::from)
+                    .into();
             let mode = run::DeliveryMode::Integrate(target.into());
             if placement != "manifest" {
-                args.extend(["--model", "codex/gpt-6-luna", "--mode", "worktree-write"].map(OsString::from));
+                args.extend(
+                    ["--model", "codex/gpt-6-luna", "--mode", "worktree-write"].map(OsString::from),
+                );
             }
             if placement == "owned" {
                 args.extend(["--worktree-branch", "refused-lane"].map(OsString::from));
