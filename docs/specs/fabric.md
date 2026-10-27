@@ -154,7 +154,7 @@ detect tampering. Cancelling a graph persists the admission fence first.
 Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
 moves a node to the next route. Task failure, input requirements and uncertain
 launches never fall back; after launch only read-only nodes may fall back. A failed
-writer keeps its worktree, and graph writers never deliver.
+writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
 - Why: retrying a writer elsewhere would duplicate edits.
 - Test: `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`;
   `::terminal_task_failure_does_not_try_a_fallback_route`
@@ -294,3 +294,24 @@ owned by GC rather than graph execution.
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`.
 - Owner: `crates/confinement/src/scratch.rs`, `src/fabric.rs`
+
+### Graph delivery
+
+Nodes accept the same optional string `delivery` as dispatch: `none`, `push`,
+`integrate:BRANCH` or `pr`. Read-only nodes cannot deliver. A graph may declare
+`integration_branch` and `delivery: "pr"`; this excludes node PR deliveries.
+Writer integration happens on the shared host delivery path under its per-ref
+lock. A failed or unattempted delivery fails the node and blocks dependants.
+
+Once every node succeeds and custody is released, the graph pushes its
+integration ref and opens one PR with a body assembled from retained node
+results. The checkpoint records the PR URL and successful final delivery;
+replay observes it. A failed final delivery keeps its advance error and remains
+eligible for advancement or manual resume. Neither conflicts nor unknown
+launches are auto-resolved.
+- Why: lanes can feed one integration branch while the graph owns the single
+  review boundary and reuses run's delivery checks.
+- Test: `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
+  `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
+  `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
+- Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
