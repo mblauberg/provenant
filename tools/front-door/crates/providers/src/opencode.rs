@@ -95,7 +95,19 @@ fn prepare(
     })
     .to_string();
     let package = package_root(input.executable)?;
-    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
+    let bin = plan.scratch.path.join("bin");
+    let path = std::env::join_paths([
+        bin.as_path(),
+        std::path::Path::new("/usr/bin"),
+        std::path::Path::new("/bin"),
+    ])
+    .map_err(|_| ProviderError::InvalidPath)?;
+    let mut env = base_env(
+        input,
+        &plan.scratch.path,
+        path.to_str().ok_or(ProviderError::InvalidPath)?,
+    );
     let xdg = |key, fallback| {
         (input.host_var)(key)
             .map(PathBuf::from)
@@ -106,6 +118,11 @@ fn prepare(
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let data = data_home.join("opencode");
     let mut runtime_reads = vec![subtree(package), subtree(&data)];
+    runtime_reads.extend(
+        crate::dylib::linked_libraries(input.provenant.git)
+            .into_iter()
+            .map(exact),
+    );
     if access == Access::WorktreeWrite {
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
     }
@@ -117,13 +134,29 @@ fn prepare(
     let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]
         .map(|name| exact(data.join(name)))
         .to_vec();
-    let mut setup = vec![SetupStep::CreateDir(data.clone())];
+    let mut setup = vec![
+        SetupStep::CreateDir(data.clone()),
+        SetupStep::CreateDir(bin.clone()),
+        SetupStep::Symlink {
+            link: bin.join("git"),
+            target: input.provenant.git.to_owned(),
+        },
+    ];
     for name in ["log", "storage", "snapshot"] {
         let directory = data.join(name);
         state_writes.push(subtree(&directory));
         setup.push(SetupStep::CreateDir(directory));
     }
+    // Writers' system roots do not cover a host-selected Homebrew Git.
+    let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
+    let tool_exec_roots = if access == Access::WorktreeWrite {
+        vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
+    } else {
+        Vec::new()
+    };
     env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         (
             "XDG_CONFIG_HOME".into(),
             config_home.clone().into_os_string(),
@@ -157,16 +190,12 @@ fn prepare(
         setup,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables: vec![exact(input.executable)],
+                process_executables,
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
                 runtime_reads,
                 state_writes,
-                tool_exec_roots: if access == Access::WorktreeWrite {
-                    vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
-                } else {
-                    Vec::new()
-                },
+                tool_exec_roots,
                 discovery_reads: input
                     .cwd
                     .ancestors()
@@ -421,6 +450,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_discovery_exec_is_exact_in_both_access_modes() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let spec = prepare(
+                &input,
+                access,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap(),
+            )
+            .unwrap();
+            let profile = provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &spec.profile,
+                input.home,
+            )
+            .unwrap();
+            let git = input.provenant.git.display();
+            let literal = format!("(allow process-exec (literal \"{git}\"))");
+            assert!(profile.contains(&literal), "{access:?} lacks {literal}");
+            let subtree_rule = format!("(allow process-exec (subpath \"{git}\"))");
+            assert!(
+                !profile.contains(&subtree_rule),
+                "{access:?} grants {subtree_rule}"
+            );
+            for shim in ["/usr/bin/git", "/usr/bin/xcode-select"] {
+                assert!(
+                    !profile.contains(&format!("(allow process-exec (literal \"{shim}\"))")),
+                    "{access:?} grants shim {shim}"
+                );
+            }
+            let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+            let bin = plan.permissions().scratch.path.join("bin");
+            assert_eq!(std::env::split_paths(&path.1).next(), Some(bin.clone()));
+            assert!(spec.setup.contains(&SetupStep::Symlink {
+                link: bin.join("git"),
+                target: input.provenant.git.to_owned(),
+            }));
+            // Read-only Git discovery must not enable other commands.
+            assert_eq!(
+                spec.profile.spec.tool_exec_roots,
+                if access == Access::ReadOnly {
+                    Vec::new()
+                } else {
+                    vec![
+                        subtree("/bin"),
+                        subtree("/usr/bin"),
+                        subtree(package_root(input.executable).unwrap()),
+                    ]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn git_discovery_ignores_host_config_in_both_access_modes() {
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let plan = crate::tests::fixture_access_plan(access, None, false);
+            let spec = OpenCode
+                .prepare(crate::tests::fixture_input(
+                    &route,
+                    &plan,
+                    &prompt,
+                    std::path::Path::new("/fixture/repo"),
+                    None,
+                ))
+                .unwrap();
+            for (key, value) in [
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ] {
+                let actual = spec.env.iter().find(|(name, _)| name == key);
+                assert_eq!(
+                    actual.map(|(_, value)| value.as_os_str()),
+                    Some(value.as_ref()),
+                    "{access:?} {key}"
+                );
+            }
+        }
+    }
+
     /// A literal on the home's `.claude` or `.codex` would list their entries.
     #[test]
     fn seatbelt_profile_for_a_project_under_home_lists_no_home_probes() {
@@ -491,6 +612,11 @@ mod tests {
         std::os::unix::fs::symlink("../Cellar/opencode-v2/2.0.32/bin/opencode", &link).unwrap();
         // Dispatch resolves the CLI before passing it to the provider.
         let executable = link.canonicalize().unwrap();
+        // The selected Git can be outside both system and provider roots,
+        // and its executable need not be named `git`.
+        let git = prefix.join("Cellar/git/1.0/bin/selected-git");
+        fs::create_dir_all(git.parent().unwrap()).unwrap();
+        fs::write(&git, "fixture git").unwrap();
         // The project sits under the home, as lane worktrees do.
         let home = root.clone();
         fs::create_dir_all(home.join(".config/opencode")).unwrap();
@@ -513,11 +639,12 @@ mod tests {
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let cwd = project_parent.join("repo");
-        let input = PrepareInput {
+        let mut input = PrepareInput {
             executable: &executable,
             home: &home,
             ..crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None)
         };
+        input.provenant.git = &git;
         {
             let spec = prepare(
                 &input,
@@ -527,11 +654,21 @@ mod tests {
             )
             .unwrap();
             for step in &spec.setup {
-                let SetupStep::CreateDir(path) = step else {
-                    panic!("unexpected setup step: {step:?}");
-                };
-                fs::create_dir_all(path).unwrap();
+                match step {
+                    SetupStep::CreateDir(path) => fs::create_dir_all(path).unwrap(),
+                    SetupStep::Symlink { link, target } => {
+                        std::os::unix::fs::symlink(target, link).unwrap();
+                    }
+                    _ => panic!("unexpected setup step: {step:?}"),
+                }
             }
+            assert_eq!(
+                project_parent
+                    .join("scratch/bin/git")
+                    .canonicalize()
+                    .unwrap(),
+                git
+            );
             assert!(spec.profile.spec.runtime_reads.contains(&subtree(&package)));
             let directories = required_anchors(plan.permissions(), &spec.profile, None)
                 .into_iter()
@@ -549,6 +686,14 @@ mod tests {
             let launch = compile(plan.permissions(), &spec.profile, &anchors)
                 .unwrap_or_else(|error| panic!("{access:?} profile refused: {error}"));
             let profile = String::from_utf8(launch.profile).unwrap();
+            assert!(profile.contains(&format!(
+                "(allow process-exec (literal \"{}\"))",
+                git.display()
+            )));
+            assert!(!profile.contains(&format!(
+                "(allow process-exec (subpath \"{}\"))",
+                git.display()
+            )));
             assert!(profile.contains(&format!("(literal \"{}\")", cwd.join(".claude").display())));
             for name in [".agents", ".claude", ".codex"] {
                 for parent in [&project_parent, &cwd] {
