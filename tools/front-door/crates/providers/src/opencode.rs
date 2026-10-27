@@ -392,6 +392,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn homebrew_launch_plan_anchors_with_default_xdg_homes() {
+        homebrew_discovery_fixture(Access::ReadOnly);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn homebrew_writer_launch_plan_anchors_with_discovery_directories() {
+        homebrew_discovery_fixture(Access::WorktreeWrite);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn homebrew_discovery_fixture(access: Access) {
         use provenant_confinement::permissions::snapshot::compile;
         use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
         use std::fs;
@@ -412,22 +423,31 @@ mod tests {
         // The project sits under the home, as lane worktrees do.
         let home = root.clone();
         fs::create_dir_all(home.join(".config/opencode")).unwrap();
-        fs::create_dir(root.join("repo")).unwrap();
+        let project_parent = root.join("projects");
+        fs::create_dir_all(project_parent.join("repo")).unwrap();
+        // Both the read root and an ancestor contain discovery directories.
+        for parent in [&project_parent, &project_parent.join("repo")] {
+            for name in [".agents", ".claude", ".codex"] {
+                fs::create_dir(parent.join(name)).unwrap();
+                fs::write(parent.join(name).join("config.json"), "private config").unwrap();
+            }
+        }
         // Compilation refuses private directories other users can reach.
         for name in ["scratch", "state"] {
-            fs::create_dir(root.join(name)).unwrap();
-            fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::create_dir(project_parent.join(name)).unwrap();
+            fs::set_permissions(project_parent.join(name), fs::Permissions::from_mode(0o700))
+                .unwrap();
         }
-        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let plan = crate::tests::read_only_plan(project_parent.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
-        let cwd = root.join("repo");
+        let cwd = project_parent.join("repo");
         let input = PrepareInput {
             executable: &executable,
             home: &home,
             ..crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None)
         };
-        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        {
             let spec = prepare(
                 &input,
                 access,
@@ -460,6 +480,14 @@ mod tests {
             let profile = String::from_utf8(launch.profile).unwrap();
             assert!(profile.contains(&format!("(literal \"{}\")", cwd.join(".claude").display())));
             for name in [".agents", ".claude", ".codex"] {
+                for parent in [&project_parent, &cwd] {
+                    let directory = parent.join(name);
+                    assert!(profile.contains(&format!("(literal \"{}\")", directory.display())));
+                    assert!(!profile.contains(&format!("(subpath \"{}\")", directory.display())));
+                    assert!(!profile.contains(directory.join("config.json").to_str().unwrap()));
+                }
+                // Ancestor configuration has no enclosing data-read grant.
+                assert!(!profile.contains(&format!("(subpath \"{}\")", project_parent.display())));
                 let literal = format!("(literal \"{}\")", home.join(name).display());
                 assert!(!profile.contains(&literal), "{access:?} grants {literal}");
             }
