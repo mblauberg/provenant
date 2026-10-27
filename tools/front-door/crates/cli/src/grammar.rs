@@ -130,6 +130,15 @@ pub enum Pr {
         #[arg(long)]
         head: GitOid,
     },
+    /// Wait for CI, merge the specified head, then fetch, fast-forward the
+    /// base when clean and remove the merged branch and its worktree
+    Land {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+        /// Full object ID of the head that was reviewed and will be merged
+        #[arg(long)]
+        head: GitOid,
+    },
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {

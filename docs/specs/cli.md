@@ -139,6 +139,22 @@ incomplete evidence.
   `::pr_merge_refuses_unpassed_missing_and_malformed_checks`
 - Owner: `src/pr.rs`
 
+### Landing adds no merge authority
+
+`pr land NUMBER --head SHA` runs the `pr watch` wait and the `pr merge` at
+that head unchanged, then follows up locally: fetch the base, fast-forward the
+local base only in a checkout with no changes, delete declared build output
+and remove the branch's registered worktree through `worktree remove`, and
+delete the merged branch with `git branch -d`. The head is required. A failure
+before the merge changes nothing. After it, each step refuses and reports
+instead of forcing, and the command exits 1 with `merged: true`.
+- Why: a landing is four routine steps, and none of them may widen what was
+  reviewed or delete work that is not merged.
+- Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
+  `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
+  `::pr_land_changes_nothing_when_the_merge_does_not_happen`
+- Owner: `src/pr/land.rs`, `src/worktrees.rs`
+
 ### Chair switch quoting
 
 `chair switch` single-quotes each handoff argument and writes apostrophes

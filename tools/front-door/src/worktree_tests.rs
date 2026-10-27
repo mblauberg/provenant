@@ -93,6 +93,17 @@ pub fn main() -> std::process::ExitCode {
         }
         Some("exec" | "-p") => exit("lane provider", lane_provider()),
         Some("--writer-provider") => exit("writer provider", provider(&args)),
+        // The fake `gh` of the `pr land` fixtures.
+        Some("pr") => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            match crate::pr_land_tests::fake_gh(&args) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    let _ = writeln!(std::io::stderr().lock(), "fake gh: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("--state-dir" | "internal") => {
             ExitCode::from(crate::dispatch(provenant_cli::parse(args), &Fixture))
         }
@@ -135,6 +146,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_an_unregistered_worktree_names_the_create_command",
             "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
+            "pr_land_merges_then_fetches_fast_forwards_and_prunes",
+            "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
+            "pr_land_changes_nothing_when_the_merge_does_not_happen",
         ],
         |name| {
             let result = match name {
@@ -200,6 +214,15 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "remove_resolves_directory_names_and_remote_integration_refs" => {
                     remove_resolves_directory_names_and_remote_integration_refs()
                 }
+                "pr_land_merges_then_fetches_fast_forwards_and_prunes" => {
+                    crate::pr_land_tests::pr_land_merges_then_fetches_fast_forwards_and_prunes()
+                }
+                "pr_land_refuses_each_unsafe_step_and_reports_the_rest" => {
+                    crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
+                }
+                "pr_land_changes_nothing_when_the_merge_does_not_happen" => {
+                    crate::pr_land_tests::pr_land_changes_nothing_when_the_merge_does_not_happen()
+                }
                 "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_names_the_create_command()
                 }
@@ -213,7 +236,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     )
 }
 
-fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
+pub(super) fn command(rig: &TestRig, args: &[&str]) -> Result<ExecOutcome> {
     let mut argv = vec![
         std::ffi::OsString::from("--state-dir"),
         rig.state.clone().into_os_string(),
@@ -1271,7 +1294,7 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
     Ok(())
 }
 
-fn json(output: &ExecOutcome) -> Result<Value> {
+pub(super) fn json(output: &ExecOutcome) -> Result<Value> {
     Ok(serde_json::from_slice(&output.stdout.bytes)?)
 }
 

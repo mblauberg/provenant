@@ -265,6 +265,29 @@ protection and any merge queue. Neither helper bypasses those gates.
 
 `pr merge` is for the immediate-merge path; use `gh pr merge --auto` to queue a merge.
 
+### Land a pull request
+
+`provenant pr land 148 --head <reviewed-sha>` runs the four landing steps in
+order: the `pr watch` wait on CI, the `pr merge` at that exact head, then the
+local follow-up below. The head is required, as for `pr merge`, so a landing can
+only merge what was reviewed. Nothing after the merge changes what merged, and
+no step forces: a refusal is reported in `data.steps` and the command exits 1
+with `merged: true`, so rerun it after fixing the cause (every step is safe to
+repeat).
+
+| Step | Does | Refuses when |
+|---|---|---|
+| `fetch` | `git fetch <remote> <base>` | the fetch fails, or the fetched base does not hold the merged head |
+| `fast_forward` | moves the local base to the fetched one, in the checkout that has it, or by fetching `base:base` when none does | that checkout has any change, or the base has diverged |
+| `worktree` | deletes declared build output (`gc.projects.<id>.regenerable`, plus `target`), then removes the branch's registered worktree as `worktree remove` does | the worktree is dirty or has a live writer, or this command runs inside it |
+| `branch` | `git branch -d` of the merged local branch | the branch holds commits the fetched base lacks, or Git refuses |
+
+The build-output deletion keeps GC's checks: tracked and `keep` paths stay,
+symlinks are never followed, and a lane that is not idle blocks it. Unlike a
+sweep it does not wait for output to be a day old, because the merge ends the
+work. A merge that is only queued reports `merged: false` and leaves everything
+in place.
+
 The helpers use the current repository, or the global `--project` selection.
 `--json` includes `number`, `head` and `result` in the normal command envelope.
 After a successful merge, JSON also includes `merged: true` and text says `merged`.

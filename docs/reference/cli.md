@@ -2384,6 +2384,34 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant pr land`
+
+| Argument | Contract |
+|---|---|
+| `number` | `{"name": "number", "positional": true, "required": true}` |
+| `--head` | `{"name": "head", "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "number",
+        "head"
+      ],
+      "multiple": true,
+      "name": "Land",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant gc`
 
 | Argument | Contract |

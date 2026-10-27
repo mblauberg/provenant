@@ -171,6 +171,9 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     for args in [
         vec!["pr", "merge", "1668"],
         vec!["pr", "merge", "1668", "--head", "abc"],
+        vec!["pr", "land", "1668"],
+        vec!["pr", "land", "1668", "--head", "abc"],
+        vec!["pr", "land", "0", "--head", HEAD],
         vec!["pr", "watch", "0"],
         vec!["pr", "watch", "--admin"],
     ] {

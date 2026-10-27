@@ -26,6 +26,8 @@ mod hosts;
 mod install;
 mod overflow;
 mod pr;
+#[cfg(test)]
+mod pr_land_tests;
 mod provider_retention;
 mod release_smoke;
 mod roots;
@@ -560,7 +562,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals, process.workers()),
-        Command::Pr(command) => pr::run(command, globals),
+        Command::Pr(command) => pr::run(command, globals, process.workers()),
         Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Bench(command) => bench::run(command, globals),
