@@ -91,6 +91,8 @@ no writes within the idle age (one day under the free floor). The primary
 checkout and unknown writers stay protected. JSON separates `idle_output`.
 Explicit removal previews all ignored paths before pruning declared output;
 undeclared ignored paths refuse removal and appear in the error.
+Every nested `.git` entry, file or directory, protects its repository and any
+declared output containing it, including beneath ignored parents.
 - Why: rebuildable output should not require ending a long-lived worktree,
   while ignored secrets and tracked directories remain protected.
 - Test: `crates/confinement/src/worktrees.rs::gc_idle_output_requires_ignored_idle_and_free_writer`;

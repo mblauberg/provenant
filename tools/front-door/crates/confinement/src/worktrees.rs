@@ -2423,6 +2423,89 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn gc_protects_nested_repositories_under_ignored_directories() -> Result<(), Box<dyn Error>> {
+        for linked in [false, true] {
+            for parent_output in [false, true] {
+                let fixture = Fixture::new()?;
+                fs::write(fixture.root.join(".gitignore"), ".claude/\ntarget/\n")?;
+                fixture.run(&["add", ".gitignore"])?;
+                fixture.run(&["commit", "-m", "ignore native worktrees"])?;
+                let test_context = TestContext::new(&fixture)?;
+                let context = test_context.context();
+                let created = create(
+                    &context,
+                    WorktreeCreate {
+                        branch: "nested-host".into(),
+                        base: None,
+                    },
+                    &cancel(),
+                )?;
+                let parent = created.path.join(if parent_output {
+                    "target"
+                } else {
+                    ".claude/worktrees"
+                });
+                fs::create_dir_all(&parent)?;
+                let nested = parent.join("native");
+                if linked {
+                    fixture.run(&[
+                        "worktree",
+                        "add",
+                        "-b",
+                        "nested-native",
+                        nested.to_str().ok_or("path")?,
+                    ])?;
+                } else {
+                    fixture.run(&[
+                        "clone",
+                        fixture.root.to_str().ok_or("root")?,
+                        nested.to_str().ok_or("path")?,
+                    ])?;
+                }
+                fs::create_dir(nested.join("build"))?;
+                fs::write(nested.join("build/source"), "committed")?;
+                run_in_worktree(&fixture, &nested, &["add", "-f", "build/source"])?;
+                run_in_worktree(
+                    &fixture,
+                    &nested,
+                    &[
+                        "-c",
+                        "user.name=Test",
+                        "-c",
+                        "user.email=test@example.test",
+                        "commit",
+                        "-m",
+                        "nested source",
+                    ],
+                )?;
+                fs::write(nested.join("build/source"), "uncommitted edit")?;
+                let report = collect(
+                    &context,
+                    &list(&context, &cancel())?,
+                    &WorktreeGcPolicy {
+                        upstream: None,
+                        terminal: &|_| false,
+                        no_live_lanes: &|_| true,
+                        regenerable: &["build".into(), "target".into()],
+                        keep: &[],
+                        written_before_ns: i128::MAX,
+                        dry_run: false,
+                        foreign_merged_clean: false,
+                        foreign_idle_before_ns: None,
+                    },
+                    &cancel(),
+                )?;
+                assert_eq!(
+                    fs::read_to_string(nested.join("build/source"))?,
+                    "uncommitted edit"
+                );
+                assert!(report.idle_output.iter().all(|entry| !entry.removed));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn remove_declared_ignored_output_but_names_undeclared_env() -> Result<(), Box<dyn Error>> {
         for secret in [false, true] {
             let fixture = Fixture::new()?;

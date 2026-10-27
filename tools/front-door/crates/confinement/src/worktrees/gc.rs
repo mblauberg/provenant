@@ -367,6 +367,9 @@ fn preview_directory_removed(
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
+    if contains_repository(directory)? {
+        return Ok(false);
+    }
     for name in entry_names(directory, 100_000)? {
         let child = path.join(&name);
         if planned.contains(&child) {
@@ -412,6 +415,10 @@ fn walk_output(
             if meta.kind != FileKind::Directory {
                 return Ok(false);
             }
+            let child = directory.open_verified_directory(&name)?;
+            if contains_repository(&child)? {
+                return Ok(false);
+            }
             if policy
                 .regenerable
                 .iter()
@@ -424,7 +431,6 @@ fn walk_output(
                 prune_output(directory, &name, policy)?;
                 Ok(true)
             } else {
-                let child = directory.open_verified_directory(&name)?;
                 walk_output(&child, root, &path, policy, protected, report, depth + 1)?;
                 Ok(false)
             }
@@ -451,10 +457,42 @@ fn walk_output(
     Ok(())
 }
 
+/// A .git file or directory marks a protected repository boundary.
+fn contains_repository(directory: &Directory) -> Result<bool, FsError> {
+    match directory.metadata_at(OsStr::new(".git"), false) {
+        Ok(_) => Ok(true),
+        Err(error) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 // This is the explicit real-time boundary for no-follow idle proofs.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn newest(directory: &Directory, depth: usize) -> Result<i128, FsError> {
     newest_bounded(directory, depth, &mut 1_000_000, std::time::Instant::now())
+}
+
+fn output_newest(directory: &Directory, depth: usize) -> Result<i128, FsError> {
+    if contains_repository(directory)? {
+        return Err(FsError::RaceRefused {
+            name: ".git".into(),
+        });
+    }
+    let mut time = directory.metadata()?.modified_ns;
+    for name in entry_names(directory, 100_000)? {
+        let meta = directory.metadata_at(&name, false)?;
+        time = time.max(meta.modified_ns);
+        if meta.kind == FileKind::Directory {
+            if depth >= 64 {
+                return Err(FsError::EntryLimit { limit: 64 });
+            }
+            time = time.max(output_newest(
+                &directory.open_verified_directory(&name)?,
+                depth + 1,
+            )?);
+        }
+    }
+    Ok(time)
 }
 
 fn newest_bounded(
@@ -493,7 +531,7 @@ fn prune_output(
 ) -> Result<(), FsError> {
     let directory = parent.open_verified_directory(name)?;
     let identity = directory.metadata()?;
-    if newest(&directory, 0)? >= policy.written_before_ns {
+    if output_newest(&directory, 0)? >= policy.written_before_ns {
         return Err(FsError::RaceRefused { name: name.into() });
     }
     if policy.dry_run {
@@ -512,7 +550,7 @@ fn prune_output(
     let removed = || -> Result<(), FsError> {
         let detached = payload.child(OsStr::new("output"))?;
         if !identity.same_identity(&detached.metadata()?)
-            || newest(detached.directory(), 0)? >= policy.written_before_ns
+            || output_newest(detached.directory(), 0)? >= policy.written_before_ns
         {
             return Err(FsError::RaceRefused { name: name.into() });
         }
@@ -531,6 +569,11 @@ fn prune_output(
 fn remove_output(tree: &PayloadTree, depth: usize) -> Result<(), FsError> {
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
+    }
+    if contains_repository(tree.directory())? {
+        return Err(FsError::RaceRefused {
+            name: ".git".into(),
+        });
     }
     tree.make_writable()?;
     for name in entry_names(tree.directory(), 100_000)? {

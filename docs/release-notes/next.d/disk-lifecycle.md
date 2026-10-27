@@ -1,5 +1,6 @@
 GC can reclaim idle Git-ignored declared output from linked worktrees without
-ending a lane. Explicit worktree removal allows that declared output and names
+ending a lane. Nested repositories protect their containing output directory.
+Explicit worktree removal allows that declared output and names
 undeclared ignored blockers such as `.env`. Projects may opt into foreign
 worktree collection with `gc.projects.<id>.foreign_worktrees = "merged-clean"`.
 
