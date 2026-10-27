@@ -1132,18 +1132,24 @@ fn observe_account(
     options.stderr = provenant_os::exec::StreamPolicy::Discard;
     use provenant_os::exec::Executor;
     let out = executor.execute(options).map_err(|e| e.to_string())?;
+    let unavailable = || {
+        format!(
+            "provider version is unavailable (termination={:?}, timed_out={}, stdout_truncated={})",
+            out.termination, out.timed_out, out.stdout.truncated
+        )
+    };
     if out.termination != provenant_os::exec::Termination::Exit(0)
         || out.timed_out
         || out.stdout.truncated
     {
-        return Err("provider version is unavailable".into());
+        return Err(unavailable());
     }
-    let version = String::from_utf8(out.stdout.bytes)
+    let version = std::str::from_utf8(&out.stdout.bytes)
         .map_err(|_| "invalid provider version")?
         .trim()
         .to_owned();
     if version.is_empty() {
-        return Err("provider version is unavailable".into());
+        return Err(format!("{}: empty version output", unavailable()));
     }
     Ok(provenant_providers::AvailabilityRecord {
         schema_version: 1,
@@ -1698,6 +1704,121 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_probe_reports_outcomes_without_disclosing_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+        };
+
+        struct VersionExecutor(ExecOutcome);
+        impl Executor for VersionExecutor {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert_eq!(options.argv[1], "--version");
+                assert_eq!(options.timeout, std::time::Duration::from_secs(4));
+                assert!(matches!(
+                    options.stdout,
+                    provenant_os::exec::StreamPolicy::Capture { limit: 128 }
+                ));
+                assert!(matches!(
+                    options.stderr,
+                    provenant_os::exec::StreamPolicy::Discard
+                ));
+                Ok(self.0.clone())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let root = canonical(temp.path())?;
+        let entry = serde_json::from_value(serde_json::json!({
+            "adapter": "opencode", "label": "go", "key": "fixture", "directory": root,
+        }))?;
+        for (termination, timed_out, truncated, bytes, detail) in [
+            (
+                Termination::Exit(42),
+                false,
+                false,
+                b"private output".as_slice(),
+                Some("termination=Exit(42)"),
+            ),
+            (
+                Termination::Signal(9),
+                false,
+                false,
+                b"private output".as_slice(),
+                Some("termination=Signal(9)"),
+            ),
+            (
+                Termination::Exit(0),
+                true,
+                false,
+                b"private output".as_slice(),
+                Some("timed_out=true"),
+            ),
+            (
+                Termination::Exit(0),
+                false,
+                true,
+                b"private output".as_slice(),
+                Some("stdout_truncated=true"),
+            ),
+            (
+                Termination::Exit(0),
+                false,
+                false,
+                b"".as_slice(),
+                Some("empty version output"),
+            ),
+            (
+                Termination::Exit(0),
+                false,
+                false,
+                b"opencode v2.0.32\n".as_slice(),
+                None,
+            ),
+        ] {
+            let executor = VersionExecutor(ExecOutcome {
+                termination,
+                timed_out,
+                stdout: CapturedStream {
+                    bytes: bytes.to_vec(),
+                    total_bytes: bytes.len() as u64,
+                    truncated,
+                    ..CapturedStream::default()
+                },
+                stderr: CapturedStream::default(),
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 80_000,
+            });
+            let executor = provenant_providers::host::HostProbeExecutor::new(&executor, &root)?;
+            let probe = Probe {
+                roots: None,
+                executor: &executor,
+                home: &root,
+                user: "fixture".as_ref(),
+                scratch: &root,
+            };
+            let result = observe_account(
+                &entry,
+                Path::new("/fixture/opencode"),
+                &probe,
+                "fixture",
+                100,
+            );
+            match detail {
+                Some(detail) => {
+                    let error = result.err().ok_or("failed version probe accepted")?;
+                    assert!(error.contains("provider version is unavailable"), "{error}");
+                    assert!(error.contains(detail), "{error}");
+                    assert!(!error.contains("private output"));
+                }
+                None => assert_eq!(result?.version, "opencode v2.0.32"),
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {

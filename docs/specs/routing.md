@@ -124,10 +124,15 @@ fingerprint identity fields only, and an undetectable identity is `unknown`.
 Quota capture checks identity before and after a probe and refuses a changed
 attribution. Probes run in a fresh 0700 directory under the host state root;
 failing to create one is a host fault, not an identity change.
-- Why: misattribution would spend or expose the wrong account.
+Version-probe refusals report termination, timeout and stdout truncation, or
+identify empty output, without quoting captured contents.
+- Why: misattribution would spend or expose the wrong account; a transient
+  version-probe failure needs an actionable diagnostic without output disclosure.
 - Test: `crates/providers/src/quota_live/claude.rs::fixed_directory_rejects_changed_account_fingerprint`;
-  `crates/providers/src/host.rs::start_up_sweeps_crashed_probes_but_never_a_live_one`
-- Owner: `crates/providers/src/identity.rs`, `crates/providers/src/host.rs`
+  `crates/providers/src/host.rs::start_up_sweeps_crashed_probes_but_never_a_live_one`;
+  `crates/cli/src/run/provider.rs::version_probe_reports_outcomes_without_disclosing_output`
+- Owner: `crates/providers/src/identity.rs`, `crates/providers/src/host.rs`,
+  `crates/cli/src/run/provider.rs`
 
 ### Pins filter, credentials stay put
 
