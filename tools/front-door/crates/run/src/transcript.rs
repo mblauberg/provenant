@@ -5,7 +5,7 @@ use provenant_os::fs::{Directory, FileKind};
 use provenant_records::run::{PathScope, WriteGrantRecord, WriteSource};
 use std::{
     ffi::{OsStr, OsString},
-    io::{Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -114,7 +114,10 @@ pub(crate) fn tail(dir: &Directory, name: &OsStr) -> Option<(Vec<u8>, bool)> {
     if clipped {
         file.seek(SeekFrom::Start(meta.size - WINDOW)).ok()?;
     }
-    let mut bytes = file.read_bounded(WINDOW).ok()?;
+    // A provider may append after metadata or seek. Cap the read itself,
+    // rather than rejecting the file if more bytes become available.
+    let mut bytes = Vec::new();
+    file.take(WINDOW).read_to_end(&mut bytes).ok()?;
     if clipped {
         let start = bytes
             .iter()

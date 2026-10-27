@@ -2963,7 +2963,10 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
     let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
     if let Some(lines) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
-        chunk = session.service().output(id, part, range, &call)?;
+        // A short transcript's first page already includes the requested tail.
+        if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
+            chunk = session.service().output(id, part, range, &call)?;
+        }
         let text = &chunk.bytes;
         let body = text.strip_suffix(b"\n").unwrap_or(text);
         let start = body
