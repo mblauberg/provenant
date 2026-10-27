@@ -20,6 +20,10 @@ provenant workflow session show SESSION --rev 3       # that revision's text as 
 provenant workflow session diff SESSION 3             # revision 3 against the current one
 ```
 
+The diff compares whole lines including the final newline; text that differs only
+there shows `-a` and `+a` with a `\ No newline at end of file` note on the side
+that lacks it, rather than "no differences".
+
 The save result reports the new `revision`, its `parent`, how many revisions
 are `retained` and the `keep` limit. Saving text identical to the current
 checkpoint adds no revision (`unchanged: true`) but still refreshes the

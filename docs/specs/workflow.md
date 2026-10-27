@@ -122,13 +122,16 @@ checkpoint, and the next one records the revision it finds; unreadable history
 never blocks a save. Identical text adds no revision. Each revision is held to
 the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
 a retained revision, or its unified line diff against the current one, as plain
-text; a revision whose text fails its hash is refused with `HISTORY`.
+text. Lines compare with their terminators, so text that differs only in its final
+newline shows a difference, marked `\ No newline at end of file` as `diff -u`
+marks it. A revision whose text fails its hash is refused with `HISTORY`.
 - Why: a bad save or a compaction must not destroy the only copy of earlier
   state, and the history must stay bounded.
 - Test: `crates/workflow/src/session.rs::each_save_keeps_the_replaced_checkpoint_as_a_linked_hashed_revision`;
   `::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
   `::an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost`;
   `::unreadable_history_never_blocks_a_save_and_a_changed_revision_is_refused`;
+  `crates/workflow/src/session/diff.rs::a_newline_only_change_is_a_difference_with_a_note`;
   `src/handoff.rs::a_handoff_checkpoint_keeps_the_configured_number_of_revisions`;
   `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`

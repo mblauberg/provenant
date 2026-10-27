@@ -60,10 +60,24 @@ fn operations(old: &[&str], new: &[&str]) -> Vec<Op> {
     ops
 }
 
+/// One diff row. A final line with no newline is marked as `diff -u` does, so
+/// text that differs only in its trailing newline still shows a difference.
+fn line(body: &mut String, sign: char, text: &str) {
+    body.push(sign);
+    body.push_str(text.strip_suffix('\n').unwrap_or(text));
+    body.push('\n');
+    if !text.ends_with('\n') {
+        body.push_str("\\ No newline at end of file\n");
+    }
+}
+
 /// The unified diff from `old` to `new`, or an empty string when they match.
+/// Lines are compared with their terminators.
 pub fn unified(old: &str, new: &str, old_label: &str, new_label: &str) -> String {
-    let (old_lines, new_lines): (Vec<&str>, Vec<&str>) =
-        (old.lines().collect(), new.lines().collect());
+    let (old_lines, new_lines): (Vec<&str>, Vec<&str>) = (
+        old.split_inclusive('\n').collect(),
+        new.split_inclusive('\n').collect(),
+    );
     let ops = operations(&old_lines, &new_lines);
     let changed: Vec<usize> = ops
         .iter()
@@ -94,17 +108,17 @@ pub fn unified(old: &str, new: &str, old_label: &str, new_label: &str) -> String
                     new_start.get_or_insert(j);
                     old_len += 1;
                     new_len += 1;
-                    body.push_str(&format!(" {}\n", old_lines[i]));
+                    line(&mut body, ' ', old_lines[i]);
                 }
                 Op::Del(i) => {
                     old_start.get_or_insert(i);
                     old_len += 1;
-                    body.push_str(&format!("-{}\n", old_lines[i]));
+                    line(&mut body, '-', old_lines[i]);
                 }
                 Op::Ins(j) => {
                     new_start.get_or_insert(j);
                     new_len += 1;
-                    body.push_str(&format!("+{}\n", new_lines[j]));
+                    line(&mut body, '+', new_lines[j]);
                 }
             }
         }
@@ -159,6 +173,25 @@ mod tests {
         let diff = unified(&old, &new, "a", "b");
         assert_eq!(diff.lines().filter(|l| l.starts_with('-')).count(), 3001);
         assert_eq!(diff.lines().filter(|l| l.starts_with('+')).count(), 3001);
+    }
+
+    #[test]
+    fn a_newline_only_change_is_a_difference_with_a_note() {
+        assert_eq!(
+            unified("a\n", "a", "x", "y"),
+            "--- x\n+++ y\n@@ -1,1 +1,1 @@\n-a\n+a\n\\ No newline at end of file\n"
+        );
+        assert_eq!(
+            unified("a", "a\n", "x", "y"),
+            "--- x\n+++ y\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+a\n"
+        );
+        // Unchanged text without a final newline is still no difference, and a
+        // context line that lacks one carries the note too.
+        assert_eq!(unified("a\nb", "a\nb", "x", "y"), "");
+        assert_eq!(
+            unified("a\nb", "A\nb", "x", "y"),
+            "--- x\n+++ y\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n\\ No newline at end of file\n"
+        );
     }
 
     #[test]
