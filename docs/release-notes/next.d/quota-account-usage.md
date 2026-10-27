@@ -15,5 +15,6 @@ chair tokens are not recovered and transcripts are not read.
 
 Chair observations store the serving account key and session ID. Project IDs
 are recorded only when `usage.project_attribution` is enabled. Otherwise, or
-when project identity is unavailable, the report shows an unknown project.
-Attribution failures do not prevent consuming an account-switch handoff.
+when an existing project identity is unavailable, the report shows an unknown
+project. Attribution never registers projects, and attribution failures do not
+prevent consuming an account-switch handoff.

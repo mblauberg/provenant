@@ -543,13 +543,11 @@ fn record_start(context: &Context, input: &Input) {
             let location = runtime
                 .project_location(executor, &context.cwd, budget, cancel)?
                 .location;
-            let binding = match provenant_config::lookup_project(&context.roots, &location)? {
-                Some(binding) => binding,
-                None => provenant_config::bind_project(&context.roots, location)?,
-            };
-            Ok(binding.project_id())
+            Ok(provenant_config::lookup_project(&context.roots, &location)?
+                .map(|binding| binding.project_id()))
         })
         .ok()
+        .flatten()
     } else {
         None
     };
