@@ -366,7 +366,9 @@ canonical request. It does not mutate the terminal source record.
 The fresh prompt contains the original prompt (following bounded retry
 lineage), prior result digest and a bounded tail, bounded Git history since
 the owner's recorded base
-with any unavailable-history diagnostic, and the new prompt. Existing secret
+with any unavailable-history diagnostic, and the new prompt. When the prior
+worktree is displaced, the prompt states that its history is unavailable;
+it never substitutes primary-checkout history. Existing secret
 scanning and prompt limits apply to the combined text. The continuation
 admission fence still permits one successor, and operation replay retains the
 original choice and prompt even after provider-state expiry. Uncertain custody

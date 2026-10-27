@@ -3188,6 +3188,14 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
         })(),
     )
 }
+fn fallback_history(cwd: &Path, base: &str, displaced: bool) -> String {
+    if displaced {
+        return "[history unavailable: prior worktree is missing or reassigned]".into();
+    }
+    run::continuation_history(cwd, base)
+        .unwrap_or_else(|error| format!("[history unavailable: {error}]"))
+}
+
 /// Continue one terminal attempt, scanned and launched on the shared path.
 /// `expected_generation` counts the attempt's prior continuations.
 pub fn continue_attempt(
@@ -3345,8 +3353,7 @@ pub fn continue_attempt_mode(
             .map(str::to_owned)
             .or_else(|| record.head.map(|head| head.to_string()))
             .unwrap_or_else(|| "HEAD".into());
-        let log = run::continuation_history(cwd, &history_base)
-            .unwrap_or_else(|error| format!("[history unavailable: {error}]"));
+        let log = fallback_history(cwd, &history_base, displaced);
         let digest = record
             .result
             .as_ref()
@@ -4096,6 +4103,15 @@ mod lane_depth_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn displaced_fallback_reports_unavailable_history() {
+        let history = super::fallback_history(Path::new(env!("CARGO_MANIFEST_DIR")), "HEAD", true);
+        assert_eq!(
+            history,
+            "[history unavailable: prior worktree is missing or reassigned]"
+        );
+    }
+
     #[test]
     fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn std::error::Error>>
     {
