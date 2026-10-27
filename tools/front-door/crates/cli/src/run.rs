@@ -792,10 +792,24 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
             })
             .collect::<Result<Vec<_>, Fail>>()
     };
+    let write_roots = resolve(&access.write_root, "--write-root")?;
+    // Worktree-write protects `.git` inside the worktree, so a write root that
+    // is, or contains, the worktree overlaps it and the plan is invalid. A read
+    // root on the worktree is valid and stays allowed.
+    if let Some(worktree) = access.worktree.as_deref() {
+        let worktree =
+            provenant_os::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        if let Some(root) = write_roots.iter().find(|root| worktree.starts_with(root)) {
+            return Err(invalid(format!(
+                "--write-root {} overlaps the --worktree; worktree-write already grants the worktree",
+                root.display()
+            )));
+        }
+    }
     Ok(run::LaneAccess {
         network,
         read_roots: resolve(&access.read_root, "--read-root")?,
-        write_roots: resolve(&access.write_root, "--write-root")?,
+        write_roots,
     })
 }
 
@@ -5599,6 +5613,37 @@ mod tests {
                 .is_err()
             );
         }
+        Ok(())
+    }
+    #[test]
+    fn lane_access_refuses_write_root_overlapping_the_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let worktree = temp.path().join("work").join("tree");
+        let inside = worktree.join("src");
+        std::fs::create_dir_all(&state)?;
+        std::fs::create_dir_all(&inside)?;
+        let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+            mode: Mode::WorktreeWrite,
+            worktree: Some(worktree.clone()),
+            read_root,
+            write_root,
+            network: None,
+            capability: Vec::new(),
+        };
+        for overlapping in [worktree.clone(), temp.path().join("work")] {
+            let message = lane_access(&access(Vec::new(), vec![overlapping]), &state)
+                .err()
+                .map(|fail| fail.message)
+                .unwrap_or_default();
+            assert!(
+                message.contains("--write-root") && message.contains("already grants"),
+                "{message}"
+            );
+        }
+        // A read root on the worktree and a write root beneath it stay valid.
+        assert!(lane_access(&access(vec![worktree.clone()], vec![inside]), &state).is_ok());
         Ok(())
     }
     #[test]
