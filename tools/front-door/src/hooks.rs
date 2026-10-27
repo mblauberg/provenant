@@ -245,7 +245,7 @@ const STOP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// Settled lanes reported when no checkpoint dates the report.
 const NO_CHECKPOINT_WINDOW: i64 = 24 * 60 * 60;
 
-pub(crate) fn project_id(
+fn project_id(
     globals: &Globals,
     cwd: &Path,
 ) -> Result<(provenant_core::Roots, provenant_core::ProjectId), Error> {
@@ -268,7 +268,8 @@ pub(crate) fn project_id(
         let location = runtime
             .project_location(executor, &project, budget, cancel)?
             .location;
-        let binding = provenant_config::bind_project(&roots, location)?;
+        let binding =
+            provenant_config::lookup_project(&roots, &location)?.ok_or("project not bound")?;
         Ok(binding.project_id())
     })?;
     Ok((roots, id))
@@ -406,7 +407,7 @@ fn autosave(
         }
     ))
 }
-fn with_git<T>(
+pub(crate) fn with_git<T>(
     operation: impl FnOnce(
         &UtilityRuntime,
         &SystemExecutor,

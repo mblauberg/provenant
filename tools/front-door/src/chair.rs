@@ -554,7 +554,16 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         if start {
             let accounts = crate::registered_claude(&context.roots)?;
             let target = current(&accounts, &context)?;
-            let (_, project) = crate::hooks::project_id(globals, &input.cwd)?;
+            let project = crate::hooks::with_git(|runtime, executor, budget, cancel| {
+                let location = runtime
+                    .project_location(executor, &context.cwd, budget, cancel)?
+                    .location;
+                let binding = match provenant_config::lookup_project(&context.roots, &location)? {
+                    Some(binding) => binding,
+                    None => provenant_config::bind_project(&context.roots, location)?,
+                };
+                Ok(binding.project_id())
+            })?;
             provenant_telemetry::usage::record_chair(
                 &context.roots,
                 &provenant_os::clock::SystemClock::new(),

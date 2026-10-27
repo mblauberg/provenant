@@ -57,7 +57,7 @@ pub enum Power {
 pub enum Quota {
     /// Show recorded provider quota
     Show(Filter),
-    /// Show recorded use across projects by account, chair sessions and lanes
+    /// Show recorded use by account and project, with chair sessions and lane tokens
     Usage {
         #[command(flatten)]
         adapter: Filter,
@@ -745,7 +745,7 @@ fn usage_report(
     if let Some(adapter) = &filter.adapter {
         rows.retain(|row| row.adapter.as_ref() == Some(adapter));
     }
-    let note = "Chair token usage is not recorded; chair rows count distinct sessions observed in this window only. Historical chair tokens are not recovered. Usage logs are bounded and rotated; lane tokens are recorded terminal usage, not provider quota percentages.";
+    let note = "Chair token usage is not recorded; chair rows count distinct sessions observed in this window only. Historical chair tokens are not recovered. Usage logs are bounded and rotated. Lane tokens cover terminal attempts in registered projects only, not transient workspaces, and are not provider quota percentages.";
     let mut human = format!("Recorded use: {since} to {until}\n{note}\n");
     for row in &rows {
         let project = projects

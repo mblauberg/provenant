@@ -2167,6 +2167,39 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant quota usage`
+
+| Argument | Contract |
+|---|---|
+| `--adapter` | `{"name": "adapter"}` |
+| `--days` | `{"defaults": ["7"], "name": "days"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "Usage",
+      "required": false
+    },
+    {
+      "arguments": [
+        "adapter"
+      ],
+      "multiple": true,
+      "name": "Filter",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota display`
 
 | Argument | Contract |
