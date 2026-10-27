@@ -1264,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_agent_socket_decode_refusal_reports_protocol_one() {
+    fn agent_socket_closure_requires_a_confirmed_protocol_mismatch() {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
@@ -1274,17 +1274,26 @@ mod tests {
         struct AgentSsh(Mutex<std::collections::VecDeque<UnixStream>>);
         impl Executor for AgentSsh {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let request: serde_json::Value =
+                    serde_json::from_slice(options.stdin.unwrap()).unwrap();
+                let probe = request.get("protocol").is_none();
+                assert_eq!(
+                    options.timeout,
+                    Duration::from_secs(if probe { 3 } else { 5 })
+                );
                 let mut stream = self.0.lock().unwrap().pop_front().unwrap();
                 stream.write_all(options.stdin.unwrap()).unwrap();
                 stream.shutdown(std::net::Shutdown::Write).unwrap();
                 let mut bytes = Vec::new();
                 stream.read_to_end(&mut bytes).unwrap();
                 Ok(if bytes.is_empty() {
-                    outcome(
+                    let mut reply = outcome(
                         3,
                         "provenant: fabric peer: peer agent closed without a reply; see /home/a/peer-agent/agent.log\n",
                         false,
-                    )
+                    );
+                    reply.elapsed_micros = 2_000_000;
+                    reply
                 } else {
                     let mut reply = outcome(0, "", false);
                     reply.stdout.bytes = bytes;
@@ -1292,35 +1301,63 @@ mod tests {
                 })
             }
         }
-        for mutation in [false, true] {
-            let (client, server) = UnixStream::pair().unwrap();
-            let (probe, health) = UnixStream::pair().unwrap();
-            let server = std::thread::spawn(move || {
-                for mut stream in [server, health] {
-                    let mut bytes = Vec::new();
-                    stream.read_to_end(&mut bytes).unwrap();
-                    let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                    if request.get("protocol").is_none() {
-                        assert_eq!(request["action"], serde_json::json!({"action":"health"}));
-                        let reply = serde_json::json!({
-                            "version":1, "host":request["target_host"],
-                            "project":request["project"]["key"],
-                            "result":{"result":"health","data":{
-                                "host":request["target_host"],"available":true,"execution":true,
-                            }},
-                        });
-                        stream
-                            .write_all(&serde_json::to_vec(&reply).unwrap())
-                            .unwrap();
+        for (protocol, wrong_identity) in [
+            (None, false),
+            (Some(4), false),
+            (Some(PROTOCOL), false),
+            (None, true),
+        ] {
+            for mutation in [false, true] {
+                let (client, server) = UnixStream::pair().unwrap();
+                let (probe, health) = UnixStream::pair().unwrap();
+                let server = std::thread::spawn(move || {
+                    for (index, mut stream) in [server, health].into_iter().enumerate() {
+                        let mut bytes = Vec::new();
+                        stream.read_to_end(&mut bytes).unwrap();
+                        if bytes.is_empty() {
+                            return;
+                        }
+                        let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        if index == 0 {
+                            assert_eq!(request["protocol"], PROTOCOL);
+                        } else {
+                            assert!(request.get("protocol").is_none());
+                            assert!(request.get("trace").is_none());
+                            assert_eq!(request["action"], serde_json::json!({"action":"health"}));
+                            let mut reply = serde_json::json!({
+                                "version":1, "host":request["target_host"],
+                                "project":request["project"]["key"],
+                                "result":{"result":"health","data":{
+                                    "host":request["target_host"],"available":true,"execution":true,
+                                }},
+                            });
+                            if let Some(protocol) = protocol {
+                                reply["protocol"] = protocol.into();
+                            }
+                            if wrong_identity {
+                                reply["host"] =
+                                    serde_json::to_value(HostId::from_bytes([9; 16])).unwrap();
+                            }
+                            stream
+                                .write_all(&serde_json::to_vec(&reply).unwrap())
+                                .unwrap();
+                        }
                     }
+                });
+                let error = exchange_error(&AgentSsh(Mutex::new([client, probe].into())), mutation);
+                if protocol != Some(PROTOCOL) && !wrong_identity {
+                    assert!(
+                        matches!(error, PeerError::ProtocolMismatch { remote, .. }
+                    if remote == protocol.unwrap_or(1)),
+                        "{error}"
+                    );
+                } else if mutation {
+                    assert!(matches!(error, PeerError::Unknown { .. }), "{error}");
+                } else {
+                    assert!(matches!(error, PeerError::Failed(_)), "{error}");
                 }
-            });
-            let error = exchange_error(&AgentSsh(Mutex::new([client, probe].into())), mutation);
-            assert!(
-                matches!(error, PeerError::ProtocolMismatch { remote: 1, .. }),
-                "{error}"
-            );
-            server.join().unwrap();
+                server.join().unwrap();
+            }
         }
     }
 
