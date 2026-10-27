@@ -6,8 +6,8 @@ use crate::{
     Target, Trace,
 };
 use provenant_core::{
-    AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WaitBudget,
-    WallTime,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId,
+    WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
@@ -22,13 +22,14 @@ use serde_json::{Value, json};
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 mod children;
 mod provider;
 mod remote;
 mod targets;
+mod watch;
 pub use children::HostHolder;
 pub(crate) use provider::resolve_executable as provider_executable;
 #[cfg(feature = "fixture")]
@@ -49,6 +50,7 @@ pub struct Reply {
     pub human: String,
 }
 /// A refused or failed owner call: envelope status, stable code and message.
+#[derive(Debug)]
 pub struct Fail {
     pub status: Status,
     pub kind: ErrorKind,
@@ -1684,12 +1686,13 @@ fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
         }
 }
 /// Snapshot every attempt the targets name. Without targets, the selection is
-/// this actor's nonterminal work; host caps bound it. With `seen`, terminal
+/// `owner`'s nonterminal work; host caps bound it. With `seen`, terminal
 /// lanes at or before that event cursor are already acknowledged and dropped.
 fn select(
     session: &Session,
     targets: &[Target],
     seen: Option<u64>,
+    owner: ActorId,
     call: &run::Request<'_>,
 ) -> Result<Vec<AttemptId>, Fail> {
     let mut selected = Vec::new();
@@ -1703,7 +1706,7 @@ fn select(
             after,
             call,
         )?;
-        query.owner = targets.is_empty().then_some(session.context.actor_id);
+        query.owner = targets.is_empty().then_some(owner);
         query.unseen_after = seen;
         let page = session.service().lanes(&query, call)?;
         selected.extend(page.lanes.iter().map(|lane| lane.attempt_id));
@@ -1720,184 +1723,529 @@ fn select(
         }
     }
 }
-/// The seen-cursor key for a wait selection.
-fn selection_key(targets: &[Target]) -> String {
-    let mut keys: Vec<String> = targets
-        .iter()
-        .map(|t| {
-            let part = |v: Option<String>| v.unwrap_or_else(|| "*".into());
-            format!(
-                "{}/{}/{}",
-                part(t.run.map(|v| v.to_string())),
-                part(t.task.map(|v| v.to_string())),
-                part(t.attempt.map(|v| v.to_string()))
-            )
+/// The seen-cursor key for a default wait selection.
+fn selection_key(label: Option<&str>) -> String {
+    label.map_or_else(|| "default".into(), |label| format!("session:{label}"))
+}
+/// What a wait or watch selects: the lanes of named targets, or those of one
+/// session when none are named.
+struct Picks<'a> {
+    targets: &'a [Target],
+    /// The session whose lanes count; this session unless `--session` names one.
+    owner: ActorId,
+    /// Set when `--session` names the session, which then also narrows targets.
+    label: Option<&'a str>,
+    since: Option<WallTime>,
+}
+impl Picks<'_> {
+    fn scope(&self) -> Result<watch::Scope, Fail> {
+        Ok(watch::Scope {
+            exact: self.targets.iter().filter_map(|t| t.attempt).collect(),
+            since: self.since,
+            entered: watch::entered()?,
+            explicit: !self.targets.is_empty(),
+            snapshot: !self.targets.is_empty(),
         })
-        .collect();
-    keys.sort();
-    if keys.is_empty() {
-        "default".into()
-    } else {
-        keys.join(",")
     }
 }
-/// Snapshot the selection at entry and poll until the condition holds or the
-/// reader deadline expires. Expiry never stops a provider. A default or `Any`
-/// wait skips terminal lanes the actor has already seen and acknowledges the
-/// ones it returns, so repeated waits neither miss nor replay a completion.
-// A CLI wait deadline is a real transport boundary independent of store progress.
-#[allow(clippy::disallowed_methods)]
+/// The agent label's actor on this host: the identity that submitted its lanes.
+fn session_actor(edge: &Edge<'_>, label: &str) -> Result<ActorId, Fail> {
+    let identity = |error: String| Fail::new(Status::Error, ErrorKind::Identity, error);
+    let host = provenant_config::bind_host(edge.roots).map_err(|e| identity(e.to_string()))?;
+    provenant_fabric_runtime::identity::Address::new(host, label)
+        .map(|address| address.actor)
+        .map_err(|e| identity(e.to_string()))
+}
+/// Lanes still unsettled, or settled at or after `--since`, found by scanning
+/// the session's lanes newest-queued first. A lane queued before the window can
+/// still settle inside it, so the scan reads every retained lane up to its cap
+/// rather than stopping at the first older queue time.
+fn select_since(
+    session: &Session,
+    owner: ActorId,
+    since: WallTime,
+    call: &run::Request<'_>,
+) -> Result<Vec<AttemptId>, Fail> {
+    let ids = select(session, &[], None, owner, call)?;
+    watch::settled_since(
+        ids,
+        |after| {
+            let mut query = lane_query(session, &[], true, 100, after, call)?;
+            query.newest_first = true;
+            query.owner = Some(owner);
+            let page = session.service().lanes(&query, call)?;
+            Ok((page.lanes, page.next))
+        },
+        since,
+    )
+}
+/// The candidate lanes for a wait or watch, read afresh on each call. With
+/// `seen`, an unnamed selection holds the unsettled lanes and those settled
+/// after that event cursor.
+fn candidates<'a>(
+    session: &'a Session,
+    picks: &'a Picks<'a>,
+    seen: Option<u64>,
+) -> impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail> + 'a {
+    move |_| {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel)?;
+        let ids = match picks.since {
+            Some(since) if picks.targets.is_empty() => {
+                select_since(session, picks.owner, since, &call)?
+            }
+            _ => select(session, picks.targets, seen, picks.owner, &call)?,
+        };
+        let mut lanes = Vec::with_capacity(ids.len());
+        for id in ids {
+            let lane = session.service().status(id, &call)?;
+            if picks.label.is_none() || lane.verified_owner == Some(picks.owner) {
+                lanes.push(lane);
+            }
+        }
+        Ok(lanes)
+    }
+}
+const LOCAL_POLL: Duration = Duration::from_millis(500);
+fn waited_reply(waited: watch::Waited, root: &Path) -> (Value, String, bool) {
+    let (mut data, human) = render_lanes(&waited.lanes, None, root);
+    data["condition_met"] = json!(waited.met);
+    if waited.ignored > 0 {
+        data["ignored_settled"] = json!(waited.ignored);
+    }
+    (data, human, !waited.met)
+}
+/// Wait for every lane a run, task or attempt names, settled or not: the
+/// whole named set, for commands that act on a lane they just created.
 fn wait_lanes(
     session: &Session,
     targets: &[Target],
+    condition: Condition,
+    seconds: u64,
+    _edge: &Edge<'_>,
+) -> Result<(Value, String, bool), Fail> {
+    let picks = Picks {
+        targets,
+        owner: session.context.actor_id,
+        label: None,
+        since: None,
+    };
+    let scope = watch::Scope {
+        explicit: false,
+        snapshot: false,
+        ..picks.scope()?
+    };
+    let waited = watch::wait(
+        candidates(session, &picks, None),
+        scope,
+        condition,
+        Duration::from_secs(seconds),
+        LOCAL_POLL,
+    )?;
+    Ok(waited_reply(waited, session.context.state_root.as_path()))
+}
+/// `lanes --wait`: settlements after the wait starts, or after `--since`. Exact
+/// attempt IDs count whenever they settled. Without named lanes, a session's
+/// wait resumes after the settlements it last acknowledged.
+fn wait_command(
+    session: &Session,
+    picks: &Picks<'_>,
     condition: Condition,
     seconds: u64,
     edge: &Edge<'_>,
 ) -> Result<(Value, String, bool), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let deadline = Instant::now() + Duration::from_secs(seconds);
-    // Explicit `All` waits report the whole named set, seen or not.
-    let selection =
-        (targets.is_empty() || matches!(condition, Condition::Any)).then(|| selection_key(targets));
     let entry = request(&clock, &cancel)?;
-    let seen = selection
-        .as_deref()
-        .map(|key| session.store.seen_cursor(key, targets.is_empty(), &entry))
+    let key = selection_key(picks.label);
+    let cursor = picks.targets.is_empty() && picks.since.is_none();
+    let seen = cursor
+        .then(|| session.store.seen_cursor(&key, true, &entry))
         .transpose()?;
-    let selected = select(session, targets, seen, &entry)?;
-    loop {
-        let call = request(&clock, &cancel)?;
-        let lanes = selected
-            .iter()
-            .map(|id| session.service().status(*id, &call))
-            .collect::<Result<Vec<_>, _>>()?;
-        let met = condition_met(&lanes, condition);
-        let expired = Instant::now() >= deadline;
-        if met || expired {
-            if let Some(key) = selection.as_deref().filter(|_| met) {
-                let mut latest = 0;
-                for lane in lanes.iter().filter(|l| settled(&l.state).0) {
-                    latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &call)?);
-                }
-                if latest > 0 {
-                    open(edge, &call)?.store.ack_seen(key, latest, &call)?;
-                }
-            }
-            let (mut data, human) =
-                render_lanes(&lanes, None, session.context.state_root.as_path());
-            data["condition_met"] = json!(met);
-            return Ok((data, human, !met));
+    let waited = watch::wait(
+        candidates(session, picks, seen),
+        picks.scope()?,
+        condition,
+        Duration::from_secs(seconds),
+        LOCAL_POLL,
+    )?;
+    if cursor && waited.met {
+        let mut latest = 0;
+        for lane in waited.lanes.iter().filter(|l| settled(&l.state).0) {
+            latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &entry)?);
         }
-        std::thread::park_timeout(
-            Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
-        );
+        if latest > 0 {
+            open(edge, &entry)?.store.ack_seen(&key, latest, &entry)?;
+        }
     }
+    Ok(waited_reply(waited, session.context.state_root.as_path()))
+}
+/// One line per call, already newline-terminated, for a watch to stream.
+type Emit<'a> = &'a mut dyn FnMut(&str) -> Result<(), Fail>;
+fn watched_reply(watched: &watch::Watched, root: &Path, json: bool) -> (Value, String, bool) {
+    let (mut data, _) = render_lanes(&watched.lanes, None, root);
+    data["condition_met"] = json!(watched.settled);
+    let human = if json {
+        String::new()
+    } else {
+        watch::end_line(watched)
+    };
+    (data, human, !watched.settled)
+}
+/// `lanes --watch`: a line for each state a counted lane enters, until all
+/// have settled or the budget passes.
+fn watch_command(
+    session: &Session,
+    picks: &Picks<'_>,
+    seconds: u64,
+    json: bool,
+    emit: Emit<'_>,
+) -> Result<(Value, String, bool), Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let entry = request(&clock, &cancel)?;
+    // A watch reports from its start, so it never reads the acknowledged cursor.
+    let base = (picks.targets.is_empty() && picks.since.is_none())
+        .then(|| {
+            let key = format!("watch:{}", selection_key(picks.label));
+            session.store.seen_cursor(&key, true, &entry)
+        })
+        .transpose()?;
+    let watched = watch::watch(
+        candidates(session, picks, base),
+        picks.scope()?,
+        Duration::from_secs(seconds),
+        LOCAL_POLL,
+        &mut |lane| {
+            let text = if json {
+                watch::json_line(lane, None)
+            } else {
+                watch::line(lane, None)
+            };
+            emit(&format!("{text}\n"))
+        },
+    )?;
+    Ok(watched_reply(
+        &watched,
+        session.context.state_root.as_path(),
+        json,
+    ))
 }
 
+/// Write one watch line to standard output and flush it, so a pipe or monitor
+/// sees each event as it happens.
+pub fn write_line(line: &str) -> Result<(), Fail> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    out.write_all(line.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|_| Fail::new(Status::Error, ErrorKind::Io, "cannot write watch output"))
+}
+/// `lanes`, buffering any watch lines into the reply for callers that cannot
+/// stream them.
 pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
-    reply_waited(
-        "lanes",
-        (|| {
-            if let Some(host) = command.host.as_deref()
-                && !remote::names_local_host(edge, host)?
-            {
-                return remote::host_lanes(&command, host, edge);
+    let mut lines = String::new();
+    let mut reply = lanes_streaming(command, edge, false, &mut |line| {
+        lines.push_str(line);
+        Ok(())
+    });
+    reply.human.insert_str(0, &lines);
+    reply
+}
+/// `lanes` with a watch writing each line to `out` and flushing it as it
+/// happens. With `json` each line is a JSON object and the reply is the last.
+pub fn lanes_streaming(
+    command: Lanes,
+    edge: &Edge<'_>,
+    json: bool,
+    out: &mut dyn FnMut(&str) -> Result<(), Fail>,
+) -> Reply {
+    reply_waited("lanes", lanes_inner(&command, edge, json, out))
+}
+fn lanes_inner(
+    command: &Lanes,
+    edge: &Edge<'_>,
+    json: bool,
+    emit: Emit<'_>,
+) -> Result<(Value, String, bool), Fail> {
+    if let Some(host) = command.host.as_deref()
+        && !remote::names_local_host(edge, host)?
+    {
+        return remote::host_lanes(command, host, edge, json, emit);
+    }
+    if let Some(placed) = remote::lanes(command, edge, json, emit)? {
+        return Ok(placed);
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let Some(store) = store else {
+        let root = execution_state(edge.roots, edge.home, edge.assets)?;
+        let (mut data, human) = render_lanes(&[], None, root.as_path());
+        if command.wait.is_some() || command.watch.is_some() {
+            // No store means no lanes, so there is nothing left to wait for.
+            data["condition_met"] = json!(true);
+        }
+        let human = if command.watch.is_some() && !json {
+            "end settled lanes=0\n".into()
+        } else {
+            human
+        };
+        return Ok((data, human, false));
+    };
+    let session = Session { store, context };
+    let owner = match command.session.as_deref() {
+        Some(label) => session_actor(edge, label)?,
+        None => session.context.actor_id,
+    };
+    let since = command
+        .since
+        .map(|since| WallTime::from_micros(since.as_microsecond()))
+        .transpose()
+        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
+    let picks = Picks {
+        targets: &command.id,
+        owner,
+        label: command.session.as_deref(),
+        since,
+    };
+    if let Some(seconds) = command.watch {
+        return watch_command(&session, &picks, seconds, json, emit);
+    }
+    if let Some(seconds) = command.wait {
+        return wait_command(&session, &picks, command.condition, seconds, edge);
+    }
+    let after = match &command.cursor {
+        Some(cursor) => cursor
+            .parse()
+            .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor"))?,
+        None => 0,
+    };
+    let mut query = lane_query(
+        &session,
+        &command.id,
+        command.all,
+        command.limit,
+        after,
+        &call,
+    )?;
+    if command.session.is_some() && command.id.is_empty() {
+        query.owner = Some(owner);
+    }
+    let by_session =
+        |lane: &run::AttemptRecord| command.session.is_none() || lane.verified_owner == Some(owner);
+    let filtered = !command.states.is_empty() || command.since.is_some();
+    query.newest_first = filtered;
+    let (lanes, next) = if filtered {
+        query.limit = 100;
+        let mut matches = Vec::new();
+        let mut next = None;
+        loop {
+            let page = session.service().lanes(&query, &call)?;
+            for lane in page.lanes {
+                let state_matches = command.states.is_empty()
+                    || command
+                        .states
+                        .iter()
+                        .any(|state| state.as_str() == state_name(&lane.state));
+                let since_matches = since.is_none_or(|since| lane.queued_at >= since);
+                if state_matches && since_matches && by_session(&lane) {
+                    matches.push(lane);
+                }
+                if matches.len() > command.limit as usize {
+                    let last = matches.get(command.limit as usize - 1).ok_or_else(|| {
+                        Fail::new(Status::Error, ErrorKind::Internal, "lane page invariant")
+                    })?;
+                    next = Some(session.store.attempt_sequence(last.attempt_id, &call)?);
+                    matches.truncate(command.limit as usize);
+                    break;
+                }
             }
-            if let Some(placed) = remote::lanes(&command, edge)? {
-                return Ok(placed);
+            if next.is_some() {
+                break;
             }
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = request(&clock, &cancel)?;
-            let (context, store) = open_read_only(edge, &call)?;
-            let Some(store) = store else {
-                let root = execution_state(edge.roots, edge.home, edge.assets)?;
-                let (data, human) = render_lanes(&[], None, root.as_path());
-                return Ok((data, human, false));
+            match page.next {
+                Some(cursor) => query.after = cursor,
+                None => break,
+            }
+        }
+        (matches, next)
+    } else {
+        let page = session.service().lanes(&query, &call)?;
+        let lanes: Vec<_> = page.lanes.into_iter().filter(by_session).collect();
+        (lanes, page.next)
+    };
+    let (data, human) = render_lanes(&lanes, next, session.context.state_root.as_path());
+    Ok((data, human, false))
+}
+
+/// What a pull request body needs from one local attempt's own record.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttemptFacts {
+    pub attempt_id: AttemptId,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub state: String,
+    pub exit_code: Option<i64>,
+    /// `adapter/model@effort`, as the attempt ran.
+    pub route: String,
+    pub head: Option<provenant_core::GitOid>,
+    /// The branch the attempt's host delivery pushed.
+    pub branch: Option<String>,
+    pub delivery_id: Option<DeliveryId>,
+    /// The attempt's receipt directory, relative to the state root.
+    pub receipt_path: String,
+    /// The attempt's delivery receipt: risk tier and review attempts.
+    pub risk: Option<String>,
+    pub reviews: Vec<AttemptId>,
+}
+fn route_label(record: &run::AttemptRecord) -> String {
+    let ran = record
+        .observed_route
+        .as_ref()
+        .or(record.applied_route.as_ref())
+        .or(record.resolved_route.as_ref());
+    let (requested_model, requested_effort) = match &record.requested_route {
+        run::RequestedRoute::Model { model, effort, .. } => (Some(model.clone()), effort.clone()),
+        run::RequestedRoute::Named { effort, .. } => (None, effort.clone()),
+    };
+    let Some(model) = ran
+        .and_then(|route| {
+            let model = route.model.clone()?;
+            Some(match &route.provider {
+                Some(provider) if !model.starts_with(&format!("{provider}/")) => {
+                    format!("{provider}/{model}")
+                }
+                _ => model,
+            })
+        })
+        .or(requested_model)
+    else {
+        return "unresolved".into();
+    };
+    match ran
+        .and_then(|route| route.effort.clone())
+        .or(requested_effort)
+    {
+        Some(effort) => format!("{model}@{effort}"),
+        None => model,
+    }
+}
+/// The recorded facts of local attempts, for the pull request body. An attempt
+/// that ran on a peer is refused: its record lives on that host.
+pub fn attempt_facts(
+    edge: &Edge<'_>,
+    attempts: &[crate::Attempt],
+) -> Result<Vec<AttemptFacts>, Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let store = store.ok_or(Fail::new(
+        Status::Invalid,
+        ErrorKind::NotFound,
+        "run store is not initialised",
+    ))?;
+    let session = Session { store, context };
+    attempts
+        .iter()
+        .map(|attempt| {
+            if targets::placement(edge, &attempt.0, false)?.is_some() {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Unsupported,
+                    "that attempt ran on a peer; its record is read on that host",
+                ));
+            }
+            let id = targets::local(&session, &attempt.0, &call)?
+                .attempt
+                .ok_or(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "attempt required",
+                ))?;
+            let record = session.service().status(id, &call)?;
+            let (state, _) = state_and_reason(&record.state);
+            let exit_code = match &record.state {
+                run::AttemptState::Terminal { exit_code, .. } => *exit_code,
+                _ => None,
             };
-            let session = Session { store, context };
-            if let Some(seconds) = command.wait {
-                return wait_lanes(&session, &command.id, command.condition, seconds, edge);
-            }
-            let after = match &command.cursor {
-                Some(cursor) => cursor.parse().map_err(|_| {
-                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor")
-                })?,
-                None => 0,
-            };
-            let mut query = lane_query(
-                &session,
-                &command.id,
-                command.all,
-                command.limit,
-                after,
-                &call,
-            )?;
-            let filtered = !command.states.is_empty() || command.since.is_some();
-            query.newest_first = filtered;
-            let threshold = command
-                .since
-                .map(|since| WallTime::from_micros(since.as_microsecond()))
-                .transpose()
-                .map_err(|_| {
-                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value")
-                })?;
-            let (lanes, next) = if filtered {
-                query.limit = 100;
-                let mut matches = Vec::new();
-                let mut next = None;
-                loop {
-                    let page = session.service().lanes(&query, &call)?;
-                    for lane in page.lanes {
-                        let state_matches = command.states.is_empty()
-                            || command
-                                .states
-                                .iter()
-                                .any(|state| state.as_str() == state_name(&lane.state));
-                        let since_matches = threshold.is_none_or(|since| lane.queued_at >= since);
-                        if state_matches && since_matches {
-                            matches.push(lane);
-                        }
-                        if matches.len() > command.limit as usize {
-                            let last =
-                                matches.get(command.limit as usize - 1).ok_or_else(|| {
-                                    Fail::new(
-                                        Status::Error,
-                                        ErrorKind::Internal,
-                                        "lane page invariant",
-                                    )
-                                })?;
-                            next = Some(session.store.attempt_sequence(last.attempt_id, &call)?);
-                            matches.truncate(command.limit as usize);
-                            break;
-                        }
-                    }
-                    if next.is_some() {
-                        break;
-                    }
-                    match page.next {
-                        Some(cursor) => query.after = cursor,
-                        None => break,
+            let (risk, reviews) = match record.delivery_id {
+                Some(delivery) => {
+                    let receipt = provenant_workflow::store::ReceiptStore::new(
+                        session.context.state_root.clone(),
+                        session.context.project_id,
+                        delivery,
+                    )
+                    .read()
+                    .map_err(|error| {
+                        Fail::new(Status::Error, ErrorKind::StateCorrupt, error.to_string())
+                    })?;
+                    match receipt {
+                        Some(receipt) => (
+                            serde_json::to_value(receipt.risk().tier())
+                                .ok()
+                                .and_then(|tier| tier.as_str().map(str::to_owned)),
+                            receipt.review_attempts().to_vec(),
+                        ),
+                        None => (None, Vec::new()),
                     }
                 }
-                (matches, next)
-            } else {
-                let page = session.service().lanes(&query, &call)?;
-                (page.lanes, page.next)
+                None => (None, Vec::new()),
             };
-            let (data, human) = render_lanes(&lanes, next, session.context.state_root.as_path());
-            Ok((data, human, false))
-        })(),
-    )
+            Ok(AttemptFacts {
+                attempt_id: record.attempt_id,
+                run_id: record.run_id,
+                task_id: record.task_id,
+                state,
+                exit_code,
+                route: route_label(&record),
+                head: record
+                    .head
+                    .or_else(|| record.delivery.as_ref().and_then(|d| d.head)),
+                branch: record.delivery.as_ref().map(|d| d.branch.clone()),
+                delivery_id: record.delivery_id,
+                receipt_path: format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+                risk,
+                reviews,
+            })
+        })
+        .collect()
 }
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }
-fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
-    if let Some(placement) = targets::placement(edge, &command.attempt.0, false)? {
+/// The most lines `output --tail` returns; a larger request is clamped.
+const TAIL_MAX: u64 = 500;
+
+fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    let site = match command.host.as_deref() {
+        Some(host) => Some(remote::site(edge, host)?),
+        None => None,
+    };
+    if let Some(remote::Site::Peer(host)) = site {
+        return remote::output_on_peer(&command, host, edge);
+    }
+    if site.is_none()
+        && let Some(placement) = targets::placement(edge, &command.attempt.0, false)?
+    {
         return remote::output(&command, &placement, edge);
+    }
+    // `HOST/ATTEMPT` is the form a graph `attempt_ref` has; a host qualifier
+    // is not a run, so it never has to match the record.
+    if command.attempt.is_qualified_pair()
+        && let Some(qualifier) = command.attempt.0.run
+    {
+        match remote::qualifier_site(edge, qualifier) {
+            Some(remote::Site::Peer(host)) if site.is_none() => {
+                return remote::output_on_peer(&command, host, edge);
+            }
+            Some(remote::Site::Local) => command.attempt.0.run = None,
+            _ => {}
+        }
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -1964,7 +2312,8 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         max_bytes: command.max_bytes,
     };
     let mut chunk = session.service().output(id, part, range, &call)?;
-    if let Some(lines) = command.tail {
+    let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
+    if let Some(lines) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
         chunk = session.service().output(id, part, range, &call)?;
         let text = &chunk.bytes;
@@ -1983,8 +2332,7 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     // The text alone cannot tell a clean success from one that needs the chair.
     let (state, reason) = state_and_reason(&record.state);
-    Ok((
-        json!({
+    let mut data = json!({
             "attempt_id": id,
             "state": state,
             "reason": reason,
@@ -1997,9 +2345,12 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
             "complete": chunk.complete,
             "digest": chunk.digest,
             "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
-        }),
-        text,
-    ))
+    });
+    if let Some(lines) = tail {
+        data["tail"] = json!(lines);
+        data["tail_clamped"] = json!(command.tail != tail);
+    }
+    Ok((data, text))
 }
 
 /// The attempt's trace, then each parent's, nearest first. The chain ends at an
@@ -2135,7 +2486,7 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             let session = open(edge, &call)?;
             let reason = command.reason.as_deref().unwrap_or("cancelled by request");
             let targets = [command.target];
-            let selected = select(&session, &targets, None, &call)?;
+            let selected = select(&session, &targets, None, session.context.actor_id, &call)?;
             if selected.is_empty() {
                 return Err(Fail::new(
                     Status::Invalid,
@@ -2303,7 +2654,15 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let target = command.attempt.0;
+    let mut target = command.attempt.0.clone();
+    if command.attempt.is_qualified_pair()
+        && target
+            .run
+            .and_then(|qualifier| remote::qualifier_site(edge, qualifier))
+            == Some(remote::Site::Local)
+    {
+        target.run = None;
+    }
     let prior = target.attempt.ok_or(Fail::new(
         Status::Invalid,
         ErrorKind::Invalid,

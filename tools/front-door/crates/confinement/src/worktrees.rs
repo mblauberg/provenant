@@ -132,6 +132,9 @@ pub enum WorktreeRemove {
         /// Integration ref to check containment against; the primary's branch
         /// when absent.
         integration: Option<String>,
+        /// The HEAD the caller verified. Removal refuses, under the worktree
+        /// lock, when the worktree is no longer at it.
+        expected_head: Option<GitOid>,
     },
     Merged {
         integration: String,
@@ -1953,6 +1956,7 @@ pub fn remove(
                 name,
                 discard,
                 integration,
+                expected_head,
             } => {
                 let (integration, integration_tip) = match integration {
                     Some(text) => pin_integration(context, &text, cancel)?,
@@ -1966,6 +1970,11 @@ pub fn remove(
                     .copied()
                     .filter(|tip| *tip == entry.head)
                     .ok_or(WorktreeError::IdentityChanged)?;
+                // `remove_tree` rechecks this tip under the worktree lock, so
+                // a commit made after the caller's check cannot be removed.
+                if expected_head.is_some_and(|expected| expected != tip) {
+                    return Err(WorktreeError::IdentityChanged);
+                }
                 let disposition = keep_disposition(
                     context,
                     &branch,
@@ -2901,6 +2910,7 @@ mod lifecycle_tests {
                     name: name.to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancel(),
             )
@@ -3093,6 +3103,7 @@ mod lifecycle_tests {
                             name: "feature/sequencer".into(),
                             discard: false,
                             integration: None,
+                            expected_head: None,
                         },
                         &cancellation,
                     ),
@@ -3120,6 +3131,7 @@ mod lifecycle_tests {
                 name: "feature/sequencer".into(),
                 discard: false,
                 integration: None,
+                expected_head: None,
             },
             &cancellation,
         )?;
@@ -3165,6 +3177,7 @@ mod lifecycle_tests {
                     name: "main".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation
             ),
@@ -3182,6 +3195,7 @@ mod lifecycle_tests {
                 name: "feature/lifecycle".to_owned(),
                 discard: false,
                 integration: None,
+                expected_head: None,
             },
             &cancellation,
         )?;
@@ -3223,6 +3237,7 @@ mod lifecycle_tests {
                     name: "feature/ignored".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation,
             ),
@@ -3302,6 +3317,7 @@ mod lifecycle_tests {
                     name: "feature/busy".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation
             ),
@@ -3322,6 +3338,7 @@ mod lifecycle_tests {
                     name: "feature/busy".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation
             ),
@@ -3334,9 +3351,71 @@ mod lifecycle_tests {
                 name: "feature/busy".to_owned(),
                 discard: false,
                 integration: None,
+                expected_head: None,
             },
             &cancellation,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn named_removal_refuses_a_head_that_moved_after_the_callers_check()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let cancellation = cancel();
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/raced".to_owned(),
+                base: None,
+            },
+            &cancellation,
+        )?;
+        // The caller verified the worktree at its creation head, then a clean
+        // commit landed before removal started.
+        let verified = created.head;
+        run_in_worktree(
+            &fixture,
+            &created.path,
+            &[
+                "-c",
+                "user.name=raced",
+                "-c",
+                "user.email=raced@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "after the check",
+            ],
+        )?;
+        let branch = GitRefName::branch("feature/raced")?;
+        let moved = read_branch_tips(&context, &cancellation)?
+            .get(&branch)
+            .copied()
+            .ok_or("branch tip")?;
+        assert_ne!(moved, verified);
+        let request = |expected_head| WorktreeRemove::Name {
+            name: "feature/raced".to_owned(),
+            discard: false,
+            integration: None,
+            expected_head,
+        };
+        assert!(matches!(
+            remove(&context, request(Some(verified)), &cancellation),
+            Err(WorktreeError::IdentityChanged)
+        ));
+        assert!(created.path.exists(), "the checkout must survive");
+        assert_eq!(
+            read_branch_tips(&context, &cancellation)?.get(&branch),
+            Some(&moved)
+        );
+        // Verifying the head it is really at lets the removal proceed.
+        let outcome = remove(&context, request(Some(moved)), &cancellation)?;
+        assert_eq!(outcome.removed.len(), 1);
+        assert!(!created.path.exists());
         Ok(())
     }
 
@@ -3529,6 +3608,7 @@ mod lifecycle_tests {
                     name: "feature/direct-gitlink".to_owned(),
                     discard: false,
                     integration: None,
+                    expected_head: None,
                 },
                 &cancellation,
             ),

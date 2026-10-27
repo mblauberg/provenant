@@ -463,6 +463,10 @@ pub trait PeerTransport {
         cancel: &CancelToken,
     ) -> Result<PeerResponse, PeerError>;
 }
+/// The executor's usual termination and reap allowances, which a deadline
+/// shares out of its own time.
+const TERMINATE_GRACE: Duration = Duration::from_millis(250);
+const REAP_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct SshTransport<'a> {
     pub executor: &'a dyn Executor,
     pub clock: &'a dyn Clock,
@@ -480,6 +484,31 @@ impl SshTransport<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
         cap: Duration,
+    ) -> Result<PeerResponse, PeerError> {
+        self.exchange_bounded(peer, request, budget, cancel, cap, None)
+    }
+    /// One exchange that is over, SSH termination and reap included, within
+    /// `within` of starting, however the whole-second `budget` rounds. The
+    /// cleanup grace is carved out of `within` rather than added to it.
+    pub fn exchange_within(
+        &self,
+        peer: &Peer,
+        request: &PeerRequest,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        within: Duration,
+    ) -> Result<PeerResponse, PeerError> {
+        let cap = Duration::from_secs(self.seconds);
+        self.exchange_bounded(peer, request, budget, cancel, cap, Some(within))
+    }
+    fn exchange_bounded(
+        &self,
+        peer: &Peer,
+        request: &PeerRequest,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        cap: Duration,
+        within: Option<Duration>,
     ) -> Result<PeerResponse, PeerError> {
         if cancel.is_cancelled() {
             return Err(PeerError::Cancelled);
@@ -506,9 +535,18 @@ impl SshTransport<'_> {
             return Err(PeerError::Frame);
         }
         input.push(b'\n');
-        let timeout = Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros())
-            .min(Duration::from_secs(self.seconds))
-            .min(cap);
+        let mut timeout =
+            Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros())
+                .min(Duration::from_secs(self.seconds))
+                .min(cap);
+        // Termination and reap follow the timeout, so a deadline leaves them
+        // their share (at most the usual grace, a quarter of it each when short).
+        let cleanup = within.map(|within| {
+            let quarter = within / 4;
+            let grace = (TERMINATE_GRACE.min(quarter), REAP_TIMEOUT.min(quarter));
+            timeout = timeout.min(within.saturating_sub(grace.0 + grace.1));
+            grace
+        });
         if timeout.is_zero() {
             return Err(PeerError::Unavailable);
         }
@@ -542,6 +580,10 @@ impl SshTransport<'_> {
         options.stderr = StreamPolicy::Capture { limit: 4096 };
         options.cancel = Some(cancel);
         options.stop_on_output_limit = true;
+        if let Some((terminate_grace, reap_timeout)) = cleanup {
+            options.terminate_grace = terminate_grace;
+            options.reap_timeout = reap_timeout;
+        }
         let uncertain = |cause: String| {
             request
                 .operation()
@@ -1509,5 +1551,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
+    }
+
+    // A real child and the wall clock bound the overrun a hung SSH can cause.
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn peer_exchange_within_a_deadline_includes_termination_and_reap() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // An SSH wrapper that ignores TERM, so only the kill ends it.
+        let ssh = dir.path().join("ssh");
+        std::fs::write(&ssh, "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n").unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        // The whole-second budget has far longer left than the deadline.
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let local = HostId::from_bytes([1; 16]);
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest {
+            version: 1,
+            protocol: PROTOCOL,
+            target_host: host,
+            source_host: local,
+            trace: Default::default(),
+            agent: "chair".into(),
+            project,
+            action: PeerAction::Health,
+        };
+        let peer = Peer {
+            host,
+            destination: "worker".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        };
+        let executor = provenant_os::exec::SystemExecutor::new(2).unwrap();
+        let transport = SshTransport {
+            executor: &executor,
+            clock: &clock,
+            home: dir.path(),
+            cwd: dir.path(),
+            executable: ssh,
+            seconds: 30,
+        };
+
+        let started = std::time::Instant::now();
+        let result = transport.exchange_within(
+            &peer,
+            &request,
+            budget,
+            &CancelToken::new(),
+            Duration::from_millis(10),
+        );
+        let elapsed = started.elapsed();
+        assert!(matches!(result, Err(PeerError::Failed(_))), "{result:?}");
+        // Without the carve-out the child gets its full timeout, then the
+        // termination and reap grace (a quarter second each) on top.
+        assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
     }
 }

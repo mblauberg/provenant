@@ -63,7 +63,7 @@ pub enum Receipt {
 }
 #[derive(Debug, Subcommand)]
 pub enum Session {
-    /// Save a session checkpoint
+    /// Save a session checkpoint (up to 256 KiB)
     Save {
         /// Session ID
         session_id: String,
@@ -71,10 +71,24 @@ pub enum Session {
         #[arg(long)]
         file: String,
     },
-    /// Show a session checkpoint
+    /// Show a session checkpoint, one of its retained revisions or their list
     Show {
         /// Session ID
         session_id: String,
+        /// Show this retained revision's text instead of the current one
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        rev: Option<u64>,
+        /// List the retained revisions with their parents and hashes
+        #[arg(long, conflicts_with = "rev")]
+        revisions: bool,
+    },
+    /// Show what changed between a retained revision and the current checkpoint
+    Diff {
+        /// Session ID
+        session_id: String,
+        /// Revision to compare with the current checkpoint
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        rev: u64,
     },
     /// Hand this session to a fresh Claude session on a peer host
     #[command(long_about = HANDOFF_ABOUT)]
@@ -145,6 +159,7 @@ impl Workflow {
             Self::Receipt(Receipt::Save { .. }) => "workflow receipt save",
             Self::Session(Session::Save { .. }) => "workflow session save",
             Self::Session(Session::Show { .. }) => "workflow session show",
+            Self::Session(Session::Diff { .. }) => "workflow session diff",
             Self::Session(Session::Handoff(_)) => "workflow session handoff",
         }
     }
@@ -154,6 +169,7 @@ impl Workflow {
             Self::Review(_)
                 | Self::Receipt(Receipt::Show { .. })
                 | Self::Session(Session::Show { .. })
+                | Self::Session(Session::Diff { .. })
         )
     }
 }
@@ -419,20 +435,55 @@ fn execute(
         Workflow::Session(Session::Save { session_id, file }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
             let text = read_input(&file)?;
-            SessionStore::new(edge.roots.state.clone(), project, id).save(
-                &text,
-                edge.budget()?,
-                &edge.cancel,
-                &edge.clock,
-            )?;
-            Ok(serde_json::json!({"saved_bytes": text.len()}))
+            let keep = session_revisions(&edge.roots);
+            let saved = SessionStore::new(edge.roots.state.clone(), project, id)
+                .with_revisions(keep)
+                .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
+            Ok(serde_json::json!({
+                "saved_bytes": text.len(),
+                "limit_bytes": provenant_workflow::session::CHECKPOINT_LIMIT,
+                "revision": saved.revision,
+                "parent": saved.parent,
+                "unchanged": saved.unchanged,
+                "retained": saved.retained,
+                "keep": keep,
+            }))
         }
-        Workflow::Session(Session::Show { session_id }) => {
+        Workflow::Session(Session::Show {
+            session_id,
+            rev,
+            revisions,
+        }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
-            let checkpoint = SessionStore::new(edge.roots.state.clone(), project, id)
-                .read()?
+            let store = SessionStore::new(edge.roots.state.clone(), project, id);
+            if revisions {
+                let chain = store.revisions()?;
+                if chain.is_empty() {
+                    return Err(Error::Missing);
+                }
+                return Ok(serde_json::json!({ "revisions": chain }));
+            }
+            if let Some(rev) = rev {
+                let found = store.read_revision(rev)?.ok_or(Error::Missing)?;
+                return serde_json::to_value(found).map_err(|e| invalid(e.to_string()));
+            }
+            let checkpoint = store.read()?.ok_or(Error::Missing)?;
+            let mut value = serde_json::to_value(checkpoint).map_err(|e| invalid(e.to_string()))?;
+            // The current revision is context; unreadable history must not hide the text.
+            value["revision"] = serde_json::json!(
+                store
+                    .revisions()
+                    .ok()
+                    .and_then(|chain| chain.last().map(|r| r.revision))
+            );
+            Ok(value)
+        }
+        Workflow::Session(Session::Diff { session_id, rev }) => {
+            let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
+            let diff = SessionStore::new(edge.roots.state.clone(), project, id)
+                .diff(rev)?
                 .ok_or(Error::Missing)?;
-            Ok(serde_json::to_value(checkpoint).map_err(|e| invalid(e.to_string()))?)
+            serde_json::to_value(diff).map_err(|e| invalid(e.to_string()))
         }
         Workflow::Session(Session::Handoff(_)) => Err(invalid(
             "workflow session handoff is composed by the provenant binary",
@@ -550,8 +601,62 @@ fn classify(error: &Error) -> (Outcome, &'static str) {
         Error::Session(provenant_workflow::session::SessionError::TooLarge) => {
             (Outcome::Invalid, "INVALID")
         }
+        Error::Session(provenant_workflow::session::SessionError::History) => {
+            (Outcome::Failed, "HISTORY")
+        }
         _ => (Outcome::Error, "IO"),
     }
+}
+
+/// Plain text for the revision views: a retained checkpoint as written, the
+/// revision list one per line and a diff as a unified diff. Everything else
+/// uses the generic rendering.
+fn human_text(command: &str, data: &Value) -> String {
+    let with_newline = |text: &str| {
+        if text.ends_with('\n') {
+            text.to_owned()
+        } else {
+            format!("{text}\n")
+        }
+    };
+    match command {
+        "workflow session diff" => match data["text"].as_str() {
+            Some("") => "no differences\n".to_owned(),
+            Some(text) => with_newline(text),
+            None => crate::terse(data),
+        },
+        "workflow session show" if data["revision"].is_object() => data["markdown"]
+            .as_str()
+            .map_or_else(|| crate::terse(data), with_newline),
+        "workflow session show" if data["revisions"].is_array() => data["revisions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                let parent = r["parent"]
+                    .as_u64()
+                    .map_or_else(|| "none".to_owned(), |p| p.to_string());
+                let hash = r["sha256"].as_str().unwrap_or_default();
+                format!(
+                    "{} parent={parent} {hash} {} bytes {}\n",
+                    r["revision"],
+                    r["bytes"],
+                    r["saved_at"].as_str().unwrap_or_default()
+                )
+            })
+            .collect(),
+        _ => crate::terse(data),
+    }
+}
+
+/// How many revisions a session checkpoint keeps, from `[retention]`. Every
+/// path that saves a checkpoint applies it. An unreadable config must not stop
+/// a checkpoint from being saved, so it falls back to the default.
+pub fn session_revisions(roots: &Roots) -> u64 {
+    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_or(provenant_workflow::session::REVISIONS_DEFAULT, |config| {
+            config.retention.session_revisions
+        })
 }
 
 pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &Path) -> u8 {
@@ -584,7 +689,7 @@ pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &P
         out.status = Outcome::Failed;
     }
     let human = if out.error.is_none() {
-        crate::terse(&out.data)
+        human_text(command, &out.data)
     } else {
         String::new()
     };

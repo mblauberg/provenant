@@ -52,6 +52,31 @@ fn provider_state_retention_defaults_overrides_and_validation() {
 }
 
 #[test]
+fn session_revision_retention_defaults_overrides_and_validation() {
+    let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
+    assert_eq!(defaults["retention"]["session_revisions"], 8);
+    let config = load(
+        &roots(),
+        Some(&b"schema_version=1\n[retention]\nsession_revisions=20"[..]),
+    )
+    .unwrap();
+    let value = serde_json::to_value(&config).unwrap();
+    assert_eq!(value["retention"]["session_revisions"], 20);
+    assert_eq!(value["retention"]["provider_state_days"], 7);
+    test_support::assert_leaf_origins(&config);
+    for (value, rule) in [
+        ("0", "session_revisions_range"),
+        ("65", "session_revisions_range"),
+        ("-1", "type"),
+        ("'many'", "type"),
+    ] {
+        let text = format!("schema_version=1\n[retention]\nsession_revisions={value}");
+        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
+        assert_refusal(&error, rule);
+    }
+}
+
+#[test]
 fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
     let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);

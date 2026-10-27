@@ -171,6 +171,9 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     for args in [
         vec!["pr", "merge", "1668"],
         vec!["pr", "merge", "1668", "--head", "abc"],
+        vec!["pr", "land", "1668"],
+        vec!["pr", "land", "1668", "--head", "abc"],
+        vec!["pr", "land", "0", "--head", HEAD],
         vec!["pr", "watch", "0"],
         vec!["pr", "watch", "--admin"],
     ] {
@@ -178,6 +181,44 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     }
     assert!(!rig.project.join("gh-calls").exists());
     Ok(())
+}
+
+fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
+    let rig = rig()?;
+    fs::write(
+        rig.project.join("status-1668.json"),
+        format!(
+            r#"{{"state":"OPEN","headRefOid":"{HEAD}","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","isDraft":false}}"#
+        ),
+    )?;
+    fs::write(
+        rig.project.join("status-1669.json"),
+        format!(
+            r#"{{"state":"OPEN","headRefOid":"{OTHER}","mergeStateStatus":"BLOCKED","reviewDecision":"","isDraft":true}}"#
+        ),
+    )?;
+    fs::write(
+        rig.project.join("checks-1669.json"),
+        r#"[{"bucket":"pass"},{"bucket":"skipping"},{"bucket":"pending"},{"bucket":"fail"}]"#,
+    )?;
+    let output = rig.command(&["pr", "status", "1668", "1669"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout.bytes)?,
+        format!(
+            "#1668 OPEN {HEAD} checks=2/2 merge=clean review=approved\n\
+             #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\n"
+        )
+    );
+    // No checks reported is a count of zero, not an error, and JSON carries the fields.
+    fs::write(rig.project.join("checks-fail"), "")?;
+    let output = rig.command(&["pr", "status", "1668", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["data"][0]["head"], HEAD);
+    assert_eq!(report["data"][0]["checks_total"], 0);
+    assert_eq!(report["data"][0]["merge"], "clean");
+    no_merge(&rig)
 }
 
 fn fake_gh(args: &[String]) -> Result<u8> {
@@ -209,6 +250,20 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 return Ok(8);
             }
             io::stdout().write_all(&fs::read("checks.json")?)?;
+        }
+        "pr checks 1669 --json bucket" => {
+            // Like gh: the JSON still prints, and pending or failing checks exit non-zero.
+            let checks = fs::read_to_string("checks-1669.json")?;
+            write!(io::stdout(), "{checks}")?;
+            return Ok(if checks.contains("pending") { 8 } else { 0 });
+        }
+        value
+            if value.starts_with("pr view ")
+                && value.ends_with(
+                    "--json state,headRefOid,mergeStateStatus,reviewDecision,isDraft",
+                ) =>
+        {
+            io::stdout().write_all(&fs::read(format!("status-{}.json", args[2]))?)?;
         }
         value
             if value.starts_with(&format!("pr merge 1668 --merge --match-head-commit {HEAD}")) =>
@@ -257,6 +312,10 @@ fn main() -> ExitCode {
             (
                 "pr_external_failures_and_invalid_arguments_fail_closed",
                 pr_external_failures_and_invalid_arguments_fail_closed,
+            ),
+            (
+                "pr_status_prints_one_compact_line_per_pull_request",
+                pr_status_prints_one_compact_line_per_pull_request,
             ),
         ];
         provenant_supervisor::fixture::run_libtest(

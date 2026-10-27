@@ -17,6 +17,40 @@ fn invalid_json_is_an_envelope() -> Result {
 }
 
 #[test]
+fn lanes_watch_and_session_selection_report_an_empty_store() -> Result {
+    let rig = TestRig::new()?;
+    // Nothing to watch settles at once, as one stable line.
+    let watch = rig.command(&["lanes", "--watch", "1"])?;
+    assert_eq!(code(&watch), 0);
+    assert_eq!(
+        String::from_utf8(watch.stdout.bytes)?,
+        "end settled lanes=0\n"
+    );
+    let json = rig.command(&["lanes", "--watch", "--json"])?;
+    assert_eq!(code(&json), 0);
+    let stdout = String::from_utf8(json.stdout.bytes)?;
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(value["data"]["lanes"], serde_json::json!([]));
+    // A session's wait with no lanes is met, and its list is empty.
+    let waited = rig.command(&["lanes", "--wait", "1", "--session", "chair", "--json"])?;
+    assert_eq!(code(&waited), 0);
+    let value: serde_json::Value = serde_json::from_slice(&waited.stdout.bytes)?;
+    assert_eq!(value["data"]["condition_met"], true);
+    let listed = rig.command(&["lanes", "--session", "chair", "--json"])?;
+    assert_eq!(code(&listed), 0);
+    // Exclusive options and bad labels are usage errors.
+    for args in [
+        vec!["lanes", "--watch", "1", "--wait", "1"],
+        vec!["lanes", "--session", "not a label"],
+        vec!["lanes", "--watch", "1", "--state", "running"],
+    ] {
+        assert_eq!(code(&rig.command(&args)?), 2, "{args:?}");
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
@@ -218,6 +252,44 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
     assert_eq!(value["data"]["bytes"]["data"], "hello");
+    // `RUN/ATTEMPT` and `--host local` name the same local attempt, and a
+    // `--tail` above the bound is clamped, not refused (#1837).
+    let run_attempt = format!(
+        "{}/{}",
+        lane["run_id"].as_str().ok_or("run")?,
+        lane["attempt_id"].as_str().ok_or("attempt")?
+    );
+    for words in [
+        vec!["output", &run_attempt, "--part", "prompt", "--json"],
+        vec![
+            "output",
+            lane["attempt_id"].as_str().ok_or("attempt")?,
+            "--host",
+            "local",
+            "--part",
+            "prompt",
+            "--json",
+        ],
+    ] {
+        let again = rig.command(&words)?;
+        assert_eq!(code(&again), 0, "{words:?} {again:?}");
+        let again: serde_json::Value = serde_json::from_slice(&again.stdout.bytes)?;
+        assert_eq!(again["data"]["bytes"]["data"], "hello", "{words:?}");
+    }
+    let tail = rig.command(&[
+        "output", &attempt, "--part", "prompt", "--tail", "9999", "--json",
+    ])?;
+    assert_eq!(code(&tail), 0, "{tail:?}");
+    let tail: serde_json::Value = serde_json::from_slice(&tail.stdout.bytes)?;
+    assert_eq!(tail["data"]["tail"], 500);
+    assert_eq!(tail["data"]["tail_clamped"], true);
+    assert_eq!(tail["data"]["bytes"]["data"], "hello");
+    let wrong_run = format!(
+        "{}/{}",
+        "ff".repeat(16),
+        lane["attempt_id"].as_str().ok_or("attempt")?
+    );
+    assert_ne!(code(&rig.command(&["output", &wrong_run, "--json"])?), 0);
 
     let trace = rig.command(&["output", &attempt, "--trace", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&trace.stdout.bytes)?;

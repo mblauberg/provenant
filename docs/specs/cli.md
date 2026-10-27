@@ -36,6 +36,28 @@ per-task route, access and timeout flags.
   `crates/cli/src/run.rs::manifest_rejects_flat_route_fields`
 - Owner: `crates/run/src/service.rs`, `crates/cli/src/run.rs`
 
+### Output references and bounded tails
+
+`output` accepts a bare attempt, `RUN/ATTEMPT`, `HOST/ATTEMPT`, or the
+three-part target. `--host` selects a configured peer's own attempt. Local
+tails above 500 lines are clamped to 500 and the JSON result reports the
+effective tail and whether it was clamped. Peer output retains its existing
+part and tail restrictions.
+- Why: a chair can inspect a precise attempt without copying a full target or
+  opening a shell on its host.
+- Test: `tests/parser.rs::run_leaves_accept_control_and_report_work_refused_per_task`;
+  `tests/fabric_transport.rs::read_only_dispatch_places_on_a_peer_and_forwards_by_id`
+- Owner: `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
+
+### Positional route resolution
+
+`route resolve NAME` accepts a route name or an unambiguous catalogue model
+name, alongside the explicit `--route` and `--model` forms. Unknown or
+ambiguous names report candidates and examples.
+- Why: interactive route lookup should explain how to select a specific match.
+- Test: `tests/route.rs`
+- Owner: `crates/cli/src/route.rs`
+
 ## Results
 
 ### One bounded envelope, never truncated
@@ -64,6 +86,76 @@ exits 124, and neither expiry nor cancelling a wait stops the work.
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
 - Owner: `crates/cli/src/lib.rs`
 
+### Lane waits count only new settlements
+
+`lanes --wait` counts a lane only if it was unsettled when the wait started
+or settled since, so a settled older attempt never satisfies a wait on a newer
+one. The wait starts at command entry, not at the first answer, so a lane
+that settles while a peer is unreachable still counts when the peer returns.
+`--since TIME` also counts lanes that settled at or after that time. Without
+`--id` the lanes are chosen by settlement time, not queue order, so one queued
+before the window that settled inside it counts; the scan covers the session's
+newest 1000 lanes and is refused beyond that. An attempt named by its exact ID
+counts whenever it settled. When every lane
+named by `--id RUN[/TASK]` settled before the wait started, the wait is
+refused (exit 2) with the count, instead of returning at once or idling to
+expiry; the result reports `ignored_settled` otherwise. Without `--id`, a wait
+covers the calling session's lanes and resumes after the settlements that
+session last acknowledged. `--session LABEL` selects the lanes another agent
+label submitted on this host, and narrows `--id` and listings the same way.
+`--host PEER` waits on or lists the peer's own lanes (its newest 100, with any
+lane it saw running tracked by ID until it settles) and reads `--session` as an
+agent label on the peer. One poll
+of a wait or watch draws every peer read (each host, each 100 lanes, and the
+lookup of tracked lanes) on a single deadline fixed when the poll starts. A read is
+capped by what the earlier reads left (at most `limits.peer_seconds`), and no
+read after the first starts at or after the deadline, so a one-second watch
+ends in about a second. The cap covers the whole SSH child: its termination
+and reap grace come out of the time left, not on top of it, so even a wrapper
+that ignores `TERM` is gone by the deadline (to scheduling accuracy). The one
+exception is the first read of `--wait 0`, which has no time left and keeps a
+one-second minimum with the usual quarter-second termination and reap
+allowances after it. `--wait` still excludes `--state` and
+`--cursor`.
+- Why: a stale settlement must never wake a chair that waits for newer work,
+  and selecting by session removes hand-copied ID lists.
+- Test: `crates/cli/src/run/watch.rs::a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one`;
+  `::a_named_attempt_counts_whenever_it_settled`;
+  `::since_counts_settlements_before_arming`;
+  `::nothing_pending_is_refused_for_named_lanes_only`;
+  `::a_fetch_gets_the_time_left_and_none_starts_after_the_deadline`;
+  `::arming_stops_retrying_at_the_deadline_with_the_last_cause`;
+  `::since_selects_by_settlement_time_not_queue_order`;
+  `::since_refuses_a_scan_past_its_cap_instead_of_missing_lanes`;
+  `::a_lane_that_settles_during_initial_peer_failures_still_counts`;
+  `::a_running_lane_pushed_off_the_page_keeps_the_wait_open`;
+  `::a_lane_that_settles_off_the_page_is_kept_in_the_result`;
+  `crates/cli/src/run/remote.rs::a_peer_call_is_capped_by_the_time_left_and_the_peer_limit`;
+  `::wait_starts_no_fetch_after_its_deadline`;
+  `::every_read_of_a_fetch_gets_only_the_time_the_earlier_ones_left`;
+  `::no_read_starts_at_or_after_the_deadline`;
+  `::a_zero_second_budget_still_makes_its_one_read`;
+  `::the_missing_lane_lookup_shares_the_first_reads_deadline`;
+  `crates/cli/src/lib.rs::lanes_session_and_watch_have_bounded_shapes`;
+  `tests/parser.rs::lanes_watch_and_session_selection_report_an_empty_store`
+- Owner: `crates/cli/src/run/watch.rs`, `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
+
+### Lane watch is one stable line per event
+
+`lanes --watch[=SECONDS]` (default and maximum 14400) selects lanes as a wait
+does and prints one line per state a counted lane enters, then `end settled
+lanes=N`, or `end timeout lanes=N pending=M` with exit 124 when the budget
+passes first. A line is `STATE RUN/TASK/ATTEMPT`, with ` host=ID` for a peer's
+lane, and carries no free text. Each line is flushed as written, so a
+background shell or monitor sees it at once. A lane dispatched during the
+watch joins it. With `--json` each line is a JSON object with `event: lane`
+and the final line is the usual envelope. `--watch` excludes `--wait`,
+`--state`, `--all` and `--cursor`.
+- Why: a chair must be told when work settles without polling for it.
+- Test: `crates/cli/src/run/watch.rs::watch_emits_each_state_once_and_ends_when_all_settle`;
+  `::watch_times_out_with_pending_lanes_and_names_the_host`
+- Owner: `crates/cli/src/run/watch.rs`, `src/lib.rs`
+
 ## Guards
 
 ### Merge guard
@@ -76,6 +168,67 @@ incomplete evidence.
 - Test: `tests/pr.rs::pr_merge_refuses_head_changes_before_and_after_checks`;
   `::pr_merge_refuses_unpassed_missing_and_malformed_checks`
 - Owner: `src/pr.rs`
+
+### Landing adds no merge authority
+
+`pr land NUMBER --head SHA` runs the `pr watch` wait and the `pr merge` at
+that head unchanged, then follows up locally: fetch the base, fast-forward the
+local base only in a checkout with no changes, delete declared build output
+and remove the branch's registered worktree through `worktree remove`, and
+delete the merged branch. The two cleanup steps act only
+on a local branch of the pull request's name whose tip is exactly the head the
+pull request merged: a head in another repository (a fork) leaves a same-named
+local branch and its worktree alone, so does a branch recreated or advanced to
+any other tip (even one the base contains), and a local branch whose tip the
+fetched base does not contain is refused and keeps its worktree as well as the
+branch. Removal carries that head and refuses, under the worktree lock, if the
+worktree's HEAD has moved since it was checked. The branch deletion carries it
+too: with no registered worktree it refuses a branch that any worktree has
+checked out, is rebasing (paused or not) or is bisecting, as `git branch -d`
+does (read from Git's administrative directories, so a missing or unmounted
+checkout still holds its branch and an unreadable entry refuses), then deletes
+with `git update-ref -d <branch> <head>`, which compares
+the branch against the merged head and deletes in one ref transaction, so a
+branch moved after the check is kept. (A checkout, rebase or bisect of the
+branch that begins between that test and the deletion is not caught.) The head is required. A failure
+before the merge changes nothing. After it, each step refuses and reports
+instead of forcing, and the command exits 1 with `merged: true`.
+- Why: a landing is four routine steps, and none of them may widen what was
+  reviewed or delete work that is not merged.
+- Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
+  `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
+  `::pr_land_changes_nothing_when_the_merge_does_not_happen`;
+  `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`;
+  `::pr_land_leaves_a_reused_branch_name_alone`;
+  `crates/confinement/src/worktrees.rs::named_removal_refuses_a_head_that_moved_after_the_callers_check`
+- Owner: `src/pr/land.rs`, `src/worktrees.rs`, `crates/confinement/src/worktrees.rs`
+
+### Pull request bodies come from receipts
+
+`pr open --from-attempt ATTEMPT --summary-file FILE` fills the repository's
+`.github/pull_request_template.md` from the local attempt's record and, when
+the attempt has one, its delivery receipt: the summary (whose heading or first
+line is the title), `Closes #N` for each `--issue`, the head to approve, the
+risk tier, the author and reviewer routes with their receipt paths, the head
+each review read, and a gate table whose empty cells say `pending`, `none` or
+`not recorded` rather than staying empty. Reviews come from `--review` or the
+delivery receipt. Only a `succeeded` or `review_required` attempt with a
+recorded head can back a pull request; a template missing a section it fills
+is refused; the delivered branch must be at the attempt's head on the remote;
+and an attempt that ran on a peer is refused, as its record lives there. The
+attempt records no issue, so issues are named with `--issue`. `--dry-run`
+prints the title and body and opens nothing. `pr status [N...]` prints one
+line per pull request: `#N STATE HEAD checks=P/T [fail=F] [pending=W]
+merge=STATE review=DECISION`, with `draft` appended for a draft, and this
+account's open pull requests when none is named.
+- Why: the chair rebuilt the same body by hand for every pull request, and a
+  hand-built body can state a head or route the receipts do not hold.
+- Test: `crates/cli/src/pr_body.rs::the_repository_template_is_filled_from_the_receipts`;
+  `::a_review_of_another_head_or_no_review_is_stated_not_hidden`;
+  `::a_template_missing_a_section_is_refused`;
+  `src/pr_land_tests.rs::pr_open_refuses_what_the_receipts_cannot_support`;
+  `tests/pr.rs::pr_status_prints_one_compact_line_per_pull_request`
+- Owner: `crates/cli/src/pr_body.rs`, `src/pr/open.rs`, `src/pr/status.rs`
 
 ### Chair switch quoting
 

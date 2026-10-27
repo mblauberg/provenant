@@ -229,9 +229,13 @@ host ID. The peer resolves the route, confines the lane and runs it in its own
 checkout of the same project, at the same path under its home directory, with
 its own provider sign-ins; a `--account` pin is checked against the peer's registrations. The calling host keeps only a placement record under
 `fabric/remote-runs/` in its state directory. `lanes --id`, `output` and `cancel` find that record and forward to
-the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
+the peer by ID, and `dispatch --wait`, `lanes --wait` and `lanes --watch` poll the peer. Lanes
 keep running after the SSH call returns. Fabric MCP `fabric_run`
 (`op: submit`) takes the same placement as an optional `host` field.
+To read a peer's own attempt without a local placement record, use
+`provenant output ATTEMPT --host workshop`, or `output HOST/ATTEMPT` with
+the host ID. Output also accepts `RUN/ATTEMPT`; a local `--tail` above 500
+is clamped to 500 lines.
 
 A writer on a peer names a new branch and its base instead of `--worktree`,
 which is a path on the calling host. This is the terminal path; agents use
@@ -268,8 +272,34 @@ Other limits on a peer run:
 - `lanes` without `--id` lists only lanes on the calling host, and mixing
   local and peer runs in one call is refused. `lanes --host workshop` lists
   the peer's own lanes, newest first with `--all`. It takes `--state` and
-  `--since` but not `--id`, `--wait` or `--cursor`, and filters only the page
-  the peer returns.
+  `--since` but not `--id` or `--cursor`, and filters only the page the peer
+  returns. `lanes --host workshop --wait N` and `--watch` follow the peer's
+  newest 100 lanes, counting only those that settle after the call starts. A
+  lane seen running stays tracked until it settles, even after newer
+  dispatches push it off that page.
+
+Waiting and watching work the same on both hosts. `lanes --wait N` returns when a
+lane that was unsettled at the start, or settled since, meets `--condition`
+(`any` by default). A settled older attempt of a named run does not count; if
+every lane of the named runs settled earlier the call is refused with their
+number, so pass the attempt ID, or `--since TIME` to count earlier
+settlements. `--session LABEL` selects the lanes an agent label submitted, so
+no ID list is needed. The wait starts when the command does, so a peer lane
+that settles while the peer is unreachable still counts once it answers. The
+comparison uses the peer's recorded settlement time against this host's clock,
+so keep the hosts' clocks synchronised. For a background job or monitor, run
+`provenant lanes --watch 3600`. One poll shares a single deadline across
+all its peer reads (one per host and per 100 lanes, plus the lookup of lanes
+that left the newest page). Each read is bounded by the time the earlier reads
+left, as well as by `limits.peer_seconds`, and no read after the first starts
+at or after the deadline; the poll then fails as a transient peer error, which
+the wait retries until its own budget ends. The time a read has left covers
+the whole SSH child, including its termination and reap, so a hung `ssh` that
+ignores `TERM` is killed by the deadline. Only the first read of `--wait 0`
+keeps a one-second minimum, with a further half second of termination and reap
+if `ssh` hangs. The watch prints `STATE RUN/TASK/ATTEMPT` (and
+`host=ID` for a peer's lane) once per state change, then `end settled lanes=N`,
+or `end timeout lanes=N pending=M` with exit 124.
 
 `provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation

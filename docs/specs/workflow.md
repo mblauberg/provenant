@@ -99,14 +99,42 @@ held during probes, provider waits or GitHub reads.
 
 ### Checkpoints are keyed exactly
 
-A checkpoint is bounded UTF-8 Markdown under an explicit project and host
+A checkpoint is UTF-8 Markdown, bounded to 256 KiB, under an explicit project and host
 session key, saved atomically with its bytes preserved. Session IDs are 1 to
 128 ASCII letters, digits, `.`, `_` and `-`, starting alphanumeric, with no
 `..`, so the injected save command is safe to copy. Symlinks are refused.
 - Why: restoring the wrong checkpoint misdirects an agent.
 - Test: `crates/workflow/src/session.rs::refuses_traversal_and_command_injection_in_host_keys`;
-  `::refuses_symlinked_directories_checkpoints_and_locks`
+  `::refuses_symlinked_directories_checkpoints_and_locks`;
+  `tests/workflow.rs::long_checkpoints_save_up_to_the_documented_bound`
 - Owner: `crates/workflow/src/session.rs`
+
+### Earlier checkpoints are bounded revisions
+
+A save keeps the checkpoint it replaces as numbered revision `N`, in
+`rev-N.md` beside `checkpoint.md`, and records every retained revision with its
+parent and a SHA-256 in `revisions.json`, all under the save's existing lock.
+The order is: store the old text, publish the new checkpoint, publish the
+history, then delete revisions beyond `retention.session_revisions` (default 8,
+1 to 64, current included), whether the save comes from `session save` or from
+`session handoff`. A save that stops part-way leaves a complete
+checkpoint, and the next one records the revision it finds; unreadable history
+never blocks a save. Identical text adds no revision. Each revision is held to
+the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
+a retained revision, or its unified line diff against the current one, as plain
+text. Lines compare with their terminators, so text that differs only in its final
+newline shows a difference, marked `\ No newline at end of file` as `diff -u`
+marks it. A revision whose text fails its hash is refused with `HISTORY`.
+- Why: a bad save or a compaction must not destroy the only copy of earlier
+  state, and the history must stay bounded.
+- Test: `crates/workflow/src/session.rs::each_save_keeps_the_replaced_checkpoint_as_a_linked_hashed_revision`;
+  `::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
+  `::an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost`;
+  `::unreadable_history_never_blocks_a_save_and_a_changed_revision_is_refused`;
+  `crates/workflow/src/session/diff.rs::a_newline_only_change_is_a_difference_with_a_note`;
+  `src/handoff.rs::a_handoff_checkpoint_keeps_the_configured_number_of_revisions`;
+  `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
+- Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`
 
 ### Session hooks are advisory
 
@@ -220,3 +248,5 @@ authority.
 - Receipt mutation commands, repair and finding sidecars.
 - Provider-family maps in workflow, or a tracker replay queue.
 - Transcript reinjection and workflow MCP tools.
+- Merging, syncing or conflict-free replication of checkpoint revisions; the
+  history is one writer's bounded chain.

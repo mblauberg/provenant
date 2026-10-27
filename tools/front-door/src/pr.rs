@@ -1,6 +1,7 @@
 //! Thin GitHub CLI edge, with CI evidence bound to the merge head.
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Pr};
+use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::GitOid;
 use provenant_os::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
@@ -9,15 +10,41 @@ use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
+mod git;
+pub(crate) mod land;
+mod open;
+mod status;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn execute(project: &Path, argv: &[&str], watch: bool) -> Result<ExecOutcome> {
-    let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
-    let mut options = ExecOptions::new(
-        &argv,
+    execute_for(
         project,
+        argv,
         Duration::from_secs(if watch { 86_400 } else { 60 }),
-    );
+        watch,
+    )
+}
+/// Run an external command to completion within `timeout`. A `watch` run
+/// discards repeated progress so a long CI wait cannot fill capture.
+fn execute_for(
+    project: &Path,
+    argv: &[&str],
+    timeout: Duration,
+    watch: bool,
+) -> Result<ExecOutcome> {
+    execute_with(project, argv, timeout, watch, None)
+}
+fn execute_with(
+    project: &Path,
+    argv: &[&str],
+    timeout: Duration,
+    watch: bool,
+    stdin: Option<&[u8]>,
+) -> Result<ExecOutcome> {
+    let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
+    let mut options = ExecOptions::new(&argv, project, timeout);
+    options.stdin = stdin;
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
     // Discard repeated progress so long CI runs cannot fill capture.
@@ -127,10 +154,13 @@ fn merge(project: &Path, number: &str, head: GitOid) -> Result<()> {
     successful(execute(project, &argv, false)?)?;
     Ok(())
 }
-pub fn run(command: Pr, globals: &Globals) -> u8 {
+pub fn run(command: Pr, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     let (leaf, number, expected) = match command {
         Pr::Watch { number } => ("pr watch", number, None),
         Pr::Merge { number, head } => ("pr merge", number, Some(head)),
+        Pr::Land { number, head } => return land::run(number, head, globals, workers),
+        Pr::Open(command) => return open::run(*command, globals),
+        Pr::Status { numbers } => return status::run(numbers, globals),
     };
     let mut captured = expected;
     let result = (|| -> Result<()> {

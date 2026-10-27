@@ -8,7 +8,7 @@ use provenant_confinement::{
         WorktreeRemove,
     },
 };
-use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
@@ -194,6 +194,7 @@ fn execute(
                             name,
                             discard: args.discard,
                             integration: args.integration,
+                            expected_head: None,
                         }
                     } else {
                         WorktreeRemove::Merged {
@@ -413,6 +414,147 @@ fn gc_project(
                 )?,
                 lanes: worktrees::list(context, cancel)?,
             })
+        },
+    )
+}
+
+/// What `pr land` did to a merged branch's registered worktree.
+#[derive(Debug, Default)]
+pub(crate) struct LandWorktree {
+    /// A worktree was registered for the branch.
+    pub registered: bool,
+    /// Declared build output deleted from it first, such as `target`.
+    pub output: Vec<PathBuf>,
+    pub removed: bool,
+    pub branch_deleted: bool,
+    /// Why the worktree or branch was kept, when it was.
+    pub kept: Option<String>,
+}
+
+/// Remove the registered worktree of a merged branch through the same removal
+/// as `worktree remove`, after deleting the build output GC already treats as
+/// regenerable (`gc.projects.<id>.regenerable` plus `target`). Output pruning
+/// keeps GC's checks: the lane must be idle with terminal writers, tracked
+/// and kept paths stay, and symlinks are never followed. Removal refuses a
+/// dirty or live worktree and keeps a branch not contained in `integration`.
+/// The worktree is only removed while its HEAD is still `tip`, the commit the
+/// caller proved merged, so commits made since keep the checkout too.
+pub(crate) fn land_cleanup(
+    globals: &Globals,
+    branch: &str,
+    integration: &str,
+    tip: GitOid,
+    workers: &dyn WorkerObserver,
+) -> Result<LandWorktree, Error> {
+    let roots::Resolved {
+        assets,
+        home,
+        project,
+        roots,
+        ..
+    } = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Required,
+    )?;
+    let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+    with_context(
+        &roots,
+        &home,
+        &project,
+        MUTATION_TIMEOUT,
+        workers,
+        |context, cancel| {
+            let mut landed = LandWorktree::default();
+            let Some(lane) = worktrees::list(context, cancel)?.into_iter().find(|lane| {
+                lane.branch
+                    .as_deref()
+                    .is_some_and(|name| name.strip_prefix("refs/heads/") == Some(branch))
+            }) else {
+                return Ok(landed);
+            };
+            landed.registered = true;
+            if project.starts_with(&lane.path) {
+                landed.kept = Some(
+                    "this command runs inside that worktree; run it from another checkout".into(),
+                );
+                return Ok(landed);
+            }
+            if lane.head != tip {
+                landed.kept = Some(format!(
+                    "the worktree is at {}, not the merged {tip}",
+                    lane.head
+                ));
+                return Ok(landed);
+            }
+            let project_id = context.binding.project_id();
+            let settings = config
+                .gc
+                .projects
+                .get(&project_id.to_string())
+                .cloned()
+                .unwrap_or_default();
+            let mut regenerable = settings.regenerable.clone();
+            if !regenerable.iter().any(|name| name == "target") {
+                regenerable.push("target".into());
+            }
+            let snapshot = crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok();
+            // A branch landed by hand may never have had a lane, so unlike a
+            // sweep this accepts a worktree no lane used. A live or unobservable
+            // lane, or a stale scan, still refuses.
+            let idle = |path: &Path| {
+                snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.no_live_lanes(path))
+            };
+            let (terminal, no_live_lanes) = (idle, idle);
+            // The merge is the proof of completion, so build output written in
+            // the last day does not hold the worktree back as it does in a sweep.
+            let now_ns = SystemClock
+                .wall_now()
+                .map(|now| i128::from(now.as_micros()) * 1_000)
+                .map_err(|_| Error::Budget)?;
+            let collected = worktrees::collect(
+                context,
+                std::slice::from_ref(&lane),
+                &worktrees::WorktreeGcPolicy {
+                    upstream: None,
+                    terminal: &terminal,
+                    no_live_lanes: &no_live_lanes,
+                    regenerable: &regenerable,
+                    keep: &settings.keep,
+                    written_before_ns: now_ns,
+                    dry_run: false,
+                },
+                cancel,
+            )?;
+            landed.output = collected
+                .output
+                .into_iter()
+                .filter(|entry| entry.removed)
+                .map(|entry| entry.path)
+                .collect();
+            match worktrees::remove(
+                context,
+                WorktreeRemove::Name {
+                    name: branch.to_owned(),
+                    discard: false,
+                    integration: Some(integration.to_owned()),
+                    expected_head: Some(tip),
+                },
+                cancel,
+            ) {
+                Ok(outcome) => {
+                    landed.removed = !outcome.removed.is_empty();
+                    landed.branch_deleted = outcome.pruned_refs.iter().any(|name| name == branch);
+                    landed.kept = outcome
+                        .retained
+                        .first()
+                        .map(|kept| format!("branch {} kept: {:?}", kept.branch, kept.reason));
+                }
+                Err(error) => landed.kept = Some(error.to_string()),
+            }
+            Ok(landed)
         },
     )
 }

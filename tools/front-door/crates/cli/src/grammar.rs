@@ -130,6 +130,51 @@ pub enum Pr {
         #[arg(long)]
         head: GitOid,
     },
+    /// Wait for CI, merge the specified head, then fetch, fast-forward the
+    /// base when clean and remove the merged branch and its worktree
+    Land {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+        /// Full object ID of the head that was reviewed and will be merged
+        #[arg(long)]
+        head: GitOid,
+    },
+    /// Open a pull request with the repository template filled from receipts
+    Open(Box<PrOpen>),
+    /// Print one line per pull request: state, head, checks, merge and review
+    Status {
+        /// Pull requests to report; this account's open ones when omitted
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        numbers: Vec<u64>,
+    },
+}
+#[derive(Debug, Args)]
+pub struct PrOpen {
+    /// The writer attempt that made the change
+    #[arg(long)]
+    pub from_attempt: Attempt,
+    /// An independent review attempt (repeatable); the attempt's delivery
+    /// receipt supplies them when omitted
+    #[arg(long)]
+    pub review: Vec<Attempt>,
+    /// Markdown for the summary section; its first line titles the pull request
+    #[arg(long)]
+    pub summary_file: PathBuf,
+    /// Issue the pull request closes (repeatable)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Vec<u64>,
+    /// Branch to open from; the attempt's delivered branch when omitted
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// Branch to merge into; the repository default when omitted
+    #[arg(long)]
+    pub base: Option<String>,
+    /// Open as a draft
+    #[arg(long)]
+    pub draft: bool,
+    /// Print the title and body without opening anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {
@@ -331,14 +376,33 @@ impl FromStr for Target {
         Ok(Self { run, task, attempt })
     }
 }
+/// One attempt: a bare ID, `RUN/ATTEMPT`, `HOST/ATTEMPT` (a graph
+/// `attempt_ref`) or `RUN/TASK/ATTEMPT`. In the two-part form the qualifier
+/// is parsed into `Target::run` and resolved against stored runs and known
+/// hosts later; `task` is `None` only there.
 #[derive(Debug, Clone)]
 pub struct Attempt(pub Target);
+impl Attempt {
+    /// Whether the target is the two-part `QUALIFIER/ATTEMPT` form.
+    pub fn is_qualified_pair(&self) -> bool {
+        self.0.run.is_some() && self.0.task.is_none() && self.0.attempt.is_some()
+    }
+}
 impl FromStr for Attempt {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let target: Target = text.parse()?;
+        const EXPECTED: &str = "expected ATTEMPT, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT";
+        let mut parts = text.split('/');
+        if let (Some(qualifier), Some(attempt), None) = (parts.next(), parts.next(), parts.next()) {
+            return Ok(Self(Target {
+                run: Some(qualifier.parse().map_err(|_| "invalid run or host ID")?),
+                task: None,
+                attempt: Some(attempt.parse().map_err(|_| "invalid attempt ID")?),
+            }));
+        }
+        let target: Target = text.parse().map_err(|_| EXPECTED)?;
         if target.attempt.is_none() {
-            return Err("expected ATTEMPT or RUN/TASK/ATTEMPT");
+            return Err(EXPECTED);
         }
         Ok(Self(target))
     }
@@ -401,9 +465,12 @@ pub struct Lanes {
     /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long, conflicts_with = "all")]
     pub id: Vec<Target>,
-    /// List a configured peer's own lanes, by label or host ID
-    #[arg(long, conflicts_with_all = ["id", "wait", "cursor"])]
+    /// List, wait on or watch a configured peer's own lanes, by label or host ID
+    #[arg(long, conflicts_with_all = ["id", "cursor"])]
     pub host: Option<String>,
+    /// Keep lanes submitted by this session (its agent label)
+    #[arg(long, value_parser = session_label, conflicts_with = "all")]
+    pub session: Option<String>,
     /// Show every lane
     #[arg(long)]
     pub all: bool,
@@ -411,20 +478,43 @@ pub struct Lanes {
     #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: u64,
     /// Continue from a previous page's cursor
-    #[arg(long, conflicts_with = "wait")]
+    #[arg(long, conflicts_with_all = ["wait", "watch"])]
     pub cursor: Option<String>,
-    /// Wait up to this many seconds for a lane condition
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+    /// Wait up to this many seconds for a lane to settle after the wait starts
+    #[arg(long, conflicts_with = "watch", value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub wait: Option<u64>,
     /// Wait for any or all lanes to settle
-    #[arg(long, default_value = "any", requires = "wait", value_enum)]
+    #[arg(
+        long,
+        default_value = "any",
+        requires = "wait",
+        conflicts_with = "watch",
+        value_enum
+    )]
     pub condition: Condition,
+    /// Print one line per lane state change until every selected lane has
+    /// settled or this many seconds pass (default 14400)
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "14400",
+        value_name = "SECONDS",
+        conflicts_with_all = ["all", "states", "cursor"],
+        value_parser = clap::value_parser!(u64).range(1..=14400)
+    )]
+    pub watch: Option<u64>,
     /// Keep lanes in any of these states.
-    #[arg(long = "state", conflicts_with = "wait")]
+    #[arg(long = "state", conflicts_with_all = ["wait", "watch"])]
     pub states: Vec<LaneState>,
     /// Keep lanes queued within this many seconds, or since an RFC3339 time.
-    #[arg(long, value_parser = since, conflicts_with = "wait")]
+    /// With --wait or --watch, count lanes that settled since then.
+    #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
+}
+fn session_label(value: &str) -> Result<String, &'static str> {
+    provenant_fabric_runtime::identity::validate_label(value)
+        .map(|()| value.to_owned())
+        .map_err(|_| "session must be an agent label of 1 to 128 letters, digits, dots, underscores or hyphens")
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Part {
@@ -435,16 +525,19 @@ pub enum Part {
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
+    /// Attempt ID, or RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT
     pub attempt: Attempt,
+    /// Read a configured peer's own attempt, by label or host ID
+    #[arg(long)]
+    pub host: Option<String>,
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
-    /// Read the last N lines instead of an offset
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=500))]
+    /// Read the last N lines instead of an offset (above 500 is clamped to 500)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub tail: Option<u64>,
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", value_parser = clap::value_parser!(u64).range(1..=65536))]
@@ -479,7 +572,7 @@ pub struct Prompt {
 }
 #[derive(Debug, Args)]
 pub struct Resume {
-    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
+    /// Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
@@ -769,7 +862,16 @@ mod target_tests {
         assert_eq!(qualified.0.run, Some(run));
         assert_eq!(qualified.0.task, Some(task));
         assert_eq!(qualified.0.attempt, Some(attempt));
-        assert!(format!("{run}/{task}").parse::<Attempt>().is_err());
+        // A graph `attempt_ref` is `HOST/ATTEMPT`; `RUN/ATTEMPT` has the same shape.
+        let pair: Attempt = format!("{run}/{attempt}").parse().unwrap();
+        assert!(pair.is_qualified_pair());
+        assert_eq!(pair.0.run, Some(run));
+        assert_eq!(pair.0.task, None);
+        assert_eq!(pair.0.attempt, Some(attempt));
+        assert!(!qualified.is_qualified_pair());
+        assert!(!bare.is_qualified_pair());
+        assert!(format!("{run}/").parse::<Attempt>().is_err());
+        assert!(format!("/{attempt}").parse::<Attempt>().is_err());
         for invalid in [
             "",
             "invalid",
