@@ -4132,6 +4132,19 @@ mod writer_disk_tests {
     use super::*;
 
     #[test]
+    fn dispatch_policy_refusal_preserves_launched_sibling() -> Result<(), String> {
+        check_launch_policy(&[
+            run::Started::Refused {
+                attempt: AttemptId::from_bytes([1; 16]),
+                kind: run::RefusalKind::Policy,
+                reason: "insufficient disk space".into(),
+            },
+            run::Started::Launched(AttemptId::from_bytes([2; 16])),
+        ])
+        .map_err(|error| error.message)
+    }
+
+    #[test]
     fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
         let refused = || run::Started::Refused {
             attempt: AttemptId::from_bytes([1; 16]),
