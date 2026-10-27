@@ -330,6 +330,17 @@ impl WriterLaunch {
         attempt: &Directory,
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
+        let owned = worktrees::load_owner(&self.worktree)?
+            .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
+        crate::artifacts::seal(
+            attempt,
+            "writer-owned.json",
+            &crate::db::bytes(&WriterOwnership {
+                schema_version: 1,
+                lane_owned: owned,
+            })?,
+            crate::RECORD_LIMIT,
+        )?;
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
         let utility = runtime(state)?;
         let executor =
@@ -662,4 +673,12 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
         attempt.sync()?;
     }
     Ok(())
+}
+
+/// Launch-time lifecycle evidence, sealed while writer custody is held.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WriterOwnership {
+    pub schema_version: u64,
+    pub lane_owned: bool,
 }

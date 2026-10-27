@@ -373,8 +373,12 @@ original choice and prompt even after provider-state expiry. Uncertain custody
 never triggers a new writer; refusal names the fresh fallback when it cannot
 launch safely.
 Before admission and again under writer custody, continuations verify the
-worktree owner's lane lineage. Missing or reassigned worktrees require a new
-owned checkout for fresh fallback; `--no-fallback` refuses them.
+worktree owner's lane lineage. Launch snapshots durably record whether the tree
+was lane-owned. Explicit unowned and adopted trees resume in place unless a
+current lane owner names another lineage. Previously lane-owned trees still
+require a matching lane owner even if that owner record is later removed or
+replaced by adoption. Missing or reassigned worktrees require a new owned
+checkout for fresh fallback; `--no-fallback` refuses them.
 - Why: a missing provider handle should not require the chair to reconstruct
   context or bypass immutable attempt records and writer custody.
 - Test: `crates/run/src/dispatch_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;

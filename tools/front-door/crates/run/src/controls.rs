@@ -118,6 +118,166 @@ mod lineage_tests {
     use std::{ffi::OsString, time::Duration};
 
     #[test]
+    fn resume_preserves_explicit_unowned_and_adopted_worktrees()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut execution = crate::tests::context(temp.path())?;
+        let project = temp.path().join("checkout");
+        let home = temp.path().join("home");
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(execution.state_root.as_path().into());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Base",
+            ],
+        ] {
+            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.into_iter().map(OsString::from))
+                .collect();
+            let outcome = SystemExecutor::new(1)?.execute(ExecOptions::new(
+                &argv,
+                &project,
+                Duration::from_secs(5),
+            ))?;
+            assert_eq!(outcome.termination, Termination::Exit(0));
+        }
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        for (index, origin) in [None, Some(WorktreeOrigin::Adopted)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut original = crate::tests::input();
+            original.run_id = RunId::from_bytes([60 + index as u8; 16]);
+            original.operation_id = format!("explicit-{index}").parse()?;
+            original.attempts[0].attempt_id = AttemptId::from_bytes([70 + index as u8; 16]);
+            let prior = original.attempts[0].attempt_id;
+            let (project_id, info) =
+                worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                    let info = worktrees::create(
+                        context,
+                        WorktreeCreate {
+                            branch: format!("explicit-{index}"),
+                            base: None,
+                        },
+                        &cancel,
+                    )?;
+                    if let Some(origin) = origin {
+                        let tree =
+                            provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                        worktrees::save_owner(
+                            &tree,
+                            &WorktreeOwner {
+                                attempt_id: None,
+                                operation_id: None,
+                                branch: info
+                                    .branch
+                                    .clone()
+                                    .ok_or(worktrees::WorktreeError::NotFound)?,
+                                base: info.head.to_string(),
+                                host: provenant_core::HostId::from_bytes([3; 16]),
+                                created_at: original.created_at,
+                                origin,
+                                label: None,
+                            },
+                        )?;
+                    }
+                    Ok((context.binding.project_id(), info))
+                })?;
+            execution.project_id = project_id;
+            let call = Request {
+                clock: &clock,
+                cancel: &cancel,
+                budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+            };
+            let store = RunStore::open(&execution, &call)?;
+            let writer = WriterRequest {
+                project: project.clone(),
+                worktree: info.path.clone(),
+            };
+            original.request.tasks[0].writer = Some(writer.clone());
+            store.create(&original, &call)?;
+            let record = store.record(prior, &call)?;
+            crate::prepare_writer(&writer, &store.writer_registry, project_id)?.snapshot(
+                store.context.state_root.as_path(),
+                &store.attempt_dir(record.run_id, prior, false)?,
+                RunStore::scope(&record),
+            )?;
+            std::fs::write(info.path.join("pending.txt"), "keep these edits")?;
+            store.withdraw(
+                prior,
+                AttemptState::Queued,
+                Outcome::Cancelled,
+                "fixture",
+                clock.wall_now()?,
+                &call,
+            )?;
+            let next = Resume {
+                prior,
+                expected_generation: 0,
+                operation_id: format!("explicit-resume-{index}").parse()?,
+                run_id: RunId::from_bytes([80 + index as u8; 16]),
+                attempt_id: AttemptId::from_bytes([90 + index as u8; 16]),
+                prompt: "Continue".into(),
+                created_at: clock.wall_now()?,
+            };
+            let resumed = store.resume_fresh(&next, "no provider session", &call)?;
+            assert_eq!(
+                store.request(resumed.run_id, &call)?.tasks[0]
+                    .writer
+                    .as_ref(),
+                Some(&writer)
+            );
+            assert_eq!(
+                std::fs::read_to_string(info.path.join("pending.txt"))?,
+                "keep these edits"
+            );
+            let tree = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+            store.check_writer_lineage(
+                &store.record(next.attempt_id, &call)?,
+                &tree.worktree,
+                &call,
+            )?;
+            worktrees::save_owner(
+                &tree.worktree,
+                &WorktreeOwner {
+                    attempt_id: Some(AttemptId::from_bytes([100; 16])),
+                    operation_id: Some("foreign".parse()?),
+                    branch: format!("explicit-{index}"),
+                    base: info.head.to_string(),
+                    host: provenant_core::HostId::from_bytes([3; 16]),
+                    created_at: original.created_at,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            )?;
+            assert!(matches!(
+                store.check_continuation_writer(next.attempt_id, &call),
+                Err(RunError::Validation(
+                    "continuation worktree belongs to another lane"
+                ))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn resume_refuses_a_pruned_worktree_reused_by_another_lane()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -213,6 +373,45 @@ mod lineage_tests {
             clock.wall_now()?,
             &call,
         )?;
+        let launch = crate::prepare_writer(
+            original.request.tasks[0].writer.as_ref().unwrap(),
+            &store.writer_registry,
+            project_id,
+        )?;
+        let record = store.record(prior, &call)?;
+        launch.snapshot(
+            store.context.state_root.as_path(),
+            &store.attempt_dir(record.run_id, prior, false)?,
+            RunStore::scope(&record),
+        )?;
+        let owner = worktrees::load_owner(&launch.worktree)?.ok_or("owner")?;
+        std::fs::remove_file(
+            launch
+                .worktree
+                .repo()
+                .private_git_dir()
+                .join("provenant-owner.json"),
+        )?;
+        assert!(matches!(
+            store.check_continuation_writer(prior, &call),
+            Err(RunError::Validation(
+                "continuation worktree has no lane owner"
+            ))
+        ));
+        worktrees::save_owner(
+            &launch.worktree,
+            &WorktreeOwner {
+                origin: WorktreeOrigin::Adopted,
+                ..owner.clone()
+            },
+        )?;
+        assert!(matches!(
+            store.check_continuation_writer(prior, &call),
+            Err(RunError::Validation(
+                "continuation worktree has no lane owner"
+            ))
+        ));
+        worktrees::save_owner(&launch.worktree, &owner)?;
         assert!(store.check_continuation_writer(prior, &call)?.is_some());
         let first = Resume {
             prior,
@@ -698,41 +897,54 @@ impl RunStore {
         };
         let launch = crate::prepare_writer(writer, &self.writer_registry, prior.project_id)?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
-            .map(Some)
     }
     pub(crate) fn check_writer_lineage(
         &self,
         record: &AttemptRecord,
         tree: &provenant_confinement::VerifiedWorktree,
         call: &Request<'_>,
-    ) -> Result<provenant_confinement::worktrees::WorktreeOwner> {
+    ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
         use provenant_confinement::worktrees::{WorktreeOrigin, load_owner};
-        let owner = load_owner(tree)?.ok_or(RunError::Validation(
-            "continuation worktree has no lane owner",
-        ))?;
-        if owner.origin != WorktreeOrigin::Lane {
-            return Err(RunError::Validation(
-                "continuation worktree belongs to an adopted owner",
-            ));
-        }
+        let owner = load_owner(tree)?;
+        let lane = owner
+            .as_ref()
+            .filter(|owner| owner.origin == WorktreeOrigin::Lane);
         let mut current = record.clone();
         let mut seen = std::collections::HashSet::new();
+        let mut was_owned = false;
         loop {
             if !seen.insert(current.attempt_id) || seen.len() > 128 {
                 return Err(RunError::Validation("continuation parent chain"));
             }
-            if owner.attempt_id == Some(current.attempt_id)
-                || owner.operation_id.as_ref() == Some(&current.operation_id)
-            {
+            if lane.is_some_and(|owner| {
+                owner.attempt_id == Some(current.attempt_id)
+                    || owner.operation_id.as_ref() == Some(&current.operation_id)
+            }) {
                 return Ok(owner);
             }
+            let directory = self.attempt_dir(current.run_id, current.attempt_id, false)?;
+            if let Some(raw) = read_sealed(&directory, "writer-owned.json", crate::RECORD_LIMIT)? {
+                // Recorded under custody before launch. A later owner removal or
+                // adoption cannot turn an owned lane into an explicit tree.
+                was_owned |= crate::db::decode::<crate::writer::WriterOwnership>(&raw)?.lane_owned;
+            }
             let Some(parent) = current.retry_of else {
-                return Err(RunError::Validation(
-                    "continuation worktree belongs to another lane",
-                ));
+                break;
             };
             current = self.record(parent, call)?;
         }
+        if lane.is_some() {
+            return Err(RunError::Validation(
+                "continuation worktree belongs to another lane",
+            ));
+        }
+        if was_owned {
+            return Err(RunError::Validation(
+                "continuation worktree has no lane owner",
+            ));
+        }
+        // Explicit unowned and adopted trees retain their existing lifecycle.
+        Ok(owner)
     }
     fn resume_mode(
         &self,
