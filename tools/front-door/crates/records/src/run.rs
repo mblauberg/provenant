@@ -114,7 +114,7 @@ pub enum NetworkAccess {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaneAccess {
-    /// Explicit network reach; absent takes the mode default.
+    /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -126,14 +126,9 @@ impl LaneAccess {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
-    /// Writers build and test, so they default to open network; read-only
-    /// lanes reach only their provider.
-    pub fn network(&self, writer: bool) -> NetworkAccess {
-        self.network.unwrap_or(if writer {
-            NetworkAccess::Open
-        } else {
-            NetworkAccess::Provider
-        })
+    /// Every lane defaults to open network; explicit flags may restrict it.
+    pub fn network(&self, _writer: bool) -> NetworkAccess {
+        self.network.unwrap_or(NetworkAccess::Open)
     }
 }
 
@@ -727,5 +722,12 @@ mod tests {
         let parsed: HarnessProfile = serde_json::from_value(sealed.clone())?;
         assert_eq!(serde_json::to_value(parsed)?, sealed);
         Ok(())
+    }
+
+    #[test]
+    fn lane_access_network_defaults_to_open() {
+        let access = LaneAccess::default();
+        assert_eq!(access.network(false), NetworkAccess::Open);
+        assert_eq!(access.network(true), NetworkAccess::Open);
     }
 }

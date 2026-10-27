@@ -346,6 +346,7 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         task
     };
     let read_only = task(false, LaneAccess::default());
+    let quiet_read_only = task(false, access(Some(NetworkAccess::Provider), &[], &[]));
     let granted = task(
         false,
         access(Some(NetworkAccess::Local), &["reads"], &["writes"]),
@@ -373,8 +374,14 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         (
             &read_only,
             task(false, access(Some(NetworkAccess::Open), &[], &[])),
-            false,
+            true,
             "network under a read-only parent",
+        ),
+        (
+            &quiet_read_only,
+            task(false, access(Some(NetworkAccess::Open), &[], &[])),
+            false,
+            "network beyond a quiet read-only parent's network",
         ),
         (
             &granted,
@@ -431,6 +438,14 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         let record = store.create(&nested, &call)?;
         let result = store.validate_child(record.run_id, parent, parent_task, 1, 2, &call);
         assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
+        if valid && case == "read-only default child of a quiet writer" {
+            let validated = result.as_ref().unwrap();
+            assert_eq!(
+                validated.tasks[0].access.network(false),
+                NetworkAccess::Provider,
+                "{case}: expected Provider network"
+            );
+        }
     }
     Ok(())
 }

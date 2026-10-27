@@ -418,7 +418,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<CanonicalRequest> {
         let expected = next_lane_depth(parent_depth, maximum)?;
-        let request = self.request(run, call)?;
+        let mut request = self.request(run, call)?;
         if request.parent_attempt != Some(parent) || request.lane_depth != Some(expected) {
             return Err(RunError::Validation(
                 "child request does not match host parent record",
@@ -436,9 +436,13 @@ impl RunStore {
         if attempts.counts.values().any(|count| *count > 1) {
             return Err(RunError::Validation("child task has more than one attempt"));
         }
-        for task in &request.tasks {
+        let parent_network = parent_task.access.network(parent_task.writer.is_some());
+        for task in &mut request.tasks {
             if task.writer.is_some() || task.deliver.is_some() {
                 return Err(RunError::Validation("a lane cannot propose a writer child"));
+            }
+            if task.access.network.is_none() && parent_network != NetworkAccess::Open {
+                task.access.network = Some(parent_network);
             }
             child_access_within(parent_task, task, self.context.state_root.as_path())?;
         }
