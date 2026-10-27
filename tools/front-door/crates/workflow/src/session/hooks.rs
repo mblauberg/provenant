@@ -127,12 +127,27 @@ pub fn hook_context_with(
     let store = SessionStore::new(root.clone(), project, session.clone());
     // The chair's checkpoint and the hook-owned autosave file are read apart
     // and rendered one after the other; neither is ever merged into the other.
-    let (status, markdown, cause) = match (store.read(), store.read_autosave(), clock.wall_now()) {
-        (Err(error), _, _) | (_, Err(error), _) => {
-            (CheckpointStatus::Unavailable, None, Some(read_cause(error)))
-        }
-        (_, _, Err(error)) => (CheckpointStatus::Unavailable, None, Some(error.to_string())),
-        (Ok(checkpoint), Ok(autosave), Ok(now)) => {
+    // A damaged or unreadable autosave is reported on its own line and never
+    // hides a checkpoint that read cleanly.
+    let autosave = store.read_autosave();
+    let (status, markdown, cause, autosave_problem) = match (store.read(), clock.wall_now()) {
+        (Err(error), _) => (
+            CheckpointStatus::Unavailable,
+            None,
+            Some(read_cause(error)),
+            None,
+        ),
+        (_, Err(error)) => (
+            CheckpointStatus::Unavailable,
+            None,
+            Some(error.to_string()),
+            None,
+        ),
+        (Ok(checkpoint), Ok(now)) => {
+            let (autosave, problem) = match autosave {
+                Ok(autosave) => (autosave, None),
+                Err(error) => (None, Some(read_cause(error))),
+            };
             let fresh = |at: provenant_core::UtcMicros| {
                 let age = i128::from(now.as_micros()) - i128::from(at.as_micros());
                 (0..=i128::from(max_age.as_micros())).contains(&age)
@@ -163,7 +178,7 @@ pub fn hook_context_with(
                 (Some(chair), Some(saved)) => Some(format!("{chair}\n\n{saved}")),
                 (one, other) => one.or(other),
             };
-            (status, both, None)
+            (status, both, None, problem)
         }
     };
     let state = match status {
@@ -180,6 +195,14 @@ pub fn hook_context_with(
     let cause = cause
         .map(|cause| format!("\nCause: {cause}."))
         .unwrap_or_default();
+    let cause = format!(
+        "{cause}{}",
+        autosave_problem
+            .map(|problem| format!(
+                "\nAutosave unavailable: {problem}; its saved state is not shown."
+            ))
+            .unwrap_or_default()
+    );
     // The save must reach the store this hook read. When the command cannot be
     // shown so that it round-trips, say so rather than show one that would
     // write into the default store.

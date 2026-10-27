@@ -197,6 +197,32 @@ fn hints_from_a_hook_on_a_custom_store_carry_its_state_dir() -> Result {
 }
 
 #[test]
+fn a_damaged_autosave_leaves_the_chair_notes_visible_at_session_start() -> Result {
+    let rig = TestRig::new()?;
+    save(
+        &store(&rig, "damaged-session")?,
+        "Chair notes: user approved #1829 only.",
+    )?;
+    let directory = checkpoint_file(&rig, "damaged-session")?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or("session directory")?;
+    fs::write(directory.join("autosave.md"), [0xff, 0xfe])?;
+    let output = run_hook(
+        &rig,
+        "session-start",
+        &start(&rig, "damaged-session", "resume"),
+    )?;
+    assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
+    assert!(output.stdout.bytes.len() <= 8192);
+    let text = context(&output)?;
+    assert!(text.contains("user approved #1829 only"), "{text}");
+    assert!(text.contains("\nAutosave unavailable: "), "{text}");
+    assert!(text.contains("Checkpoint present"), "{text}");
+    Ok(())
+}
+
+#[test]
 fn restart_hook_ignores_other_start_sources_and_bad_input() -> Result {
     let rig = TestRig::new()?;
     save(&store(&rig, "restart-session")?, "notes")?;

@@ -76,6 +76,12 @@ Auto-saved: 2026-10-27T03:00:00Z
 - `session-start` and `compact` show the status diagnostic, then the freshly
   derived digest, then the chair's checkpoint, then `autosave.md`, under the
   8 KiB cap (the checkpoint text shrinks first).
+- The two files are read independently. If `autosave.md` is damaged (not UTF-8,
+  too large) or unreadable, a readable checkpoint is still shown and its status
+  is unchanged; the diagnostic gains one line, `Autosave unavailable: <cause>;
+  its saved state is not shown.`, with no path in it. The next autosave
+  replaces the damaged file. An unreadable checkpoint is still reported as
+  unavailable.
 - A `workflow session save` replaces only `checkpoint.md`; the next autosave
   rewrites only `autosave.md`. A checkpoint from an earlier release that holds
   an in-body state block keeps it as ordinary chair text; the new file starts

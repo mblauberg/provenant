@@ -816,6 +816,77 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_or_unreadable_autosave_never_hides_a_readable_checkpoint() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, FIXTURE_ID);
+        save(
+            &selected,
+            b"# Goal\nChair authority: user approved #1829 only.",
+        )
+        .unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let directory = path(&root, project, FIXTURE_ID);
+        let autosave = directory.join("autosave.md");
+        let external = root.as_path().join("outside.md");
+        std::fs::write(&external, "private").unwrap();
+        let check = |expect_problem: bool| {
+            let response = hook_with(&root, project, &CommandPrefix::default(), mtime);
+            assert_eq!(response.status, CheckpointStatus::Present);
+            assert!(!response.needs_saving);
+            let text = context(&response);
+            assert!(text.contains("user approved #1829 only"), "{text}");
+            assert_eq!(
+                text.contains("\nAutosave unavailable: "),
+                expect_problem,
+                "{text}"
+            );
+            // One line, and never a path.
+            let line = text
+                .lines()
+                .find(|line| line.starts_with("Autosave unavailable: "));
+            assert_eq!(line.is_some(), expect_problem, "{text}");
+            assert!(!text.contains(external.to_str().unwrap()));
+            assert!(!text.contains(root.as_path().to_str().unwrap()));
+        };
+        // Missing: nothing to report.
+        check(false);
+        // Damaged: not UTF-8.
+        std::fs::write(&autosave, [0xff, 0xfe]).unwrap();
+        check(true);
+        // Unreadable: a symlink the store refuses to follow.
+        std::fs::remove_file(&autosave).unwrap();
+        symlink(&external, &autosave).unwrap();
+        check(true);
+        std::fs::remove_file(&autosave).unwrap();
+        // Valid: shown after the checkpoint, with no problem line.
+        std::fs::write(&autosave, "## Provenant session state\nAuto-saved: t").unwrap();
+        check(false);
+        let saved_at = selected.read_autosave().unwrap().unwrap().modified_at;
+        let shown = hook_context(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            FIXTURES[0].0.as_bytes(),
+            &clock(saved_at.as_micros()),
+            DurationMicros::from_micros(3_600_000_000),
+        );
+        let text = context(&shown);
+        assert!(text.find("Chair authority").unwrap() < text.find("Auto-saved: t").unwrap());
+        // With no checkpoint at all, a damaged autosave is still just a line.
+        std::fs::remove_file(directory.join("checkpoint.md")).unwrap();
+        std::fs::write(&autosave, [0xff]).unwrap();
+        let response = hook_with(&root, project, &CommandPrefix::default(), mtime);
+        assert_eq!(response.status, CheckpointStatus::Missing);
+        assert!(context(&response).contains("\nAutosave unavailable: "));
+        // An unreadable checkpoint is still reported as unavailable.
+        std::fs::write(directory.join("checkpoint.md"), [0xff]).unwrap();
+        assert_eq!(
+            hook_with(&root, project, &CommandPrefix::default(), mtime).status,
+            CheckpointStatus::Unavailable
+        );
+    }
+
+    #[test]
     fn the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap() {
         let (_temp, root, project) = setup();
         let selected = store(&root, project, FIXTURE_ID);
