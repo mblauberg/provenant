@@ -122,37 +122,24 @@ impl SessionStore {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<(), SessionError> {
-        if text.len() as u64 > CHECKPOINT_LIMIT {
-            return Err(SessionError::TooLarge);
-        }
-        std::str::from_utf8(text)?;
-        let dir = self.directory(true)?;
-        let _lock = dir.lock(
-            OsStr::new("checkpoint.lock"),
-            LockMode::Exclusive,
-            budget,
-            cancel,
-            clock,
-        )?;
-        check_wait(budget, cancel, clock).map_err(|stop| match stop {
-            WaitStop::Cancelled => SessionError::from(FsError::Cancelled {
-                path: self.root.as_path().into(),
-            }),
-            WaitStop::Deadline => SessionError::Deadline,
-        })?;
-        dir.atomic_write(
-            OsStr::new("checkpoint.md"),
-            ".checkpoint.",
-            text,
-            PublishMode::Replace,
-        )?
-        .require_durable()
-        .map_err(SessionError::Durability)
+        self.write_file("checkpoint.md", ".checkpoint.", text, budget, cancel, clock)
     }
     /// Replaces the hook-owned autosave file, creating the session directory
     /// when missing. `checkpoint.md` is never opened for writing.
     pub fn write_autosave(
         &self,
+        text: &[u8],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), SessionError> {
+        self.write_file(AUTOSAVE_FILE, ".autosave.", text, budget, cancel, clock)
+    }
+
+    fn write_file(
+        &self,
+        name: &str,
+        staging: &str,
         text: &[u8],
         budget: WaitBudget,
         cancel: &CancelToken,
@@ -176,51 +163,41 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
-        dir.atomic_write(
-            OsStr::new(AUTOSAVE_FILE),
-            ".autosave.",
-            text,
-            PublishMode::Replace,
-        )?
-        .require_durable()
-        .map_err(SessionError::Durability)
+        dir.atomic_write(OsStr::new(name), staging, text, PublishMode::Replace)?
+            .require_durable()
+            .map_err(SessionError::Durability)
     }
     /// The hook-owned autosave file, if any hook has written one.
     pub fn read_autosave(&self) -> Result<Option<Autosave>, SessionError> {
-        let read = || -> Result<Autosave, SessionError> {
-            let dir = self.directory(false)?;
-            let mut file = dir.open_read(OsStr::new(AUTOSAVE_FILE))?;
-            let text = file.read_bounded(CHECKPOINT_LIMIT)?;
-            let markdown = std::str::from_utf8(&text)?.to_owned();
-            let micros = i64::try_from(file.metadata()?.modified_ns / 1000)
-                .map_err(|_| provenant_core::TimeError::WallRange)?;
-            Ok(Autosave {
+        self.read_file(AUTOSAVE_FILE).map(|saved| {
+            saved.map(|(markdown, modified_at)| Autosave {
                 markdown,
-                modified_at: UtcMicros::from_micros(micros)?,
+                modified_at,
             })
-        };
-        match read() {
-            Ok(autosave) => Ok(Some(autosave)),
-            Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
-            Err(error) => Err(error),
-        }
+        })
     }
     /// Atomic replacement allows a consistent unlocked read of one held file.
     pub fn read(&self) -> Result<Option<Checkpoint>, SessionError> {
-        let read = || -> Result<Checkpoint, SessionError> {
+        self.read_file("checkpoint.md").map(|saved| {
+            saved.map(|(markdown, modified_at)| Checkpoint {
+                markdown,
+                modified_at,
+            })
+        })
+    }
+
+    fn read_file(&self, name: &str) -> Result<Option<(String, UtcMicros)>, SessionError> {
+        let read = || -> Result<_, SessionError> {
             let dir = self.directory(false)?;
-            let mut file = dir.open_read(OsStr::new("checkpoint.md"))?;
+            let mut file = dir.open_read(OsStr::new(name))?;
             let text = file.read_bounded(CHECKPOINT_LIMIT)?;
             let markdown = std::str::from_utf8(&text)?.to_owned();
             let micros = i64::try_from(file.metadata()?.modified_ns / 1000)
                 .map_err(|_| provenant_core::TimeError::WallRange)?;
-            Ok(Checkpoint {
-                markdown,
-                modified_at: UtcMicros::from_micros(micros)?,
-            })
+            Ok((markdown, UtcMicros::from_micros(micros)?))
         };
         match read() {
-            Ok(checkpoint) => Ok(Some(checkpoint)),
+            Ok(saved) => Ok(Some(saved)),
             Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
             Err(error) => Err(error),
         }
@@ -391,6 +368,76 @@ mod tests {
         std::fs::write(file, vec![b'x'; CHECKPOINT_LIMIT as usize + 1]).unwrap();
         assert!(matches!(
             selected.read(),
+            Err(SessionError::Filesystem(FsError::TooLarge { .. }))
+        ));
+    }
+    #[test]
+    fn autosave_has_the_same_bounds_and_lock_but_keeps_the_chair_file_separate() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let clock = clock(0);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let write = |text: &[u8], cancel: &CancelToken, clock: &dyn Clock| {
+            selected.write_autosave(text, budget, cancel, clock)
+        };
+        let cancel = CancelToken::new();
+        let big = vec![b'x'; CHECKPOINT_LIMIT as usize + 1];
+        assert!(selected.read_autosave().unwrap().is_none());
+        assert!(matches!(
+            write(&big, &cancel, &clock),
+            Err(SessionError::TooLarge)
+        ));
+        assert!(matches!(
+            write(&[0xff], &cancel, &clock),
+            Err(SessionError::Utf8(_))
+        ));
+        assert!(!path(&root, project, "host-1").exists());
+
+        let exact = "é".repeat(CHECKPOINT_LIMIT as usize / 2);
+        write(exact.as_bytes(), &cancel, &clock).unwrap();
+        assert_eq!(selected.read_autosave().unwrap().unwrap().markdown, exact);
+        assert!(selected.read().unwrap().is_none());
+        save(&selected, b"chair notes").unwrap();
+        write(b"replacement", &cancel, &clock).unwrap();
+        let saved = selected.read_autosave().unwrap().unwrap();
+        assert_eq!(saved.markdown, "replacement");
+
+        cancel.cancel();
+        assert!(matches!(
+            write(b"cancelled", &cancel, &clock),
+            Err(SessionError::Filesystem(FsError::Cancelled { .. }))
+        ));
+        let expired = TestClock::new(
+            UtcMicros::from_micros(0).unwrap(),
+            MonoTime::from_micros(1_000_000),
+        );
+        selected
+            .update(
+                true,
+                |_| {
+                    assert!(matches!(
+                        write(b"contended", &CancelToken::new(), &expired),
+                        Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
+                    ));
+                    Ok(None)
+                },
+                budget,
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+        assert_eq!(selected.read_autosave().unwrap().unwrap(), saved);
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "chair notes");
+
+        let file = path(&root, project, "host-1").join(AUTOSAVE_FILE);
+        std::fs::write(&file, [0xff]).unwrap();
+        assert!(matches!(
+            selected.read_autosave(),
+            Err(SessionError::Utf8(_))
+        ));
+        std::fs::write(file, big).unwrap();
+        assert!(matches!(
+            selected.read_autosave(),
             Err(SessionError::Filesystem(FsError::TooLarge { .. }))
         ));
     }
