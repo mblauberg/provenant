@@ -156,22 +156,24 @@ registry scan.
   `::scheduled_projects_exclude_missing_non_git_and_old_transient_bindings`
 - Owner: `crates/config/src/project_binding.rs`, `src/worktrees.rs`
 
-## Closed-run captures
+## Closed-run captures and event logs
 
 `retention.logs_days` defaults to 30 (range 1 to 3650). Under the existing
 publication, continuation, reservation and writer checks, GC expires stdout
-and stderr captures larger than 64 KiB only when all sibling attempts are
-terminal. A distinct `.log.tail` file retains the final 64 KiB. Results, exit
-evidence, original digest records, small captures and child-store databases
-survive. The same policy visits indexed child stores. Disk inventory reports
-`attempt_logs`; GC reports `provider_state.attempt_logs`.
+and stderr captures larger than 64 KiB, and intermediate event log rows, only
+when all sibling attempts are terminal. A distinct `.log.tail` file retains
+the final 64 KiB. Results, exit evidence, original digest records, small
+captures and child-store databases survive. The same policy visits indexed
+child stores. Disk inventory reports `attempt_logs`; GC reports
+`provider_state.attempt_logs`.
 Disk reports compact capture observations by class, preserving byte totals and
 capture counts so many closed runs fit within the report limit.
 `output --part stderr` falls back to the retained `stderr.log.tail` when
 the full capture has expired. JSON reports `complete=false`; text marks the
 retained tail as truncated. Offsets and digest describe the retained bytes.
-- Why: bound bulky captures without rewriting what sealed digests describe.
+- Why: bound bulky captures and historical logs without rewriting what sealed digests describe.
 - Test: `crates/run/src/retention.rs::gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview`;
+  `::gc_expires_closed_run_events_after_log_retention`;
   `::gc_logs_refuse_symlinks`; `crates/run/src/disk.rs::disk_usage_rolls_many_attempts_up_per_run`
 - Owner: `crates/run/src/retention.rs`, `crates/run/src/disk.rs`
 

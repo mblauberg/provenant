@@ -43,7 +43,8 @@ as history until their transcript locations are established.
 
 The attempt's result, exit evidence, records and digests stay in place.
 After `retention.logs_days` (default 30), captures larger than 64 KiB from
-closed runs expire. Their last 64 KiB stays in `stdout.log.tail` and
+closed runs expire, and intermediate event log rows are deleted from the
+database. Their last 64 KiB stays in `stdout.log.tail` and
 `stderr.log.tail`, preserving the distinction from the original capture
 digests. Small captures stay unchanged. The rule also applies inside child
 stores; child databases and result evidence remain. Inspect
