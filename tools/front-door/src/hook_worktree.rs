@@ -276,9 +276,10 @@ pub fn remove(globals: &Globals) -> u8 {
         if input.hook_event_name != "WorktreeRemove" || !input.worktree_path.is_absolute() {
             return Err("invalid hook input".into());
         }
-        let Ok(target) = std::fs::canonicalize(&input.worktree_path) else {
-            // Nothing is left at the path, so there is nothing to remove.
-            return Ok(());
+        let target = match std::fs::canonicalize(&input.worktree_path) {
+            Ok(target) => target,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("cannot resolve worktree: {:?}", error.kind()).into()),
         };
         // Run from a directory that survives the removal: the session's own
         // directory unless it is inside the target, else the target's parent.
