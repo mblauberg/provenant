@@ -728,4 +728,11 @@ mod tests {
         assert_eq!(serde_json::to_value(parsed)?, sealed);
         Ok(())
     }
+
+    #[test]
+    fn lane_access_network_defaults_to_open() {
+        let access = LaneAccess::default();
+        assert_eq!(access.network(false), NetworkAccess::Open);
+        assert_eq!(access.network(true), NetworkAccess::Open);
+    }
 }

@@ -5317,12 +5317,13 @@ mod tests {
                 .map_err(|fail| fail.message)
         };
         assert_eq!(network(Mode::WorktreeWrite, None, &[]), Ok(None));
+        assert_eq!(network(Mode::ReadOnly, None, &["postgres"]), Ok(None));
         assert_eq!(
-            network(Mode::ReadOnly, None, &["postgres"]),
+            network(Mode::WorktreeWrite, Some(Switch::Off), &["postgres"]),
             Ok(Some(run::NetworkAccess::Local))
         );
         assert_eq!(
-            network(Mode::WorktreeWrite, Some(Switch::Off), &["postgres"]),
+            network(Mode::ReadOnly, Some(Switch::Off), &["postgres"]),
             Ok(Some(run::NetworkAccess::Local))
         );
         assert_eq!(
