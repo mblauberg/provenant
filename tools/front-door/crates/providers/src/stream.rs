@@ -20,6 +20,9 @@ pub enum ProviderEvent {
         message: String,
     },
     AuthRequired,
+    Denied {
+        action: String,
+    },
     Error,
     TransientError,
     Terminal,
@@ -209,7 +212,7 @@ impl StreamState {
                     self.terminal = true;
                     self.transient_error = false;
                 }
-                ProviderEvent::Error => self.error = true,
+                ProviderEvent::Error | ProviderEvent::Denied { .. } => self.error = true,
                 ProviderEvent::TransientError => self.transient_error = true,
                 ProviderEvent::Refusal
                 | ProviderEvent::QuotaLimited { .. }

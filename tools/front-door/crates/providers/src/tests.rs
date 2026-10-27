@@ -156,6 +156,21 @@ fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_stream_denial_is_failure() -> Result<(), ProviderError> {
+    let (events, outcome) = replay(&agy::Agy, fixture!("agy/denied-result.jsonl"), EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Failed);
+    assert!(events.contains(&ProviderEvent::Denied {
+        action: "RunCommand".into(),
+    }));
+    let unsafe_name = fixture!("agy/denied-result.jsonl").replace("RunCommand", "bad\\nname");
+    let (events, outcome) = replay(&agy::Agy, &unsafe_name, EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Failed);
+    assert!(events.contains(&ProviderEvent::Denied {
+        action: "unknown action".into(),
+    }));
+    Ok(())
+}
+#[test]
 fn agy_denied_command_preserves_failed_response() -> Result<(), ProviderError> {
     // Synthetic stdout paired with the issue's recorded stderr diagnostic.
     let raw = serde_json::json!({"event":"result","result":{
@@ -909,8 +924,7 @@ fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<()
             }
             if id == "agy" && access == Access::ReadOnly {
                 assert!(
-                    !spec
-                        .argv
+                    spec.argv
                         .iter()
                         .any(|arg| arg == "--dangerously-skip-permissions")
                 );
@@ -1431,8 +1445,23 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
         assert_eq!(spec.profile.spec.process_executables.len(), 2);
         let exec = &spec.profile.spec.tool_exec_roots;
         if access == Access::ReadOnly {
-            // Like Claude's read-only lanes, which run no commands either.
-            assert!(exec.is_empty());
+            assert_eq!(
+                exec,
+                &vec![
+                    crate::launch::subtree("/bin"),
+                    crate::launch::subtree("/usr/bin"),
+                    crate::launch::subtree("/usr/libexec")
+                ]
+            );
+            assert!(spec.profile.spec.tool_writes.is_empty());
+            assert!(plan.permissions().write_roots.is_empty());
+            for (key, value) in [
+                ("PATH", "/usr/bin:/bin"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ] {
+                assert!(spec.env.iter().any(|(k, v)| k == key && v == value));
+            }
             continue;
         }
         let plan = fixture_access_plan(access, Some("login"), false);
@@ -2733,11 +2762,10 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
         let plan = fixture_access_plan(access, Some("keychain"), false);
         let spec = agy::Agy.prepare(fixture_input(&route, &plan, &prompt, cwd, None))?;
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
-        // Headless mode auto-denies tools; only writers auto-approve them.
-        assert_eq!(
+        // Headless lanes auto-approve tools within the outer profile.
+        assert!(
             argv.iter()
-                .any(|arg| arg == "--dangerously-skip-permissions"),
-            edits
+                .any(|arg| arg == "--dangerously-skip-permissions")
         );
         assert!(!argv.iter().any(|arg| arg == "--sandbox"));
         assert_eq!(spec.stdin, Stdin::Null);

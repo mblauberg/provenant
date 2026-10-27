@@ -355,7 +355,13 @@ impl run::Providers for Registry<'_> {
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
         }
-        if let Some(ProviderEvent::QuotaLimited {
+        if let Some(ProviderEvent::Denied { action }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::Denied { .. }))
+        {
+            decoded.outcome = run::Outcome::Failed;
+            decoded.reason = Some(format!("provider denied: {action}"));
+        } else if let Some(ProviderEvent::QuotaLimited {
             message,
             pool,
             resets_in_seconds,

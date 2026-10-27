@@ -268,3 +268,72 @@ fn first_difference(expected: &str, actual: &str) -> String {
     }
     unreachable!()
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_confinement::permissions::snapshot::compile;
+    use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    for name in ["repo", "scratch", "state", "Library/Keychains", "bin"] {
+        std::fs::create_dir_all(root.join(name))?;
+    }
+    for name in ["scratch", "state"] {
+        std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))?;
+    }
+    let executable = root.join("bin/agy");
+    std::fs::write(&executable, "fixture")?;
+    let repo = root.join("repo");
+    std::fs::write(repo.join("input"), "readable")?;
+    let plan = super::tests::read_only_plan(root.to_str().unwrap(), Some("keychain"));
+    let route = route("agy", "fixture-model");
+    let prompt = Prompt::new("fixture".into());
+    let input = PrepareInput {
+        executable: &executable,
+        home: &root,
+        ..fixture_input(&route, &plan, &prompt, &repo, None)
+    };
+    let adapter = REGISTRY
+        .iter()
+        .find(|entry| entry.adapter.id() == "agy")
+        .unwrap();
+    let spec = adapter.adapter.prepare(input)?;
+    let directories = required_anchors(plan.permissions(), &spec.profile, None)
+        .iter()
+        .map(AnchoredDirectory::open_canonical)
+        .collect::<Result<Vec<_>, _>>()?;
+    let anchors = Anchors {
+        home: &root,
+        directories: &directories,
+        worktree: None,
+    };
+    let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
+    let source = std::str::from_utf8(&compiled.profile)?;
+    assert!(source.contains("(deny default)"));
+    assert!(source.contains(&format!(
+        "(allow file-read* (subpath \"{}\"))",
+        repo.display()
+    )));
+    assert!(source.contains("(allow process-exec (subpath \"/bin\"))"));
+    // Deny-by-default leaves the read root unwritable. Check every writable
+    // subtree, including ancestors, rather than only the root's exact line.
+    for line in source
+        .lines()
+        .filter(|line| line.starts_with("(allow file-write* (subpath "))
+    {
+        let path = line
+            .strip_prefix("(allow file-write* (subpath \"")
+            .unwrap()
+            .strip_suffix("\"))")
+            .unwrap();
+        assert!(
+            !repo.starts_with(path) && !Path::new(path).starts_with(&repo),
+            "read root is writable via {line}"
+        );
+    }
+    Ok(())
+}

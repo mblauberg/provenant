@@ -736,6 +736,32 @@ fn persisted_attempt(
     Ok((rig, terminal))
 }
 
+fn agy_denial_result_reaches_terminal_reason() -> Result {
+    let (rig, terminal) = persisted_attempt(
+        "agy",
+        "agy/gemini-3.8-flash",
+        ("work", "google-fixture"),
+        include_bytes!("fixtures/providers/agy/denied-result.jsonl"),
+        b"",
+        0,
+    )?;
+    assert!(matches!(
+        terminal.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Failed,
+            ..
+        }
+    ));
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    assert_eq!(
+        lanes["data"]["lanes"][0]["reason"],
+        "provider denied: RunCommand"
+    );
+    Ok(())
+}
+
 fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     let denial = include_bytes!("fixtures/providers/agy/command-denied.stderr");
     // Synthetic partial stdout and the real stderr-only failure case.
@@ -942,6 +968,7 @@ fn main() -> ExitCode {
                 "opencode_free_pool_cools_second_model",
                 "agy_individual_quota_cools_model_until_reset",
                 "agy_denied_command_reaches_result_and_terminal_reason",
+                "agy_denial_result_reaches_terminal_reason",
             ],
             |name| {
                 let result = match name {
@@ -960,6 +987,9 @@ fn main() -> ExitCode {
                     }
                     "agy_denied_command_reaches_result_and_terminal_reason" => {
                         agy_denied_command_reaches_result_and_terminal_reason()
+                    }
+                    "agy_denial_result_reaches_terminal_reason" => {
+                        agy_denial_result_reaches_terminal_reason()
                     }
                     _ => opencode_free_pool_cools_second_model(),
                 };
