@@ -3090,6 +3090,13 @@ impl Factory {
                     )
                     .map_err(run_error)?;
                 }
+                let admitted = FileJournal::read_checkpoint(
+                    &self.context.roots.state,
+                    self.context.identity.project,
+                    &document.graph_id,
+                )
+                .map_err(|_| FacadeError::StateCorrupt)?
+                .is_some();
                 for node in &document.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                         &node.delivery
@@ -3098,6 +3105,28 @@ impl Factory {
                             &self.cwd, target,
                         )
                         .map_err(run_error)?;
+                    }
+                    if !admitted
+                        && node.delivery == Some(provenant_records::run::DeliveryMode::Push)
+                    {
+                        let path = node.worktree.as_deref().ok_or(FacadeError::InvalidInput)?;
+                        let writer = provenant_run::resolve_writer(
+                            self.context.roots.state.as_path(),
+                            &self.cwd,
+                            Path::new(path),
+                        )
+                        .map_err(run_error)?;
+                        let writer = provenant_run::prepare_writer(
+                            &writer,
+                            self.context.roots.state.as_path(),
+                            self.context.identity.project,
+                        )
+                        .map_err(run_error)?;
+                        provenant_run::HostDeliveryContext::check_delivery_branch(
+                            &self.cwd,
+                            writer.branch.as_str().trim_start_matches("refs/heads/"),
+                        )
+                        .map_err(|_| FacadeError::ConfinementRefused)?;
                     }
                     if node.prompt.len() as u64 > self.context.config.limits.body_bytes {
                         return Err(FacadeError::InvalidInput);
@@ -4091,6 +4120,163 @@ mod peer_tests {
             .is_none()
         );
         assert!(fixture.worktree.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn graph_submission_refuses_a_push_to_main_before_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_refuses_a_push_to_main_before_admission",
+        )? {
+            return Ok(());
+        }
+        use provenant_confinement::worktrees::{self, WorktreeCreate};
+        use provenant_fabric_runtime::graph::FileJournal;
+        let fixture = SettlementFixture::resumed()?;
+        let cancel = CancelToken::new();
+        let info = worktrees::with_context(
+            &fixture.roots,
+            &fixture.rig.home,
+            &fixture.rig.project,
+            &SystemClock,
+            &cancel,
+            |context| {
+                worktrees::create(
+                    &worktrees::WorktreeContext {
+                        workers: &FreeWorkers,
+                        ..*context
+                    },
+                    WorktreeCreate {
+                        branch: "main".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )
+            },
+        )?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join("protected-push-graph.json");
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":"protected-push",
+                "nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write",
+                    "worktree":info.path,"delivery":"push",
+                    "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?,
+        )?;
+        let result = factory.graph(
+            GraphInput::Run { document },
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &cancel,
+        );
+        assert!(
+            FileJournal::read_checkpoint(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "protected-push"
+            )?
+            .is_none(),
+            "protected push was admitted: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(FacadeError::ConfinementRefused)),
+            "{result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_submission_replays_an_accepted_push_after_protection_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_replays_an_accepted_push_after_protection_changes",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join("replay-push-graph.json");
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":"replay-push",
+                "nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write",
+                    "worktree":fixture.worktree,"delivery":"push",
+                    "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?,
+        )?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let run = factory.graph(
+            GraphInput::Run {
+                document: document.clone(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            provenant_fabric_runtime::graph::NodeState::Failed
+        );
+        assert!(!run.checkpoint.nodes[0].attempts[0].launched);
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [
+            vec![
+                "remote",
+                "add",
+                "origin",
+                fixture.rig.project.to_str().ok_or("project")?,
+            ],
+            vec![
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/resumed-lane",
+            ],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
+        for input in [
+            GraphInput::Run {
+                document: document.clone(),
+            },
+            GraphInput::Resume { document },
+        ] {
+            let replay = factory.graph(input, budget, &cancel)?;
+            assert_eq!(replay.checkpoint, run.checkpoint);
+        }
         Ok(())
     }
 
