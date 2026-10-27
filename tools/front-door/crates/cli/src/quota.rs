@@ -395,12 +395,7 @@ fn detections(
                         .filter(|a| a.adapter == r.adapter.id())
                         .cloned()
                         .collect();
-                    (!accounts.is_empty()
-                        && !matches!(
-                            status,
-                            Ok(provenant_providers::AccountDetection::AuthRequired)
-                        ))
-                    .then_some(accounts)
+                    (!accounts.is_empty()).then_some(accounts)
                 },
                 status: match status {
                     Ok(provenant_providers::AccountDetection::AuthRequired) => {
@@ -948,5 +943,122 @@ mod tests {
             rep.coverage.known, rep.coverage.total
         );
         assert_eq!(headline, "Quota: 3/3 current readings\n");
+    }
+
+    struct AuthRequiredAdapter;
+    impl provenant_providers::Adapter for AuthRequiredAdapter {
+        fn id(&self) -> &'static str {
+            "claude"
+        }
+        fn account(
+            &self,
+            _: &provenant_providers::StreamState,
+        ) -> Result<provenant_providers::AccountDetection, provenant_providers::ProviderError>
+        {
+            Ok(provenant_providers::AccountDetection::AuthRequired)
+        }
+        fn prepare(
+            &self,
+            _: provenant_providers::PrepareInput<'_>,
+        ) -> Result<provenant_providers::LaunchSpec, provenant_providers::ProviderError> {
+            unimplemented!()
+        }
+        fn stream(
+            &self,
+            continuation: Option<&provenant_providers::Continuation>,
+        ) -> Result<provenant_providers::StreamState, provenant_providers::ProviderError> {
+            provenant_providers::claude::REGISTRATION
+                .adapter
+                .stream(continuation)
+        }
+        fn observe(
+            &self,
+            _: &mut provenant_providers::StreamState,
+            _: &[u8],
+        ) -> Result<Vec<provenant_providers::ProviderEvent>, provenant_providers::ProviderError>
+        {
+            unimplemented!()
+        }
+        fn finish(
+            &self,
+            _: provenant_providers::StreamState,
+            _: provenant_providers::ExitObservation,
+        ) -> Result<provenant_providers::ProviderOutcome, provenant_providers::ProviderError>
+        {
+            unimplemented!()
+        }
+        fn continuation(
+            &self,
+            _: &provenant_providers::ProviderOutcome,
+            _: &provenant_records::ResolvedRoute,
+            _: &str,
+        ) -> Result<provenant_providers::Continuation, provenant_providers::ProviderError> {
+            unimplemented!()
+        }
+        fn validate_provenance(
+            &self,
+            _: &provenant_providers::RouteProvenance<'_>,
+        ) -> Result<provenant_providers::VerifiedLineage, provenant_providers::ProviderError>
+        {
+            unimplemented!()
+        }
+    }
+
+    static AUTH_REQUIRED_ADAPTER: AuthRequiredAdapter = AuthRequiredAdapter;
+
+    #[test]
+    fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {
+        let policy = QuotaPolicy {
+            adapter: "claude",
+            timer_seconds: 300,
+            panel_seconds: 120,
+            probe_seconds: 14,
+            low_power: true,
+            solo: false,
+        };
+        let registration = provenant_providers::Registration {
+            adapter: &AUTH_REQUIRED_ADAPTER,
+            quota_source: None,
+            display_name: "Claude",
+            quota: policy,
+        };
+        let account = AccountScope {
+            adapter: "claude".into(),
+            account_key: "michael".into(),
+            label: "michael".into(),
+        };
+        let configured = vec![account.clone()];
+        let detected = detections(&[registration], &configured);
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].status, QuotaStatus::AuthRequired);
+        assert_eq!(detected[0].accounts, Some(configured.clone()));
+
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: account.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let policies = [policy];
+        let rep = schedule::report(
+            &policies,
+            &[record],
+            &detected,
+            &QuotaQuery { adapter: None },
+            500,
+            "/report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 1);
+        assert_eq!(rep.accounts[0].account, account);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::Stale);
+        assert_eq!(rep.coverage.total, 1);
     }
 }

@@ -295,7 +295,7 @@ pub fn plan_tick_with_settings(
     let mut solo = Vec::new();
     for account in detections
         .iter()
-        .filter(|d| selected(&d.adapter))
+        .filter(|d| selected(&d.adapter) && d.status != QuotaStatus::AuthRequired)
         .filter_map(|d| d.accounts.as_ref())
         .flatten()
     {
@@ -348,10 +348,7 @@ fn validate_inputs(records: &[AccountRecord], detections: &[Detection]) -> Resul
         if detection.accounts.is_some()
             && matches!(
                 detection.status,
-                QuotaStatus::Unknown
-                    | QuotaStatus::AuthRequired
-                    | QuotaStatus::Unsupported
-                    | QuotaStatus::Stale
+                QuotaStatus::Unknown | QuotaStatus::Unsupported | QuotaStatus::Stale
             )
         {
             return Err(QuotaError::Invalid(
@@ -965,5 +962,56 @@ mod transition_tests {
         .unwrap();
         assert_eq!(plan.drops.len(), 1);
         assert_eq!(plan.drops[0].account, legacy_record.account);
+    }
+    #[test]
+    fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {
+        let live = account("claude", "live");
+        let mut record = AccountRecord::empty(live.clone());
+        record.revision = 1;
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: live.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let detections = [Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![live.clone()]),
+            status: QuotaStatus::AuthRequired,
+        }];
+        let rep = report(
+            crate::source::TEST_POLICIES,
+            &[record.clone()],
+            &detections,
+            &QuotaQuery { adapter: None },
+            500,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 1);
+        assert_eq!(rep.accounts[0].account, live);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::Stale);
+        assert_eq!(rep.coverage.total, 1);
+
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Manual,
+            power: Power::Ac,
+        };
+        let plan = plan_tick(
+            crate::source::TEST_POLICIES,
+            &[record],
+            &detections,
+            &tick,
+            500,
+        )
+        .unwrap();
+        assert!(plan.drops.is_empty());
+        assert!(plan.batches.is_empty());
     }
 }
