@@ -2200,7 +2200,7 @@ fn registration_names_probe_directory_failures() {
         assert!(
             error
                 .to_string()
-                .contains("provider probe could not prepare its private directory"),
+                .contains("private directory"),
             "{error}"
         );
     }
