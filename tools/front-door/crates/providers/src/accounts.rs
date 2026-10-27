@@ -190,6 +190,29 @@ pub fn detect_with_org(
     }
     if adapter == "cursor" {
         let db = directory.join("state.vscdb");
+        if !db
+            .try_exists()
+            .map_err(|_| ProviderError::UnknownIdentity)?
+        {
+            let bytes = read_following(
+                &directory.join("cli-config.json"),
+                ReadOptions { limit: 1024 * 1024 },
+            )
+            .map_err(|_| ProviderError::UnknownIdentity)?;
+            let config: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
+            let subject = config["authInfo"]["authId"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control))
+                .ok_or(ProviderError::UnknownIdentity)?;
+            let digest =
+                provenant_records::CanonicalV1::file_digest(subject.as_bytes()).to_string();
+            let key = digest
+                .strip_prefix("sha256:")
+                .and_then(|s| s.get(..16))
+                .ok_or(ProviderError::UnknownIdentity)?;
+            return Ok((format!("cursor-{key}"), None));
+        }
         let argv: Vec<OsString> = vec![
             "/usr/bin/sqlite3".into(),
             "-readonly".into(),

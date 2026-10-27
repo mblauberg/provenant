@@ -2070,6 +2070,23 @@ fn cursor_cli_only_account_matches_desktop_identity() {
         Some(key),
         crate::identity::cursor_account("header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature")
     );
+    std::fs::write(
+        directory.path().join("cli-config.json"),
+        br#"{"authInfo":{"email":"fixture@example.test"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::accounts::detect(
+            &NoDesktop,
+            "cursor",
+            Path::new("/bin/cursor-agent"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            directory.path(),
+            directory.path(),
+        ),
+        Err(ProviderError::UnknownIdentity)
+    ));
 }
 
 #[test]
