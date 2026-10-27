@@ -373,11 +373,15 @@ fn autosave(
     };
     let state = crate::hook_state::collect(globals, cwd, &want, deadline);
     let stamp = String::from(clock.wall_now()?);
-    store.update(
+    store.update_autosaved(
         true,
         // The edit runs under the checkpoint lock, so a chair save that landed
-        // after the read above is merged, never overwritten.
-        |existing| session::autosave_document(existing, &state, wall, &stamp).map(Some),
+        // after the read above is merged, never overwritten. The recorded
+        // digest names the one block this autosave may replace.
+        |existing, recorded| {
+            let saved = session::autosave_document(existing, recorded, &state, wall, &stamp)?;
+            Ok(Some((saved.markdown, Some(saved.digest))))
+        },
         WaitBudget::cli(clock.mono_now(), 1)?,
         &CancelToken::new(),
         clock,

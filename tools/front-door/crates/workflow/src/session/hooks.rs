@@ -115,7 +115,11 @@ pub fn hook_context_with(
                     (CheckpointStatus::Stale, None, None)
                 } else {
                     {
-                        let chair = super::state::split(&checkpoint.markdown).chair;
+                        let chair = super::state::split(
+                            &checkpoint.markdown,
+                            checkpoint.autosave_digest.as_deref(),
+                        )
+                        .chair;
                         if super::state::has_chair_text(&chair) {
                             (CheckpointStatus::Present, Some(chair), None)
                         } else {

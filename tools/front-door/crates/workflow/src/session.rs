@@ -76,6 +76,20 @@ pub enum SessionError {
 pub struct Checkpoint {
     pub markdown: String,
     pub modified_at: UtcMicros,
+    /// Digest of the last managed block an autosave wrote, kept beside the
+    /// checkpoint rather than in it. Only a block with this digest is ours.
+    pub autosave_digest: Option<String>,
+}
+
+/// Where the last autosaved block's digest lives, outside the checkpoint body.
+const AUTOSAVE_DIGEST_FILE: &str = "autosave.digest";
+const AUTOSAVE_DIGEST_LIMIT: u64 = 128;
+
+fn recorded_digest(dir: &Directory) -> Option<String> {
+    let mut file = dir.open_read(OsStr::new(AUTOSAVE_DIGEST_FILE)).ok()?;
+    let bytes = file.read_bounded(AUTOSAVE_DIGEST_LIMIT).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 /// StateRoot must already exist. Reads create nothing; saves create only this key.
@@ -151,6 +165,7 @@ impl SessionStore {
             Ok(Checkpoint {
                 markdown,
                 modified_at: UtcMicros::from_micros(micros)?,
+                autosave_digest: recorded_digest(&dir),
             })
         };
         match read() {
@@ -168,6 +183,29 @@ impl SessionStore {
         &self,
         create: bool,
         edit: impl FnOnce(Option<&str>) -> Result<Option<String>, SessionError>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool, SessionError> {
+        self.update_autosaved(
+            create,
+            |text, _| Ok(edit(text)?.map(|next| (next, None))),
+            budget,
+            cancel,
+            clock,
+        )
+    }
+    /// As [`update`](Self::update), for the autosave. `edit` also gets the
+    /// digest recorded for the last block an autosave wrote, and may return a
+    /// new digest to record once the replacement is durable. The record lives
+    /// beside the checkpoint, so a chair cannot copy it by copying text.
+    pub fn update_autosaved(
+        &self,
+        create: bool,
+        edit: impl FnOnce(
+            Option<&str>,
+            Option<&str>,
+        ) -> Result<Option<(String, Option<String>)>, SessionError>,
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
@@ -192,7 +230,8 @@ impl SessionStore {
             Err(error) if error.is_not_found() => None,
             Err(error) => return Err(error.into()),
         };
-        let Some(next) = edit(current.as_deref())? else {
+        let recorded = recorded_digest(&dir);
+        let Some((next, digest)) = edit(current.as_deref(), recorded.as_deref())? else {
             return Ok(false);
         };
         if next.len() as u64 > CHECKPOINT_LIMIT {
@@ -212,6 +251,19 @@ impl SessionStore {
         )?
         .require_durable()
         .map_err(SessionError::Durability)?;
+        if let Some(digest) = digest {
+            // After the checkpoint: a failure here leaves the old record, which
+            // matches no block, so the next autosave appends instead of
+            // replacing.
+            dir.atomic_write(
+                OsStr::new(AUTOSAVE_DIGEST_FILE),
+                ".digest.",
+                digest.as_bytes(),
+                PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(SessionError::Durability)?;
+        }
         Ok(true)
     }
 }

@@ -57,11 +57,16 @@ Auto-saved: 2026-10-27T03:00:00Z
 <!-- provenant:session-state:end -->
 ```
 
-- Only that block is replaced, and only when its digest verifies: marker lines
-  in the chair's own text, or a block whose content was edited, carry no valid
-  digest, stay untouched, and a fresh block is appended after them. Everything
-  outside the verified block, including every
-  authority reference the chair wrote, is kept as written.
+- Only the block the last autosave wrote is replaced. A digest proves
+  integrity, not authorship, so each autosave records the digest of the block
+  it wrote in workflow session state (`autosave.digest`, beside the checkpoint
+  and outside its body), and a block is replaced only when its digest both
+  verifies its content and equals that record. A valid block the chair copied
+  into their notes, marker lines in the chair's own text, and a block whose
+  content was edited all stay untouched, and a fresh block is appended after
+  them. With no record, nothing is treated as ours. Everything outside the
+  recorded block, including every authority reference the chair wrote, is kept
+  as written.
 - A `workflow session save` replaces the whole file, block included; the next
   autosave adds a fresh block. `Chair-saved-unix` records when the chair last
   saved, and later autosaves keep it, which is how "settled since the last
