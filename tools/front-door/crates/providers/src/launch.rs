@@ -230,6 +230,15 @@ pub(crate) fn rust_tools(
             target.clone().into_os_string(),
         ),
     ]);
+    if access == Access::WorktreeWrite {
+        // Lint-only runs set both CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR to
+        // this sibling. Cargo locks the build directory, so they then do not
+        // queue behind test and build runs in the lane's own target/.
+        env.push((
+            "PROVENANT_LANE_CARGO_LINT_TARGET".into(),
+            cache.join("target-lint").into_os_string(),
+        ));
+    }
     if access == Access::ReadOnly {
         // The lane cannot fetch, so Cargo fails fast offline, and its cache
         // clean-up never touches the shared stores behind the links.
