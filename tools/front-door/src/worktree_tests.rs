@@ -1983,32 +1983,54 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
         attempt: provenant_core::AttemptId::from_bytes([32; 16]),
         generation: 1,
     };
-    let state = rig.state.join("worktrees").join(context.project_id.to_string())
+    let state = rig
+        .state
+        .join("worktrees")
+        .join(context.project_id.to_string())
         .join(provenant_confinement::worktrees::state_dir_name(&path));
     let acquire = |scope| -> Result<_> {
-        let request = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
-        let writer = provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+        let request =
+            provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+        let writer = provenant_run::prepare_writer(
+            &request,
+            context.state_root.as_path(),
+            context.project_id,
+        )?;
         let binding = WriterBinding::from_verified(
-            writer.worktree.repo().root_dir(), writer.worktree.repo().private_dir(),
-            writer.branch.as_str(), provenant_core::GitOid::parse(&git(&rig, &["rev-parse", "HEAD"])?)?,
+            writer.worktree.repo().root_dir(),
+            writer.worktree.repo().private_dir(),
+            writer.branch.as_str(),
+            provenant_core::GitOid::parse(&git(&rig, &["rev-parse", "HEAD"])?)?,
         )?;
         Ok(provenant_supervisor::fixture::acquire_writer_with_binding(
-            Directory::open_anchor(&state)?, scope, binding,
-            provenant_core::WaitBudget::nonblocking(clock.mono_now()), &cancel, &clock,
+            Directory::open_anchor(&state)?,
+            scope,
+            binding,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
         )?)
     };
     let old_tree = Directory::open_anchor(&path)?;
     drop(acquire(scope)?);
-    assert!(acquire(scope).is_err_and(|error| error.to_string().contains("writer reservation requires recovery")));
+    assert!(acquire(scope).is_err_and(|error| {
+        error
+            .to_string()
+            .contains("writer reservation requires recovery")
+    }));
     provenant_supervisor::custody::acquire_recovery(
         Directory::open_anchor(&state)?,
         provenant_core::WaitBudget::nonblocking(clock.mono_now()),
         &cancel,
         &clock,
-    )?.withdraw_prepared()?;
+    )?
+    .withdraw_prepared()?;
     ok(&rig, &["worktree", "remove", "reused", "--json"])?;
     ok(&rig, &["worktree", "create", "reused", "--json"])?;
-    let lease = acquire(Scope { run: provenant_core::RunId::from_bytes([33; 16]), ..scope })?;
+    let lease = acquire(Scope {
+        run: provenant_core::RunId::from_bytes([33; 16]),
+        ..scope
+    })?;
     lease.withdraw_unlaunched()?;
     drop(old_tree);
     Ok(())
