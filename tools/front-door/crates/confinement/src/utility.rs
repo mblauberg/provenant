@@ -539,6 +539,100 @@ pub fn run_utility(
     )
 }
 
+/// Host-only remote preparation. Unlike evidence reads, this must retain the
+/// host's transport and credential configuration. It never edits fetch config.
+pub(crate) fn fetch_missing_remote_branch(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    home: &Path,
+    base: &str,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<(), UtilityError> {
+    let Some((remote, branch)) = base.split_once('/') else {
+        return Ok(());
+    };
+    // Only literal branch names qualify, never revision expressions or options.
+    if remote.is_empty() || remote.starts_with('-') || GitRefName::branch(branch).is_err() {
+        return Ok(());
+    }
+    runtime.revalidate()?;
+    repo.revalidate()?;
+    verify_repo_binding(repo)?;
+    let run = |args: &[OsString]| -> Result<ExecOutcome, UtilityError> {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        runtime.git.verify()?;
+        let mut argv = vec![
+            runtime.git.path.as_os_str().to_owned(),
+            "--git-dir".into(),
+            repo.private_git_dir().as_os_str().to_owned(),
+            "--work-tree".into(),
+            repo.root_path().as_os_str().to_owned(),
+            "-c".into(),
+            "core.hooksPath=/dev/null".into(),
+        ];
+        argv.extend_from_slice(args);
+        let mut options = exec_options(
+            &argv,
+            repo.root_path(),
+            budget,
+            &[],
+            Some(b""),
+            Some(cancel),
+        );
+        // Inherit the host environment for SSH and credential helpers; override
+        // HOME so isolated callers and fixtures retain their own configuration.
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.to_str(),
+                    Some(
+                        "HOME"
+                            | "GIT_TERMINAL_PROMPT"
+                            | "GIT_DIR"
+                            | "GIT_WORK_TREE"
+                            | "GIT_COMMON_DIR"
+                    )
+                )
+            })
+            .collect();
+        env.extend([
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ]);
+        options.env = Some(&env);
+        validate_outcome(executor.execute(options)?)
+    };
+    let remotes = run(&["remote".into()])?;
+    if remotes.termination != Termination::Exit(0)
+        || !remotes
+            .stdout
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .any(|name| name == remote.as_bytes())
+    {
+        return Ok(());
+    }
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    // A missing remote branch is reported by the caller's subsequent resolve,
+    // which can name the requested base. Execution failures still propagate.
+    run(&[
+        "fetch".into(),
+        // Creation must not indirectly prune stale worktree registrations.
+        "--no-auto-maintenance".into(),
+        "--no-tags".into(),
+        "--no-recurse-submodules".into(),
+        "--refmap=".into(),
+        "--".into(),
+        remote.into(),
+        refspec.into(),
+    ])?;
+    Ok(())
+}
+
 /// Run a read for the release scan, where shallow boundaries must not hide
 /// commits from the publication history check.
 pub fn run_release_read_utility(

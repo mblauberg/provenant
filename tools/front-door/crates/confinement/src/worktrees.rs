@@ -49,6 +49,10 @@ pub enum WorktreeError {
     InvalidRequest,
     #[error("worktree or branch was not found")]
     NotFound,
+    #[error("base {base} did not resolve to a commit")]
+    BaseNotFound { base: String },
+    #[error("worktree registration is stale; git worktree prune clears it")]
+    StaleRegistration,
     #[error("worktree is dirty")]
     Dirty,
     #[error("worktree has an in-progress Git operation")]
@@ -643,7 +647,9 @@ fn canonical_worktree_paths(
 ) -> Result<Vec<(PathBuf, &GitWorktree)>, WorktreeError> {
     entries
         .iter()
-        .filter(|entry| !entry.bare)
+        // A prunable registration names a path that Git has already observed
+        // as missing. It has no canonical filesystem path to protect here.
+        .filter(|entry| !entry.bare && !entry.prunable)
         .map(|entry| Ok((canonicalize(&entry.path)?, entry)))
         .collect()
 }
@@ -1422,15 +1428,34 @@ fn pin_revision(
     revision: &str,
     cancel: &CancelToken,
 ) -> Result<GitOid, WorktreeError> {
-    let revision = GitRevision::new(revision).map_err(|_| WorktreeError::InvalidRequest)?;
-    let outcome = run_git(
-        context,
-        context.repo,
-        GitRead::ResolveRevision { revision },
-        cancel,
-    )?;
+    let parsed = GitRevision::new(revision).map_err(|_| WorktreeError::InvalidRequest)?;
+    let resolve = || {
+        run_git(
+            context,
+            context.repo,
+            GitRead::ResolveRevision {
+                revision: parsed.clone(),
+            },
+            cancel,
+        )
+    };
+    let mut outcome = resolve()?;
     if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::NotFound);
+        crate::utility::fetch_missing_remote_branch(
+            context.executor,
+            context.repo,
+            context.utility,
+            context.home,
+            revision,
+            context.mutation_budget,
+            cancel,
+        )?;
+        outcome = resolve()?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::BaseNotFound {
+                base: revision.to_owned(),
+            });
+        }
     }
     parse_oid(trim_ascii(&outcome.stdout.bytes))
 }
@@ -1471,7 +1496,7 @@ fn matching_worktree<'a>(
     let mut found = None;
     for entry in entries
         .iter()
-        .filter(|entry| entry.branch.as_ref() == Some(branch))
+        .filter(|entry| !entry.prunable && entry.branch.as_ref() == Some(branch))
     {
         let path = canonicalize(&entry.path)?;
         if path == repo_root {
@@ -1493,7 +1518,7 @@ fn checked_out_elsewhere(
     let allowed = allowed_path.map(canonicalize).transpose()?;
     for entry in entries
         .iter()
-        .filter(|entry| entry.branch.as_ref() == Some(branch))
+        .filter(|entry| !entry.prunable && entry.branch.as_ref() == Some(branch))
     {
         if allowed.is_none() {
             return Ok(true);
@@ -1654,7 +1679,19 @@ fn named_worktree<'a>(
             _ => found = Some(entry),
         }
     }
-    found.ok_or(WorktreeError::NotFound)
+    if let Some(entry) = found {
+        return Ok(entry);
+    }
+    if entries.iter().any(|entry| {
+        entry.prunable
+            && (branch
+                .as_ref()
+                .is_some_and(|branch| entry.branch.as_ref() == Some(branch))
+                || entry.path.file_name() == Some(OsStr::new(name)))
+    }) {
+        return Err(WorktreeError::StaleRegistration);
+    }
+    Err(WorktreeError::NotFound)
 }
 
 fn pin_branch_ref(
@@ -2205,6 +2242,29 @@ mod lifecycle_tests {
     /// tree and branch exist, as when a slow checkout is killed part-way.
     struct TimesOutWorktreeAdd<'a>(&'a provenant_os::exec::SystemExecutor);
 
+    struct ObservesFetch<'a> {
+        executor: &'a dyn Executor,
+        seen: std::sync::atomic::AtomicBool,
+    }
+
+    impl Executor for ObservesFetch<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options.argv.iter().any(|arg| arg == "fetch") {
+                self.seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                assert!(
+                    options
+                        .argv
+                        .iter()
+                        .any(|arg| arg == "--no-auto-maintenance")
+                );
+            }
+            self.executor.execute(options)
+        }
+    }
+
     impl Executor for TimesOutWorktreeAdd<'_> {
         fn execute(
             &self,
@@ -2605,6 +2665,242 @@ mod lifecycle_tests {
                 .join("feature-existing")
                 .exists()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn create_fetches_a_remote_base_with_a_main_only_refspec() -> Result<(), Box<dyn Error>> {
+        let source = Fixture::new()?;
+        source.run(&["branch", "-M", "main"])?;
+        source.run(&["checkout", "-b", "chore/cleanup-code-sweep"])?;
+        source.run(&["commit", "--allow-empty", "-m", "remote-only commit"])?;
+        let base = source.head()?;
+        source.run(&["checkout", "main"])?;
+        let mut fixture = Fixture::new()?;
+        let clone = fixture._temp.path().join("clone");
+        fixture.run(&[
+            "clone",
+            "--single-branch",
+            "--branch",
+            "main",
+            source.root.to_str().ok_or("non-UTF8 source")?,
+            clone.to_str().ok_or("non-UTF8 clone")?,
+        ])?;
+        fixture.root = clone;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        let refspec = fixture.run(&["config", "--get-all", "remote.origin.fetch"])?;
+        assert_eq!(
+            refspec.stdout.bytes,
+            b"+refs/heads/main:refs/remotes/origin/main\n"
+        );
+        assert!(
+            fixture
+                .run(&["for-each-ref", "refs/remotes/origin/chore/"])?
+                .stdout
+                .bytes
+                .is_empty()
+        );
+        let test_context = TestContext::new(&fixture)?;
+
+        let observes_fetch = ObservesFetch {
+            executor: &fixture.executor,
+            seen: std::sync::atomic::AtomicBool::new(false),
+        };
+        let mut context = test_context.context();
+        context.executor = &observes_fetch;
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "chore/cleanup-code-sweep-2".to_owned(),
+                base: Some("origin/chore/cleanup-code-sweep".to_owned()),
+            },
+            &cancel(),
+        )?;
+
+        assert_eq!(created.head, base);
+        assert!(
+            observes_fetch
+                .seen
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let tracking =
+            fixture.run(&["rev-parse", "refs/remotes/origin/chore/cleanup-code-sweep"])?;
+        assert_eq!(
+            String::from_utf8(tracking.stdout.bytes)?.trim(),
+            base.to_string()
+        );
+        assert_eq!(
+            fixture
+                .run(&["config", "--get-all", "remote.origin.fetch"])?
+                .stdout
+                .bytes,
+            refspec.stdout.bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_base_error_names_the_base() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        fixture.run(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.root.to_str().ok_or("non-UTF8 root")?,
+        ])?;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        let test_context = TestContext::new(&fixture)?;
+        for base in ["unknown/branch", "origin/missing"] {
+            let error = create(
+                &test_context.context(),
+                WorktreeCreate {
+                    branch: "feature/missing-base".to_owned(),
+                    base: Some(base.to_owned()),
+                },
+                &cancel(),
+            )
+            .expect_err("missing base must fail");
+            assert_eq!(
+                error.to_string(),
+                format!("base {base} did not resolve to a commit")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn create_skips_prunable_worktree_registrations() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let stale = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::remove_dir_all(&stale.path)?;
+        let listing = fixture.run(&["worktree", "list", "--porcelain"])?;
+        assert!(String::from_utf8_lossy(&listing.stdout.bytes).contains("prunable"));
+
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/after-prunable".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+
+        assert!(created.path.is_dir());
+        assert!(!stale.path.exists());
+        assert!(
+            read_worktrees(&context, &cancel())?
+                .iter()
+                .any(|entry| entry.path == stale.path && entry.prunable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_reports_stale_registration_by_branch_and_directory() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let stale = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::remove_dir_all(&stale.path)?;
+        for name in ["scratch/stale", "scratch-stale"] {
+            let error = remove(
+                &context,
+                WorktreeRemove::Name {
+                    name: name.to_owned(),
+                    discard: false,
+                    integration: None,
+                },
+                &cancel(),
+            )
+            .expect_err("stale registration must be reported");
+            assert!(
+                error.to_string().contains("registration is stale"),
+                "{error}"
+            );
+            assert!(error.to_string().contains("git worktree prune"), "{error}");
+        }
+        assert!(branch_exists(&fixture, "scratch/stale"));
+        assert!(
+            read_worktrees(&context, &cancel())?
+                .iter()
+                .any(|entry| entry.path == stale.path && entry.prunable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let stale = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        run_in_worktree(
+            &fixture,
+            &stale.path,
+            &["commit", "--allow-empty", "-m", "stale work"],
+        )?;
+        fixture.run(&[
+            "merge",
+            "--no-ff",
+            "scratch/stale",
+            "-m",
+            "merge stale work",
+        ])?;
+        fs::remove_dir_all(&stale.path)?;
+        let entries = read_worktrees(&context, &cancel())?;
+        let branch = GitRefName::branch("scratch/stale")?;
+        assert!(matching_worktree(&entries, &branch, &fixture.root)?.is_none());
+        assert!(!checked_out_elsewhere(&entries, &branch, None)?);
+        assert!(!checked_out_elsewhere(
+            &entries,
+            &branch,
+            Some(&fixture.root)
+        )?);
+        let integration = primary_integration(&context, &cancel())?.0;
+        let result = remove(
+            &context,
+            WorktreeRemove::Merged {
+                integration: integration.as_str().to_owned(),
+                scope: PruneScope::Branches(vec!["scratch/stale".to_owned()]),
+            },
+            &cancel(),
+        )?;
+        assert_eq!(result.pruned_refs, vec!["scratch/stale"]);
+        assert!(result.retained.is_empty());
+        assert!(!branch_exists(&fixture, "scratch/stale"));
         Ok(())
     }
 
