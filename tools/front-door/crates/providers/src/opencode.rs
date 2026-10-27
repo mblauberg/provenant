@@ -407,6 +407,91 @@ mod tests {
     use super::*;
     use crate::Adapter;
 
+    // Reduced from #1891: three tool steps, then final text without step_finish.
+    const FINAL_TEXT_WITHOUT_FINISH: &str = concat!(
+        "{\"type\":\"step_start\",\"sessionID\":\"fixture\"}\n",
+        "{\"type\":\"tool_use\",\"sessionID\":\"fixture\"}\n",
+        "{\"type\":\"step_finish\",\"sessionID\":\"fixture\",\"part\":{\"reason\":\"tool-calls\"}}\n",
+        "{\"type\":\"step_start\",\"sessionID\":\"fixture\"}\n",
+        "{\"type\":\"tool_use\",\"sessionID\":\"fixture\"}\n",
+        "{\"type\":\"step_finish\",\"sessionID\":\"fixture\",\"part\":{\"reason\":\"tool-calls\"}}\n",
+        "{\"type\":\"step_start\",\"sessionID\":\"fixture\"}\n",
+        "{\"type\":\"tool_use\",\"sessionID\":\"fixture\"}\n",
+        "{\"type\":\"step_finish\",\"sessionID\":\"fixture\",\"part\":{\"reason\":\"tool-calls\"}}\n",
+        "{\"type\":\"step_start\",\"sessionID\":\"fixture\"}\n",
+        "{\"type\":\"text\",\"sessionID\":\"fixture\",\"part\":{\"text\":\"Provenant\"}}\n",
+    );
+
+    #[test]
+    fn final_text_without_step_finish_succeeds_only_on_clean_exit() {
+        use crate::{ExitObservation, OutcomeStatus};
+
+        for (code, timed_out, expected) in [
+            (Some(0), false, OutcomeStatus::Success),
+            (Some(1), false, OutcomeStatus::Failed),
+            (None, false, OutcomeStatus::Failed),
+            (Some(0), true, OutcomeStatus::Partial),
+        ] {
+            let mut stream = OpenCode.stream(None).unwrap();
+            let mut events = Vec::new();
+            for chunk in FINAL_TEXT_WITHOUT_FINISH.as_bytes().chunks(17) {
+                events.extend(OpenCode.observe(&mut stream, chunk).unwrap());
+            }
+            assert!(events.contains(&E::Text("Provenant".into())));
+            let outcome = OpenCode
+                .finish(stream, ExitObservation { code, timed_out })
+                .unwrap();
+            assert_eq!(outcome.status(), expected, "{code:?}, {timed_out}");
+        }
+    }
+
+    #[test]
+    fn final_text_does_not_hide_error_events() {
+        let error = b"{\"type\":\"error\",\"error\":{\"type\":\"APIError\"}}\n";
+        for error_first in [true, false] {
+            let mut stream = OpenCode.stream(None).unwrap();
+            let text = FINAL_TEXT_WITHOUT_FINISH.as_bytes();
+            let parts = if error_first {
+                [error.as_slice(), text]
+            } else {
+                [text, error.as_slice()]
+            };
+            for part in parts {
+                OpenCode.observe(&mut stream, part).unwrap();
+            }
+            let outcome = OpenCode
+                .finish(
+                    stream,
+                    crate::ExitObservation {
+                        code: Some(0),
+                        timed_out: false,
+                    },
+                )
+                .unwrap();
+            assert_eq!(outcome.status(), crate::OutcomeStatus::Failed);
+        }
+    }
+
+    #[test]
+    fn clean_exit_without_answer_or_stop_remains_partial() {
+        let raw = FINAL_TEXT_WITHOUT_FINISH
+            .rsplit_once("{\"type\":\"text\"")
+            .unwrap()
+            .0;
+        let mut stream = OpenCode.stream(None).unwrap();
+        OpenCode.observe(&mut stream, raw.as_bytes()).unwrap();
+        let outcome = OpenCode
+            .finish(
+                stream,
+                crate::ExitObservation {
+                    code: Some(0),
+                    timed_out: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.status(), crate::OutcomeStatus::Partial);
+    }
+
     #[test]
     fn discovery_reads_are_literal_along_cwd_ancestry() {
         let plan = crate::tests::read_only_plan("/fixture", None);
