@@ -781,8 +781,14 @@ enum Content {
 }
 #[derive(Deserialize)]
 struct Usage {
+    #[serde(alias = "inputTokens")]
     input_tokens: u64,
+    #[serde(alias = "outputTokens")]
     output_tokens: u64,
+    #[serde(default, alias = "cacheReadInputTokens")]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default, alias = "cacheCreationInputTokens")]
+    cache_creation_input_tokens: Option<u64>,
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
@@ -841,6 +847,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 events.push(E::Usage {
                     input: usage.input_tokens,
                     output: usage.output_tokens,
+                    cache_read: usage.cache_read_input_tokens,
+                    cache_write: usage.cache_creation_input_tokens,
                 });
             }
             if api_error_status == Some(401) {

@@ -526,3 +526,42 @@ fn trace_groups_hosts_and_links_a_child_to_its_parent_across_them() {
         .collect();
     assert_eq!(names, ["unknown host"]);
 }
+
+#[test]
+fn claude_attempt_with_cache_usage_reports_all_four_categories() {
+    let mut attempt = fact(1, Some(10));
+    attempt.resolved_route = Some(RouteFact {
+        provider: Some("claude".into()),
+        model: Some("claude-sonnet-5".into()),
+        effort: None,
+        account_label: Some("default".into()),
+    });
+    attempt.usage = Usage {
+        uncached_input: Some(10),
+        cache_read: Some(30),
+        cache_write: Some(40),
+        output_excluding_reasoning: Some(20),
+        reasoning: None,
+    };
+    let mut config = configured(Some(1_000_000));
+    config.models[0].provider = "claude".into();
+    config.models[0].model = "claude-sonnet-5".into();
+    config.models[0].rates.cache_read = Some(500_000);
+    config.models[0].rates.cache_write = Some(750_000);
+    let prices = validate_prices(&config).unwrap();
+    let report = crate::stats([attempt], &prices, Window::default()).unwrap();
+    assert_eq!(report.totals.usage.uncached_input.known, 10);
+    assert_eq!(report.totals.usage.output_excluding_reasoning.known, 20);
+    assert_eq!(report.totals.usage.cache_read.known, 30);
+    assert_eq!(report.totals.usage.cache_write.known, 40);
+    assert_eq!(report.coverage.missing_categories.uncached_input, 0);
+    assert_eq!(
+        report
+            .coverage
+            .missing_categories
+            .output_excluding_reasoning,
+        0
+    );
+    assert_eq!(report.coverage.missing_categories.cache_read, 0);
+    assert_eq!(report.coverage.missing_categories.cache_write, 0);
+}

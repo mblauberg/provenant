@@ -1,5 +1,6 @@
 ## Fixes
 
-Claude lane attempts now record the input and output token counts from the
-provider's final result event, instead of marking usage missing. Cache read
-and cache write counts are not yet recorded for Claude lanes.
+Claude lane attempts now record input, output, cache read and cache write token
+counts from the provider's final result event. Settled Claude attempts with no
+provider usage record why usage is absent instead of leaving a bare missing
+value.

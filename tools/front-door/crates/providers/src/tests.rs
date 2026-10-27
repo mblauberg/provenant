@@ -761,7 +761,9 @@ fn claude_usage_comes_from_the_result_event() -> Result<(), ProviderError> {
         usage,
         [&ProviderEvent::Usage {
             input: 10,
-            output: 20
+            output: 20,
+            cache_read: Some(30),
+            cache_write: Some(40),
         }]
     );
     Ok(())

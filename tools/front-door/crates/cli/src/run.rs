@@ -247,12 +247,16 @@ impl run::Providers for Registry<'_> {
         exit: &ExitObservation,
         provider_state: &Path,
     ) -> Result<run::Decoded, String> {
+        let is_claude = route.provider.as_deref() == Some("claude");
         let failed = |reason: &str| run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: false,
             observed_route: None,
-            usage: run::UsageRecord::default(),
+            usage: run::UsageRecord {
+                absent_reason: is_claude.then(|| "no result event".into()),
+                ..run::UsageRecord::default()
+            },
             session: None,
             reason: Some(reason.into()),
         };
@@ -328,16 +332,36 @@ impl run::Providers for Registry<'_> {
             session: outcome.session().map(str::to_owned),
             reason: None,
         };
+        let mut has_usage = false;
         for event in &events {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
-                ProviderEvent::Usage { input, output } => {
+                ProviderEvent::Usage {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                } => {
+                    has_usage = true;
                     decoded.usage.uncached_input = Some(*input);
                     decoded.usage.output_excluding_reasoning = Some(*output);
+                    decoded.usage.cache_read = *cache_read;
+                    decoded.usage.cache_write = *cache_write;
                     decoded.usage.source = Some("provider".into());
                 }
                 _ => {}
             }
+        }
+        if (is_claude || adapter.id() == "claude") && !has_usage {
+            let has_result = stdout.split(|&b| b == b'\n').any(|line| {
+                line.windows(15).any(|w| w == b"\"type\":\"result\"")
+                    || line.windows(16).any(|w| w == b"\"type\": \"result\"")
+            });
+            decoded.usage.absent_reason = Some(if has_result {
+                "result event has no usage".into()
+            } else {
+                "no result event".into()
+            });
         }
         let auth = events.contains(&ProviderEvent::AuthRequired);
         (decoded.outcome, decoded.reason) = match outcome.status() {
@@ -5876,6 +5900,76 @@ mod tests {
         assert_eq!(
             decoded.session.as_deref(),
             Some("FIXTURE_SESSION_IDENTIFIER_003")
+        );
+    }
+
+    #[test]
+    fn claude_usage_records_cache_read_and_cache_write() {
+        let route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5".into()),
+            ..Default::default()
+        };
+        let stream = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40}}\n",
+        );
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.usage.uncached_input, Some(10));
+        assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
+        assert_eq!(decoded.usage.cache_read, Some(30));
+        assert_eq!(decoded.usage.cache_write, Some(40));
+        assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+        assert_eq!(decoded.usage.absent_reason, None);
+    }
+
+    #[test]
+    fn claude_absent_usage_records_absent_reason() {
+        let route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5".into()),
+            ..Default::default()
+        };
+        let stream = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n";
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.usage.uncached_input, None);
+        assert_eq!(decoded.usage.source, None);
+        assert_eq!(
+            decoded.usage.absent_reason.as_deref(),
+            Some("no result event")
+        );
+
+        let stream_no_usage = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\"}\n",
+        );
+        let decoded_no_usage = Registry::default()
+            .decode(
+                &route,
+                stream_no_usage.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded_no_usage.usage.uncached_input, None);
+        assert_eq!(decoded_no_usage.usage.source, None);
+        assert_eq!(
+            decoded_no_usage.usage.absent_reason.as_deref(),
+            Some("result event has no usage")
         );
     }
 }

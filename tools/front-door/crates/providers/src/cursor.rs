@@ -188,6 +188,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 events.push(E::Usage {
                     input: usage.input,
                     output: usage.output,
+                    cache_read: None,
+                    cache_write: None,
                 });
             }
             if is_error || subtype != "success" {
