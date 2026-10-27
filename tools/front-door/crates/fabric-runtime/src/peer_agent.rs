@@ -432,6 +432,14 @@ pub fn plist(home: &Path) -> PathBuf {
 }
 
 pub fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError> {
+    launchctl_with(args, home, &SystemExecutor::new(1)?)
+}
+
+fn launchctl_with(
+    args: &[&OsStr],
+    home: &Path,
+    executor: &impl Executor,
+) -> Result<(bool, String), AgentError> {
     let mut argv: Vec<OsString> = vec!["/bin/launchctl".into()];
     argv.extend(args.iter().map(|arg| arg.to_os_string()));
     let env: [(OsString, OsString); 2] = [
@@ -442,7 +450,7 @@ pub fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentEr
     options.env = Some(&env);
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Capture { limit: 4096 };
-    let outcome = SystemExecutor::new(1)?.execute(options)?;
+    let outcome = executor.execute(options)?;
     Ok((
         outcome.termination == Termination::Exit(0) && !outcome.timed_out,
         String::from_utf8_lossy(&outcome.stderr.bytes)
@@ -455,6 +463,17 @@ pub fn launchctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentEr
 // LaunchAgent bootstrap retries are bounded real-time OS operations.
 #[allow(clippy::disallowed_methods)]
 fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError> {
+    bootstrap_with(state, home, changed, launchctl)
+}
+
+// LaunchAgent bootstrap retries are bounded real-time OS operations.
+#[allow(clippy::disallowed_methods)]
+fn bootstrap_with(
+    state: &Path,
+    home: &Path,
+    changed: bool,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Result<(), AgentError> {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -462,9 +481,9 @@ fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError>
     let plist = plist(home);
     let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
-    let loaded = launchctl(&["print".as_ref(), service.as_ref()], home)?.0;
+    let loaded = run(&["print".as_ref(), service.as_ref()], home)?.0;
     if loaded && !changed {
-        let (ok, error) = launchctl(
+        let (ok, error) = run(
             &["kickstart".as_ref(), "-k".as_ref(), service.as_ref()],
             home,
         )?;
@@ -475,12 +494,12 @@ fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError>
         };
     }
     if loaded {
-        launchctl(&["bootout".as_ref(), service.as_ref()], home)?;
+        run(&["bootout".as_ref(), service.as_ref()], home)?;
     }
     // A just-booted-out service can refuse bootstrap briefly while it exits.
     let mut last = String::new();
     for _ in 0..5 {
-        let (ok, error) = launchctl(
+        let (ok, error) = run(
             &["bootstrap".as_ref(), domain.as_ref(), plist.as_os_str()],
             home,
         )?;
@@ -821,6 +840,90 @@ pub fn status(state: &Path, home: &Path) -> Status {
 mod tests {
     // Agent tests use real time to bound local socket simulations.
     #![allow(clippy::disallowed_methods)]
+
+    struct LaunchctlRunner {
+        termination: provenant_os::exec::Termination,
+        timed_out: bool,
+        stdout: &'static str,
+        stderr: &'static str,
+    }
+
+    impl provenant_os::exec::Executor for LaunchctlRunner {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+            use provenant_os::exec::*;
+            let capture = |policy: StreamPolicy<'_>, text: &str| CapturedStream {
+                bytes: if matches!(policy, StreamPolicy::Capture { .. }) {
+                    text.as_bytes().to_vec()
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            };
+            Ok(ExecOutcome {
+                termination: self.termination,
+                timed_out: self.timed_out,
+                stdout: capture(options.stdout, self.stdout),
+                stderr: capture(options.stderr, self.stderr),
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn launchctl_failure_names_exit_signal_and_timeout() {
+        use super::*;
+        for (termination, timed_out, expected) in [
+            (Termination::Exit(113), false, "exit 113"),
+            (Termination::Signal(15), false, "signal 15"),
+            (Termination::Signal(15), true, "timed out after 10s"),
+        ] {
+            let runner = LaunchctlRunner { termination, timed_out, stdout: "", stderr: "" };
+            let (ok, detail) = launchctl_with(&["kickstart".as_ref()], Path::new("/"), &runner).unwrap();
+            assert!(!ok);
+            assert_eq!(AgentError::Launchctl("kickstart", detail).to_string(), format!("launchctl kickstart failed: {expected}"));
+        }
+    }
+
+    #[test]
+    fn launchctl_captures_stdout_and_prefers_stderr_for_failures() {
+        use super::*;
+        for (termination, stdout, stderr, expected) in [
+            (Termination::Exit(0), "state = running\n pid = 42\n", "", "state = running\n pid = 42"),
+            (Termination::Exit(1), " stdout reason\n", "", "exit 1: stdout reason"),
+            (Termination::Exit(1), "stdout reason", " stderr reason\n", "exit 1: stderr reason"),
+        ] {
+            let runner = LaunchctlRunner { termination, timed_out: false, stdout, stderr };
+            let (_, detail) = launchctl_with(&["print".as_ref()], Path::new("/"), &runner).unwrap();
+            assert_eq!(detail, expected);
+        }
+    }
+
+    #[test]
+    fn kickstart_failure_with_a_restarted_service_succeeds() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let mut calls = Vec::new();
+        let mut replies = [
+            (true, "state = running\n pid = 41"),
+            (false, "timed out after 10s"),
+            (true, "state = running\n pid = 41"),
+            (true, "state = waiting\n pid = 42"),
+            (true, "state = running\n pid = 42"),
+        ].into_iter();
+        bootstrap_with(root.path(), root.path(), false, |args, _| {
+            calls.push(args[0].to_owned());
+            let (ok, detail) = replies.next().expect("unexpected launchctl call");
+            Ok((ok, detail.into()))
+        }).unwrap();
+        assert!(replies.next().is_none());
+        assert_eq!(calls, ["print", "kickstart", "print", "print", "print"].map(OsString::from));
+    }
 
     /// A stand-in for the worktree owner's registry entry name.
     fn name(path: &std::path::Path) -> std::ffi::OsString {
