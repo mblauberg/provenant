@@ -827,7 +827,12 @@ pub(super) fn dispatch(
         }
         None => (lanes, None),
     };
-    let (mut data, human) = render(&peer, &lanes, &selected, edge);
+    // A waited report makes no peer read after the wait's deadline.
+    let (mut data, human) = if met.is_some() {
+        render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path())
+    } else {
+        render(&peer, &lanes, &selected, edge)
+    };
     data["run_id"] = json!(run_id);
     data["operation_id"] = json!(batch.operation_id);
     data["host"] = json!(host);
@@ -1268,7 +1273,9 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                 if !met && status == Status::Ok {
                     status = Status::Timeout;
                 }
-                let (rendered, text) = render(&peer, &lanes, &selected, edge);
+                // No peer read after the wait's deadline.
+                let (rendered, text) =
+                    render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path());
                 data["lanes"] = rendered["lanes"].clone();
                 data["condition_met"] = json!(met);
                 human.push_str(&text);

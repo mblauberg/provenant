@@ -278,8 +278,8 @@ Other limits on a peer run:
   lane seen running stays tracked until it settles, even after newer
   dispatches push it off that page. A queued or starting lane on the peer shows
   its `lane_class` and `waiting_for` like a local one, except in the final report
-  of a wait or watch, which makes no read after its deadline; an older peer
-  shows neither.
+  of any `--wait` or `--watch` (including `dispatch` and `cancel`), which makes
+  no read after its deadline; an older peer shows neither.
 
 Waiting and watching work the same on both hosts. `lanes --wait N` returns when a
 lane that was unsettled at the start, or settled since, meets `--condition`
