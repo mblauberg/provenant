@@ -204,6 +204,15 @@ refused, and the attempt records every granted path.
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
 
+## Writer hard-link refusal
+
+On macOS, launch refuses a writable tree containing an existing hard-linked
+regular file and names the offending path. An operator can inspect it and
+remove or rebuild it if it is disposable output before retrying.
+- Why: a writable hard link could modify data outside the granted tree.
+- Test: `crates/confinement/src/permissions.rs::writable_tree_hard_link_refusal_names_nested_file`
+- Owner: `crates/confinement/src/permissions.rs`
+
 ## Reconcile and temporary cleanup
 
 `reconcile` recovers queued and orphaned work idempotently and never replays
