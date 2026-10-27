@@ -561,7 +561,7 @@ fn prepare(
     argv.push(session_id.clone().into());
     let shell = access == Access::WorktreeWrite;
     let (mode, tools) = match access {
-        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob"),
+        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash"),
         Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
     };
     argv.extend(
@@ -605,7 +605,7 @@ fn prepare(
     let allowed_tools = if shell {
         "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
     } else {
-        "mcp__fabric__*"
+        "Bash,mcp__fabric__*"
     };
     let mut setup = input.provenant.claude(scratch, &mut argv, allowed_tools)?;
 
