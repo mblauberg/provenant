@@ -217,6 +217,11 @@ fn prepare_with(
             &task.access,
             &host_writes,
             adapter,
+            task.profile
+                .knobs
+                .get("lanes.publish")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
         )
         .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
         {
@@ -419,6 +424,11 @@ fn prepare_with(
             &task.access,
             &host_writes,
             adapter.id(),
+            task.profile
+                .knobs
+                .get("lanes.publish")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
         )
         .and_then(|request| match writer.as_ref() {
             Some(_) => ConfinedPlan::new(request)
@@ -512,6 +522,25 @@ fn prepare_with(
                 continue;
             }
         };
+        if plan.permissions().writer_publishing() {
+            let publishing = resolve_executable("gh").and_then(|gh| {
+                spec.configure_publishing(
+                    scratch,
+                    &git,
+                    &gh,
+                    writer
+                        .as_ref()
+                        .ok_or("writer authority missing")?
+                        .branch
+                        .short_name(),
+                )
+                .map_err(|error| error.to_string())
+            });
+            if let Err(error) = publishing {
+                reasons.push(skip(&label, SkipKind::Setup, error));
+                continue;
+            }
+        }
         if git_context.is_some() && adapter.id() == "claude" {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
@@ -1411,12 +1440,16 @@ fn confinement_request(
     access: &run::LaneAccess,
     host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
+    publishing: bool,
 ) -> Result<PlanRequest, String> {
     let mode = match writer {
-        Some(writer) => AccessMode::WorktreeWrite(Box::new(
-            WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
-                .map_err(|error| error.to_string())?,
-        )),
+        Some(writer) => {
+            let mut authority =
+                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
+                    .map_err(|error| error.to_string())?;
+            authority.set_publishing(publishing);
+            AccessMode::WorktreeWrite(Box::new(authority))
+        }
         None => AccessMode::ReadOnly,
     };
     let grant = |path: &Path| PathGrant {
@@ -1726,6 +1759,7 @@ pub fn writer_fixture_plan(
         &run::LaneAccess::default(),
         &Default::default(),
         "codex",
+        true,
     )?;
     ConfinedPlan::new(request).map_err(|error| error.to_string())
 }
@@ -2230,7 +2264,10 @@ mod tests {
             base: Some("HEAD".into()),
             base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
-            profile: Default::default(),
+            profile: provenant_records::run::HarnessProfile {
+                knobs: [("lanes.publish".into(), serde_json::json!(false))].into(),
+                ..Default::default()
+            },
             prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
             route: run::RequestedRoute::Model {
                 provider: "cursor".into(),
@@ -2351,6 +2388,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, prompt);
         let confinement = launch.confinement.ok_or("writer confinement missing")?;
         assert!(confinement.writer.is_some());
+        assert!(!confinement.plan.permissions().writer_publishing());
+        assert!(!scratch.join("publishing.gitconfig").exists());
         assert!(
             confinement
                 .plan
@@ -2757,6 +2796,7 @@ mod tests {
                     &Default::default(),
                     &Default::default(),
                     "codex",
+                    true,
                 )?)?;
                 use provenant_providers::{Adapter, ProviderEvent, codex::Codex};
                 let prompt = Prompt::new("continue".into());
@@ -3333,6 +3373,7 @@ mod tests {
                 &run::LaneAccess::default(),
                 &Default::default(),
                 entry.adapter.id(),
+                true,
             )?;
             assert!(request.permissions.read_roots.contains(&PathGrant {
                 path: assets.to_owned(),

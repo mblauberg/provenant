@@ -1954,14 +1954,14 @@ fn render_profile(
 
     // The gh read comes before the secret-root denies: Seatbelt is
     // last-match-wins, so an overlapping secret root must still hide it.
-    let gh_paths =
-        if (matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open)
-            || plan.writer_publishing()
-        {
-            gh_config_paths(home)
-        } else {
-            Vec::new()
-        };
+    let gh_paths = if (matches!(plan.mode, AccessMode::ReadOnly)
+        && plan.network == NetworkAccess::Open)
+        || plan.writer_publishing()
+    {
+        gh_config_paths(home)
+    } else {
+        Vec::new()
+    };
     for path in &gh_paths {
         push_rule(&mut source, "allow", "file-read*", path, PathScope::Subtree)?;
     }

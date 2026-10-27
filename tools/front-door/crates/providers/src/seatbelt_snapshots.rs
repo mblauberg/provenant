@@ -203,24 +203,62 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             plan.network = network;
         })?);
     }
+    cases.push(Case::new(
+        "publishing-disabled-worktree-write",
+        "opencode",
+        Access::WorktreeWrite,
+        None,
+        false,
+        |plan| {
+            plan.network = NetworkAccess::Open;
+            if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
+                &mut plan.mode
+            {
+                authority.set_publishing(false);
+            }
+        },
+    )?);
     Ok(cases)
 }
 
 #[test]
-fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn std::error::Error>> {
+fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn std::error::Error>>
+{
     let (mut plan, profile) = prepared("codex", Access::WorktreeWrite, login("codex"), false)?;
-    for network in [NetworkAccess::Provider, NetworkAccess::Local, NetworkAccess::Open] {
+    for network in [
+        NetworkAccess::Provider,
+        NetworkAccess::Local,
+        NetworkAccess::Open,
+    ] {
         plan.network = network;
         let rendered = render(&plan, &profile, Path::new(HOME))?;
         for path in [".config/gh", "Library/Application Support/GitHub CLI"] {
             let path = Path::new(HOME).join(path);
             let read = format!("(allow file-read* (subpath \"{}\"))", path.display());
             let deny = format!("(deny file-read* (subpath \"{}\"))", path.display());
-            assert_eq!(rendered.contains(&read), network == NetworkAccess::Open, "writer gh read grant");
-            assert_eq!(rendered.contains(&deny), network != NetworkAccess::Open, "writer gh read denial");
-            assert!(rendered.contains(&format!("(deny file-write* (subpath \"{}\"))", path.display())));
+            assert_eq!(
+                rendered.contains(&read),
+                network == NetworkAccess::Open,
+                "writer gh read grant"
+            );
+            assert_eq!(
+                rendered.contains(&deny),
+                network != NetworkAccess::Open,
+                "writer gh read denial"
+            );
+            assert!(rendered.contains(&format!(
+                "(deny file-write* (subpath \"{}\"))",
+                path.display()
+            )));
         }
     }
+    if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) = &mut plan.mode
+    {
+        authority.set_publishing(false);
+    }
+    let disabled = render(&plan, &profile, Path::new(HOME))?;
+    assert!(disabled.contains("(deny file-read* (subpath \"/fixture/home/.config/gh\"))"));
+    assert!(!disabled.contains("(allow file-read* (subpath \"/fixture/home/.config/gh\"))"));
     Ok(())
 }
 
