@@ -79,8 +79,8 @@ fn refresh(
 ) -> Result<(), ProbeFailure> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    // The shared refresh tolerates failed credential reads. Remember directory
-    // failures even if it makes another call and discards the original error.
+    // Preserve directory failures, which the quota report must distinguish
+    // from credential failures even when the shared refresh returns early.
     struct Watch<'a> {
         executor: &'a dyn Executor,
         directory_failed: AtomicBool,
@@ -325,6 +325,54 @@ impl LiveQuota {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn quota_refresh_renews_near_expiry_file_credentials() {
+        use super::*;
+        struct Renew<'a>(&'a Path, std::sync::atomic::AtomicUsize);
+        impl Executor for Renew<'_> {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert_eq!(options.argv[0], OsStr::new("/fake/claude"));
+                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::fs::write(
+                    self.0,
+                    br#"{"claudeAiOauth":{"accessToken":"fake-renewed","expiresAt":5000000}}"#,
+                )
+                .unwrap();
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".credentials.json");
+        std::fs::write(
+            &path,
+            br#"{"claudeAiOauth":{"accessToken":"fake-expiring","expiresAt":1001000}}"#,
+        )
+        .unwrap();
+        let executor = Renew(&path, Default::default());
+        let login = crate::claude::Login {
+            executable: Path::new("/fake/claude"),
+            home: temp.path(),
+            user: OsStr::new("fake"),
+            config_dir: temp.path(),
+        };
+        refresh(&executor, &login, &|| 1000000, 1060000).unwrap();
+        assert_eq!(executor.1.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(
+            std::fs::read_to_string(path)
+                .unwrap()
+                .contains("fake-renewed")
+        );
+    }
+
+    #[test]
     fn refresh_preserves_a_probe_directory_failure_even_if_the_next_call_differs() {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -341,11 +389,17 @@ mod tests {
                 }
             }
         }
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fake-expiring","expiresAt":1000}}"#,
+        )
+        .unwrap();
         let login = crate::claude::Login {
             executable: Path::new("/bin/claude"),
             home: Path::new("/home/test"),
             user: OsStr::new("test"),
-            config_dir: Path::new("/home/test/.claude"),
+            config_dir: temp.path(),
         };
         let result = refresh(&Fail(AtomicUsize::new(0)), &login, &|| 1, 1000);
         assert_eq!(result, Err(ProbeFailure::ProbeDirectory));

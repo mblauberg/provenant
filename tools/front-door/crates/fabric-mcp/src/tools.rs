@@ -574,6 +574,10 @@ impl ServiceError {
             )) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
+            Self::Facade(
+                error @ (FacadeError::Io { .. } | FacadeError::WorktreeUnregistered { .. }),
+            ) => serde_json::to_value(error)
+                .unwrap_or_else(|_| serde_json::json!({"code":self.code()})),
             Self::Coordination(CoordinationError::Input(error)) => {
                 serde_json::json!({"code":self.code(),"path":error.path})
             }

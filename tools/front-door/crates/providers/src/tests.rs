@@ -156,6 +156,49 @@ fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_denied_command_preserves_failed_response() -> Result<(), ProviderError> {
+    // Synthetic stdout paired with the issue's recorded stderr diagnostic.
+    let raw = serde_json::json!({"event":"result","result":{
+        "conversation_id":"", "status":"ERROR", "response":"I could only verify part of the claim.",
+        "error":"command permission denied", "usage":{"input_tokens":0,"output_tokens":0}
+    }})
+    .to_string();
+    let (mut events, outcome) = replay(
+        &agy::Agy,
+        &raw,
+        ExitObservation {
+            code: Some(1),
+            ..EXIT
+        },
+    )?;
+    events.extend(outcome.final_events().iter().cloned());
+    assert_eq!(outcome.status(), OutcomeStatus::Failed);
+    assert!(events.contains(&ProviderEvent::Text(
+        "I could only verify part of the claim.".into()
+    )));
+    assert_eq!(
+        agy::Agy.failure_diagnostic(include_bytes!(
+            "../../../tests/fixtures/providers/agy/command-denied.stderr"
+        )),
+        Some(r#"agy denied the "command" permission in headless mode"#.into())
+    );
+    for unrelated in [
+        "a tool required the command permission",
+        "jetski: unrelated failure",
+        "jetski: no output produced \u{2014} a tool required the \"command\nforged\" permission that headless mode cannot prompt for, so it was auto-denied.",
+        "jetski: no output produced \u{2014} a tool required the \"\" permission that headless mode cannot prompt for, so it was auto-denied.",
+    ] {
+        assert_eq!(agy::Agy.failure_diagnostic(unrelated.as_bytes()), None);
+    }
+    assert_eq!(
+        codex::Codex.failure_diagnostic(include_bytes!(
+            "../../../tests/fixtures/providers/agy/command-denied.stderr"
+        )),
+        None
+    );
+    Ok(())
+}
+#[test]
 fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
     let exit = ExitObservation {
         code: Some(1),
@@ -1832,6 +1875,36 @@ impl provenant_os::exec::Executor for KeychainScript {
     }
 }
 
+/// File-backed fake credentials; only the fake CLI refresh rewrites storage.
+struct FileCredentialScript {
+    script: KeychainScript,
+    path: std::path::PathBuf,
+}
+impl FileCredentialScript {
+    fn new(config: &Path, script: KeychainScript) -> Self {
+        std::fs::create_dir_all(config).unwrap();
+        let path = config.join(".credentials.json");
+        if let Some(item) = script.items.lock().unwrap().pop_front() {
+            std::fs::write(&path, item).unwrap();
+        }
+        Self { script, path }
+    }
+}
+impl provenant_os::exec::Executor for FileCredentialScript {
+    fn execute(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        assert_ne!(options.argv[0], OsStr::new("/usr/bin/security"));
+        if options.argv.get(1).is_some_and(|arg| arg == "-p")
+            && let Some(item) = self.script.items.lock().unwrap().pop_front()
+        {
+            std::fs::write(&self.path, item).unwrap();
+        }
+        self.script.execute(options)
+    }
+}
+
 #[test]
 fn agy_account_probe_logs_under_the_host_probe_root() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
@@ -2064,7 +2137,7 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
     // Check while the command is running, before the private cwd is removed.
     struct CheckCwd<'a> {
         host_root: &'a Path,
-        script: &'a KeychainScript,
+        script: &'a FileCredentialScript,
     }
     impl Executor for CheckCwd<'_> {
         fn execute(
@@ -2110,6 +2183,8 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
             ),
             calls: Default::default(),
         };
+        let config = host_root.join(".claude-pro");
+        let script = FileCredentialScript::new(&config, script);
         let checked = CheckCwd {
             host_root: &host_root,
             script: &script,
@@ -2117,9 +2192,9 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
         let executor = HostProbeExecutor::new(&checked, &host_root).unwrap();
         let login = claude::Login {
             executable: Path::new("/opt/homebrew/bin/claude"),
-            home: Path::new("/home/u"),
+            home: &host_root,
             user: OsStr::new("u"),
-            config_dir: Path::new("/home/u/.claude-pro"),
+            config_dir: &config,
         };
         let key = crate::accounts::detect(
             &executor,
@@ -2143,12 +2218,8 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
                 Duration::from_secs(4),
             ))
             .unwrap();
-        let calls = script.calls.lock().unwrap();
-        assert_eq!(
-            calls.len(),
-            7,
-            "status, refresh, keychain and version commands"
-        );
+        let calls = script.script.calls.lock().unwrap();
+        assert_eq!(calls.len(), 5, "status, refresh and version commands");
         for (_, _, cwd) in calls.iter() {
             assert!(!cwd.starts_with(&child_store));
             assert!(!cwd.exists(), "host cwd must be removed after each command");
@@ -2168,59 +2239,47 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
         )
         .into_bytes()
     };
-    let run_by = |config: &str, items: Vec<Vec<u8>>, deadline: u64| {
-        let script = KeychainScript {
-            items: std::sync::Mutex::new(items.into()),
-            statuses: Default::default(),
-            calls: std::sync::Mutex::new(vec![]),
-        };
+    let run_by = |items: Vec<Vec<u8>>, deadline: u64| {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join(".claude");
+        let script = FileCredentialScript::new(
+            &config,
+            KeychainScript {
+                items: std::sync::Mutex::new(items.into()),
+                statuses: Default::default(),
+                calls: std::sync::Mutex::new(vec![]),
+            },
+        );
         let login = Login {
             executable: Path::new("/opt/homebrew/bin/claude"),
-            home: Path::new("/home/u"),
+            home: temp.path(),
             user: OsStr::new("u"),
-            config_dir: Path::new(config),
+            config_dir: &config,
         };
         let result = refresh_if_expiring(&script, &login, &|| now, deadline, None);
-        (result, script.calls.into_inner().unwrap())
+        (result, script.script.calls.into_inner().unwrap())
     };
     let hour = 3_600_000;
-    let run = |config: &str, items: Vec<Vec<u8>>| run_by(config, items, now + hour);
+    let run = |items: Vec<Vec<u8>>| run_by(items, now + hour);
 
     // A spent deadline runs nothing.
-    let (token, calls) = run_by("/home/u/.claude", vec![], now);
-    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+    let (token, calls) = run_by(vec![item("fixture-access", now + 1000)], now);
+    assert!(token.is_err());
     assert!(calls.is_empty());
 
     // A live token is used as read: no refresh, and Debug never shows it.
-    let (token, calls) = run("/home/u/.claude", vec![item("fixture-access", now + hour)]);
+    let (token, calls) = run(vec![item("fixture-access", now + hour)]);
     let token = token.expect("live token");
     let printed = format!("{token:?}");
     assert!(!printed.contains("fixture-access") && !printed.contains("fixture-refresh"));
-    assert_eq!(calls.len(), 1);
-    let (argv, env, cwd) = &calls[0];
-    assert_eq!(
-        argv[1..],
-        [
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-a",
-            "u",
-            "-w"
-        ]
-    );
-    assert!(!env.iter().any(|v| v.starts_with("CLAUDE_CONFIG_DIR=")));
-    assert_eq!(cwd, Path::new("/"));
+    assert!(calls.is_empty());
 
     // Inside the window the CLI refreshes once, in the empty scratch directory
     // with hooks, MCP servers, slash commands and session files off.
     let expiring = item("fixture-access", now + 14 * 60 * 1000);
-    let (token, calls) = run(
-        "/home/u/.claude",
-        vec![expiring.clone(), item("fixture-renewed", now + hour)],
-    );
+    let (token, calls) = run(vec![expiring.clone(), item("fixture-renewed", now + hour)]);
     token.expect("refreshed token");
-    let (argv, _, cwd) = &calls[1];
+    let (argv, env, cwd) = &calls[0];
     assert_eq!(argv[0], "/opt/homebrew/bin/claude");
     for flag in [
         "--safe-mode",
@@ -2232,32 +2291,119 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
         assert!(argv.iter().any(|a| a == flag), "{flag}");
     }
     assert_eq!(cwd, Path::new("/"));
-    assert_eq!(calls.len(), 3);
+    assert!(!env.iter().any(|v| v.starts_with("CLAUDE_CONFIG_DIR=")));
+    assert_eq!(calls.len(), 1);
 
     // The CLI may keep a token inside the window; one with a minute left is
     // accepted, one about to expire is refused.
-    let (token, _) = run("/home/u/.claude", vec![expiring.clone(), expiring.clone()]);
+    let (token, _) = run(vec![expiring.clone(), expiring.clone()]);
     token.expect("still usable");
-    let (token, _) = run(
-        "/home/u/.claude",
-        vec![expiring, item("fixture-access", now + 30_000)],
-    );
+    let (token, _) = run(vec![expiring, item("fixture-access", now + 30_000)]);
     assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
 
-    // Another identity's directory names its own keychain item and config.
-    let (token, calls) = run(
-        "/home/u/.claude-work",
-        vec![b"not json".to_vec(), b"not json".to_vec()],
-    );
-    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
-    let (argv, env, _) = &calls[0];
-    let suffix = crate::claude::keychain_suffix(b"/home/u/.claude-work");
-    assert_eq!(argv[3], format!("Claude Code-credentials-{suffix}"));
-    assert!(env.contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned()));
+    // An expired token is refreshed; it stays expired only if the CLI fails.
+    let (token, calls) = run(vec![
+        item("fixture-access", now),
+        item("fixture-renewed", now + hour),
+    ]);
+    token.expect("expired token refreshed");
+    assert_eq!(calls.len(), 1, "expired storage refreshes once");
+    let (token, calls) = run(vec![
+        item("fixture-access", now),
+        item("fixture-access", now),
+    ]);
+    assert!(matches!(token, Err(ProviderError::CredentialExpired)));
+    assert_eq!(calls.len(), 1);
+
+    // Corrupt stored JSON cannot be repaired by refreshing.
+    let (token, calls) = run(vec![b"not json: fixture-secret".to_vec()]);
     assert!(
-        calls[1]
+        matches!(&token, Err(ProviderError::CredentialReadFailed(reason)) if reason == "stored credential JSON is invalid")
+    );
+    assert!(!token.unwrap_err().to_string().contains("fixture-secret"));
+    assert!(
+        calls.is_empty(),
+        "corrupt file credentials must not refresh"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn claude_keychain_read_failure_does_not_spawn_refresh_probe() {
+    use crate::claude::{Login, refresh_if_expiring};
+
+    struct FailedKeychainRead(std::sync::Mutex<Vec<Call>>);
+
+    impl provenant_os::exec::Executor for FailedKeychainRead {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+            let argv: Vec<String> = options
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            self.0.lock().unwrap().push((
+                argv.clone(),
+                options
+                    .env
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(key, value)| {
+                        format!("{}={}", key.to_string_lossy(), value.to_string_lossy())
+                    })
+                    .collect(),
+                options.cwd.into(),
+            ));
+            Ok(provenant_os::exec::ExecOutcome {
+                termination: if argv.first().is_some_and(|arg| arg == "/usr/bin/security") {
+                    provenant_os::exec::Termination::Exit(1)
+                } else {
+                    provenant_os::exec::Termination::Exit(0)
+                },
+                stdout: Default::default(),
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
+    let executor = FailedKeychainRead(Default::default());
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude-work");
+    std::fs::create_dir(&config).unwrap();
+    let login = Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+
+    let result = refresh_if_expiring(&executor, &login, &|| 1_000_000, 2_000_000, None);
+
+    assert!(matches!(
+        result,
+        Err(ProviderError::CredentialReadFailed(_))
+    ));
+    let calls = executor.0.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "a failed keychain read must not start a refresh"
+    );
+    assert_eq!(calls[0].0[0], "/usr/bin/security");
+    use std::os::unix::ffi::OsStrExt;
+    let suffix = crate::claude::keychain_suffix(config.as_os_str().as_bytes());
+    assert_eq!(calls[0].0[3], format!("Claude Code-credentials-{suffix}"));
+    assert!(
+        calls[0]
             .1
-            .contains(&"CLAUDE_CONFIG_DIR=/home/u/.claude-work".to_owned())
+            .contains(&format!("CLAUDE_CONFIG_DIR={}", config.display()))
     );
 }
 
@@ -2684,6 +2830,7 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
     use std::path::Path;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
+    let temp = tempfile::tempdir().unwrap();
     for adapter in ["claude", "codex"] {
         for key in ["fixture-one", "fixture-two"] {
             let mut route = route(adapter, "fixture-model");
@@ -2694,7 +2841,12 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 key.into()
             };
             route.account_key = Some(account_key.clone());
-            let dir = Path::new("/fixture/identities").join(key);
+            let dir = temp.path().join(key);
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(
+                dir.join(".credentials.json"),
+                br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#,
+            )?;
             let account = identity::RegisteredAccount::new(adapter, &account_key, dir.clone())?;
             let selected_token;
             let token = if adapter == "claude" {

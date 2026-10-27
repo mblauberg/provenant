@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::ExitCode,
 };
@@ -531,9 +531,31 @@ fn persisted_refusal(
     (label, key): (&str, &str),
     stdout: &[u8],
 ) -> Result<provenant_quota::AccountRecord> {
+    let (rig, terminal) = persisted_attempt(provider, model, (label, key), stdout, b"", 1)?;
+    assert!(matches!(
+        terminal.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::QuotaLimited,
+            ..
+        }
+    ));
+    Ok(provenant_quota::AccountRecord::decode(&fs::read(
+        rig.state.join(format!("quota/{key}/{provider}.json")),
+    )?)?)
+}
+
+/// Publish sealed captures through the production holder and provider registry.
+fn persisted_attempt(
+    provider: &str,
+    model: &str,
+    (label, key): (&str, &str),
+    stdout: &[u8],
+    stderr: &[u8],
+    exit_code: i64,
+) -> Result<(TestRig, provenant_run::AttemptRecord)> {
     use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId, WaitBudget,
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
+        WaitBudget,
     };
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::Termination;
@@ -553,7 +575,13 @@ fn persisted_refusal(
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let project_id = ProjectId::from_bytes([21; 16]);
+    fs::create_dir_all(&rig.state)?;
+    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+    let project_id = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
     let actor_id = ActorId::from_bytes([22; 16]);
     let execution = ExecutionContext {
         state_root: roots.state.clone(),
@@ -652,7 +680,7 @@ fn persisted_refusal(
             attempt: attempt_id,
             generation: 0,
         },
-        termination: Some(Termination::Exit(1)),
+        termination: Some(Termination::Exit(exit_code)),
         never_spawned: false,
         stop_reason: None,
         delivered_signals: vec![],
@@ -690,6 +718,13 @@ fn persisted_refusal(
         .open(attempt_dir.join("stdout.log"))?;
     stdout_file.write_all(stdout)?;
     stdout_file.sync_all()?;
+    let mut stderr_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(attempt_dir.join("stderr.log"))?;
+    stderr_file.write_all(stderr)?;
+    stderr_file.sync_all()?;
     let attempt = Directory::open_anchor(&attempt_dir)?;
     let terminal = store.finish(
         attempt_id,
@@ -698,20 +733,78 @@ fn persisted_refusal(
         &provenant_cli::run::Registry::default(),
         &call,
     )?;
+    Ok((rig, terminal))
+}
+
+fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
+    let denial = include_bytes!("fixtures/providers/agy/command-denied.stderr");
+    // Synthetic partial stdout and the real stderr-only failure case.
+    let partial = br#"{"event":"step_update","step_update":{"conversation_id":"fixture-session","step_type":"agent_response","text_delta":"I verified part of the claim."}}"#;
+    let failed_response = br#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"I verified part of the claim.","error":"command permission denied","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+    for stdout in [
+        b"".as_slice(),
+        partial.as_slice(),
+        failed_response.as_slice(),
+    ] {
+        let (rig, terminal) = persisted_attempt(
+            "agy",
+            "agy/gemini-3.8-flash",
+            ("work", "google-fixture"),
+            stdout,
+            denial,
+            1,
+        )?;
+        assert!(matches!(
+            terminal.state,
+            provenant_run::AttemptState::Terminal {
+                outcome: provenant_run::Outcome::Failed,
+                ..
+            }
+        ));
+        let lanes = rig.command(&["lanes", "--all", "--json"])?;
+        assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
+        let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        let reason = lanes["data"]["lanes"][0]["reason"]
+            .as_str()
+            .ok_or("terminal reason")?;
+        assert!(reason.contains(r#""command" permission"#), "{lanes}");
+        let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
+        assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
+        let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let result = output["data"]["bytes"]["data"]
+            .as_str()
+            .ok_or("result bytes")?;
+        assert!(result.contains(r#""command" permission"#), "{output}");
+        if !stdout.is_empty() {
+            assert!(
+                result.starts_with("I verified part of the claim."),
+                "{output}"
+            );
+        }
+    }
+    // A successful answer wins even when stderr contains a denial notice.
+    let success = br#"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
+{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"Verified.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#;
+    let (rig, terminal) = persisted_attempt(
+        "agy",
+        "agy/gemini-3.8-flash",
+        ("work", "google-fixture"),
+        success,
+        denial,
+        0,
+    )?;
     assert!(matches!(
         terminal.state,
         provenant_run::AttemptState::Terminal {
-            outcome: provenant_run::Outcome::QuotaLimited,
+            outcome: provenant_run::Outcome::Succeeded,
             ..
         }
     ));
-    let account_path = roots
-        .state
-        .as_path()
-        .join(format!("quota/{key}/{provider}.json"));
-    Ok(provenant_quota::AccountRecord::decode(&fs::read(
-        account_path,
-    )?)?)
+    let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
+    assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
+    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(output["data"]["bytes"]["data"], "Verified.");
+    Ok(())
 }
 
 fn opencode_free_pool_cools_second_model() -> Result {
@@ -848,6 +941,7 @@ fn main() -> ExitCode {
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
                 "agy_individual_quota_cools_model_until_reset",
+                "agy_denied_command_reaches_result_and_terminal_reason",
             ],
             |name| {
                 let result = match name {
@@ -863,6 +957,9 @@ fn main() -> ExitCode {
                     }
                     "agy_individual_quota_cools_model_until_reset" => {
                         agy_individual_quota_cools_model_until_reset()
+                    }
+                    "agy_denied_command_reaches_result_and_terminal_reason" => {
+                        agy_denied_command_reaches_result_and_terminal_reason()
                     }
                     _ => opencode_free_pool_cools_second_model(),
                 };

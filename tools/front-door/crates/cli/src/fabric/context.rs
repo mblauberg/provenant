@@ -290,6 +290,9 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
         FacadeError::ConfinementRefused => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WorktreeMissing => (Outcome::Invalid, ErrorKind::WorktreeMissing),
+        FacadeError::WorktreeUnregistered { .. } => {
+            (Outcome::Refused, ErrorKind::WorktreeUnregistered)
+        }
         FacadeError::BaseUnreachable => (Outcome::Refused, ErrorKind::BaseUnreachable),
         FacadeError::BranchExists => (Outcome::Refused, ErrorKind::BranchExists),
         FacadeError::LaneDepth => (Outcome::Refused, ErrorKind::LaneDepth),
@@ -306,7 +309,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         | FacadeError::ContinuationUnsupported
         | FacadeError::OutputTooLarge
         | FacadeError::PublicationFailed
-        | FacadeError::Io => (Outcome::Error, ErrorKind::Peer),
+        | FacadeError::Io { .. } => (Outcome::Error, ErrorKind::Peer),
     }
 }
 /// Map a transport error, naming the peer and, when known, the cause.

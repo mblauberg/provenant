@@ -441,7 +441,15 @@ fn prepare_with(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
-                    reasons.push(skip(&label, SkipKind::AuthRequired, format!("account {}: {error}; sign in again with CLAUDE_CONFIG_DIR={} claude auth login", entry.map_or("unknown", |e| e.label.as_str()), account.directory().display())));
+                    reasons.push(skip(
+                        &label,
+                        SkipKind::AuthRequired,
+                        credential_failure_message(
+                            &error,
+                            entry.map_or("unknown", |e| e.label.as_str()),
+                            account.directory(),
+                        ),
+                    ));
                     continue;
                 }
             }
@@ -873,6 +881,25 @@ fn changed_entry(error: &FsError) -> bool {
             error.raw_os_error(),
             Some(libc::ENOTDIR | libc::ENXIO | libc::EOPNOTSUPP)
         )
+}
+
+fn credential_failure_message(
+    error: &provenant_providers::ProviderError,
+    label: &str,
+    directory: &Path,
+) -> String {
+    let mut message = format!("account {label}: {error}");
+    if matches!(
+        error,
+        provenant_providers::ProviderError::CredentialNotFound
+            | provenant_providers::ProviderError::CredentialExpired
+    ) {
+        message.push_str(&format!(
+            "; sign in again with CLAUDE_CONFIG_DIR={} claude auth login",
+            directory.display()
+        ));
+    }
+    message
 }
 
 // Lets a test change an entry between its stat and its open.
@@ -1671,6 +1698,32 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
+        use provenant_providers::ProviderError;
+        let directory = Path::new("/fake/account");
+        for error in [
+            ProviderError::CredentialNotFound,
+            ProviderError::CredentialExpired,
+        ] {
+            let message = credential_failure_message(&error, "work", directory);
+            assert!(
+                message.contains(
+                    "sign in again with CLAUDE_CONFIG_DIR=/fake/account claude auth login"
+                )
+            );
+        }
+        for error in [
+            ProviderError::CredentialReadFailed("security exited with code 1".into()),
+            ProviderError::CredentialReadFailed("stored credential JSON is invalid".into()),
+            ProviderError::CredentialUnavailable,
+        ] {
+            let message = credential_failure_message(&error, "work", directory);
+            assert!(message.contains(&error.to_string()));
+            assert!(!message.contains("sign in again"));
+        }
+    }
 
     fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::Error>> {
         Ok(run::LaunchPaths {

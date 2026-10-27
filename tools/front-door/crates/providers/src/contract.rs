@@ -29,8 +29,15 @@ pub enum ProviderError {
     InvalidPath,
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
-    #[error("provider login token is unavailable, unreadable or expired")]
+    #[error("provider login token is unavailable")]
     CredentialUnavailable,
+    #[error("provider login token was not found")]
+    CredentialNotFound,
+    #[error("provider login token has expired")]
+    CredentialExpired,
+    // Reasons must never include subprocess output or credential contents.
+    #[error("provider credential read failed: {0}")]
+    CredentialReadFailed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -239,6 +246,10 @@ pub(crate) fn verify_lineage(
 }
 
 pub trait Adapter: Sync {
+    /// A recognised failure diagnostic, without untrusted stderr prose.
+    fn failure_diagnostic(&self, _stderr: &[u8]) -> Option<String> {
+        None
+    }
     fn id(&self) -> &'static str;
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;

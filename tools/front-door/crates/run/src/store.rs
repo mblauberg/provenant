@@ -633,15 +633,72 @@ impl RunStore {
         }
         #[cfg(test)]
         crate::tests::crash_at("sealed");
+        self.commit_terminal_record(&old, &next, call)?;
+        #[cfg(test)]
+        crate::tests::crash_at("committed");
+        Ok(next)
+    }
+
+    /// A reboot proves loss without inventing provider output or exit facts.
+    /// The caller holds both exclusions until this transaction and release.
+    pub(crate) fn commit_reboot_lost(
+        &self,
+        proof: &provenant_supervisor::custody::RebootRecovery,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let scope = proof.scope();
+        let directory = self.run_dir(scope.run, false)?;
+        let _publication = directory.lock(
+            OsStr::new("publication.lock"),
+            LockMode::Exclusive,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?;
+        let old = self.record(scope.attempt, call)?;
+        if Self::scope(&old) != scope {
+            return Err(RunError::Conflict);
+        }
+        if matches!(old.state, AttemptState::Terminal { .. }) {
+            return Ok(());
+        }
+        let mut next = old.clone();
+        next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        next.state = AttemptState::Terminal {
+            outcome: Outcome::Lost,
+            exit_code: None,
+            finished_at: call
+                .clock
+                .wall_now()
+                .map_err(|_| RunError::Validation("wall clock"))?,
+            reason: Some("machine rebooted before the guardian settled the attempt".into()),
+        };
+        super::reader::validate_attempt(&next)?;
+        // Keep recovery discoverable until fence release, even for readers
+        // whose reservations live outside the writer registry. Reconcile
+        // recognises this lost state and preserves scratch on every retry.
+        self.commit_terminal_record(&old, &next, call)
+    }
+
+    fn commit_terminal_record(
+        &self,
+        old: &AttemptRecord,
+        next: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let AttemptState::Terminal { finished_at, .. } = next.state else {
+            return Err(RunError::Validation("terminal state missing"));
+        };
+        let id = old.attempt_id;
         self.write(call, |tx| {
-            let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(&next)?, id.to_string(), sql_int(expected_revision)?])?;
+            let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
-            insert_event(tx, &next)?;
+            insert_event(tx, next)?;
             let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)", [old.run_id.to_string()], |r| r.get(0))?;
             let mut run = self.run_on(tx, old.run_id)?;
             run.revision = run.revision.checked_add(1).ok_or(RunError::Conflict)?;
-            if !pending && run.children.is_empty() { run.closure = Closure::Closed; run.closed_at = Some(publication.finished_at); }
+            if !pending && run.children.is_empty() { run.closure = Closure::Closed; run.closed_at = Some(finished_at); }
             tx.execute("UPDATE runs SET record=?1 WHERE id=?2", params![bytes(&run)?, run.run_id.to_string()])?;
             if run.closure == Closure::Closed {
                 let raw: Vec<u8> = tx.query_row("SELECT record FROM operations WHERE run=?1", [run.run_id.to_string()], |r| r.get(0))?;
@@ -652,10 +709,7 @@ impl RunStore {
             #[cfg(test)]
             crate::tests::crash_at("transaction");
             Ok(())
-        })?;
-        #[cfg(test)]
-        crate::tests::crash_at("committed");
-        Ok(next)
+        })
     }
 
     pub(crate) fn set_temporary_retained(

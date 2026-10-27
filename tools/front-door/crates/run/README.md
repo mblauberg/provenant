@@ -100,8 +100,11 @@ because the guardian's environment is cleared.
 `resume` accepts a continuation of one terminal attempt as a new run, once
 per attempt, and `start` hands the prior attempt to `Providers::prepare` so
 the exact session is continued. `reconcile` commits durable exits, withdraws
-launches that provably never reached a guardian, and reports anything else as
-held or uncertain without touching it. `open_runs` lists runs with
+launches that provably never reached a guardian, and settles attempts proven
+to belong to a previous boot as `lost`. Reboot recovery releases the reservation
+after the terminal transaction and preserves all attempt artefacts and worktree
+contents. `cancel` also performs this recovery. Other custody stays held or
+uncertain without being changed. `open_runs` lists runs with
 nonterminal work for a recovery scan.
 
 Provider preparation receives canonical per-attempt temporary and provider-state
