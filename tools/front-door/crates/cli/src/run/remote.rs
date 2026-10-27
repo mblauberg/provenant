@@ -145,7 +145,10 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
         );
     }
     let (status, kind) = crate::fabric::facade_outcome(&error);
-    Fail::new(status, kind, format!("peer: {message}"))
+    Fail {
+        detail: Some(error),
+        ..Fail::new(status, kind, format!("peer: {message}"))
+    }
 }
 
 fn directory(roots: &Roots) -> Result<Directory, Fail> {
