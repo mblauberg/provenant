@@ -4877,12 +4877,12 @@ fn reconcile_retries_reboot_release_for_a_reader() -> TestResult {
 }
 
 #[test]
-fn cancel_settles_a_placed_writer_whose_reservation_is_gone() -> TestResult {
+fn cancel_keeps_unidentified_provider_uncertain() -> TestResult {
     placed_writer_without_reservation(true)
 }
 
 #[test]
-fn reconcile_settles_a_placed_writer_whose_reservation_is_gone() -> TestResult {
+fn reconcile_keeps_unidentified_provider_uncertain() -> TestResult {
     placed_writer_without_reservation(false)
 }
 
@@ -4938,25 +4938,20 @@ fn placed_writer_without_reservation(cancel_run: bool) -> TestResult {
         &serde_json::to_vec(&summary)?,
         RECORD_LIMIT,
     )?;
-    // The slot keeps writer.lock but its reservation is gone, and no guardian lives.
+    // A launch summary alone does not prove the provider was never spawned.
     std::fs::remove_file(custody.join("reservation.json"))?;
     if cancel_run {
         assert_eq!(
             store.cancel(id, "stop", &call)?,
-            CancelReceipt::AlreadyTerminal
+            CancelReceipt::Requested
         );
     } else {
         assert_eq!(
             store.reconcile(run.run_id, &Fake::default(), &call)?,
-            vec![(id, Reconciled::Finished)]
+            vec![(id, Reconciled::Uncertain { reason: UncertainReason::GuardianNotObservable })]
         );
     }
-    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
-    let AttemptState::Terminal { reason, .. } = store.record(id, &call)?.state else {
-        return Err("not terminal".into());
-    };
-    assert!(reason.unwrap_or_default().contains("reservation"));
-    assert!(store.open_runs(10, &call)?.is_empty());
+    assert!(!matches!(store.record(id, &call)?.state, AttemptState::Terminal { .. }));
     Ok(())
 }
 
