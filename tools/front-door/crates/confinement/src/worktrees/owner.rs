@@ -206,7 +206,11 @@ pub fn prune_owned(
                     .as_ref()
                     == Some(&owner)
         },
-        None,
+        Some(&provenant_config::ProjectGcSettings {
+            regenerable: policy.regenerable.to_vec(),
+            keep: policy.keep.to_vec(),
+            ..Default::default()
+        }),
     )?;
     let mut result = RemoveOutcome::default();
     result.removed.push(removed.info.clone());

@@ -642,7 +642,7 @@ pub(crate) fn land_cleanup(
                 .filter(|entry| entry.removed)
                 .map(|entry| entry.path)
                 .collect();
-            match worktrees::remove(
+            match worktrees::remove_with_output(
                 context,
                 WorktreeRemove::Name {
                     name: branch.to_owned(),
@@ -651,6 +651,10 @@ pub(crate) fn land_cleanup(
                     expected_head: Some(tip),
                 },
                 cancel,
+                &provenant_config::ProjectGcSettings {
+                    regenerable,
+                    ..settings
+                },
             ) {
                 Ok(outcome) => {
                     landed.removed = !outcome.removed.is_empty();
