@@ -4,7 +4,10 @@ use crate::launch::{
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
+use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+use provenant_os::fs::{Directory, LockMode};
 use provenant_records::CanonicalV1;
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -222,7 +225,9 @@ fn parse_stored_token(bytes: &[u8], now_ms: u64) -> Result<OauthToken, ProviderE
 /// then reads again and accepts a token with at least a minute left. The
 /// refresh runs with every customisation off (safe mode, no hooks, no MCP
 /// servers, no slash commands, no session file) in the executor's private
-/// working directory. Every subprocess is capped by the caller's `deadline_ms` on the
+/// working directory. Host callers share an exclusive config-directory lock
+/// across the read, refresh and reread, so only one CLI can rotate its token.
+/// Every subprocess is capped by the caller's `deadline_ms` on the
 /// `now_ms` clock. The token is never logged, printed or persisted.
 pub fn refresh_if_expiring(
     executor: &dyn Executor,
@@ -241,6 +246,27 @@ pub fn refresh_if_expiring(
             left => Ok(cap.min(Duration::from_millis(left))),
         }
     };
+    // Stable inode, never removed: all host launch and quota refresh paths
+    // must reread storage after acquiring this cross-process lock.
+    let clock = SystemClock::new();
+    let wait_seconds = budget(Duration::from_secs(60))?.as_secs();
+    let wait = if wait_seconds == 0 {
+        WaitBudget::nonblocking(clock.mono_now())
+    } else {
+        WaitBudget::cli(clock.mono_now(), wait_seconds)
+            .map_err(|_| ProviderError::CredentialUnavailable)?
+    };
+    let directory = Directory::open_anchor(login.config_dir)
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    let _refresh_lock = directory
+        .lock(
+            OsStr::new("provenant-oauth-refresh.lock"),
+            LockMode::Exclusive,
+            wait,
+            &CancelToken::new(),
+            &clock,
+        )
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
     let default = login.config_dir == login.home.join(".claude");
     let mut service = KEYCHAIN_SERVICE.to_owned();
     let mut env: Vec<(OsString, OsString)> = vec![
