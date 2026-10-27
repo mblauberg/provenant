@@ -399,15 +399,20 @@ pub fn report(
         let age = record.snapshot.as_ref().map(|s| {
             u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
         });
+        let auth_required = detections
+            .iter()
+            .any(|d| d.adapter == record.account.adapter && d.status == QuotaStatus::AuthRequired);
         let fresh = record.snapshot.as_ref().is_some_and(|s| {
             s.observed_unix_seconds <= now
                 && record.last_error.is_none()
+                && !auth_required
                 && age.is_some_and(|a| {
                     a < interval(policies, &record.account.adapter, Trigger::Timer, Power::Ac)
                         .unwrap_or(0)
                 })
         });
         let status = match &record.snapshot {
+            _ if auth_required => QuotaStatus::AuthRequired,
             Some(snapshot) if fresh => snapshot.status,
             Some(_) => QuotaStatus::Stale,
             None if record.last_error == Some(ProbeFailure::Auth) => QuotaStatus::AuthRequired,
@@ -995,7 +1000,9 @@ mod transition_tests {
         .unwrap();
         assert_eq!(rep.accounts.len(), 1);
         assert_eq!(rep.accounts[0].account, live);
-        assert_eq!(rep.accounts[0].status, QuotaStatus::Stale);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
+        assert!(rep.accounts[0].snapshot.is_some());
+        assert_eq!(rep.coverage.known, 0);
         assert_eq!(rep.coverage.total, 1);
 
         let tick = QuotaTick {
@@ -1013,5 +1020,42 @@ mod transition_tests {
         .unwrap();
         assert!(plan.drops.is_empty());
         assert!(plan.batches.is_empty());
+    }
+    #[test]
+    fn auth_required_adapter_with_fresh_snapshot_shows_auth_required_and_not_current() {
+        let live = account("claude", "live");
+        let mut record = AccountRecord::empty(live.clone());
+        record.revision = 1;
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: live.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let detections = [Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![live.clone()]),
+            status: QuotaStatus::AuthRequired,
+        }];
+        let rep = report(
+            crate::source::TEST_POLICIES,
+            &[record],
+            &detections,
+            &QuotaQuery { adapter: None },
+            110,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 1);
+        assert_eq!(rep.accounts[0].account, live);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
+        assert!(rep.accounts[0].snapshot.is_some());
+        assert_eq!(rep.coverage.known, 0);
+        assert_eq!(rep.coverage.total, 1);
     }
 }

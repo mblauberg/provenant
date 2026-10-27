@@ -1058,7 +1058,9 @@ mod tests {
         .unwrap();
         assert_eq!(rep.accounts.len(), 1);
         assert_eq!(rep.accounts[0].account, account);
-        assert_eq!(rep.accounts[0].status, QuotaStatus::Stale);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
+        assert!(rep.accounts[0].snapshot.is_some());
+        assert_eq!(rep.coverage.known, 0);
         assert_eq!(rep.coverage.total, 1);
     }
 }
