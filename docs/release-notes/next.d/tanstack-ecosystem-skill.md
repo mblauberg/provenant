@@ -1,3 +1,5 @@
+## Additions
+
 - The `tanstack` library skill now covers Form, Store, Pacer, Hotkeys, Charts,
   Devtools, DB and Router file routes, as well as Query, Router, Table and
   Virtual. It sends agents to version-matched API detail first: read-only
