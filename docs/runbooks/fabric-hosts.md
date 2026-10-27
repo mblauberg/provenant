@@ -276,7 +276,10 @@ Other limits on a peer run:
   returns. `lanes --host workshop --wait N` and `--watch` follow the peer's
   newest 100 lanes, counting only those that settle after the call starts. A
   lane seen running stays tracked until it settles, even after newer
-  dispatches push it off that page.
+  dispatches push it off that page. A queued or starting lane on the peer shows
+  its `lane_class` and `waiting_for` like a local one, except in the final report
+  of a wait or watch, which makes no read after its deadline; an older peer
+  shows neither.
 
 Waiting and watching work the same on both hosts. `lanes --wait N` returns when a
 lane that was unsettled at the start, or settled since, meets `--condition`

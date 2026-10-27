@@ -372,6 +372,16 @@ impl Peer {
             &mut |host, action, left| self.call_within(host, action, left),
         )
     }
+    /// What each queued or starting lane waits for, read from its owner. A
+    /// peer that cannot say, or does not know the question, leaves a lane with
+    /// no wait rather than failing the listing.
+    fn waits(
+        &self,
+        lanes: &[run::AttemptRecord],
+        selected: &[(HostId, AttemptId)],
+    ) -> Vec<run::LaneWait> {
+        fetch_waits(lanes, selected, |host, action| self.call(host, action))
+    }
     /// Poll the owner until the condition holds or the reader deadline passes.
     /// Expiry never stops a provider. A transient peer failure is retried within
     /// the budget; the last cause is reported only if the budget runs out on it.
@@ -517,6 +527,47 @@ fn call_seconds(remaining: Duration, peer_seconds: u64) -> u64 {
         .clamp(1, peer_seconds.max(1))
 }
 
+/// Ask each lane's host what its queued or starting lanes wait for.
+fn fetch_waits(
+    lanes: &[run::AttemptRecord],
+    selected: &[(HostId, AttemptId)],
+    mut call: impl FnMut(HostId, PeerAction) -> Result<PeerResult, Fail>,
+) -> Vec<run::LaneWait> {
+    let mut by_host: BTreeMap<HostId, Vec<AttemptId>> = BTreeMap::new();
+    for lane in lanes.iter().filter(|lane| {
+        matches!(
+            lane.state,
+            run::AttemptState::Queued | run::AttemptState::Starting
+        )
+    }) {
+        if let Some((host, _)) = selected.iter().find(|(_, id)| *id == lane.attempt_id) {
+            by_host.entry(*host).or_default().push(lane.attempt_id);
+        }
+    }
+    let mut waits = Vec::new();
+    for (host, attempts) in by_host {
+        for chunk in attempts.chunks(100) {
+            let targets = chunk
+                .iter()
+                .map(|attempt| AttemptTarget {
+                    attempt: *attempt,
+                    host: Some(host),
+                })
+                .collect();
+            if let Ok(PeerResult::LaneWaits(found)) = call(host, PeerAction::LaneWaits { targets })
+            {
+                // Only a wait for a lane that was asked about is believed.
+                waits.extend(
+                    found
+                        .into_iter()
+                        .filter(|wait| chunk.contains(&wait.attempt_id)),
+                );
+            }
+        }
+    }
+    waits
+}
+
 /// Poll `fetch`, given the time left, until the condition holds or `budget`
 /// passes. No fetch starts after the deadline.
 // Remote peer polling uses a hard real-time budget.
@@ -549,11 +600,21 @@ fn poll_until(
 /// Local lane rendering plus each row's owning host. Result paths are the
 /// peer's; read them with `output`.
 fn render(
+    peer: &Peer,
     lanes: &[run::AttemptRecord],
     selected: &[(HostId, AttemptId)],
     edge: &Edge<'_>,
 ) -> (Value, String) {
-    let (mut data, human) = render_lanes(lanes, &[], None, edge.roots.state.as_path());
+    let waits = peer.waits(lanes, selected);
+    render_with_waits(lanes, &waits, selected, edge.roots.state.as_path())
+}
+fn render_with_waits(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    selected: &[(HostId, AttemptId)],
+    state: &std::path::Path,
+) -> (Value, String) {
+    let (mut data, human) = render_lanes(lanes, waits, None, state);
     if let Some(rows) = data["lanes"].as_array_mut() {
         for (row, lane) in rows.iter_mut().zip(lanes) {
             let host = selected
@@ -766,7 +827,7 @@ pub(super) fn dispatch(
         }
         None => (lanes, None),
     };
-    let (mut data, human) = render(&lanes, &selected, edge);
+    let (mut data, human) = render(&peer, &lanes, &selected, edge);
     data["run_id"] = json!(run_id);
     data["operation_id"] = json!(batch.operation_id);
     data["host"] = json!(host);
@@ -870,7 +931,7 @@ pub(super) fn lanes(
         .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
         .take(usize::try_from(command.limit).unwrap_or(usize::MAX))
         .collect();
-    let (data, human) = render(&lanes, &selected, edge);
+    let (data, human) = render(&peer, &lanes, &selected, edge);
     Ok(Some((data, human, false)))
 }
 
@@ -906,7 +967,12 @@ fn armed(
                 emit(&format!("{text}\n"))
             },
         )?;
-        let (mut data, _) = render(&watched.lanes, &hosts(&watched.lanes), edge);
+        let (mut data, _) = render_with_waits(
+            &watched.lanes,
+            &[],
+            &hosts(&watched.lanes),
+            edge.roots.state.as_path(),
+        );
         data["condition_met"] = json!(watched.settled);
         let human = if json {
             String::new()
@@ -923,7 +989,12 @@ fn armed(
         Duration::from_secs(seconds),
         POLL,
     )?;
-    let (mut data, human) = render(&waited.lanes, &hosts(&waited.lanes), edge);
+    let (mut data, human) = render_with_waits(
+        &waited.lanes,
+        &[],
+        &hosts(&waited.lanes),
+        edge.roots.state.as_path(),
+    );
     data["condition_met"] = json!(waited.met);
     if waited.ignored > 0 {
         data["ignored_settled"] = json!(waited.ignored);
@@ -1011,7 +1082,7 @@ pub(super) fn host_lanes(
         data["host"] = json!(id);
         (data, format!("host {id}\n{human}"))
     } else {
-        render(&lanes, &selected, edge)
+        render(&peer, &lanes, &selected, edge)
     };
     Ok((data, human, false))
 }
@@ -1197,7 +1268,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                 if !met && status == Status::Ok {
                     status = Status::Timeout;
                 }
-                let (rendered, text) = render(&lanes, &selected, edge);
+                let (rendered, text) = render(&peer, &lanes, &selected, edge);
                 data["lanes"] = rendered["lanes"].clone();
                 data["condition_met"] = json!(met);
                 human.push_str(&text);
@@ -1288,6 +1359,106 @@ mod tests {
     use provenant_core::RootInputs;
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    fn lane(seed: u8, state: &str) -> Result<run::AttemptRecord> {
+        Ok(serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([seed; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([seed; 16]),
+            "operation_id": "peer-wait",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(100)?,
+            "state": {"state": state},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": provenant_records::CanonicalV1::file_digest(b""),
+                "bytes": 1,
+                "complete": true,
+                "redacted": false
+            }
+        }))?)
+    }
+
+    #[test]
+    fn a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones() -> Result {
+        let host = HostId::from_bytes([9; 16]);
+        let (queued, starting) = (lane(1, "queued")?, lane(2, "starting")?);
+        let lanes = [queued.clone(), starting.clone()];
+        let selected: Vec<_> = lanes.iter().map(|l| (host, l.attempt_id)).collect();
+        let wait = |lane: &run::AttemptRecord, text: &str| run::LaneWait {
+            attempt_id: lane.attempt_id,
+            lane_class: run::LaneClass::ReadOnly,
+            waiting_for: text.into(),
+        };
+        let mut asked = Vec::new();
+        let waits = fetch_waits(&lanes, &selected, |host, action| {
+            let PeerAction::LaneWaits { targets } = action else {
+                return Err(corrupt());
+            };
+            asked.push((host, targets.iter().map(|t| t.attempt).collect::<Vec<_>>()));
+            Ok(PeerResult::LaneWaits(vec![
+                wait(&queued, "launch: not yet handed to a guardian"),
+                wait(&starting, "read-only startup spacing: 1.2 s left of 2.0 s"),
+                // Not asked about, so not believed.
+                run::LaneWait {
+                    attempt_id: AttemptId::from_bytes([77; 16]),
+                    lane_class: run::LaneClass::Writer,
+                    waiting_for: "stray".into(),
+                },
+            ]))
+        });
+        assert_eq!(
+            asked,
+            vec![(host, vec![queued.attempt_id, starting.attempt_id])]
+        );
+        assert_eq!(waits.len(), 2);
+        let (data, human) =
+            render_with_waits(&lanes, &waits, &selected, std::path::Path::new("/state"));
+        assert_eq!(data["lanes"][0]["lane_class"], "read_only");
+        assert_eq!(
+            data["lanes"][0]["waiting_for"],
+            "launch: not yet handed to a guardian"
+        );
+        assert_eq!(
+            data["lanes"][1]["waiting_for"],
+            "read-only startup spacing: 1.2 s left of 2.0 s"
+        );
+        assert_eq!(data["lanes"][1]["host"], json!(host));
+        assert!(human.contains("(read-only startup spacing: 1.2 s left of 2.0 s)"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_peer_that_cannot_say_leaves_a_lane_without_a_wait_and_running_lanes_are_not_asked()
+    -> Result {
+        let host = HostId::from_bytes([9; 16]);
+        let (running, starting) = (lane(3, "running")?, lane(4, "starting")?);
+        let lanes = [running.clone(), starting.clone()];
+        let selected: Vec<_> = lanes.iter().map(|l| (host, l.attempt_id)).collect();
+        let mut asked = Vec::new();
+        // An older peer refuses the action it does not know.
+        let waits = fetch_waits(&lanes, &selected, |_, action| {
+            if let PeerAction::LaneWaits { targets } = action {
+                asked.extend(targets.iter().map(|t| t.attempt));
+            }
+            Err(corrupt())
+        });
+        assert!(waits.is_empty());
+        assert_eq!(asked, vec![starting.attempt_id]);
+        let (data, _) =
+            render_with_waits(&lanes, &waits, &selected, std::path::Path::new("/state"));
+        assert_eq!(data["lanes"][1]["lane_class"], Value::Null);
+        assert_eq!(data["lanes"][1]["waiting_for"], Value::Null);
+        Ok(())
+    }
 
     #[test]
     fn peer_writer_moves_its_base_into_the_new_worktree() -> Result {

@@ -648,6 +648,18 @@ pub fn peer(
                 owner.lanes_local(*all, *limit, budget, &cancel),
                 PeerResult::RunStatuses,
             ),
+            PeerAction::LaneWaits { targets } => {
+                if !(1..=100).contains(&targets.len()) {
+                    PeerResult::Error {
+                        error: FacadeError::InvalidInput,
+                    }
+                } else {
+                    peer_result(
+                        owner.waits_local(targets, budget, &cancel),
+                        PeerResult::LaneWaits,
+                    )
+                }
+            }
             PeerAction::SessionHandoff { input, .. } => {
                 PeerResult::SessionHandoff(crate::handoff::receive(
                     &crate::handoff::Target {
@@ -1438,6 +1450,17 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(run_error)?;
         Ok(page.lanes)
+    }
+    /// The wait of each queued or starting lane among `targets`, for `PeerAction::LaneWaits`.
+    fn waits_local(
+        &self,
+        targets: &[AttemptTarget],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<provenant_records::run::LaneWait>, FacadeError> {
+        let lanes = self.snapshots_local(targets, budget, cancel)?;
+        let store = self.store(budget, cancel)?;
+        Ok(store.lane_waits(&lanes, &self.call(budget, cancel)))
     }
     fn peer(
         &self,

@@ -64,13 +64,7 @@ impl AdmissionPolicy {
     }
 }
 
-/// What a lane that has not started is waiting for, shown by `lanes`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaneWait {
-    pub attempt_id: AttemptId,
-    pub lane_class: LaneClass,
-    pub waiting_for: String,
-}
+pub use provenant_records::run::LaneWait;
 
 /// Resource probes. A failed probe queues; it never admits unchecked.
 pub trait Resources {

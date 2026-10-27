@@ -538,6 +538,15 @@ impl LaneClass {
         }
     }
 }
+/// What a lane that has not started is waiting for, shown by `lanes` and carried
+/// over the peer channel so a peer's lanes read like local ones.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneWait {
+    pub attempt_id: AttemptId,
+    pub lane_class: LaneClass,
+    pub waiting_for: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionTicket {

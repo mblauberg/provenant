@@ -18,7 +18,8 @@
 - `lanes` now shows `lane_class` and `waiting_for` for queued and starting
   lanes, and uses the wait as their reason: launch not yet handed to a
   guardian, run concurrency, the class's remaining startup spacing, or host
-  capacity.
+  capacity. A peer's lanes, from `lanes --host` or a placed run, show the same
+  fields; an older peer shows neither.
 - The host admission ledger (`admission.sqlite3`) moves to schema version 2 and
   upgrades in place on first use. Its single spacing row becomes the writer
   start, and existing leases and tickets with no class count as writers. A

@@ -235,6 +235,11 @@ pub enum PeerAction {
         all: bool,
         limit: u16,
     },
+    /// What each named queued or starting lane waits for. An older peer does
+    /// not know it and refuses, which a caller reads as no waits to show.
+    LaneWaits {
+        targets: Vec<crate::coordination::facade::AttemptTarget>,
+    },
     /// Start a fresh session on the peer from a hand-off prompt.
     SessionHandoff {
         input: Box<crate::handoff::SessionHandoff>,
@@ -367,6 +372,7 @@ pub enum PeerResult {
     RunStatuses(
         #[serde(with = "crate::runs::attempts_wire")] Vec<provenant_records::run::AttemptRecord>,
     ),
+    LaneWaits(Vec<provenant_records::run::LaneWait>),
     Submitted(crate::runs::SubmissionReceipt),
     Output(crate::coordination::facade::OutputResult),
     RunEvents(crate::runs::RunEventsPage),

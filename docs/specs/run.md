@@ -59,7 +59,9 @@ has.
 and uses the latter as its reason: launch not yet handed to a guardian, run
 concurrency, the class's remaining startup spacing, or otherwise host
 capacity. It reads the store and ledger without locking and names only a wait
-it can see.
+it can see. `lanes --host` and the other peer listings show the same two fields:
+the peer derives them from its own store and ledger (peer action `lane_waits`)
+and an older peer that does not know the action simply shows none.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
@@ -73,6 +75,8 @@ it can see.
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
+  `crates/cli/src/run/remote.rs::a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones`;
+  `tests/fabric_transport.rs::run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates`;
   `crates/fabric-runtime/src/coordination/input.rs::concurrency_above_the_task_count_is_accepted_up_to_sixteen`;
   `::a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it`;
   `::a_recorded_start_only_moves_forward_unless_the_clock_stepped_back_a_spacing`;
