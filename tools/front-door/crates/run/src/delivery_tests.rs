@@ -94,10 +94,37 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 }
 
 #[test]
-fn graph_publication_never_adopts_a_foreign_local_branch()
+fn graph_publication_recovers_a_ref_created_before_its_marker()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    let publication = format!("provenant/graph/{head}");
+    // Simulate a crash after update-ref but before the ownership marker.
+    fixture.git(&["branch", &publication, &head.to_string()])?;
+    let common = host.command(
+        &fixture.writer.project,
+        "git",
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        WriterDeliveryStage::Push,
+    )?;
+    let directory = provenant_os::fs::Directory::open_anchor(Path::new(&common))?;
+    let marker = format!("provenant-graph-publication-{head}.json");
+    assert!(artifacts::read_sealed(&directory, &marker, RECORD_LIMIT)?.is_none());
+    assert_eq!(
+        host.graph_publication_branch(&fixture.writer.project, head)?,
+        publication
+    );
+    assert_eq!(
+        artifacts::read_sealed(&directory, &marker, RECORD_LIMIT)?.as_deref(),
+        Some(publication.as_bytes())
+    );
+    assert_eq!(
+        host.graph_publication_branch(&fixture.writer.project, head)?,
+        publication
+    );
+
+    fixture.commit(&fixture.writer.worktree, "different graph head")?;
     let head = host.head(&fixture.writer)?;
     let publication = format!("provenant/graph/{head}");
     fixture.git(&["branch", &publication])?;

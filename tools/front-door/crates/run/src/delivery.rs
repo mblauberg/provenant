@@ -314,20 +314,36 @@ impl HostDeliveryContext {
                 return Err(RunError::Delivery(stage));
             }
         } else {
-            // Empty expected OID means create only. A pre-existing foreign
-            // branch, including one at the same head, must be refused.
-            self.command(
-                project,
-                "git",
-                &[
-                    "update-ref",
-                    "--no-deref",
-                    &reference,
-                    &head.to_string(),
-                    "",
-                ],
-                stage,
-            )?;
+            // Recover a crash between ref creation and marker publication.
+            // Both updates compare the old value, so a different head refuses.
+            if self
+                .command(
+                    project,
+                    "git",
+                    &[
+                        "update-ref",
+                        "--no-deref",
+                        &reference,
+                        &head.to_string(),
+                        "",
+                    ],
+                    stage,
+                )
+                .is_err()
+            {
+                self.command(
+                    project,
+                    "git",
+                    &[
+                        "update-ref",
+                        "--no-deref",
+                        &reference,
+                        &head.to_string(),
+                        &head.to_string(),
+                    ],
+                    stage,
+                )?;
+            }
             crate::artifacts::seal(&directory, &marker, branch.as_bytes(), crate::RECORD_LIMIT)?;
         }
         Ok(branch)

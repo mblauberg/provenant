@@ -307,7 +307,9 @@ Before dispatch, every integration target is checked against the default and
 primary checkout branches, and node targets must match the graph's declared
 integration branch. Once every node succeeds and custody is released, the
 graph publishes local integration through a separately created graph branch,
-or uses its existing remote integration branch, and opens one PR. Its body
+recovering an interrupted publication only when its unmarked ref still points
+at the exact graph head. A different head or symbolic ref refuses. Alternatively,
+the graph uses its existing remote integration branch, and opens one PR. Its body
 contains bounded commit messages and run and attempt IDs. The checkpoint
 records the PR URL and successful final delivery;
 replay observes it. A failed final delivery keeps its advance error and remains
