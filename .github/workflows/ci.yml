@@ -263,8 +263,8 @@ jobs:
         run: swift test
 
   # #1339: stripping proc-macro dylibs broke macOS release builds at install
-  # time. Exercise the front door's release build; the release workflow covers
-  # the full-LTO build.
+  # time. Exercise the front door's release build without LTO for speed; the
+  # full-LTO build runs only at install (docs/runbooks/install.md).
   rust-macos-release:
     name: Rust macOS release smoke
     runs-on: macos-15
