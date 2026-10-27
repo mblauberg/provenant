@@ -60,3 +60,29 @@ invoking lane's `PROVENANT_RUN_STATE_DIR`.
 - Test: `crates/confinement/src/disk.rs::lane_inventory_refuses_incomplete_measurements`;
   `::lane_classification_reuses_gc_owner_and_reason`
 - Owner: `crates/confinement/src/disk.rs`
+
+## Decisions not adopted
+
+The disk-use epic #1570 closes with these decisions:
+
+- No byte budget (`disk.budget_bytes`) or LRU eviction by `last_used` at
+  lease release. Free-space triggers cover single-user hosts: the GC free
+  floor defaults to 10% of the state volume, at least 50 GiB; GC also runs
+  hourly, and `gc.alert_below` raises a low-space alert. The disk guard warns
+  and collects below 60 GiB, pauses builds below 25 GiB and resumes them at
+  50 GiB. Reopen this decision if a host runs out of space with all of these
+  active.
+- No seeded warm builds using a host seed cloned into lanes with `clonefile`.
+  The [Stage 0 workshop trial](https://github.com/mblauberg/provenant/issues/1570#issuecomment-6407476129) found that Cargo fingerprints the registry source
+  path: a private or symlinked `CARGO_HOME` makes every registry crate dirty.
+  A seed stays Fresh only with the host `~/.cargo`, and workspace crates still
+  rebuild because the lane checkout's mtimes are newer than the seed.
+  Re-measure on a quiet machine only if both constraints change. No ADR 0030
+  exists in `docs/adr` for seeding; this section records the decision.
+- No `git worktree lock` while a lane runs. Writer leases and custody records
+  serve that purpose; the lock was dropped during Stage 1.
+
+Remaining work is tracked separately: #1814 for admission freeing space before
+refusing a writer, #1815 for idle build output in live worktrees, #1816 for
+worktree removal blocked by ignored build output, and #1817 for expiry of
+closed-run logs and child stores.
