@@ -171,6 +171,27 @@ fn agy_stream_denial_is_failure() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_denials_accept_unexpected_shapes() -> Result<(), ProviderError> {
+    for (denials, expected) in [
+        (serde_json::json!(null), None),
+        (serde_json::json!({"display_name": "RunCommand"}), None),
+        (serde_json::json!([42]), Some("unknown action")),
+    ] {
+        let raw = serde_json::json!({"event":"result","result":{
+            "conversation_id":"", "status":"SUCCESS", "response":"",
+            "denied_actions":denials, "usage":{"input_tokens":0,"output_tokens":0}
+        }}).to_string();
+        let (events, outcome) = replay(&agy::Agy, &raw, EXIT)?;
+        if let Some(action) = expected {
+            assert_eq!(outcome.status(), OutcomeStatus::Failed);
+            assert!(events.contains(&ProviderEvent::Denied { action: action.into() }));
+        } else {
+            assert_eq!(outcome.status(), OutcomeStatus::Success);
+        }
+    }
+    Ok(())
+}
+#[test]
 fn agy_denied_command_preserves_failed_response() -> Result<(), ProviderError> {
     // Synthetic stdout paired with the issue's recorded stderr diagnostic.
     let raw = serde_json::json!({"event":"result","result":{

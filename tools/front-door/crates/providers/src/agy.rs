@@ -213,13 +213,8 @@ struct ResultWire {
     response: String,
     error: Option<String>,
     #[serde(default)]
-    denied_actions: Vec<DeniedAction>,
+    denied_actions: serde_json::Value,
     usage: Usage,
-}
-#[derive(Deserialize)]
-struct DeniedAction {
-    #[serde(default)]
-    display_name: String,
 }
 #[derive(Deserialize)]
 struct Usage {
@@ -280,17 +275,17 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     pool: None,
                     resets_in_seconds: resets_in(message),
                 });
-            } else if let Some(denied) = result.denied_actions.first() {
+            } else if let Some(denied) = result.denied_actions.as_array().and_then(|a| a.first()) {
                 if !result.response.is_empty() {
                     events.push(E::Text(result.response));
                 }
-                let name = &denied.display_name;
+                let name = denied.get("display_name").and_then(|n| n.as_str()).unwrap_or("");
                 let action = if (1..=64).contains(&name.len())
                     && name
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                 {
-                    name.as_str()
+                    name
                 } else {
                     "unknown action"
                 };
