@@ -221,6 +221,94 @@ fn claude_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
+fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
+    for (model, writer, suppress) in [
+        ("claude/claude-opus-5-5", true, false),
+        ("claude/claude-opus-5-5", true, true),
+        ("claude/claude-opus-5-5", false, false),
+        ("claude/claude-sonnet-5-5", true, false),
+    ] {
+        let rig = claude_fixture()?;
+        let cleanup = rig.process_cleanup();
+        if suppress {
+            let mut config = OpenOptions::new()
+                .append(true)
+                .open(rig.state.join("config.toml"))?;
+            writeln!(
+                config,
+                "\n[domains.routing]\nsuppress_opus_writer_warning = true"
+            )?;
+        }
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+            vec!["branch", "-M", "main"],
+        ] {
+            assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+        }
+        let prompt = rig.root.join("prompt.md");
+        fs::write(&prompt, "Reply OK without changing files.")?;
+        let mut args = vec![
+            "dispatch",
+            "--operation-id",
+            "opus-writer",
+            "--model",
+            model,
+            "--account",
+            "pro",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ];
+        if writer {
+            args.extend([
+                "--mode",
+                "worktree-write",
+                "--worktree-branch",
+                "fixture/opus",
+                "--base",
+                "main",
+                "--deliver",
+                "none",
+            ]);
+        }
+        let out = rig.command(&args)?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout.bytes),
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(reply["status"], "ok", "{reply}");
+        if !writer || suppress || model.contains("sonnet") {
+            assert!(!stderr.contains("advisory"), "{stderr}");
+        } else {
+            let advisory = stderr
+                .lines()
+                .find(|line| line.contains("advisory"))
+                .ok_or_else(|| format!("missing Opus writer advisory: {stderr}"))?;
+            assert!(advisory.contains("claude/claude-opus-5-5"), "{advisory}");
+            assert!(advisory.contains("codex/gpt-6.1-sol"), "{advisory}");
+            assert!(advisory.contains("principal"), "{advisory}");
+            assert_eq!(
+                stderr
+                    .lines()
+                    .filter(|line| line.contains("advisory"))
+                    .count(),
+                1
+            );
+        }
+        rig.assert_legacy_unchanged()?;
+        cleanup.disarm();
+    }
+    Ok(())
+}
+
 fn claude_dispatch_refreshes_registered_account() -> Result {
     let rig = claude_fixture()?;
     let cleanup = rig.process_cleanup();
@@ -1388,6 +1476,7 @@ fn main() -> ExitCode {
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
+                "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_settlement_records_a_failed_advance_for_status",
@@ -1406,6 +1495,9 @@ fn main() -> ExitCode {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
+                    "opus_writer_dispatch_advises_a_cheaper_route" => {
+                        opus_writer_dispatch_advises_a_cheaper_route()
+                    }
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()
                     }

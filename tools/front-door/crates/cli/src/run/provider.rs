@@ -11,6 +11,7 @@ use provenant_records::{ADAPTER_SPECS, AdapterSpec};
 use provenant_records::{ResolvedRoute, RouteAlternative};
 use provenant_run as run;
 use run::{RouteRecord, SkipKind, SkippedRoute};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(super) fn prepare(
@@ -531,6 +532,16 @@ fn prepare_with(
                 format!("setup failed: {error}"),
             ));
             continue;
+        }
+        if writer.is_some()
+            && let Some(advisory) = config
+                .domains
+                .routing
+                .opus_writer_advisory(&catalogue, &route)
+        {
+            // Advice must never refuse an otherwise valid dispatch, even if
+            // the caller has closed its diagnostic stream.
+            let _ = writeln!(std::io::stderr().lock(), "{advisory}");
         }
         let provider = RouteRecord {
             provider: Some(route.adapter.clone()),

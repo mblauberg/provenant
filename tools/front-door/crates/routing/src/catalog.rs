@@ -18,9 +18,69 @@ pub enum PacingPolicy {
 #[serde(deny_unknown_fields)]
 #[serde(default)]
 pub struct RoutingConfig {
+    /// Silence the advisory for Opus implementation lanes.
+    pub suppress_opus_writer_warning: bool,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub pacing: BTreeMap<String, PacingPolicy>,
+}
+impl RoutingConfig {
+    /// Suggest a cheaper route in the applied tier. Exact models and custom
+    /// pools use the model's highest bundled implementation tier.
+    pub fn opus_writer_advisory(
+        &self,
+        catalogue: &Catalogue,
+        route: &crate::ResolvedRoute,
+    ) -> Option<String> {
+        if self.suppress_opus_writer_warning || !route.model.contains("opus") {
+            return None;
+        }
+        let applied = format!("{}/{}", route.adapter, route.model);
+        let pool = route
+            .pool_selection
+            .as_ref()
+            .filter(|receipt| catalogue.has_pool(&receipt.pool))
+            .map(|receipt| receipt.pool.as_str())
+            .or_else(|| {
+                [
+                    "principal",
+                    "senior",
+                    "junior",
+                    "design",
+                    "writing",
+                    "utility",
+                ]
+                .into_iter()
+                .find(|name| {
+                    catalogue
+                        .pools
+                        .get(*name)
+                        .is_some_and(|members| members.iter().any(|m| m.model.as_str() == applied))
+                })
+            })?;
+        let members = self.pools.get(pool).or_else(|| catalogue.pools.get(pool))?;
+        let cheaper = members
+            .iter()
+            .chain(catalogue.pools.get(pool).into_iter().flatten())
+            .find(|member| {
+                member.weight > 0
+                    && (member.model.model().contains("sonnet")
+                        || member.model.adapter() == "codex")
+            })?;
+        let effort = cheaper.effort.as_deref().or_else(|| {
+            route
+                .effort
+                .as_deref()
+                .filter(|effort| cheaper.efforts.iter().any(|e| e == effort))
+        });
+        Some(format!(
+            "advisory: Opus writer route {applied}; consider cheaper {pool} route {}{} (silence with domains.routing.suppress_opus_writer_warning = true)",
+            cheaper.model.as_str(),
+            effort
+                .map(|effort| format!(" effort={effort}"))
+                .unwrap_or_default(),
+        ))
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,7 +210,7 @@ impl DomainConfig for RoutingConfig {
     }
 }
 fn defaults(_: Profile) -> &'static str {
-    "[routes]\n[pools]\n[pacing]\n"
+    "suppress_opus_writer_warning = false\n[routes]\n[pools]\n[pacing]\n"
 }
 pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
 
