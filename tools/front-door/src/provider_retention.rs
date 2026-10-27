@@ -247,6 +247,8 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         WallTime::from_micros(200)?,
         &call,
     )?;
+    let events_before = store.events(0, 64, Some(attempt), &call)?;
+    assert!(!events_before.is_empty(), "child attempt records events");
     drop(store);
     let temporary = candidate
         .parent()
@@ -269,6 +271,12 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     assert_eq!(report.attempt_tmp[0].bytes, preview.attempt_tmp[0].bytes);
     assert!(!temporary.exists());
     assert!(!candidate.exists());
+    let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("child store")?;
+    assert!(
+        reader.events(0, 64, Some(attempt), &call)?.is_empty(),
+        "child store events must expire after log retention"
+    );
+    drop(reader);
     assert!(
         child_path
             .join(format!(
