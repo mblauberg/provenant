@@ -2573,6 +2573,52 @@ fn cargo_build_dir_is_pinned_to_lane_target_for_each_access() -> Result<(), Prov
 }
 
 #[test]
+fn writer_lint_target_is_a_lane_cache_sibling_of_the_build_target() -> Result<(), ProviderError> {
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let cache = "/fixture/home/Library/Caches/provenant-lane-cargo/fixture";
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let launch = crate::codex::Codex.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    // Lint-only cargo runs take their own build directory, so they do not
+    // queue on the lock that test and build runs hold.
+    let lint = format!("{cache}/target-lint");
+    assert!(
+        launch
+            .env
+            .iter()
+            .any(|(k, v)| k == "PROVENANT_LANE_CARGO_LINT_TARGET" && v == lint.as_str()),
+        "PROVENANT_LANE_CARGO_LINT_TARGET must be {lint}"
+    );
+    assert!(
+        Path::new(&lint).starts_with(cache),
+        "the lint target must sit inside the granted lane cache"
+    );
+    let read_only = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let launch = crate::codex::Codex.prepare(fixture_input(
+        &route,
+        &read_only,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    assert!(
+        launch
+            .env
+            .iter()
+            .all(|(k, _)| k != "PROVENANT_LANE_CARGO_LINT_TARGET"),
+        "read-only lanes have no lane cache to hold a lint target"
+    );
+    Ok(())
+}
+
+#[test]
 fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let shared = [
