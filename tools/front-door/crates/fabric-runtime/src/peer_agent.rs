@@ -1313,19 +1313,56 @@ mod tests {
             OsStr::new("/opt/homebrew/bin:/usr/bin"),
         )
         .unwrap();
-        assert!(plist.contains("<string>dev.provenant.peer</string>"));
-        assert!(plist.contains(
-            "<string>/Users/a&amp;b/.local/bin/provenant</string>\n    <string>fabric</string>\n    <string>peer-agent</string>"
-        ));
-        assert!(plist.contains("<key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/bin</string>"));
-        assert!(plist.contains("<string>/Users/a&amp;b/.local/share/provenant/v1</string>"));
-        for key in ["RunAtLoad", "KeepAlive", "AbandonProcessGroup"] {
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::{Command, Stdio};
+
+            let mut parser = Command::new("plutil")
+                .args(["-convert", "json", "-o", "-", "-"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("plutil is available on macOS");
+            parser
+                .stdin
+                .take()
+                .expect("plutil stdin")
+                .write_all(plist.as_bytes())
+                .expect("write plist");
+            let parsed = parser.wait_with_output().expect("parse plist");
             assert!(
-                plist.contains(&format!("<key>{key}</key>\n  <true/>")),
-                "{key}"
+                parsed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&parsed.stderr)
+            );
+            let value: serde_json::Value =
+                serde_json::from_slice(&parsed.stdout).expect("plutil JSON output");
+            assert_eq!(value["Label"], "dev.provenant.peer");
+            assert_eq!(
+                value["ProgramArguments"],
+                serde_json::json!([
+                    "/Users/a&b/.local/bin/provenant",
+                    "fabric",
+                    "peer-agent"
+                ])
+            );
+            assert_eq!(
+                value["EnvironmentVariables"]["PATH"],
+                "/opt/homebrew/bin:/usr/bin"
+            );
+            assert_eq!(
+                value["EnvironmentVariables"]["PROVENANT_STATE_DIR"],
+                "/Users/a&b/.local/share/provenant/v1"
+            );
+            assert_eq!(value["RunAtLoad"], true);
+            assert_eq!(value["KeepAlive"], true);
+            assert_eq!(value["AbandonProcessGroup"], true);
+            assert_eq!(
+                value["StandardErrorPath"],
+                "/Users/a&b/.local/share/provenant/v1/peer-agent/agent.log"
             );
         }
-        assert!(plist.contains("/v1/peer-agent/agent.log</string>"));
-        assert!(!plist.contains("a&b"));
+        #[cfg(not(target_os = "macos"))]
+        assert!(plist.starts_with("<?xml"));
     }
 }
