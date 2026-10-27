@@ -75,18 +75,25 @@ pub(super) fn nothing_pending(ignored: usize) -> Fail {
     )
 }
 
-/// One fetch. A transient peer failure is retried within the budget, and the
-/// last cause is reported only if the budget runs out on it.
+/// Reads the candidate lanes within the time left to the wait's deadline, so a
+/// slow peer cannot hold the command past its budget.
+pub(super) type Fetch<'a> = dyn FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail> + 'a;
+
+enum Tick {
+    Lanes(Vec<run::AttemptRecord>),
+    /// A transient peer failure, to retry while the budget lasts.
+    Retry(Fail),
+}
+/// One fetch, given what is left of the budget. A transient peer failure is
+/// retried within the budget, and the last cause is reported only if the
+/// budget runs out on it.
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
-fn tick(
-    fetch: &mut dyn FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
-    deadline: Instant,
-) -> Result<Option<Vec<run::AttemptRecord>>, Fail> {
-    match fetch() {
-        Ok(lanes) => Ok(Some(lanes)),
+fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fail> {
+    match fetch(deadline.saturating_duration_since(Instant::now())) {
+        Ok(lanes) => Ok(Tick::Lanes(lanes)),
         Err(fail) if fail.kind == ErrorKind::PeerUnavailable && Instant::now() < deadline => {
-            Ok(None)
+            Ok(Tick::Retry(fail))
         }
         Err(fail) => Err(fail),
     }
@@ -96,18 +103,26 @@ fn tick(
 fn pause(poll: Duration, deadline: Instant) {
     std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
 }
-/// Arm on the first successful fetch.
+/// Arm on the first successful fetch. No fetch starts after the deadline: the
+/// last transient cause is reported instead.
+// A reader deadline is a real transport boundary.
+#[allow(clippy::disallowed_methods)]
 fn arm(
-    fetch: &mut dyn FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    fetch: &mut Fetch<'_>,
     scope: Scope,
     deadline: Instant,
     poll: Duration,
 ) -> Result<(Armed, Vec<run::AttemptRecord>), Fail> {
     let first = loop {
-        if let Some(first) = tick(fetch, deadline)? {
-            break first;
+        match tick(fetch, deadline)? {
+            Tick::Lanes(first) => break first,
+            Tick::Retry(fail) => {
+                pause(poll, deadline);
+                if Instant::now() >= deadline {
+                    return Err(fail);
+                }
+            }
         }
-        pause(poll, deadline);
     };
     let armed = Armed::arm(scope, &first);
     let counted = armed.counted(first);
@@ -126,7 +141,7 @@ pub(super) struct Waited {
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn wait(
-    mut fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    mut fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
     scope: Scope,
     condition: Condition,
     budget: Duration,
@@ -144,7 +159,10 @@ pub(super) fn wait(
             });
         }
         pause(poll, deadline);
-        if let Some(next) = tick(&mut fetch, deadline)? {
+        if Instant::now() >= deadline {
+            continue;
+        }
+        if let Tick::Lanes(next) = tick(&mut fetch, deadline)? {
             lanes = armed.counted(next);
         }
     }
@@ -159,7 +177,7 @@ pub(super) struct Watched {
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn watch(
-    mut fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    mut fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
     scope: Scope,
     budget: Duration,
     poll: Duration,
@@ -184,7 +202,10 @@ pub(super) fn watch(
             });
         }
         pause(poll, deadline);
-        if let Some(next) = tick(&mut fetch, deadline)? {
+        if Instant::now() >= deadline {
+            continue;
+        }
+        if let Tick::Lanes(next) = tick(&mut fetch, deadline)? {
             lanes = armed.counted(next);
         }
     }
@@ -293,7 +314,7 @@ mod tests {
     fn a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one() {
         let mut calls = 0;
         let waited = wait(
-            || {
+            |_| {
                 calls += 1;
                 Ok(if calls < 3 {
                     vec![done(1, 10), running(2)]
@@ -317,7 +338,7 @@ mod tests {
     #[test]
     fn an_older_settlement_expires_the_wait_instead_of_satisfying_it() {
         let waited = wait(
-            || Ok(vec![done(1, 10), running(2)]),
+            |_| Ok(vec![done(1, 10), running(2)]),
             scope(&[], None, true),
             Condition::Any,
             Duration::from_millis(20),
@@ -331,7 +352,7 @@ mod tests {
     #[test]
     fn a_named_attempt_counts_whenever_it_settled() {
         let waited = wait(
-            || Ok(vec![done(1, 10), running(2)]),
+            |_| Ok(vec![done(1, 10), running(2)]),
             scope(&[1], None, true),
             Condition::Any,
             Duration::from_secs(5),
@@ -345,7 +366,7 @@ mod tests {
     #[test]
     fn since_counts_settlements_before_arming() {
         let waited = wait(
-            || Ok(vec![done(1, 10), done(2, 30), running(3)]),
+            |_| Ok(vec![done(1, 10), done(2, 30), running(3)]),
             scope(&[], Some(20), true),
             Condition::Any,
             Duration::from_secs(5),
@@ -366,7 +387,7 @@ mod tests {
 
     #[test]
     fn nothing_pending_is_refused_for_named_lanes_only() {
-        let settled_only = || Ok(vec![done(1, 10)]);
+        let settled_only = |_| Ok(vec![done(1, 10)]);
         let refused = wait(
             settled_only,
             scope(&[], None, true),
@@ -394,7 +415,7 @@ mod tests {
     fn a_lane_that_appears_after_arming_counts() {
         let mut calls = 0;
         let waited = wait(
-            || {
+            |_| {
                 calls += 1;
                 Ok(if calls == 1 {
                     vec![running(1)]
@@ -416,7 +437,7 @@ mod tests {
     fn a_transient_peer_failure_is_retried_within_budget() {
         let mut calls = 0;
         let waited = wait(
-            || {
+            |_| {
                 calls += 1;
                 if calls < 3 {
                     Err(Fail::new(
@@ -443,7 +464,7 @@ mod tests {
         let mut calls = 0;
         let mut lines = Vec::new();
         let watched = watch(
-            || {
+            |_| {
                 calls += 1;
                 Ok(match calls {
                     1 => vec![lane(1, json!({"state":"queued"})), running(2)],
@@ -484,7 +505,7 @@ mod tests {
         let host = HostId::from_bytes([7; 16]);
         let mut lines = Vec::new();
         let watched = watch(
-            || Ok(vec![running(1), done(2, 1)]),
+            |_| Ok(vec![running(1), done(2, 1)]),
             scope(&[2], None, true),
             Duration::from_millis(10),
             POLL,
@@ -505,5 +526,73 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&json_line(&running(1), None)).unwrap();
         assert_eq!(json["event"], "lane");
         assert_eq!(json["state"], "running");
+    }
+
+    #[test]
+    fn a_fetch_gets_the_time_left_and_none_starts_after_the_deadline() {
+        let budget = Duration::from_millis(60);
+        for watching in [false, true] {
+            let mut given = Vec::new();
+            let mut fetch = |left: Duration| {
+                given.push(left);
+                Ok(vec![running(1)])
+            };
+            // The poll outlasts the budget, so the sleep ends at the deadline.
+            let long_poll = Duration::from_secs(30);
+            if watching {
+                let watched = watch(
+                    &mut fetch,
+                    scope(&[], None, true),
+                    budget,
+                    long_poll,
+                    &mut |_| Ok(()),
+                )
+                .unwrap();
+                assert!(!watched.settled);
+            } else {
+                let waited = wait(
+                    &mut fetch,
+                    scope(&[], None, true),
+                    Condition::All,
+                    budget,
+                    long_poll,
+                )
+                .unwrap();
+                assert!(!waited.met);
+            }
+            assert_eq!(given.len(), 1, "watching={watching}: {given:?}");
+            assert!(given[0] <= budget, "{given:?}");
+        }
+    }
+
+    #[test]
+    // The deadline under test is a real-time reader boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn arming_stops_retrying_at_the_deadline_with_the_last_cause() {
+        let mut starts = Vec::new();
+        let begun = Instant::now();
+        let refused = wait(
+            |_| {
+                starts.push(Instant::now());
+                std::thread::sleep(Duration::from_millis(25));
+                Err(Fail::new(
+                    Status::Unavailable,
+                    ErrorKind::PeerUnavailable,
+                    format!("workshop: attempt {}", starts.len()),
+                ))
+            },
+            scope(&[], None, true),
+            Condition::All,
+            Duration::from_millis(40),
+            Duration::from_millis(100),
+        );
+        let message = refused.err().map(|fail| fail.message).unwrap_or_default();
+        assert!(message.contains("workshop: attempt"), "{message}");
+        assert!(
+            starts
+                .iter()
+                .all(|start| *start < begun + Duration::from_millis(40)),
+            "a fetch began after the deadline"
+        );
     }
 }

@@ -283,7 +283,9 @@ every lane of the named runs settled earlier the call is refused with their
 number, so pass the attempt ID, or `--since TIME` to count earlier
 settlements. `--session LABEL` selects the lanes an agent label submitted, so
 no ID list is needed. For a background job or monitor, run
-`provenant lanes --watch 3600`: it prints `STATE RUN/TASK/ATTEMPT` (and
+`provenant lanes --watch 3600`. Each peer read is bounded by the time the wait
+has left as well as by `limits.peer_seconds`, so a short wait or watch never
+sits in a slow SSH call past its own budget. The watch prints `STATE RUN/TASK/ATTEMPT` (and
 `host=ID` for a peer's lane) once per state change, then `end settled lanes=N`,
 or `end timeout lanes=N pending=M` with exit 124.
 

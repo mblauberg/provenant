@@ -1802,8 +1802,8 @@ fn candidates<'a>(
     session: &'a Session,
     picks: &'a Picks<'a>,
     seen: Option<u64>,
-) -> impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail> + 'a {
-    move || {
+) -> impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail> + 'a {
+    move |_| {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = request(&clock, &cancel)?;

@@ -310,9 +310,19 @@ impl Peer {
         Ok(peer)
     }
     fn call(&self, host: HostId, action: PeerAction) -> Result<PeerResult, Fail> {
+        self.call_within(host, action, Duration::MAX)
+    }
+    /// One peer request that takes no longer than `remaining`, the time a wait
+    /// or watch has left, nor than the configured peer limit.
+    fn call_within(
+        &self,
+        host: HostId,
+        action: PeerAction,
+        remaining: Duration,
+    ) -> Result<PeerResult, Fail> {
         let budget = WaitBudget::cli(
             self.clock.mono_now(),
-            self.context.config.limits.peer_seconds,
+            call_seconds(remaining, self.context.config.limits.peer_seconds),
         )
         .map_err(io_fail)?;
         self.context
@@ -321,6 +331,13 @@ impl Peer {
     }
     /// Current owner records, one batched status read per host.
     fn records(&self, selected: &[(HostId, AttemptId)]) -> Result<Vec<run::AttemptRecord>, Fail> {
+        self.records_within(selected, Duration::MAX)
+    }
+    fn records_within(
+        &self,
+        selected: &[(HostId, AttemptId)],
+        remaining: Duration,
+    ) -> Result<Vec<run::AttemptRecord>, Fail> {
         let mut by_host: BTreeMap<HostId, Vec<usize>> = BTreeMap::new();
         for (index, (host, _)) in selected.iter().enumerate() {
             by_host.entry(*host).or_default().push(index);
@@ -338,7 +355,7 @@ impl Peer {
                     })
                     .collect();
                 let PeerResult::RunStatuses(page) =
-                    self.call(host, PeerAction::RunStatuses { targets })?
+                    self.call_within(host, PeerAction::RunStatuses { targets }, remaining)?
                 else {
                     return Err(corrupt());
                 };
@@ -368,7 +385,7 @@ impl Peer {
         seconds: u64,
     ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
         poll_until(
-            || self.records(selected),
+            |remaining| self.records_within(selected, remaining),
             condition,
             Duration::from_secs(seconds),
             POLL,
@@ -376,32 +393,48 @@ impl Peer {
     }
 }
 
-/// Poll `fetch` until the condition holds or `budget` passes.
+/// Whole seconds one peer request may take: what is left of the wait, rounded
+/// up to the one-second minimum a budget has, and never more than the peer
+/// limit.
+fn call_seconds(remaining: Duration, peer_seconds: u64) -> u64 {
+    remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+        .clamp(1, peer_seconds.max(1))
+}
+
+/// Poll `fetch`, given the time left, until the condition holds or `budget`
+/// passes. No fetch starts after the deadline.
 // Remote peer polling uses a hard real-time budget.
 #[allow(clippy::disallowed_methods)]
 fn poll_until(
-    mut fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    mut fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
     condition: Condition,
     budget: Duration,
     poll: Duration,
 ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
     let deadline = Instant::now() + budget;
     loop {
-        match fetch() {
+        let last = match fetch(deadline.saturating_duration_since(Instant::now())) {
             Ok(lanes) => {
                 let met = condition_met(&lanes, condition);
                 if met || Instant::now() >= deadline {
                     return Ok((lanes, met));
                 }
+                Ok(lanes)
             }
             Err(fail) if fail.kind == ErrorKind::PeerUnavailable => {
                 if Instant::now() >= deadline {
                     return Err(fail);
                 }
+                Err(fail)
             }
             Err(fail) => return Err(fail),
-        }
+        };
         std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
+        if Instant::now() >= deadline {
+            return last.map(|lanes| (lanes, false));
+        }
     }
 }
 
@@ -702,7 +735,7 @@ pub(super) fn lanes(
             explicit: true,
             snapshot: true,
         };
-        let fetch = || peer.records(&selected);
+        let fetch = |remaining| peer.records_within(&selected, remaining);
         let first = selected
             .first()
             .map(|(host, _)| *host)
@@ -736,7 +769,7 @@ pub(super) fn lanes(
 fn armed(
     command: &Lanes,
     scope: Scope,
-    fetch: impl FnMut() -> Result<Vec<run::AttemptRecord>, Fail>,
+    fetch: impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail>,
     host_of: &dyn Fn(&run::AttemptRecord) -> HostId,
     edge: &Edge<'_>,
     json: bool,
@@ -826,13 +859,14 @@ pub(super) fn host_lanes(
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
     if command.wait.is_some() || command.watch.is_some() {
         // The peer's newest lanes: the window a wait or watch can see.
-        let fetch = || {
-            let PeerResult::RunStatuses(records) = peer.call(
+        let fetch = |remaining| {
+            let PeerResult::RunStatuses(records) = peer.call_within(
                 id,
                 PeerAction::Lanes {
                     all: true,
                     limit: PEER_LANES,
                 },
+                remaining,
             )?
             else {
                 return Err(corrupt());
@@ -1405,7 +1439,7 @@ mod tests {
     fn wait_retries_a_transient_peer_failure_within_budget() {
         let mut calls = 0;
         let out = poll_until(
-            || {
+            |_| {
                 calls += 1;
                 if calls < 3 {
                     Err(unavailable("workshop: ssh timed out"))
@@ -1425,7 +1459,7 @@ mod tests {
     fn wait_reports_the_last_cause_when_the_budget_runs_out() {
         let mut calls = 0;
         let out = poll_until(
-            || {
+            |_| {
                 calls += 1;
                 Err(unavailable(&format!("workshop: failure {calls}")))
             },
@@ -1440,10 +1474,46 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_call_is_capped_by_the_time_left_and_the_peer_limit() {
+        let secs = Duration::from_secs;
+        assert_eq!(call_seconds(secs(1), 30), 1);
+        assert_eq!(call_seconds(Duration::from_millis(1500), 30), 2);
+        assert_eq!(call_seconds(secs(25), 30), 25);
+        assert_eq!(call_seconds(secs(3600), 30), 30);
+        assert_eq!(call_seconds(Duration::MAX, 30), 30);
+        // An exhausted budget still asks for the one-second minimum.
+        assert_eq!(call_seconds(Duration::ZERO, 30), 1);
+    }
+
+    #[test]
+    // The deadline under test is a real-time reader boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn wait_starts_no_fetch_after_its_deadline() {
+        let mut starts = Vec::new();
+        let begun = Instant::now();
+        let out = poll_until(
+            |left| {
+                starts.push((Instant::now(), left));
+                Err(unavailable("workshop: ssh timed out"))
+            },
+            Condition::All,
+            Duration::from_millis(40),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            out.err().map(|fail| fail.kind.code()),
+            Some("PEER_UNAVAILABLE")
+        );
+        assert_eq!(starts.len(), 1);
+        assert!(starts[0].1 <= Duration::from_millis(40), "{starts:?}");
+        assert!(starts[0].0 < begun + Duration::from_millis(40));
+    }
+
+    #[test]
     fn wait_does_not_retry_a_non_transient_failure() {
         let mut calls = 0;
         let out = poll_until(
-            || {
+            |_| {
                 calls += 1;
                 Err(corrupt())
             },
