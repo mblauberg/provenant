@@ -290,6 +290,10 @@ fn spawn_identified(
     if let Some(pipe) = secret {
         pass.push(pipe.fd());
     }
+    // SAFETY: the hook runs only after fork and calls only umask.
+    unsafe {
+        command.pre_exec(private_umask);
+    }
     child::configure_command(&mut command, &pass, Some(env), false)?;
     let worker = std::thread::Builder::new()
         .name("provider-identity".into())
@@ -324,6 +328,14 @@ fn spawn_identified(
         }
         (Err(error), _) => Err(error),
     }
+}
+
+/// Provider-created state is private from creation; the parent keeps its mask.
+fn private_umask() -> io::Result<()> {
+    // SAFETY: umask takes an integer, is async-signal-safe and changes only the
+    // forked child's mask.
+    unsafe { libc::umask(0o077) };
+    Ok(())
 }
 
 fn identity_gate(fd: i32) -> io::Result<()> {
@@ -925,5 +937,61 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
                 "unexpected waitid status",
             )),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn provider_creates_private_state_regardless_of_parent_umask() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = provenant_os::fs::Directory::open_anchor(root.path()).unwrap();
+        let lease = directory
+            .try_lock(
+                std::ffi::OsStr::new("writer.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            )
+            .unwrap();
+        let argv: Vec<OsString> = ["/bin/sh", "-c", "umask; mkdir made && : > made.txt"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let env = [(OsString::from("PATH"), OsString::from("/bin:/usr/bin"))];
+        let boot = super::super::census::SystemProcessObserver::boot_identity().unwrap();
+        let mut group = ProviderGroup::spawn(
+            provenant_os::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&env),
+                cwd: root.path(),
+                input: false,
+                secret_input: None,
+                capture_stdout: true,
+                capture_stderr: false,
+            },
+            &lease,
+            &boot,
+        )
+        .unwrap();
+        assert!(group.child.as_mut().unwrap().wait().unwrap().success());
+        let mut stdout = String::new();
+        group
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        assert_eq!(stdout.trim(), "0077");
+        let mode = |name: &str| {
+            std::fs::metadata(root.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("made"), 0o700);
+        assert_eq!(mode("made.txt"), 0o600);
     }
 }
