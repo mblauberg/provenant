@@ -2338,7 +2338,7 @@ mod tests {
             confinement.plan.permissions().scratch.path,
             paths.temporary.join("candidate-0")
         );
-        let mut bad_task = task;
+        let mut bad_task = task.clone();
         bad_task.base = Some("absent-base".into());
         let result = prepare_with(
             &registry,
@@ -2350,6 +2350,27 @@ mod tests {
             None,
         );
         assert!(matches!(result, Err(error) if error.contains("invalid Git base \"absent-base\"")));
+        // A writable tree the plan cannot cover names that error, not a disclosure denial.
+        std::fs::write(
+            state.join("config.toml"),
+            format!(
+                "schema_version = 1\n[domains.run]\nwriter_writes = ['{}']\n",
+                paths.scratch.display(),
+            ),
+        )?;
+        let error = prepare_with(
+            &registry,
+            &task,
+            &full,
+            &paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+        )
+        .err()
+        .ok_or("unconfinable worktree accepted")?;
+        assert!(!error.contains("DisclosureDenied"), "{error}");
+        assert!(error.contains("plan roots are invalid"), "{error}");
         Ok(())
     }
 
