@@ -348,8 +348,32 @@ fn write_intent(
         None => {
             account_dir.unlink(OsStr::new(&name))?;
             account_dir.sync()?;
+            drop(account_dir);
+            let _ = dir.rmdir(OsStr::new(&intent.account.account_key));
+            let _ = dir.sync();
             if let Some(p) = pos {
                 records.remove(p);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn clean_orphan_dirs(dir: &Directory) -> Result<(), EdgeError> {
+    for entry in dir.entries()? {
+        let entry = entry?;
+        if entry == "report.json"
+            || entry == "quota.lock"
+            || entry.to_str().is_some_and(|s| s.starts_with('.'))
+        {
+            continue;
+        }
+        if let Ok(account_dir) = dir.open_verified_directory(&entry) {
+            let is_empty = account_dir.entries()?.next().is_none();
+            drop(account_dir);
+            if is_empty {
+                let _ = dir.rmdir(&entry);
+                let _ = dir.sync();
             }
         }
     }
@@ -371,12 +395,7 @@ fn detections(
                         .filter(|a| a.adapter == r.adapter.id())
                         .cloned()
                         .collect();
-                    (!accounts.is_empty()
-                        && !matches!(
-                            status,
-                            Ok(provenant_providers::AccountDetection::AuthRequired)
-                        ))
-                    .then_some(accounts)
+                    (!accounts.is_empty()).then_some(accounts)
                 },
                 status: match status {
                     Ok(provenant_providers::AccountDetection::AuthRequired) => {
@@ -513,6 +532,7 @@ fn execute(
         for drop in &plan.drops {
             write_intent(&dir, drop, &mut records)?;
         }
+        clean_orphan_dirs(&dir)?;
         plan
     };
     for account in plan.batches.iter().flatten() {
@@ -675,7 +695,7 @@ pub fn run(
                     row.account.label, row.account.adapter
                 ));
                 if let Some(snapshot) = &row.snapshot {
-                    if row.status == QuotaStatus::Stale {
+                    if matches!(row.status, QuotaStatus::Stale | QuotaStatus::AuthRequired) {
                         human.push_str(" (last known)");
                     }
                     for window in &snapshot.windows {
@@ -788,5 +808,259 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn drop_removes_empty_orphan_quota_directory() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let dir = private(temp.path())?;
+        let account = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        };
+        let mut records = Vec::new();
+        let mut initial = AccountRecord::empty(account.clone());
+        initial.revision = 1;
+        let add = UpdateIntent {
+            account: account.clone(),
+            expected: None,
+            replacement: Some(initial),
+        };
+        write_intent(&dir, &add, &mut records)?;
+        assert_eq!(records.len(), 1);
+        assert!(dir.open_verified_directory(OsStr::new("go")).is_ok());
+
+        let drop_intent = UpdateIntent {
+            account: account.clone(),
+            expected: Some(records[0].clone()),
+            replacement: None,
+        };
+        write_intent(&dir, &drop_intent, &mut records)?;
+        assert_eq!(records.len(), 0);
+        assert!(dir.open_verified_directory(OsStr::new("go")).is_err());
+
+        // Pre-existing empty orphan directory is cleaned up by clean_orphan_dirs.
+        let orphan = child(&dir, OsStr::new("anese"))?;
+        drop(orphan);
+        assert!(dir.open_verified_directory(OsStr::new("anese")).is_ok());
+        clean_orphan_dirs(&dir)?;
+        assert!(dir.open_verified_directory(OsStr::new("anese")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn quota_human_output_prints_three_of_three_current_readings() {
+        let accounts =
+            [("claude", "michael"), ("claude", "pro"), ("codex", "work")].map(|(adapter, key)| {
+                AccountScope {
+                    adapter: adapter.into(),
+                    account_key: key.into(),
+                    label: key.into(),
+                }
+            });
+        let records: Vec<_> = accounts
+            .iter()
+            .map(|a| {
+                let mut r = AccountRecord::empty(a.clone());
+                r.revision = 1;
+                r.snapshot = Some(QuotaSnapshot {
+                    schema_version: 1,
+                    account: a.clone(),
+                    revision: 1,
+                    status: QuotaStatus::Available,
+                    observed_unix_seconds: 100,
+                    source_ref: "fixture".into(),
+                    authority_ref: None,
+                    windows: vec![],
+                    details: None,
+                });
+                r
+            })
+            .collect();
+        // Include an unregistered cached account and an unsupported source adapter.
+        let mut all_records = records;
+        all_records.push(AccountRecord::empty(AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        }));
+        let detections = vec![
+            Detection {
+                adapter: "claude".into(),
+                accounts: Some(vec![accounts[0].clone(), accounts[1].clone()]),
+                status: QuotaStatus::Available,
+            },
+            Detection {
+                adapter: "codex".into(),
+                accounts: Some(vec![accounts[2].clone()]),
+                status: QuotaStatus::Available,
+            },
+            Detection {
+                adapter: "cursor".into(),
+                accounts: None,
+                status: QuotaStatus::Unsupported,
+            },
+            Detection {
+                adapter: "opencode".into(),
+                accounts: None,
+                status: QuotaStatus::Unsupported,
+            },
+        ];
+        let policies = [
+            QuotaPolicy {
+                adapter: "claude",
+                timer_seconds: 300,
+                panel_seconds: 120,
+                probe_seconds: 14,
+                low_power: true,
+                solo: false,
+            },
+            QuotaPolicy {
+                adapter: "codex",
+                timer_seconds: 300,
+                panel_seconds: 120,
+                probe_seconds: 14,
+                low_power: true,
+                solo: false,
+            },
+        ];
+        let rep = schedule::report(
+            &policies,
+            &all_records,
+            &detections,
+            &QuotaQuery { adapter: None },
+            100,
+            "/report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.coverage.known, 3);
+        assert_eq!(rep.coverage.total, 3);
+        let headline = format!(
+            "Quota: {}/{} current readings\n",
+            rep.coverage.known, rep.coverage.total
+        );
+        assert_eq!(headline, "Quota: 3/3 current readings\n");
+    }
+
+    struct AuthRequiredAdapter;
+    impl provenant_providers::Adapter for AuthRequiredAdapter {
+        fn id(&self) -> &'static str {
+            "claude"
+        }
+        fn account(
+            &self,
+            _: &provenant_providers::StreamState,
+        ) -> Result<provenant_providers::AccountDetection, provenant_providers::ProviderError>
+        {
+            Ok(provenant_providers::AccountDetection::AuthRequired)
+        }
+        fn prepare(
+            &self,
+            _: provenant_providers::PrepareInput<'_>,
+        ) -> Result<provenant_providers::LaunchSpec, provenant_providers::ProviderError> {
+            unimplemented!()
+        }
+        fn stream(
+            &self,
+            continuation: Option<&provenant_providers::Continuation>,
+        ) -> Result<provenant_providers::StreamState, provenant_providers::ProviderError> {
+            provenant_providers::claude::REGISTRATION
+                .adapter
+                .stream(continuation)
+        }
+        fn observe(
+            &self,
+            _: &mut provenant_providers::StreamState,
+            _: &[u8],
+        ) -> Result<Vec<provenant_providers::ProviderEvent>, provenant_providers::ProviderError>
+        {
+            unimplemented!()
+        }
+        fn finish(
+            &self,
+            _: provenant_providers::StreamState,
+            _: provenant_providers::ExitObservation,
+        ) -> Result<provenant_providers::ProviderOutcome, provenant_providers::ProviderError>
+        {
+            unimplemented!()
+        }
+        fn continuation(
+            &self,
+            _: &provenant_providers::ProviderOutcome,
+            _: &provenant_records::ResolvedRoute,
+            _: &str,
+        ) -> Result<provenant_providers::Continuation, provenant_providers::ProviderError> {
+            unimplemented!()
+        }
+        fn validate_provenance(
+            &self,
+            _: &provenant_providers::RouteProvenance<'_>,
+        ) -> Result<provenant_providers::VerifiedLineage, provenant_providers::ProviderError>
+        {
+            unimplemented!()
+        }
+    }
+
+    static AUTH_REQUIRED_ADAPTER: AuthRequiredAdapter = AuthRequiredAdapter;
+
+    #[test]
+    fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {
+        let policy = QuotaPolicy {
+            adapter: "claude",
+            timer_seconds: 300,
+            panel_seconds: 120,
+            probe_seconds: 14,
+            low_power: true,
+            solo: false,
+        };
+        let registration = provenant_providers::Registration {
+            adapter: &AUTH_REQUIRED_ADAPTER,
+            quota_source: None,
+            display_name: "Claude",
+            quota: policy,
+        };
+        let account = AccountScope {
+            adapter: "claude".into(),
+            account_key: "michael".into(),
+            label: "michael".into(),
+        };
+        let configured = vec![account.clone()];
+        let detected = detections(&[registration], &configured);
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].status, QuotaStatus::AuthRequired);
+        assert_eq!(detected[0].accounts, Some(configured.clone()));
+
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: account.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let policies = [policy];
+        let rep = schedule::report(
+            &policies,
+            &[record],
+            &detected,
+            &QuotaQuery { adapter: None },
+            500,
+            "/report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 1);
+        assert_eq!(rep.accounts[0].account, account);
+        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
+        assert!(rep.accounts[0].snapshot.is_some());
+        assert_eq!(rep.coverage.known, 0);
+        assert_eq!(rep.coverage.total, 1);
     }
 }

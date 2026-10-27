@@ -55,7 +55,8 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     );
     let tick: serde_json::Value = serde_json::from_slice(&tick.stdout.bytes)?;
     assert_eq!(tick["command"], "quota tick");
-    assert_eq!(tick["data"]["coverage"]["total"], 5);
+    // Only registered adapters count toward coverage (#1810).
+    assert_eq!(tick["data"]["coverage"]["total"], 1);
     assert_eq!(tick["data"]["accounts"].as_array().unwrap().len(), 1);
     assert_eq!(tick["data"]["accounts"][0]["status"], "unknown");
     assert_eq!(tick["data"]["accounts"][0]["error"], "missing_cli");
@@ -217,7 +218,9 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
     // Leave one slot for the configured Codex account.
     for i in 0..127 {
         let key = format!("account-{i}");
-        let account = serde_json::json!({"adapter":"claude","account_key":key,"label":"work"});
+        let label = format!("work-{i}");
+        support::register_account(&rig, "claude", &label, &key, &rig.root.join(&key))?;
+        let account = serde_json::json!({"adapter":"claude","account_key":key,"label":label});
         let record = serde_json::json!({"schema_version":1,"account":account,"revision":1,
             "snapshot":{"schema_version":1,"account":account,"revision":1,"status":"available","observed_unix_seconds":1,"source_ref":"fixture","authority_ref":null,"windows":windows},
             "claim":null,"last_attempt_unix_seconds":1,"backoff_until_unix_seconds":null,"failures":0,"last_error":null,"refusals":[]});
@@ -280,10 +283,18 @@ fn internal_lock_deadline_is_contention_and_keeps_the_report() -> Result {
 }
 
 #[test]
-fn failed_auth_refresh_shows_last_known_usage_age_and_stale_marker() -> Result {
+fn failed_auth_refresh_shows_last_known_usage_age_and_auth_marker() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let rig = quota_rig()?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
+    // The report lists only registered accounts (#1810).
+    support::register_account(
+        &rig,
+        "claude",
+        "pro",
+        "pro-account",
+        &rig.root.join("claude-pro"),
+    )?;
     let directory = rig.state.join("quota/pro-account");
     fs::create_dir(&directory)?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
@@ -304,12 +315,19 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_stale_marker() -> Result {
     assert_eq!(code(&out), 0);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let row = &value["data"]["accounts"][0];
-    assert_eq!(row["status"], "stale");
+    assert_eq!(row["status"], "auth_required");
     assert!(row["age_seconds"].as_u64().is_some_and(|age| age >= 10));
     assert_eq!(row["snapshot"]["windows"][0]["used_basis_points"], 5300);
     let human = rig.command(&["quota", "show"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
-    for expected in ["pro", "STALE", "last known", "53.00%", "age", "auth"] {
+    for expected in [
+        "pro",
+        "AUTH_REQUIRED",
+        "last known",
+        "53.00%",
+        "age",
+        "auth",
+    ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
     assert!(!text.contains('\u{1b}'));
