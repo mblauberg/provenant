@@ -9,8 +9,9 @@ refused with the count. `lanes` takes `--session LABEL`, `--host` works with
 shell or monitor. The wait starts at command entry, so a lane that settles while a
 peer is unreachable still counts. One poll shares a single deadline across
 all its peer reads, each capped by what the earlier ones left, and none after
-the first starts at or after it (budgets are whole seconds, so the last read can
-run under a second over). A peer wait keeps every running
+the first starts at or after it. A read's SSH termination and reap come out of
+the time it has left, so a hung `ssh` is gone by the deadline; only the first
+read of `--wait 0` keeps a one-second minimum. A peer wait keeps every running
 lane tracked until it settles, even after newer dispatches push it off the
 peer's newest 100, and `--since` selects by settlement time rather than queue
 order, scanning up to 1000 lanes.

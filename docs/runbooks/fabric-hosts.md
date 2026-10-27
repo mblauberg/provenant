@@ -293,8 +293,11 @@ all its peer reads (one per host and per 100 lanes, plus the lookup of lanes
 that left the newest page). Each read is bounded by the time the earlier reads
 left, as well as by `limits.peer_seconds`, and no read after the first starts
 at or after the deadline; the poll then fails as a transient peer error, which
-the wait retries until its own budget ends. Budgets are whole seconds, so the
-last read can run under a second past the deadline. The watch prints `STATE RUN/TASK/ATTEMPT` (and
+the wait retries until its own budget ends. The time a read has left covers
+the whole SSH child, including its termination and reap, so a hung `ssh` that
+ignores `TERM` is killed by the deadline. Only the first read of `--wait 0`
+keeps a one-second minimum, with a further half second of termination and reap
+if `ssh` hangs. The watch prints `STATE RUN/TASK/ATTEMPT` (and
 `host=ID` for a peer's lane) once per state change, then `end settled lanes=N`,
 or `end timeout lanes=N pending=M` with exit 124.
 

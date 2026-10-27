@@ -314,7 +314,9 @@ impl Peer {
         self.call_within(host, action, Duration::MAX)
     }
     /// One peer request that takes no longer than `remaining`, the time a wait
-    /// or watch has left, nor than the configured peer limit.
+    /// or watch has left, nor than the configured peer limit. The SSH child's
+    /// termination and reap come out of `remaining` too. Only the first read of
+    /// a zero-second wait has nothing left, and it keeps the one-second minimum.
     fn call_within(
         &self,
         host: HostId,
@@ -326,8 +328,14 @@ impl Peer {
             call_seconds(remaining, self.context.config.limits.peer_seconds),
         )
         .map_err(io_fail)?;
+        if remaining.is_zero() || remaining == Duration::MAX {
+            return self
+                .context
+                .peer(&self.clock, host, action, budget, &self.cancel)
+                .map_err(peer_failure_fail);
+        }
         self.context
-            .peer(&self.clock, host, action, budget, &self.cancel)
+            .peer_within(&self.clock, host, action, budget, &self.cancel, remaining)
             .map_err(peer_failure_fail)
     }
     /// Current owner records, one batched status read per host.

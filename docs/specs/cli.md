@@ -108,11 +108,14 @@ lane it saw running tracked by ID until it settles) and reads `--session` as an
 agent label on the peer. One poll
 of a wait or watch draws every peer read (each host, each 100 lanes, and the
 lookup of tracked lanes) on a single deadline fixed when the poll starts. A read is
-capped by what the earlier reads left (at least one second, at most
-`limits.peer_seconds`), and no read after the first starts at or after the
-deadline, so a one-second watch ends in about a second. Budgets are whole
-seconds, so a read started with a fraction of a second left can run under a
-second past the deadline. `--wait` still excludes `--state` and
+capped by what the earlier reads left (at most `limits.peer_seconds`), and no
+read after the first starts at or after the deadline, so a one-second watch
+ends in about a second. The cap covers the whole SSH child: its termination
+and reap grace come out of the time left, not on top of it, so even a wrapper
+that ignores `TERM` is gone by the deadline (to scheduling accuracy). The one
+exception is the first read of `--wait 0`, which has no time left and keeps a
+one-second minimum with the usual quarter-second termination and reap
+allowances after it. `--wait` still excludes `--state` and
 `--cursor`.
 - Why: a stale settlement must never wake a chair that waits for newer work,
   and selecting by session removes hand-copied ID lists.
