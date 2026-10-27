@@ -573,6 +573,92 @@ mod tests {
     }
 
     #[test]
+    fn a_transient_io_failure_is_retried_before_and_after_arming() {
+        for armed in [false, true] {
+            let mut calls = 0;
+            let waited = wait(
+                |_| {
+                    calls += 1;
+                    match (armed, calls) {
+                        (true, 1) => Ok(vec![running(1)]),
+                        (false, 1) | (true, 2) => Err(Fail::new(
+                            Status::Error,
+                            ErrorKind::Io,
+                            "run-store path is not private or contained",
+                        )),
+                        _ => Ok(vec![done(1, 20)]),
+                    }
+                },
+                scope(&[1], None, true),
+                Condition::All,
+                Duration::from_secs(5),
+                POLL,
+            )
+            .unwrap();
+            assert!(waited.met, "armed={armed}");
+            assert_eq!(waited.lanes[0].attempt_id, AttemptId::from_bytes([1; 16]));
+        }
+    }
+
+    #[test]
+    // The deadline under test is a real-time reader boundary.
+    #[allow(clippy::disallowed_methods)]
+    fn persistent_io_failures_report_the_last_error_at_the_deadline() {
+        for armed in [false, true] {
+            let mut calls = 0;
+            let budget = Duration::from_millis(50);
+            let begun = Instant::now();
+            let refused = wait(
+                |_| {
+                    calls += 1;
+                    if armed && calls == 1 {
+                        return Ok(vec![running(1)]);
+                    }
+                    Err(Fail::new(
+                        Status::Error,
+                        ErrorKind::Io,
+                        format!("run-store read failure {calls}"),
+                    ))
+                },
+                scope(&[1], None, true),
+                Condition::All,
+                budget,
+                POLL,
+            );
+            let fail = refused.err().expect("I/O failure must never yield met");
+            assert_eq!(fail.kind, ErrorKind::Io);
+            assert_eq!(fail.status, Status::Error);
+            assert_eq!(fail.message, format!("run-store read failure {calls}"));
+            assert!(begun.elapsed() >= budget, "armed={armed}: failed early");
+        }
+    }
+
+    #[test]
+    fn other_fetch_errors_fail_without_retrying() {
+        for armed in [false, true] {
+            for kind in [ErrorKind::Invalid, ErrorKind::Refused] {
+                let mut calls = 0;
+                let refused = wait(
+                    |_| {
+                        calls += 1;
+                        if armed && calls == 1 {
+                            return Ok(vec![running(1)]);
+                        }
+                        Err(Fail::new(Status::Invalid, kind, "permanent failure"))
+                    },
+                    scope(&[1], None, true),
+                    Condition::All,
+                    Duration::from_secs(5),
+                    POLL,
+                );
+                let fail = refused.err().expect("permanent failure must be returned");
+                assert_eq!(fail.kind, kind);
+                assert_eq!(calls, if armed { 2 } else { 1 });
+            }
+        }
+    }
+
+    #[test]
     fn watch_emits_each_state_once_and_ends_when_all_settle() {
         let mut calls = 0;
         let mut lines = Vec::new();
