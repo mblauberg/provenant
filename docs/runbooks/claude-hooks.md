@@ -51,7 +51,8 @@ pointer in a truncated excerpt all repeat the hook's `--state-dir` the same way
 (absolute, single-quoted) when it was non-default. A hint that could not
 round-trip is never printed as a command: the `Save:` line then says that no
 runnable command is shown and that a save without the hook's `--state-dir` goes
-to the default store.
+to the default store. The `output bounded` marker that points at `provenant lanes`
+follows the same rule, with a plain note when the command cannot be shown.
 
 A section the hook could not read is listed as unavailable, never as empty.
 The hook budget is 4 seconds in total, with the lane, PR and worktree reads

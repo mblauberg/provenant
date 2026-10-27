@@ -153,7 +153,7 @@ reported as holding only automatically saved state, and lane sessions never
 write. A next-page command in the digest is shown only if it survives
 rendering byte for byte (within 512 bytes and free of `<`, `>` and backticks);
 otherwise a plain note names the cursor. Every other command a hook prints
-(the digest heading, the `pr status` hint, the `Save:` line, the `session show`
+(the digest heading, the bounded-output marker, the `pr status` hint, the `Save:` line, the `session show`
 pointer) repeats the hook's non-default `--state-dir` on the same terms, so
 following it reaches the store the hook used; one that cannot is not printed.
 - Why: automatic state must not erase the authority references the chair wrote
@@ -166,6 +166,7 @@ following it reaches the store the hook used; one that cannot is not printed.
   `::lane_sessions_report_but_never_write_checkpoint_state`;
   `crates/workflow/src/session/state.rs::a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte`;
   `::the_digest_title_names_the_store_it_was_read_from`;
+  `::the_bounded_fallback_lists_the_store_the_digest_came_from`;
   `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
   `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
 - Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`

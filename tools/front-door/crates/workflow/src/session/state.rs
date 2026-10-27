@@ -291,6 +291,7 @@ impl SessionState {
             &format!("Provenant state for this project (read-only; re-derive with {how})"),
             &self.sections(false),
             limit,
+            &self.commands,
         )
     }
 
@@ -304,6 +305,7 @@ impl SessionState {
             "",
             &self.sections(true),
             limit.saturating_sub(head.len() + 1),
+            &self.commands,
         );
         format!("{head}\n{body}")
     }
@@ -311,7 +313,7 @@ impl SessionState {
 fn plus(truncated: bool) -> &'static str {
     if truncated { "+" } else { "" }
 }
-fn render(title: &str, sections: &[Section], limit: usize) -> String {
+fn render(title: &str, sections: &[Section], limit: usize, commands: &CommandPrefix) -> String {
     let mut out = String::new();
     if !title.is_empty() {
         out.push_str(title);
@@ -359,7 +361,15 @@ fn render(title: &str, sections: &[Section], limit: usize) -> String {
     }
     if full {
         // Reserve room by trimming whole trailing lines until the marker fits.
-        let marker = "- [output bounded; list the rest with `provenant lanes`]\n";
+        // The listing must read the store the digest came from; a command that
+        // cannot be shown whole, or would not fit, becomes a plain note.
+        let marker = commands
+            .runnable("lanes")
+            .map(|lanes| format!("- [output bounded; list the rest with `{lanes}`]\n"))
+            .filter(|marker| marker.len() <= limit)
+            .unwrap_or_else(|| {
+                "- [output bounded; list the rest with provenant lanes and this hook's --state-dir]\n".to_owned()
+            });
         while out.len() + marker.len() > limit {
             match out[..out.len().saturating_sub(1)].rfind('\n') {
                 Some(end) => out.truncate(end + 1),
@@ -369,7 +379,7 @@ fn render(title: &str, sections: &[Section], limit: usize) -> String {
                 }
             }
         }
-        out.push_str(marker);
+        out.push_str(&marker);
     }
     out
 }
@@ -545,6 +555,49 @@ mod tests {
             assert!(!text.contains("state-dir '/"), "{text}");
             assert!(text.contains("--cursor 7"), "{text}");
             assert!(text.contains("too long or unsafe"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_bounded_fallback_lists_the_store_the_digest_came_from() {
+        let many: Vec<_> = (0..200)
+            .map(|n| lane(&format!("run/task/{n:0>100}")))
+            .collect();
+        let cwd = std::path::Path::new("/work");
+        let with = |dir: Option<&str>| SessionState {
+            active: many.clone(),
+            commands: CommandPrefix::new(dir.map(std::path::Path::new), cwd),
+            ..Default::default()
+        };
+        let marker = |text: &str| text.lines().last().unwrap_or_default().to_owned();
+        let long = format!("/{}", "d".repeat(600));
+        for limit in [512, 700] {
+            let text = with(Some("/s/a b")).digest(limit);
+            assert!(text.len() <= limit);
+            assert_eq!(
+                marker(&text),
+                "- [output bounded; list the rest with `provenant --state-dir '/s/a b' lanes`]"
+            );
+            let text = with(Some("rel")).document("t", limit);
+            assert!(text.len() <= limit);
+            assert!(
+                marker(&text).contains("`provenant --state-dir '/work/rel' lanes`"),
+                "{text}"
+            );
+            // A directory that cannot be shown whole gives a note, not a command.
+            for bad in ["/s/a>b", "/s/a\nb", long.as_str()] {
+                let text = with(Some(bad)).digest(limit);
+                assert!(text.len() <= limit, "{}", text.len());
+                assert_eq!(
+                    marker(&text),
+                    "- [output bounded; list the rest with provenant lanes and this hook's --state-dir]"
+                );
+            }
+            // The default store keeps the plain command.
+            assert_eq!(
+                marker(&with(None).digest(limit)),
+                "- [output bounded; list the rest with `provenant lanes`]"
+            );
         }
     }
 
