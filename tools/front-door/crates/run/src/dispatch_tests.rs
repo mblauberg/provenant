@@ -3,7 +3,7 @@
 use super::tests::{call, clock, context, exit, input, route};
 use super::*;
 use provenant_confinement::permissions::{PathGrant, PathScope};
-use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, WallTime};
+use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, TestClock, WallTime};
 use provenant_os::{exec::Termination, fs::Directory, sys::resources::MemorySample};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::custody::ExitObservation;
@@ -699,7 +699,7 @@ fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
     // Make the replacement fully launchable, including its prompt and ticket.
     let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
     artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
-    store.queue_ticket(&store.db, &replacement, 1, 0)?;
+    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0)?;
     let revalidated = store.validate_child(
         nested.run_id,
         parent,
@@ -2319,10 +2319,11 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    let now = WallTime::from_micros(100)?;
+    let now = at_micros(100);
 
     store.set_admission_policy(AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
     let serial = two_tasks(1);
@@ -2339,12 +2340,12 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         )?;
     }
     let running = store
-        .claim(first, now, &call)?
+        .claim(first, &now, &call)?
         .ok_or("first not admitted")?;
     assert_eq!(running.state, AttemptState::Running);
-    assert_eq!(running.started_at, Some(now));
+    assert_eq!(running.started_at, Some(now.wall_now()?));
     assert!(
-        store.claim(second, now, &call)?.is_none(),
+        store.claim(second, &now, &call)?.is_none(),
         "run concurrency 1"
     );
 
@@ -2364,7 +2365,10 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         None,
         &call,
     )?;
-    assert!(store.claim(id, now, &call)?.is_none(), "20 s host spacing");
+    assert!(
+        store.claim(id, &now, &call)?.is_none(),
+        "2 s read-only host spacing"
+    );
 
     // A one-second window from the queued time, 100 microseconds, so the
     // starved wait pauses on the virtual clock until the deadline.
@@ -2398,12 +2402,993 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     Ok(())
 }
 
+/// One-task run with its own IDs: a writer when `writer`, else read-only.
+fn lane(seed: u8, writer: bool) -> PreparedRun {
+    let mut run = batch(seed, 1);
+    if writer {
+        run.request.tasks[0].writer = Some(WriterRequest {
+            project: "/project".into(),
+            worktree: format!("/project/.worktrees/lane-{seed}").into(),
+        });
+    }
+    run
+}
+/// Create and start `run`, returning its only attempt ready to claim.
+fn starting(store: &RunStore, run: &PreparedRun, call: &Request<'_>) -> Result<AttemptId> {
+    store.create(run, call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        call,
+    )?;
+    Ok(id)
+}
+/// A clock stopped at this time on both its wall and its host monotonic
+/// coordinate, to start a claim at an exact moment.
+fn at_micros(micros: i64) -> TestClock {
+    TestClock::new(
+        WallTime::from_micros(micros).unwrap(),
+        MonoTime::from_micros(u64::try_from(micros).unwrap()),
+    )
+}
+fn at(ms: i64) -> TestClock {
+    at_micros(ms * 1000)
+}
+
+#[test]
+fn read_only_lane_is_admitted_inside_a_writers_spacing_window() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let writer = starting(&store, &lane(20, true), &call)?;
+    let reader = starting(&store, &lane(21, false), &call)?;
+    assert!(store.claim(writer, &at(10_000), &call)?.is_some());
+    assert!(
+        store.claim(reader, &at(11_000), &call)?.is_some(),
+        "a writer that started 1 s ago does not space a read-only lane"
+    );
+    Ok(())
+}
+
+#[test]
+fn writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(30, true), &call)?;
+    let second = starting(&store, &lane(31, true), &call)?;
+    let third = starting(&store, &lane(32, true), &call)?;
+    let reader = starting(&store, &lane(33, false), &call)?;
+    assert!(store.claim(first, &at(0), &call)?.is_some());
+    assert!(
+        store.claim(second, &at(19_999), &call)?.is_none(),
+        "20 s between writers"
+    );
+    assert!(store.claim(reader, &at(20_000), &call)?.is_some());
+    assert!(
+        store.claim(second, &at(20_001), &call)?.is_some(),
+        "measured from the last writer, not the read-only start at 20 s"
+    );
+    assert!(store.claim(third, &at(40_000), &call)?.is_none());
+    assert!(store.claim(third, &at(40_001), &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn read_only_lanes_are_spaced_2_seconds_apart() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(40, false), &call)?;
+    let second = starting(&store, &lane(41, false), &call)?;
+    let third = starting(&store, &lane(42, false), &call)?;
+    assert!(store.claim(first, &at(0), &call)?.is_some());
+    assert!(
+        store.claim(second, &at(1_999), &call)?.is_none(),
+        "a burst of provider launches is still staggered"
+    );
+    assert!(store.claim(second, &at(2_000), &call)?.is_some());
+    assert!(store.claim(third, &at(3_999), &call)?.is_none());
+    assert!(store.claim(third, &at(4_000), &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut run = lane(90, false);
+    run.request.concurrency = 16;
+    store.create(&run, &call)?;
+    assert_eq!(store.request(run.run_id, &call)?.concurrency, 16);
+    let mut wider = lane(91, false);
+    wider.request.concurrency = 17;
+    assert!(matches!(
+        store.create(&wider, &call),
+        Err(RunError::Validation(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_root() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let host = context(temp.path())?;
+    // A nested lane's store is a child directory with no ledger of its own.
+    let mut inputs =
+        provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+    inputs.state_dir = Some(host.state_root.as_path().join("children").join("lane"));
+    let nested = ExecutionContext {
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        ..host.clone()
+    };
+    let mut writable =
+        RunStore::open(&nested, &call)?.with_writer_registry(host.state_root.as_path());
+    writable.set_admission_policy(AdmissionPolicy {
+        read_only_spacing_ms: 600_000,
+        ..AdmissionPolicy::default()
+    });
+    let (first, second) = (lane(110, false), lane(111, false));
+    let first_id = starting(&writable, &first, &call)?;
+    let second_id = starting(&writable, &second, &call)?;
+    let attempt = writable.attempt_dir(first.run_id, first_id, false)?;
+    writable.admit(
+        first_id,
+        &attempt,
+        &Host { available: 100 },
+        &clock,
+        &cancel,
+    )?;
+    let waiting = writable.record(second_id, &call)?;
+    let waits = |registry: Option<&std::path::Path>| -> Result<String> {
+        let reader = RunStore::open_read_only(&nested, &call)?.ok_or(RunError::NotFound)?;
+        let reader = match registry {
+            Some(host) => reader.with_writer_registry(host),
+            None => reader,
+        };
+        let waits = reader.lane_waits(std::slice::from_ref(&waiting), &call);
+        Ok(waits
+            .first()
+            .map(|w| w.waiting_for.clone())
+            .unwrap_or_default())
+    };
+    assert!(
+        waits(Some(host.state_root.as_path()))?.starts_with("read-only startup spacing: "),
+        "the host root shows the class's spacing wait"
+    );
+    assert!(
+        waits(None)?.starts_with("host capacity"),
+        "the child directory has no ledger, so the wait goes unseen"
+    );
+    Ok(())
+}
+
+/// A clock a test steps by hand. The wall clock, the host's monotonic clock and
+/// the boot identity each move on their own, as they do on a real host; waits
+/// move the wall and monotonic clocks together like `TestClock`.
+struct Stepped {
+    inner: TestClock,
+    wall_offset_micros: Cell<i64>,
+    host_base_micros: Cell<u64>,
+    boot: RefCell<&'static str>,
+    host_readable: Cell<bool>,
+    boot_readable: Cell<bool>,
+}
+impl Stepped {
+    /// A host that has been up `host_ms`, in boot `"boot-a"`.
+    fn up(host_ms: u64) -> Self {
+        Self {
+            inner: clock(),
+            wall_offset_micros: Cell::new(0),
+            host_base_micros: Cell::new(host_ms * 1000),
+            boot: RefCell::new("boot-a"),
+            host_readable: Cell::new(true),
+            boot_readable: Cell::new(true),
+        }
+    }
+    /// The wall clock alone steps, as an operator or NTP can make it.
+    fn step_wall_ms(&self, ms: i64) {
+        self.wall_offset_micros
+            .set(self.wall_offset_micros.get() + ms * 1000);
+    }
+    /// Real time passes: the wall and host clocks both move.
+    fn pass_micros(&self, micros: u64) {
+        self.host_base_micros
+            .set(self.host_base_micros.get() + micros);
+        self.wall_offset_micros
+            .set(self.wall_offset_micros.get() + i64::try_from(micros).unwrap_or(0));
+    }
+    fn pass_ms(&self, ms: u64) {
+        self.pass_micros(ms * 1000);
+    }
+    /// The host restarts: a new boot whose clock has run `host_ms`.
+    fn reboot(&self, boot: &'static str, host_ms: u64) {
+        *self.boot.borrow_mut() = boot;
+        self.host_base_micros
+            .set(host_ms * 1000 - self.inner.mono_now().as_micros());
+    }
+}
+impl Clock for Stepped {
+    fn wall_now(&self) -> std::result::Result<WallTime, provenant_core::TimeError> {
+        WallTime::from_micros(self.inner.wall_now()?.as_micros() + self.wall_offset_micros.get())
+    }
+    fn mono_now(&self) -> MonoTime {
+        self.inner.mono_now()
+    }
+    fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), provenant_core::TimeError> {
+        self.inner.wait_until(deadline)
+    }
+    fn host_monotonic_micros(&self) -> std::result::Result<u64, provenant_core::TimeError> {
+        if !self.host_readable.get() {
+            return Err(provenant_core::TimeError::HostClock);
+        }
+        Ok(self.inner.mono_now().as_micros() + self.host_base_micros.get())
+    }
+    fn boot_identity(&self) -> std::result::Result<String, provenant_core::TimeError> {
+        if !self.boot_readable.get() {
+            return Err(provenant_core::TimeError::HostClock);
+        }
+        Ok((*self.boot.borrow()).to_owned())
+    }
+}
+fn stepped_call<'a>(clock: &'a Stepped, cancel: &'a CancelToken) -> Request<'a> {
+    Request {
+        clock,
+        budget: provenant_core::WaitBudget::cli(MonoTime::from_micros(0), 10).unwrap(),
+        cancel,
+    }
+}
+/// Writer lanes ready to claim, each a lane of its own run.
+fn writers<const N: usize>(
+    store: &RunStore,
+    seeds: [u8; N],
+    call: &Request<'_>,
+) -> Result<[AttemptId; N]> {
+    let mut ids = [AttemptId::from_bytes([0; 16]); N];
+    for (id, seed) in ids.iter_mut().zip(seeds) {
+        *id = starting(store, &lane(seed, true), call)?;
+    }
+    Ok(ids)
+}
+
+#[test]
+fn a_wall_clock_step_back_then_forward_cannot_admit_two_writers_within_a_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [first, second] = writers(&store, [80, 81], &call)?;
+    assert!(store.claim(first, &host, &call)?.is_some());
+
+    // The wall clock steps back an hour and a claim sees it, then it is
+    // corrected forward. Only 5 s of real time have passed since the start.
+    host.step_wall_ms(-3_600_000);
+    host.pass_ms(5_000);
+    assert!(store.claim(second, &host, &call)?.is_none());
+    host.step_wall_ms(3_600_000);
+    assert!(
+        store.claim(second, &host, &call)?.is_none(),
+        "5 s after a writer started, whatever the wall clock read between"
+    );
+
+    // The hold is one spacing from the start, not from the claim that saw the
+    // step: 20 s of real time after the start the writer is admitted, no later.
+    host.pass_micros(14_999_999);
+    assert!(store.claim(second, &host, &call)?.is_none());
+    host.pass_micros(1);
+    assert!(store.claim(second, &host, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn a_forward_wall_clock_step_alone_does_not_free_the_class() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [first, second] = writers(&store, [82, 83], &call)?;
+    assert!(store.claim(first, &host, &call)?.is_some());
+    host.step_wall_ms(86_400_000);
+    assert!(
+        store.claim(second, &host, &call)?.is_none(),
+        "a day on the wall clock is no time on the host clock"
+    );
+    host.pass_micros(19_999_999);
+    assert!(store.claim(second, &host, &call)?.is_none());
+    host.pass_micros(1);
+    assert!(store.claim(second, &host, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn read_only_spacing_holds_on_the_host_clock_and_never_holds_a_writer() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(85, false), &call)?;
+    let second = starting(&store, &lane(86, false), &call)?;
+    let [writer] = writers(&store, [87], &call)?;
+    assert!(store.claim(first, &host, &call)?.is_some());
+    host.step_wall_ms(-60_000);
+    host.pass_micros(1_999_999);
+    assert!(store.claim(second, &host, &call)?.is_none());
+    assert!(
+        store.claim(writer, &host, &call)?.is_some(),
+        "the read-only start holds no writer"
+    );
+    host.pass_micros(1);
+    assert!(store.claim(second, &host, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn a_new_boot_frees_the_class_and_spacing_runs_on_the_new_boot() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(500_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [first, second, third] = writers(&store, [88, 89, 90], &call)?;
+    assert!(store.claim(first, &host, &call)?.is_some());
+    // The host restarted. Its clock is behind the recorded start, which is
+    // another boot's reading and says nothing about this one.
+    host.reboot("boot-b", 1_000);
+    assert!(
+        store.claim(second, &host, &call)?.is_some(),
+        "a start from an earlier boot does not hold the class"
+    );
+    host.pass_ms(5_000);
+    assert!(
+        store.claim(third, &host, &call)?.is_none(),
+        "the new boot's start is the one that spaces"
+    );
+    host.pass_ms(15_000);
+    assert!(store.claim(third, &host, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [lane_id] = writers(&store, [91], &call)?;
+    let attempt = store.attempt_dir(lane(91, true).run_id, lane_id, false)?;
+    for (readable, name) in [
+        (&host.host_readable, "monotonic clock"),
+        (&host.boot_readable, "boot identity"),
+    ] {
+        readable.set(false);
+        assert!(
+            matches!(store.claim(lane_id, &host, &call), Err(RunError::HostClock)),
+            "an unreadable {name} refuses, with no wall-clock fallback"
+        );
+        let admitted = store.admit(lane_id, &attempt, &Host { available: 100 }, &host, &cancel);
+        let reason = admitted.err().ok_or("admit must refuse")?.to_string();
+        assert!(
+            reason.contains("startup spacing cannot be judged"),
+            "{name}: {reason}"
+        );
+        assert_eq!(
+            store.record(lane_id, &call)?.state,
+            AttemptState::Starting,
+            "nothing started"
+        );
+        readable.set(true);
+    }
+    assert!(
+        store.claim(lane_id, &host, &call)?.is_some(),
+        "no lease was taken while the clock was unreadable"
+    );
+    Ok(())
+}
+
+#[test]
+fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreadable() -> TestResult
+{
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [first, second] = writers(&store, [92, 93], &call)?;
+    assert!(store.claim(first, &host, &call)?.is_some());
+    let wait = |host: &Stepped| -> Result<String> {
+        let records = [store.record(second, &call)?];
+        let waits = store.lane_waits(&records, &stepped_call(host, &cancel));
+        Ok(waits
+            .first()
+            .map(|w| w.waiting_for.clone())
+            .unwrap_or_default())
+    };
+    host.pass_ms(5_000);
+    host.step_wall_ms(86_400_000);
+    assert_eq!(
+        wait(&host)?,
+        "writer startup spacing: 15.0 s left of 20.0 s",
+        "the wall clock stepped a day and is not what the wait counts"
+    );
+    host.host_readable.set(false);
+    assert!(
+        wait(&host)?.starts_with("host capacity"),
+        "no wait is stated when the host clock cannot be read"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [first, second] = writers(&store, [94, 95], &call)?;
+    assert!(store.claim(first, &host, &call)?.is_some());
+    let ledger = crate::ledger::open(&store.writer_registry, &call)?;
+    ledger.execute(
+        "UPDATE spacing SET last_start=last_start+3600000000 WHERE class='writer'",
+        [],
+    )?;
+    host.pass_ms(60_000);
+    assert!(
+        store.claim(second, &host, &call)?.is_none(),
+        "a recorded start the clock has not reached holds, never frees"
+    );
+    Ok(())
+}
+
+/// A ledger as an earlier build left it, under the store's host root. Tables
+/// come from `schema`; the file is created private like the real one.
+fn old_ledger(store: &RunStore, schema: &str) -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let file = store.writer_registry.join("admission.sqlite3");
+    std::fs::create_dir_all(&store.writer_registry)?;
+    let old = rusqlite::Connection::open(&file)?;
+    old.execute_batch(schema)?;
+    drop(old);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[test]
+fn a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    old_ledger(
+        &store,
+        "CREATE TABLE leases (
+          attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL,
+          class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only'))
+         ) STRICT;
+         CREATE INDEX lease_projects ON leases(project);
+         CREATE TABLE spacing (
+          class TEXT PRIMARY KEY CHECK(class IN ('writer','read_only')),
+          last_start INTEGER NOT NULL
+         ) STRICT;
+         INSERT INTO spacing(class,last_start) VALUES ('writer', 4000000000000);
+         PRAGMA user_version=2;",
+    )?;
+    let [first, second] = writers(&store, [96, 97], &call)?;
+    assert!(
+        store.claim(first, &host, &call)?.is_some(),
+        "wall milliseconds from before boot-keyed spacing hold no class"
+    );
+    assert!(store.claim(second, &host, &call)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let version_1 = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+         CREATE INDEX lease_projects ON leases(project);";
+    // A spacing that cannot be dropped fails the upgrade after it has added
+    // the lease class column. A crash at that point must leave version 1 whole.
+    old_ledger(
+        &store,
+        &format!(
+            "{version_1}
+             CREATE VIEW spacing AS SELECT 1 AS id, 4000000000000 AS last_start;
+             PRAGMA user_version=1;"
+        ),
+    )?;
+    let [first, second] = writers(&store, [98, 99], &call)?;
+    assert!(store.claim(first, &host, &call).is_err());
+    let file = store.writer_registry.join("admission.sqlite3");
+    let raw = rusqlite::Connection::open(&file)?;
+    let classes: i64 = raw.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('leases') WHERE name='class'",
+        [],
+        |r| r.get(0),
+    )?;
+    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    assert_eq!(
+        (classes, version),
+        (0, 1),
+        "the failed upgrade left no trace"
+    );
+    raw.execute_batch(
+        "DROP VIEW spacing;
+         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
+         INSERT INTO spacing(id,last_start) VALUES (1,4000000000000);",
+    )?;
+    drop(raw);
+    assert!(
+        store.claim(first, &host, &call)?.is_none(),
+        "the upgrade carried the start into the new ledger"
+    );
+    host.pass_ms(20_500);
+    assert!(
+        store.claim(first, &host, &call)?.is_some(),
+        "a start in the wall future held the class one spacing, and no longer"
+    );
+    assert!(store.claim(second, &host, &call)?.is_none());
+    Ok(())
+}
+
+const VERSION_1_LEDGER: &str = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+     CREATE INDEX lease_projects ON leases(project);
+     CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;";
+
+/// A version 1 ledger whose one start was `ago_ms` before the clock's wall now
+/// (negative: in the wall future).
+fn version_1_start(store: &RunStore, host: &Stepped, ago_ms: i64) -> TestResult {
+    let started = host.wall_now()?.as_micros() / 1000 - ago_ms;
+    old_ledger(
+        store,
+        &format!(
+            "{VERSION_1_LEDGER}
+             INSERT INTO spacing(id,last_start) VALUES (1,{started});
+             PRAGMA user_version=1;"
+        ),
+    )
+}
+
+#[test]
+fn a_version_1_start_of_any_age_holds_each_class_one_full_spacing() -> TestResult {
+    // Old (a spacing and more), recent, and in the wall future: the upgrade
+    // reads no wall clock, so the recorded age changes nothing.
+    for (case, ago_ms) in [
+        ("old", 3_600_000),
+        ("recent", 5_000),
+        ("future", -3_600_000),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+        let call = stepped_call(&host, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        version_1_start(&store, &host, ago_ms)?;
+        let writer = starting(&store, &lane(100, true), &call)?;
+        let reader = starting(&store, &lane(101, false), &call)?;
+        assert!(
+            store.claim(writer, &host, &call)?.is_none(),
+            "{case}: the writer is held from the upgrade"
+        );
+        assert!(
+            store.claim(reader, &host, &call)?.is_none(),
+            "{case}: the read-only class is held from the upgrade"
+        );
+        host.pass_ms(1_500);
+        assert!(
+            store.claim(reader, &host, &call)?.is_none(),
+            "{case}: the read-only spacing has not run out"
+        );
+        host.pass_ms(1_000);
+        assert!(
+            store.claim(reader, &host, &call)?.is_some(),
+            "{case}: the 2 s read-only spacing has run out"
+        );
+        host.pass_ms(17_000);
+        assert!(
+            store.claim(writer, &host, &call)?.is_none(),
+            "{case}: the writer is held the full 20 s, not less"
+        );
+        host.pass_ms(1_000);
+        assert!(
+            store.claim(writer, &host, &call)?.is_some(),
+            "{case}: held one spacing, and no longer"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_version_1_ledger_with_no_start_holds_nothing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    old_ledger(
+        &store,
+        &format!("{VERSION_1_LEDGER} PRAGMA user_version=1;"),
+    )?;
+    let writer = starting(&store, &lane(104, true), &call)?;
+    let reader = starting(&store, &lane(105, false), &call)?;
+    assert!(store.claim(writer, &host, &call)?.is_some());
+    assert!(store.claim(reader, &host, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    version_1_start(&store, &host, 5_000)?;
+    let writer = starting(&store, &lane(103, true), &call)?;
+    host.boot_readable.set(false);
+    assert!(matches!(
+        store.claim(writer, &host, &call),
+        Err(RunError::HostClock)
+    ));
+    let raw = rusqlite::Connection::open(store.writer_registry.join("admission.sqlite3"))?;
+    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let rows: i64 = raw.query_row("SELECT COUNT(*) FROM spacing", [], |r| r.get(0))?;
+    assert_eq!(
+        (version, rows),
+        (1, 1),
+        "the refused upgrade dropped nothing"
+    );
+    host.boot_readable.set(true);
+    assert!(store.claim(writer, &host, &call)?.is_none());
+    Ok(())
+}
+
+/// Probes memory, and while it does another process starts a writer.
+struct RivalStarts<'a> {
+    store: &'a RunStore,
+    rival: AttemptId,
+    clock: &'a Stepped,
+    call: &'a Request<'a>,
+    started: Cell<bool>,
+}
+impl Resources for RivalStarts<'_> {
+    fn memory(&self) -> std::io::Result<MemorySample> {
+        if !self.started.replace(true) {
+            self.clock.pass_ms(1_000);
+            let rival = self.store.claim(self.rival, self.clock, self.call);
+            assert!(rival.is_ok_and(|record| record.is_some()), "rival starts");
+            self.clock.pass_ms(500);
+        }
+        Ok(MemorySample {
+            available_bytes: 100,
+            total_bytes: 100,
+        })
+    }
+    fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+        Ok(u64::MAX)
+    }
+}
+
+#[test]
+fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (Stepped::up(0), CancelToken::new());
+    let call = stepped_call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        admission_seconds: 1,
+        ..AdmissionPolicy::default()
+    });
+    let (delayed, rival) = (lane(70, true), lane(71, true));
+    let delayed_id = starting(&store, &delayed, &call)?;
+    let rival_id = starting(&store, &rival, &call)?;
+    let attempt = store.attempt_dir(delayed.run_id, delayed_id, false)?;
+    // `admit` samples the time, then the probe stalls while the rival's
+    // writer starts one second later. The delayed lane must see that start.
+    let probe = RivalStarts {
+        store: &store,
+        rival: rival_id,
+        clock: &clock,
+        call: &call,
+        started: Cell::new(false),
+    };
+    assert!(matches!(
+        store.admit(delayed_id, &attempt, &probe, &clock, &cancel),
+        Err(RunError::Refused)
+    ));
+    assert!(probe.started.get());
+    assert_eq!(
+        store.record(delayed_id, &call)?.state,
+        AttemptState::Starting
+    );
+    // The rival's start, at 1 s, is still the recorded one.
+    let since_rival = clock.host_monotonic_micros()? / 1000 - 1_000;
+    assert!(since_rival >= 500);
+    assert_eq!(
+        crate::ledger::spacing_left(&store.writer_registry, LaneClass::Writer, 20_000, &clock),
+        Some(20_000 - since_rival)
+    );
+    Ok(())
+}
+#[test]
+fn memory_floor_refuses_both_lane_classes() -> TestResult {
+    // Each case has its own store and ledger, so only the floor can decide it.
+    for (seed, writer, available) in [
+        (50, true, 1),
+        (51, false, 1),
+        (52, true, 50),
+        (53, false, 50),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(seed, writer);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let admitted = store.admit(id, &attempt, &Host { available }, &clock, &cancel);
+        if available < 5 {
+            assert!(
+                matches!(admitted, Err(RunError::Refused)),
+                "1% memory is under the 5% floor (writer: {writer})"
+            );
+        } else {
+            assert_eq!(admitted?.state, AttemptState::Running, "writer: {writer}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn project_cap_allows_up_to_32_active_lanes() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    // Four runs of eight keep each run under its own batch concurrency.
+    let mut index = 0_i64;
+    for seed in 60..64 {
+        let run = batch(seed, 8);
+        store.create(&run, &call)?;
+        for attempt in &run.attempts {
+            let id = attempt.attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            // Spaced past both classes' windows so only the cap can refuse.
+            index += 1;
+            assert!(
+                store.claim(id, &at(index * 20_000), &call)?.is_some(),
+                "lane {index} is within the 32-lane project cap"
+            );
+        }
+    }
+    let over = lane(70, false);
+    let id = starting(&store, &over, &call)?;
+    assert!(
+        store.claim(id, &at(40 * 20_000), &call)?.is_none(),
+        "the 33rd lane waits for the project cap"
+    );
+    Ok(())
+}
+
+#[test]
+fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
+    let profile = |knobs: &[(&str, u64)]| HarnessProfile {
+        name: "test".into(),
+        knobs: knobs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect(),
+        ..HarnessProfile::default()
+    };
+    let registry = profile(&[
+        ("lanes.max_concurrency", 8),
+        ("lanes.max_concurrency_read_only", 16),
+    ]);
+    assert_eq!(concurrency(None, &registry, false, None), 8, "writer batch");
+    assert_eq!(
+        concurrency(None, &registry, true, None),
+        16,
+        "read-only batch"
+    );
+    assert_eq!(concurrency(Some(3), &registry, false, None), 3);
+    assert_eq!(concurrency(Some(3), &registry, true, None), 3);
+    let tuned = profile(&[
+        ("lanes.max_concurrency", 2),
+        ("lanes.max_concurrency_read_only", 5),
+    ]);
+    assert_eq!(concurrency(None, &tuned, false, None), 2);
+    assert_eq!(concurrency(None, &tuned, true, None), 5);
+    let bare = HarnessProfile::default();
+    assert_eq!(concurrency(None, &bare, false, None), 8);
+    assert_eq!(concurrency(None, &bare, true, None), 16);
+    assert_eq!(concurrency(None, &registry, true, Some(3)), 3, "bounded");
+    assert_eq!(
+        concurrency(None, &tuned, true, Some(7)),
+        5,
+        "a cap, not a floor"
+    );
+    assert_eq!(
+        concurrency(Some(12), &registry, true, Some(3)),
+        12,
+        "explicit"
+    );
+}
+
+#[test]
+fn sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut run = batch(90, 16);
+    run.request.concurrency = 16;
+    store.create(&run, &call)?;
+    for (index, attempt) in run.attempts.iter().enumerate() {
+        let id = attempt.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        assert!(
+            store.claim(id, &at(index as i64 * 2_000), &call)?.is_some(),
+            "lane {index} of a 16-lane read-only batch"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(100, true), &call)?;
+    let second = starting(&store, &lane(101, true), &call)?;
+    let reader = starting(&store, &lane(102, false), &call)?;
+    let queued = lane(103, false);
+    store.create(&queued, &call)?;
+    let queued = queued.attempts[0].attempt_id;
+    // The test clock reads 0 ms, so the writer start is happening now.
+    assert!(store.claim(first, &at(0), &call)?.is_some());
+    let records = [first, second, reader, queued]
+        .map(|id| store.record(id, &call))
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let waits = store.lane_waits(&records, &call);
+    let wait = |id| waits.iter().find(|w| w.attempt_id == id);
+    assert!(wait(first).is_none(), "a running lane waits for nothing");
+    let writer = wait(second).ok_or("second lane waits")?;
+    assert_eq!(writer.lane_class, LaneClass::Writer);
+    assert_eq!(
+        writer.waiting_for,
+        "writer startup spacing: 20.0 s left of 20.0 s"
+    );
+    let reader = wait(reader).ok_or("read-only lane waits")?;
+    assert_eq!(reader.lane_class, LaneClass::ReadOnly);
+    assert!(
+        reader.waiting_for.starts_with("host capacity"),
+        "no read-only start yet, so the writer's spacing is not its wait: {}",
+        reader.waiting_for
+    );
+    let queued = wait(queued).ok_or("queued lane waits")?;
+    assert_eq!(queued.lane_class, LaneClass::ReadOnly);
+    assert!(queued.waiting_for.starts_with("launch"));
+
+    // A serial run reports its own concurrency before any spacing.
+    let serial = {
+        let mut run = two_tasks(1);
+        run.run_id = RunId::from_bytes([110; 16]);
+        run.operation_id = provenant_core::OperationId::parse("serial-waits")?;
+        run.attempts[0].attempt_id = AttemptId::from_bytes([111; 16]);
+        run.attempts[1].attempt_id = AttemptId::from_bytes([112; 16]);
+        run
+    };
+    store.create(&serial, &call)?;
+    let [a, b] = [serial.attempts[0].attempt_id, serial.attempts[1].attempt_id];
+    for id in [a, b] {
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+    }
+    assert!(store.claim(a, &at(0), &call)?.is_some());
+    let blocked = store.lane_waits(&[store.record(b, &call)?], &call);
+    assert_eq!(
+        blocked[0].waiting_for,
+        "run concurrency: 1 of 1 lanes of this run are active"
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    // A ledger from before lane classes, holding one lease and no start, so
+    // the upgrade holds no class (the carried start has its own tests).
+    old_ledger(
+        &store,
+        "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+         CREATE INDEX lease_projects ON leases(project);
+         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
+         INSERT INTO leases(attempt,project,store) VALUES ('legacy','project',x'2f6e6f77686572652f');
+         PRAGMA user_version=1;",
+    )?;
+
+    let old = starting(&store, &lane(80, true), &call)?;
+    // A ticket recorded before classes has no class field; strip it.
+    let raw: Vec<u8> = store.db.query_row(
+        "SELECT record FROM admission WHERE attempt=?1",
+        [old.to_string()],
+        |r| r.get(0),
+    )?;
+    let mut ticket: serde_json::Value = db::decode(&raw)?;
+    ticket
+        .as_object_mut()
+        .ok_or("ticket object")?
+        .remove("lane_class");
+    store.db.execute(
+        "UPDATE admission SET record=?1 WHERE attempt=?2",
+        rusqlite::params![db::bytes(&ticket)?, old.to_string()],
+    )?;
+    let writer = starting(&store, &lane(81, true), &call)?;
+    let reader = starting(&store, &lane(82, false), &call)?;
+
+    assert!(store.claim(old, &at(11_000), &call)?.is_some());
+    let ledger = crate::ledger::open(&store.writer_registry, &call)?;
+    let class: String =
+        ledger.query_row("SELECT class FROM leases WHERE attempt='legacy'", [], |r| {
+            r.get(0)
+        })?;
+    assert_eq!(class, "writer", "a lease from before classes is a writer's");
+    assert!(
+        store.claim(writer, &at(11_001), &call)?.is_none(),
+        "a ticket with no class is a writer, spaced 20 s from the last writer start"
+    );
+    assert!(
+        store.claim(reader, &at(11_001), &call)?.is_some(),
+        "the writer start holds no read-only lane"
+    );
+    assert!(store.claim(writer, &at(31_000), &call)?.is_some());
+    Ok(())
+}
+
 #[test]
 fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let now = WallTime::from_micros(100)?;
+    let now = at_micros(100);
     let base = std::fs::canonicalize(temp.path())?;
     let host = base.join("host");
     let mut stores = Vec::new();
@@ -2413,14 +3398,21 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
             RunStore::open(&context(&base.join(name))?, &call)?.with_writer_registry(&host);
         store.set_admission_policy(AdmissionPolicy {
             startup_spacing_ms: 0,
+            read_only_spacing_ms: 0,
             ..AdmissionPolicy::default()
         });
         stores.push(store);
     }
-    // Each store fills half the project's host-wide limit with its own run.
-    let half = PROJECT_ACTIVE / 2;
-    let batches = [batch(1, half), batch(2, half)];
-    for (store, run) in stores.iter().zip(&batches) {
+    // Each store fills half the project's host-wide limit, in runs that stay
+    // inside one batch's concurrency.
+    let per_run = PROJECT_ACTIVE / 4;
+    let batches = [
+        batch(1, per_run),
+        batch(4, per_run),
+        batch(2, per_run),
+        batch(5, per_run),
+    ];
+    for (store, run) in stores.iter().flat_map(|s| [s, s]).zip(&batches) {
         store.create(run, &call)?;
         for attempt in &run.attempts {
             store.mark_starting(
@@ -2432,11 +3424,11 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
                 &call,
             )?;
             store
-                .claim(attempt.attempt_id, now, &call)?
+                .claim(attempt.attempt_id, &now, &call)?
                 .ok_or("within the host limit")?;
         }
     }
-    // Counted per store, the second store would admit a ninth attempt.
+    // Counted per store, the second store would admit another attempt.
     let extra = batch(3, 1);
     let waiting = extra.attempts[0].attempt_id;
     stores[1].create(&extra, &call)?;
@@ -2449,7 +3441,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
         &call,
     )?;
     assert!(
-        stores[1].claim(waiting, now, &call)?.is_none(),
+        stores[1].claim(waiting, &now, &call)?.is_none(),
         "both child stores count against one project limit"
     );
     // The first attempt's owner dies; recovery commits its terminal from the
@@ -2470,7 +3462,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     };
     stores[0].finish(dead, &dir, &observed, &fake, &call)?;
     let admitted = stores[1]
-        .claim(waiting, now, &call)?
+        .claim(waiting, &now, &call)?
         .ok_or("recovered lease not freed")?;
     assert_eq!(admitted.state, AttemptState::Running);
     Ok(())
@@ -2627,11 +3619,12 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
     store.set_admission_policy(AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
     let batch = two_tasks(2);
     store.create(&batch, &call)?;
-    let now = WallTime::from_micros(100)?;
+    let now = at_micros(100);
     let fake = Fake {
         refuse: false,
         observed: Some(route()),
@@ -2647,7 +3640,7 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
             None,
             &call,
         )?;
-        store.claim(id, now, &call)?.ok_or("not admitted")?;
+        store.claim(id, &now, &call)?.ok_or("not admitted")?;
         let dir = store.attempt_dir(batch.run_id, id, false)?;
         artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
         let mut observed = exit();
@@ -3761,7 +4754,7 @@ fn recover_rebooted_writer(cancel_run: bool, interrupted: bool, writer: bool) ->
         &call,
     )?;
     store
-        .claim(id, WallTime::from_micros(100)?, &call)?
+        .claim(id, &at_micros(100), &call)?
         .ok_or("not admitted")?;
     let before = store.record(id, &call)?;
     let scope = RunStore::scope(&before);
@@ -3910,6 +4903,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
     store.set_admission_policy(AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
     let batch = two_tasks(2);
@@ -3926,7 +4920,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         &call,
     )?;
     store
-        .claim(exited, WallTime::from_micros(100)?, &call)?
+        .claim(exited, &at_micros(100), &call)?
         .ok_or("not admitted")?;
     let dir = store.attempt_dir(batch.run_id, exited, false)?;
     artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
@@ -4005,7 +4999,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         &call,
     )?;
     store
-        .claim(id, WallTime::from_micros(100)?, &call)?
+        .claim(id, &at_micros(100), &call)?
         .ok_or("not admitted")?;
     let attempt = store.attempt_dir(run.run_id, id, false)?;
     let scope = provenant_supervisor::custody::Scope {

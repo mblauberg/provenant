@@ -1222,6 +1222,36 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         2
     );
 
+    // The peer derives a queued lane's class and wait itself, so a lane listed
+    // from another host reads like a local one.
+    let mut waits_request = ingress_request.clone();
+    waits_request["action"] = json!({"action":"lane_waits","targets":attempts[1..3]
+        .iter()
+        .map(|attempt| json!({"host":local_host.to_string(),"attempt":attempt.to_string()}))
+        .collect::<Vec<_>>()});
+    let waits = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&waits_request)?),
+    )?;
+    assert_eq!(code(&waits), 0);
+    let waits: Value = serde_json::from_slice(&waits.stdout.bytes)?;
+    assert_eq!(waits["result"]["result"], "lane_waits", "{waits}");
+    let waits = waits["result"]["data"].as_array().ok_or("waits")?;
+    assert_eq!(waits.len(), 2, "{waits:?}");
+    for wait in waits {
+        assert_eq!(wait["lane_class"], "read_only", "{wait}");
+        assert_eq!(
+            wait["waiting_for"], "launch: not yet handed to a guardian",
+            "{wait}"
+        );
+    }
+
     let project_key: provenant_fabric_runtime::identity::CrossHostProjectKey =
         serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
     let mut status_record = records[0].clone();
@@ -2257,6 +2287,8 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
             vec!["lanes.max_concurrency=2"],
             1,
         ),
+        // Four tasks and an explicit 16: above the task count, still accepted.
+        ("wide-capacity", Some(16), vec![], 16),
     ] {
         let (request, attempt) = submitted_policy(
             &rig,

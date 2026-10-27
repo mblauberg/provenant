@@ -1742,7 +1742,7 @@ bounds are null. Positional arguments have no long flag.
 | `--network` | `{"name": "network", "values": ["on", "off"]}` |
 | `--capability` | `{"bounds": [0, 16], "name": "capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "name": "provider_timeout"}` |
-| `--concurrency` | `{"bounds": [1, 8], "conflicts": ["prompt_file", "prompt_stdin"], "name": "concurrency", "requires": ["manifest"]}` |
+| `--concurrency` | `{"bounds": [1, 16], "conflicts": ["prompt_file", "prompt_stdin"], "name": "concurrency", "requires": ["manifest"]}` |
 | `--knob` | `{"name": "knobs", "repeatable": true}` |
 | `--host` | `{"name": "host"}` |
 | `--branch` | `{"name": "branch"}` |

@@ -362,7 +362,7 @@ impl ValidateInput for SubmitInput {
                 if tasks.is_empty() || tasks.len() > 64 {
                     return Err(field("tasks"));
                 }
-                if concurrency.is_some_and(|n| n == 0 || n > 8 || usize::from(n) > tasks.len()) {
+                if concurrency.is_some_and(|n| n == 0 || n > 16) {
                     return Err(field("concurrency"));
                 }
                 if knobs.len() > 64 {
@@ -468,6 +468,27 @@ mod tests {
     fn rejects<T: DeserializeOwned + std::fmt::Debug>(value: Value, path: &str) {
         let error = serde_json::from_value::<T>(value).unwrap_err().to_string();
         assert!(error.contains(path), "expected `{path}` in `{error}`");
+    }
+
+    /// A one-task submit with this `concurrency`, as the CLI and store see it.
+    fn one_task_submit_is_valid(concurrency: u64) -> bool {
+        use super::ValidateInput;
+        serde_json::from_value::<SubmitInput>(json!({
+            "op":"submit","operation_id":"work-1","concurrency":concurrency,
+            "tasks":[{"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
+        }))
+        .is_ok_and(|input| input.validate_input(provenant_core::WaitTransport::Cli).is_ok())
+    }
+
+    #[test]
+    fn concurrency_above_the_task_count_is_accepted_up_to_sixteen() {
+        // The CLI and the run store accept 16 for one task, so a peer must too.
+        for accepted in [1, 2, 16] {
+            assert!(one_task_submit_is_valid(accepted), "{accepted}");
+        }
+        for refused in [0, 17] {
+            assert!(!one_task_submit_is_valid(refused), "{refused}");
+        }
     }
 
     #[test]

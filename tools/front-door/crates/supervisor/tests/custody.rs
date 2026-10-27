@@ -26,6 +26,7 @@ const S2_CENSUS_GATE_ONCE: &str = "s2-census-gate-once";
 const S2_CENSUS_PAUSED: &str = "s2-census-paused";
 const S2_CENSUS_RELEASE: &str = "s2-census-release";
 const S2_PRODUCTION_SHAPE: &str = "s2-production-shape";
+const S2_REFUSE_ADMISSION: &str = "s2-refuse-admission";
 const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
 
@@ -1106,6 +1107,72 @@ fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
     wait_for_identity_absence(&owner_identity)?;
     Ok(())
 }
+/// A host holder whose admission always fails, as the refusal its marker names.
+struct RefusingHolder {
+    clock: bool,
+}
+impl provenant_supervisor::Holder for RefusingHolder {
+    fn admit(
+        &self,
+        _context: &[u8],
+        _attempt: &Directory,
+    ) -> std::result::Result<(), CustodyError> {
+        Err(if self.clock {
+            CustodyError::AdmissionClock
+        } else {
+            CustodyError::Io(io::Error::other("/private/state/admission.sqlite3"))
+        })
+    }
+    fn terminal(
+        &self,
+        _context: &[u8],
+        attempt: &Directory,
+        exit: &ExitObservation,
+        _custody: &Recovery,
+    ) -> std::result::Result<(), CustodyError> {
+        // Settle at once, so the guardian does not retry release for long.
+        attempt.mkdir(OsStr::new("quarantine"), 0o700)?;
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": exit.scope,
+            "kind": "quarantine_manifest",
+        }))
+        .map_err(|_| CustodyError::InvalidRecord)?;
+        attempt
+            .open_verified_directory(OsStr::new("quarantine"))?
+            .atomic_write(
+                OsStr::new("manifest.json"),
+                ".test-",
+                &manifest,
+                provenant_os::fs::PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+        publish_release(attempt, exit.scope)
+    }
+}
+/// The guardian publishes the reason for a refused admission: an unreadable
+/// host clock is named, and any other error leaves only the generic reason,
+/// with none of its text.
+#[cfg(target_os = "macos")]
+fn the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal(root: &Path) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    for (marker, name, reason) in [
+        (
+            "clock",
+            "unreadable-clock",
+            "startup spacing cannot be judged: host clock or boot identity unreadable",
+        ),
+        ("io", "other-error", "admission refused"),
+    ] {
+        std::fs::write(home.join(S2_REFUSE_ADMISSION), marker)?;
+        let (_writer, handle) = start(root, name, "exit", &[], CapturePlan::default())?;
+        let exit = exited(&handle)?;
+        assert!(exit.never_spawned, "{exit:?}");
+        assert_eq!(exit.warnings, vec![reason.to_owned()], "{exit:?}");
+    }
+    Ok(())
+}
 /// The production shape: no registry is wired, so the host's child store
 /// decides. A store with no nested run ends the escapee; one with a run, which
 /// could hold a nested owner, leaves it alive and reported.
@@ -1923,6 +1990,11 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
+        "the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal",
+        the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal,
+    ),
+    #[cfg(target_os = "macos")]
+    (
         "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
         escapee_is_ended_only_when_the_host_reports_no_nested_runs,
     ),
@@ -2031,15 +2103,25 @@ fn main() -> Result<()> {
         // The production shape wires no registry; only the host's child store.
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
         let store = FileNestedChildren { home: home.clone() };
+        let refusal_marker = home.join(S2_REFUSE_ADMISSION);
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
         let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
             Some(path) => fixture::ExitPublicationFaults::from_state_dir(&PathBuf::from(path))?,
             None => None,
         };
+        let refusal = match std::fs::read(&refusal_marker) {
+            Ok(marker) => Some(RefusingHolder {
+                clock: marker == b"clock",
+            }),
+            Err(_) => None,
+        };
         provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {
+                holder: refusal
+                    .as_ref()
+                    .map(|holder| holder as &dyn provenant_supervisor::Holder),
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
                 nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),

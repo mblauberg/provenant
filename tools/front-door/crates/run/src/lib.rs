@@ -21,7 +21,7 @@ pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 mod writer;
 
 pub use admission::{
-    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, PROJECT_ACTIVE, Resources, SystemResources,
+    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{CancelReceipt, Reconciled, Resume, UncertainReason};
 pub use delivery::HostDeliveryContext;
@@ -116,6 +116,10 @@ pub enum RunError {
     DepthOverflow,
     #[error("host queue is full")]
     Capacity,
+    #[error(
+        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
+    )]
+    HostClock,
     #[error("run store is contended or its call budget expired")]
     Contention,
     #[error("run-store call was cancelled")]

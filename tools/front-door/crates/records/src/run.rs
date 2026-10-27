@@ -511,6 +511,42 @@ pub struct AttemptRecord {
     #[serde(default)]
     pub trace: crate::Trace,
 }
+/// The admission class of a lane: it picks the startup spacing a lane waits
+/// out and which earlier starts it is measured against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneClass {
+    /// A `worktree-write` lane. A record with no class is a writer, the
+    /// conservative reading.
+    #[default]
+    Writer,
+    /// Every other lane.
+    ReadOnly,
+}
+impl LaneClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Writer => "writer",
+            Self::ReadOnly => "read_only",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "writer" => Some(Self::Writer),
+            "read_only" => Some(Self::ReadOnly),
+            _ => None,
+        }
+    }
+}
+/// What a lane that has not started is waiting for, shown by `lanes` and carried
+/// over the peer channel so a peer's lanes read like local ones.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneWait {
+    pub attempt_id: AttemptId,
+    pub lane_class: LaneClass,
+    pub waiting_for: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionTicket {
@@ -525,7 +561,11 @@ pub struct AdmissionTicket {
     /// Available memory floor as basis points of installed memory.
     pub memory_floor_basis_points: u64,
     pub disk_floor_bytes: u64,
+    /// Spacing for this lane's class, fixed at submission.
     pub startup_spacing_ms: u64,
+    /// Absent on tickets from before lane classes, which decode as writers.
+    #[serde(default)]
+    pub lane_class: LaneClass,
     /// The owning run's batch concurrency, distinct from host admission caps.
     pub run_concurrency: u64,
     pub quota_permit: Option<String>,

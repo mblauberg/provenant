@@ -1108,6 +1108,54 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     );
 }
 #[test]
+fn read_only_batch_concurrency_has_its_own_knob() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let shown = read(&roots).unwrap();
+    let writers = &shown.knobs["lanes.max_concurrency"];
+    let readers = &shown.knobs["lanes.max_concurrency_read_only"];
+    assert_eq!(
+        (writers.value.as_i64(), readers.value.as_i64()),
+        (Some(8), Some(16))
+    );
+    assert_eq!(readers.source, KnobSource::Default);
+    let set = |name, value| knob_edit(&roots, KnobEdit::Set { name, value });
+    set("lanes.max_concurrency_read_only", "16").unwrap();
+    assert!(matches!(
+        set("lanes.max_concurrency_read_only", "17"),
+        Err(ConfigError::KnobValue {
+            rule: "outside_allowed_range",
+            ..
+        })
+    ));
+    knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
+    knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency_read_only")).unwrap();
+    let shown = read(&roots).unwrap();
+    assert_eq!(
+        shown.knobs["lanes.max_concurrency_read_only"]
+            .value
+            .as_i64(),
+        Some(8)
+    );
+}
+#[test]
+fn knob_is_set_tells_a_user_choice_from_a_default_or_preset() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let name = "lanes.max_concurrency";
+    assert!(!read(&roots).unwrap().knob_is_set(name, &[]));
+    knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
+    assert!(
+        !read(&roots).unwrap().knob_is_set(name, &[]),
+        "a preset is not a choice"
+    );
+    let shown = read(&roots).unwrap();
+    assert!(shown.knob_is_set(name, &["lanes.max_concurrency=2".into()]));
+    assert!(!shown.knob_is_set(name, &["lanes.max_concurrency_read_only=2".into()]));
+    knob_edit(&roots, KnobEdit::Set { name, value: "3" }).unwrap();
+    assert!(read(&roots).unwrap().knob_is_set(name, &[]));
+}
+#[test]
 fn set_rejects_out_of_range_values_and_unknown_knobs() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
@@ -1121,7 +1169,10 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
     ));
     match set("lanes.max_concurrenc", "2") {
         Err(ConfigError::UnknownKnob { close, .. }) => {
-            assert_eq!(close, ["lanes.max_concurrency"]);
+            assert_eq!(
+                close,
+                ["lanes.max_concurrency", "lanes.max_concurrency_read_only"]
+            );
         }
         other => panic!("expected unknown knob, got {other:?}"),
     }

@@ -555,8 +555,20 @@ fn open_read_only(
     call: &run::Request<'_>,
 ) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
     let context = execution_context(edge)?;
-    let store = run::RunStore::open_read_only(&context, call)?;
+    let store = read_only_store(&context, edge.roots.state.as_path(), call)?;
     Ok((context, store))
+}
+/// The read-only open of `context`'s store. Like the writable open, it reads
+/// the host admission ledger from the host state root: in a nested lane
+/// the store is a child directory with no ledger of its own, and without the
+/// host root `lanes` reads no spacing and calls every spacing wait host capacity.
+fn read_only_store(
+    context: &run::ExecutionContext,
+    host_state: &Path,
+    call: &run::Request<'_>,
+) -> Result<Option<run::RunStore>, Fail> {
+    Ok(run::RunStore::open_read_only(context, call)?
+        .map(|store| store.with_writer_registry(host_state)))
 }
 fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
@@ -903,7 +915,13 @@ pub fn submit_with_host(
     let profile = config
         .dispatch_profile(&submission.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let concurrency = run::concurrency(submission.concurrency, &profile);
+    let read_only = submission.tasks.iter().all(|task| task.worktree.is_none());
+    let bound = (read_only
+        && config.knob_is_set("lanes.max_concurrency", &submission.knobs)
+        && !config.knob_is_set("lanes.max_concurrency_read_only", &submission.knobs))
+    .then(|| profile.knob_u64("lanes.max_concurrency"))
+    .flatten();
+    let concurrency = run::concurrency(submission.concurrency, &profile, read_only, bound);
     let tasks = submission
         .tasks
         .into_iter()
@@ -1482,8 +1500,13 @@ fn report(
             let page = session
                 .service()
                 .lanes(&lane_query(session, &[target], true, 100, 0, call)?, call)?;
-            let (data, human) =
-                render_lanes(&page.lanes, None, session.context.state_root.as_path());
+            let waits = session.store.lane_waits(&page.lanes, call);
+            let (data, human) = render_lanes(
+                &page.lanes,
+                &waits,
+                None,
+                session.context.state_root.as_path(),
+            );
             (data, human, false)
         }
     };
@@ -1545,7 +1568,12 @@ pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
     };
     (state_name(state), reason)
 }
-fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) -> (Value, String) {
+fn render_lanes(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    next: Option<u64>,
+    root: &Path,
+) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
         .iter()
@@ -1578,6 +1606,9 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
                 .unwrap_or_default();
             let route_text = plain_text(&route, usize::MAX);
+            // A lane that has not started says what it is waiting for.
+            let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
+            let reason = reason.or_else(|| wait.map(|w| w.waiting_for.clone()));
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
@@ -1637,6 +1668,8 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                 "state": state,
                 "exit_code": exit_code,
                 "reason": reason,
+                "lane_class": wait.map(|w| w.lane_class),
+                "waiting_for": wait.map(|w| &w.waiting_for),
                 "requested_route": lane.requested_route,
                 "applied_route": lane.applied_route,
                 "skipped_routes": lane.skipped_routes,
@@ -1808,13 +1841,29 @@ fn candidates<'a>(
     }
 }
 const LOCAL_POLL: Duration = Duration::from_millis(500);
-fn waited_reply(waited: watch::Waited, root: &Path) -> (Value, String, bool) {
-    let (mut data, human) = render_lanes(&waited.lanes, None, root);
+/// The lanes a wait or watch ended on, each unstarted one with what it waits for.
+fn render_settled(
+    session: &Session,
+    lanes: &[run::AttemptRecord],
+) -> Result<(Value, String), Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let waits = session.store.lane_waits(lanes, &call);
+    Ok(render_lanes(
+        lanes,
+        &waits,
+        None,
+        session.context.state_root.as_path(),
+    ))
+}
+fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
+    let (mut data, human) = render_settled(session, &waited.lanes)?;
     data["condition_met"] = json!(waited.met);
     if waited.ignored > 0 {
         data["ignored_settled"] = json!(waited.ignored);
     }
-    (data, human, !waited.met)
+    Ok((data, human, !waited.met))
 }
 /// Wait for every lane a run, task or attempt names, settled or not: the
 /// whole named set, for commands that act on a lane they just created.
@@ -1843,7 +1892,7 @@ fn wait_lanes(
         Duration::from_secs(seconds),
         LOCAL_POLL,
     )?;
-    Ok(waited_reply(waited, session.context.state_root.as_path()))
+    waited_reply(session, waited)
 }
 /// `lanes --wait`: settlements after the wait starts, or after `--since`. Exact
 /// attempt IDs count whenever they settled. Without named lanes, a session's
@@ -1879,19 +1928,23 @@ fn wait_command(
             open(edge, &entry)?.store.ack_seen(&key, latest, &entry)?;
         }
     }
-    Ok(waited_reply(waited, session.context.state_root.as_path()))
+    waited_reply(session, waited)
 }
 /// One line per call, already newline-terminated, for a watch to stream.
 type Emit<'a> = &'a mut dyn FnMut(&str) -> Result<(), Fail>;
-fn watched_reply(watched: &watch::Watched, root: &Path, json: bool) -> (Value, String, bool) {
-    let (mut data, _) = render_lanes(&watched.lanes, None, root);
+fn watched_reply(
+    session: &Session,
+    watched: &watch::Watched,
+    json: bool,
+) -> Result<(Value, String, bool), Fail> {
+    let (mut data, _) = render_settled(session, &watched.lanes)?;
     data["condition_met"] = json!(watched.settled);
     let human = if json {
         String::new()
     } else {
         watch::end_line(watched)
     };
-    (data, human, !watched.settled)
+    Ok((data, human, !watched.settled))
 }
 /// `lanes --watch`: a line for each state a counted lane enters, until all
 /// have settled or the budget passes.
@@ -1926,11 +1979,7 @@ fn watch_command(
             emit(&format!("{text}\n"))
         },
     )?;
-    Ok(watched_reply(
-        &watched,
-        session.context.state_root.as_path(),
-        json,
-    ))
+    watched_reply(session, &watched, json)
 }
 
 /// Write one watch line to standard output and flush it, so a pipe or monitor
@@ -1983,7 +2032,7 @@ fn lanes_inner(
     let (context, store) = open_read_only(edge, &call)?;
     let Some(store) = store else {
         let root = execution_state(edge.roots, edge.home, edge.assets)?;
-        let (mut data, human) = render_lanes(&[], None, root.as_path());
+        let (mut data, human) = render_lanes(&[], &[], None, root.as_path());
         if command.wait.is_some() || command.watch.is_some() {
             // No store means no lanes, so there is nothing left to wait for.
             data["condition_met"] = json!(true);
@@ -2077,7 +2126,8 @@ fn lanes_inner(
         let lanes: Vec<_> = page.lanes.into_iter().filter(by_session).collect();
         (lanes, page.next)
     };
-    let (data, human) = render_lanes(&lanes, next, session.context.state_root.as_path());
+    let waits = session.store.lane_waits(&lanes, &call);
+    let (data, human) = render_lanes(&lanes, &waits, next, session.context.state_root.as_path());
     Ok((data, human, false))
 }
 
@@ -3402,6 +3452,33 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_lane_reads_the_host_ledger_when_it_opens_read_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let host = root.join("state");
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(host.join("children").join("lane"));
+        let context = run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        // The store must exist to be opened; the writable open creates it.
+        run::RunStore::open(&context, &call)?;
+        let store = read_only_store(&context, &host, &call)
+            .map_err(|f| f.message)?
+            .ok_or("nested store")?;
+        assert_eq!(store.writer_registry(), host);
+        assert_ne!(store.writer_registry(), context.state_root.as_path());
+        Ok(())
+    }
+
+    #[test]
     fn trace_chain_follows_parents_and_ends_at_a_parent_this_store_lacks()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -3611,7 +3688,8 @@ mod tests {
             "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
             "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
         }))?;
-        let (data, human) = render_lanes(std::slice::from_ref(&lane), None, Path::new("/state"));
+        let (data, human) =
+            render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
         assert_eq!(
             human,
             format!(
@@ -3653,7 +3731,7 @@ mod tests {
             &provenant_core::RelativePath::parse(".github/unsafe\npath.yml")?,
         )?];
         lane.delivery = None;
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert_eq!(data["lanes"][0]["state"], "review_required");
         assert_eq!(data["lanes"][0]["head"], "a".repeat(40));
         assert_eq!(
@@ -3702,7 +3780,7 @@ mod tests {
             reason: None,
         };
         lane.protected_paths = vec![];
-        let (_, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (_, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert!(human.contains("  review head=unknown paths=\n"));
         Ok(())
     }
@@ -3740,7 +3818,7 @@ mod tests {
                 "redacted": false
             }
         }))?;
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert_eq!(
             human,
             format!(
@@ -3755,6 +3833,53 @@ mod tests {
         assert_eq!(data["lanes"][0]["state"], "rejected");
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert!(data["lanes"][0]["applied_route"].is_null());
+        Ok(())
+    }
+    #[test]
+    fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "wait-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state": "starting"},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 1,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        let wait = run::LaneWait {
+            attempt_id: lane.attempt_id,
+            lane_class: run::LaneClass::ReadOnly,
+            waiting_for: "read-only startup spacing: 1.2 s left of 2.0 s".into(),
+        };
+        let (data, human) = render_lanes(&[lane], &[wait], None, Path::new("/state"));
+        assert!(
+            human.contains("starting unresolved (read-only startup spacing: 1.2 s left of 2.0 s)"),
+            "{human}"
+        );
+        let row = &data["lanes"][0];
+        assert_eq!(row["lane_class"], "read_only");
+        assert_eq!(
+            row["waiting_for"],
+            "read-only startup spacing: 1.2 s left of 2.0 s"
+        );
+        assert_eq!(row["reason"], row["waiting_for"]);
         Ok(())
     }
     #[test]
@@ -3792,7 +3917,7 @@ mod tests {
             }
         }))?;
         assert_eq!(settled(&lane.state), (true, false));
-        let (data, human) = render_lanes(&[lane], None, Path::new("/state"));
+        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert!(
             human.contains(&format!(" uncommitted unresolved ({reason})\n")),
             "{human}"

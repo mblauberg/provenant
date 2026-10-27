@@ -25,7 +25,7 @@ pub(crate) struct AppliedWriteGrants {
 
 /// Hard host limits, independent of batch concurrency.
 pub const HOST_ACTIVE: u64 = 64;
-pub const PROJECT_ACTIVE: u64 = 16;
+pub const PROJECT_ACTIVE: u64 = 32;
 pub const HOST_QUEUED: u64 = 256;
 
 /// Floors and windows recorded on each ticket at submission. A task queued
@@ -35,21 +35,36 @@ pub const HOST_QUEUED: u64 = 256;
 pub struct AdmissionPolicy {
     pub memory_floor_basis_points: u64,
     pub disk_floor_bytes: u64,
+    /// Spacing between writer starts.
     pub startup_spacing_ms: u64,
+    /// Spacing between read-only starts, kept apart from the writer clock.
+    pub read_only_spacing_ms: u64,
     pub admission_seconds: u64,
 }
 impl Default for AdmissionPolicy {
-    /// Read-only defaults: five per cent memory, 500 MiB disk, 20 s spacing
-    /// and a one-hour admission deadline.
+    /// Defaults: five per cent memory, 500 MiB disk, 20 s writer spacing, 2 s
+    /// read-only spacing and a one-hour admission deadline.
     fn default() -> Self {
         Self {
             memory_floor_basis_points: 500,
             disk_floor_bytes: 500 * 1024 * 1024,
             startup_spacing_ms: 20_000,
+            read_only_spacing_ms: 2_000,
             admission_seconds: 3600,
         }
     }
 }
+impl AdmissionPolicy {
+    /// The spacing a lane of `class` waits out after the last start of its class.
+    pub fn spacing_ms(&self, class: LaneClass) -> u64 {
+        match class {
+            LaneClass::Writer => self.startup_spacing_ms,
+            LaneClass::ReadOnly => self.read_only_spacing_ms,
+        }
+    }
+}
+
+pub use provenant_records::run::LaneWait;
 
 /// Resource probes. A failed probe queues; it never admits unchecked.
 pub trait Resources {
@@ -74,6 +89,7 @@ impl RunStore {
         &self,
         tx: &Connection,
         attempt: &AttemptRecord,
+        class: LaneClass,
         concurrency: u64,
         queue_seconds: u64,
     ) -> Result<()> {
@@ -93,7 +109,8 @@ impl RunStore {
             active: false,
             memory_floor_basis_points: self.policy.memory_floor_basis_points,
             disk_floor_bytes: self.policy.disk_floor_bytes,
-            startup_spacing_ms: self.policy.startup_spacing_ms,
+            startup_spacing_ms: self.policy.spacing_ms(class),
+            lane_class: class,
             run_concurrency: concurrency,
             quota_permit: None,
             admission_deadline: deadline(
@@ -111,6 +128,59 @@ impl RunStore {
             ],
         )?;
         Ok(())
+    }
+    /// What each queued or starting lane in `lanes` is waiting for, in order.
+    /// It reads this store and the host ledger without taking a lock, so it
+    /// names a wait only when it can see one: run concurrency, then startup
+    /// spacing, then the shared host and project caps and resource floors.
+    pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
+        lanes
+            .iter()
+            .filter(|lane| matches!(lane.state, AttemptState::Queued | AttemptState::Starting))
+            .filter_map(|lane| {
+                let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
+                let class = ticket.lane_class;
+                let waiting_for = if lane.state == AttemptState::Queued {
+                    "launch: not yet handed to a guardian".to_owned()
+                } else {
+                    let active: i64 = self
+                        .db
+                        .query_row(
+                            "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
+                            [lane.run_id.to_string()],
+                            |r| r.get(0),
+                        )
+                        .ok()?;
+                    let spacing = ticket.startup_spacing_ms;
+                    let left = crate::ledger::spacing_left(
+                        &self.writer_registry,
+                        class,
+                        spacing,
+                        call.clock,
+                    );
+                    if active >= i64::try_from(ticket.run_concurrency).ok()? {
+                        format!(
+                            "run concurrency: {active} of {} lanes of this run are active",
+                            ticket.run_concurrency
+                        )
+                    } else if let Some(left) = left.filter(|left| *left > 0) {
+                        format!(
+                            "{} startup spacing: {} s left of {} s",
+                            class_name(class),
+                            tenths(left),
+                            tenths(spacing)
+                        )
+                    } else {
+                        "host capacity: active lane caps and memory or disk floors".to_owned()
+                    }
+                };
+                Some(LaneWait {
+                    attempt_id: lane.attempt_id,
+                    lane_class: class,
+                    waiting_for,
+                })
+            })
+            .collect()
     }
     fn ticket(&self, db: &Connection, id: AttemptId) -> Result<AdmissionTicket> {
         let raw: Vec<u8> = db
@@ -249,7 +319,7 @@ impl RunStore {
                 _ => false,
             };
             if fits {
-                match self.claim(id, now, &call) {
+                match self.claim(id, clock, &call) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
                     Ok(None) | Err(RunError::Contention) => {}
@@ -282,7 +352,7 @@ impl RunStore {
     pub(crate) fn claim(
         &self,
         id: AttemptId,
-        now: WallTime,
+        clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
@@ -302,17 +372,18 @@ impl RunStore {
             }
             // Host and project counts and spacing span every execution
             // namespace, so they live in the host ledger, not this store.
-            if !crate::ledger::lease(
+            // The ledger reads the clock under its own lock; the lane starts at
+            // the time spacing was judged and recorded.
+            let Some(now) = crate::ledger::lease(
                 &ledger,
                 self.context.state_root.as_path(),
-                id,
-                old.project_id,
-                now.as_micros() / 1000,
-                sql_int(ticket.startup_spacing_ms)?,
+                &ticket,
+                clock,
                 call,
-            )? {
+            )?
+            else {
                 return Ok(None);
-            }
+            };
             ticket.active = true;
             tx.execute(
                 "UPDATE admission SET active=1, record=?1 WHERE attempt=?2",
@@ -326,6 +397,18 @@ impl RunStore {
             Ok(Some(next))
         })
     }
+}
+fn class_name(class: LaneClass) -> &'static str {
+    match class {
+        LaneClass::Writer => "writer",
+        LaneClass::ReadOnly => "read-only",
+    }
+}
+/// Milliseconds as seconds to one decimal place, rounded up so a wait never
+/// reads as zero while it holds.
+fn tenths(ms: u64) -> String {
+    let tenths = ms.div_ceil(100);
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
     DurationMicros::from_seconds(seconds)

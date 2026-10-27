@@ -62,6 +62,18 @@ pub enum KnobEdit<'a> {
 }
 
 impl<D> crate::ResolvedConfig<D> {
+    /// Whether the user chose `name`, in `[knobs]` or as a dispatch override,
+    /// as opposed to the registry default or the profile preset.
+    pub fn knob_is_set(&self, name: &str, overrides: &[String]) -> bool {
+        overrides
+            .iter()
+            .any(|entry| entry.split_once('=').is_some_and(|(key, _)| key == name))
+            || self
+                .knobs
+                .get(name)
+                .is_some_and(|knob| knob.source == KnobSource::Override)
+    }
+
     /// Resolve a task's final policy without changing the config file.
     pub fn dispatch_profile(
         &self,

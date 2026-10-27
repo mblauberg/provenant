@@ -32,12 +32,94 @@ different digest fails with `operation_conflict` (exit 2).
 Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
 supervisor call happens inside a transaction. Admission bounds active lanes
-at 64 per host and 16 per project and queued lanes at 256 per host, with
+at 64 per host and 32 per project and queued lanes at 256 per host, with
 memory and disk floors, startup spacing and a deadline.
-- Why: an accepted receipt must mean durable admission.
+
+Each ticket and host ledger lease records a lane class: `writer` for a
+`worktree-write` lane, `read_only` for every other. Startup spacing is per
+class and measured only against the last start of that class: writers wait 20 s
+after the last writer start, and read-only lanes wait 2 s after the last
+read-only start, so a burst of provider launches is still staggered but a
+read-only lane never waits behind a writer. Spacing is measured on the host's
+monotonic clock since boot (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on
+Linux, both counting sleep), never the wall clock. Every process on the host
+shares that clock, and the ledger records each class's last start as a reading
+of it with the boot identity it was read under (`kern.bootsessionuuid` on macOS,
+`/proc/sys/kernel/random/boot_id` on Linux). The ledger reads the clock inside
+the transaction that checks and records spacing, never before a probe or the
+lock, so lock order is clock order and an admission delayed behind another
+process's newer start still waits for it. When the stored boot identity is the
+current one, spacing is the clock now minus the start, and no wall-clock step,
+forward or back, moves it. The guarantee is: within one boot, no two lanes of a
+class start less than one spacing apart. A reboot resets spacing: a start from
+another boot, or none, leaves the class free, apart from the one-time upgrade
+below of a version 1 ledger that recorded a start, which holds each class for
+one spacing. If the clock or the boot identity cannot be read the claim is refused with a reason (`startup spacing cannot be
+judged: host clock or boot identity unreadable`), which the guardian publishes
+as the lane's never-spawned reason, rather than judged on the wall clock;
+`lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
+memory floor (5 %) and disk floor (500 MiB) refuse both classes. A ledger row
+or ticket with no class is a writer; opening a version 1 ledger upgrades it in
+place, in one transaction, carrying any wall-time start across as a start of now under the current boot
+for each class, whatever its age and without reading the wall clock, so the
+one-time upgrade holds each class for one spacing (a version 1 ledger with no
+start holds neither); it refuses the upgrade if the
+clock or boot identity cannot be read. Spacing is enforced at
+admission, the ledger commit, not at provider spawn, so a guardian suspended
+between the two can spawn alongside a later lane. A run's own batch concurrency (1 to 16) defaults to
+8 when any lane writes and to 16 when none does, from `lanes.max_concurrency`
+and `lanes.max_concurrency_read_only`; an explicit value wins. A
+`lanes.max_concurrency` the user set also caps the read-only default unless
+they set the read-only knob too. Every entry point (CLI, Fabric and a peer)
+accepts a value above the task count; it cannot admit more lanes than the run
+has.
+
+`lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
+and uses the latter as its reason: launch not yet handed to a guardian, run
+concurrency, the class's remaining startup spacing, or otherwise host
+capacity. It reads the store and the host's ledger without locking, from a nested
+lane too, and names only a wait it can see. `lanes --host` and the other peer
+listings show the same two fields: the peer derives them from its own store and
+ledger (peer action `lane_waits`) and an older peer that does not know the
+action simply shows none.
+- Why: an accepted receipt must mean durable admission, and read-only lanes
+  must not queue behind writer spacing that exists to pace worktree and
+  provider startup.
 - Test: `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
+  `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
+  `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
+  `::read_only_lanes_are_spaced_2_seconds_apart`;
+  `::memory_floor_refuses_both_lane_classes`;
+  `::project_cap_allows_up_to_32_active_lanes`;
+  `::legacy_rows_without_a_class_are_treated_as_writers`;
+  `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
+  `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
+  `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
+  `::a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_root`;
+  `crates/cli/src/run.rs::a_nested_lane_reads_the_host_ledger_when_it_opens_read_only`;
+  `crates/cli/src/run/remote.rs::a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones`;
+  `tests/fabric_transport.rs::run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates`;
+  `crates/fabric-runtime/src/coordination/input.rs::concurrency_above_the_task_count_is_accepted_up_to_sixteen`;
+  `::a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it`;
+  `::a_wall_clock_step_back_then_forward_cannot_admit_two_writers_within_a_spacing`;
+  `::a_forward_wall_clock_step_alone_does_not_free_the_class`;
+  `::read_only_spacing_holds_on_the_host_clock_and_never_holds_a_writer`;
+  `::a_new_boot_frees_the_class_and_spacing_runs_on_the_new_boot`;
+  `::an_unreadable_host_clock_or_boot_identity_refuses_the_claim`;
+  `::a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class`;
+  `::lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreadable`;
+  `::a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free`;
+  `::upgrading_a_version_1_ledger_is_atomic`;
+  `::a_version_1_start_of_any_age_holds_each_class_one_full_spacing`;
+  `::a_version_1_ledger_with_no_start_holds_nothing`;
+  `::a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read`;
+  `crates/supervisor/tests/custody.rs::the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal`;
+  `crates/run/src/holder.rs::host_clock_tests::an_unreadable_host_clock_reaches_the_guardian_as_itself`;
+  `crates/os/src/sys/clock.rs::host_monotonic_clock_does_not_go_backwards_and_the_boot_identity_is_stable`;
+  `::lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for`;
+  `crates/cli/src/run.rs::render_lanes_says_what_an_unstarted_lane_waits_for`;
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
-- Owner: `crates/run/src/admission.rs`
+- Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
 
 ## Immutable attempts, no writer replay
 
