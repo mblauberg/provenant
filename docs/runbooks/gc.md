@@ -80,9 +80,15 @@ and rechecks every output volume once. Applied full and pressure sweeps share
 `<state>/gc/collection.lock`; a busy collector is skipped, not queued.
 Manual `gc --pressure` prints a notice when scheduling is disabled, the project
 is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
-Provider-cache and temporary cleanup at settlement, and lane-cache cleanup on
-worktree removal, remain scoped to their owner. Event wiring for settlement
-lane caches and delivery landing belongs to their respective callers.
+Lane settlement collects that lane's declared ignored output and Cargo cache,
+including when its worktree is retained for delivery pickup. Successful
+settlement, delivery integration and `pr land` also prune eligible worktrees
+and their caches through the existing custody checks. These event passes share
+the collection lock, apply no idle delay and leave foreign worktrees alone.
+Kept files, live writers and reservations still prevent removal. A busy
+collector skips settlement collection; the daily backstop retries eligible
+data. Provider-cache and temporary cleanup at settlement remain scoped to
+their owner. `gc.schedule = false` leaves settlement and landing cleanup enabled.
 
 Declared ignored output in an idle linked worktree no longer needs a terminal
 lane. It still needs free writer custody and no live lane. Undeclared ignored
