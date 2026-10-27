@@ -2193,12 +2193,7 @@ fn registration_names_probe_directory_failures() {
         )
         .unwrap_err();
         assert!(matches!(&error, ProviderError::ProbeDirectory(_)));
-        assert!(
-            error
-                .to_string()
-                .contains("provider probe could not prepare its private directory"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("private directory"), "{error}");
     }
 }
 

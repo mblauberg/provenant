@@ -407,7 +407,14 @@ mod tests {
         let rows: Vec<&str> = text.lines().filter(|line| line.starts_with('|')).collect();
         assert!(rows.len() >= 8, "{rows:?}");
         assert!(rows.iter().all(|row| !row.contains("|  |")), "{rows:?}");
-        assert!(text.contains("| Harness style | `provenant check harness` | pending |"));
+        let harness = rows
+            .iter()
+            .find_map(|row| {
+                let cells: Vec<_> = row.split('|').map(str::trim).collect();
+                (cells.get(1) == Some(&"Harness style")).then_some(cells)
+            })
+            .expect("harness style row");
+        assert_eq!(&harness[2..4], ["`provenant check harness`", "pending"]);
         assert!(text.contains("| Writer attempt |"));
         assert!(text.contains("| Independent review |"));
     }

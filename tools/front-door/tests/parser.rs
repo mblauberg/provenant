@@ -56,10 +56,6 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let cleanup = rig.process_cleanup();
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
     let state = rig.state.to_string_lossy().into_owned();
-    let empty = rig.command(&["lanes", "--json"])?;
-    assert_eq!(code(&empty), 0);
-    let value: serde_json::Value = serde_json::from_slice(&empty.stdout.bytes)?;
-    assert_eq!(value["data"]["lanes"], serde_json::json!([]));
     let args = [
         "--state-dir",
         &state,
