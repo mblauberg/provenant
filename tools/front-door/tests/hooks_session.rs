@@ -6,7 +6,7 @@
 mod support;
 use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
 use provenant_os::clock::SystemClock;
-use provenant_workflow::session::{HostSessionId, STATE_BEGIN, SessionStore};
+use provenant_workflow::session::{HostSessionId, SessionStore};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -181,40 +181,83 @@ fn restart_hook_ignores_other_start_sources_and_bad_input() -> Result {
     Ok(())
 }
 
+fn autosave_text(store: &SessionStore) -> Result<String> {
+    Ok(store.read_autosave()?.ok_or("autosave missing")?.markdown)
+}
+fn checkpoint_file(rig: &TestRig, session: &str) -> Result<PathBuf> {
+    let (_, project) = binding(rig)?;
+    Ok(rig.state.join(format!(
+        "workflow/projects/{project}/sessions/{session}/checkpoint.md"
+    )))
+}
+
 #[test]
-fn pre_compact_keeps_the_chair_text_and_replaces_only_its_own_block() -> Result {
+fn autosave_never_writes_the_chair_file_and_output_shows_both_parts() -> Result {
     let rig = TestRig::new()?;
     let lane = create_lane(&rig)?;
     let checkpoint = store(&rig, "keep-session")?;
-    let chair = "# Chair\nAuthority: user approved #1829 only. PR #9 is mine.";
+    let chair = "# Chair\nAuthority: user approved #1829 only. PR #9 is mine.\n\n\n";
     save(&checkpoint, chair)?;
+    let file = checkpoint_file(&rig, "keep-session")?;
+    let before = (fs::read(&file)?, fs::metadata(&file)?.modified()?);
     let input =
         json!({"hook_event_name":"PreCompact","session_id":"keep-session","cwd":rig.project});
     for _ in 0..2 {
         let output = run_hook(&rig, "pre-compact", &input)?;
         assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
-        let text = checkpoint_text(&checkpoint)?;
-        assert!(text.starts_with(chair), "{text}");
-        assert_eq!(text.matches(STATE_BEGIN).count(), 1, "{text}");
-        assert!(text.contains(&lane), "{text}");
-        assert!(text.contains("Chair-saved-unix: "), "{text}");
         assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("auto-saved"));
+        // The chair's file is byte-identical and was never rewritten.
+        assert_eq!(fs::read(&file)?, before.0);
+        assert_eq!(fs::metadata(&file)?.modified()?, before.1);
+        assert_eq!(checkpoint_text(&checkpoint)?, chair);
+        let saved = autosave_text(&checkpoint)?;
+        assert!(
+            saved.contains(&lane) && saved.contains("Auto-saved: "),
+            "{saved}"
+        );
     }
-    // The post-compaction report shows the chair's text and a fresh digest,
-    // not the saved block twice.
+    // A chair who copied the saved state into their notes keeps it, too.
+    let copied = format!("{chair}copy:\n{}", autosave_text(&checkpoint)?);
+    save(&checkpoint, &copied)?;
+    run_hook(&rig, "pre-compact", &input)?;
+    assert_eq!(checkpoint_text(&checkpoint)?, copied);
+    // The report shows the chair's text, then the saved state, then it is
+    // bounded as before.
     let output = run_hook(&rig, "compact", &start(&rig, "keep-session", "compact"))?;
     let text = context(&output)?;
     assert!(text.contains("Checkpoint present"), "{text}");
-    assert!(
-        text.contains("Authority: user approved #1829 only"),
-        "{text}"
-    );
+    let notes = text
+        .find("Authority: user approved #1829 only")
+        .ok_or("notes")?;
+    let state = text
+        .rfind("## Provenant session state")
+        .ok_or("state file")?;
+    assert!(notes < state, "{text}");
     assert!(text.contains("Lanes in flight (1"), "{text}");
-    assert!(!text.contains(STATE_BEGIN), "{text}");
     assert!(output.stdout.bytes.len() <= 8192);
-    // A chair save replaces the whole file, block included.
+    // A chair save replaces only the chair's file; the autosave file stays.
     save(&checkpoint, "fresh notes")?;
-    assert!(!checkpoint_text(&checkpoint)?.contains(STATE_BEGIN));
+    assert_eq!(checkpoint_text(&checkpoint)?, "fresh notes");
+    assert!(autosave_text(&checkpoint)?.contains(&lane));
+    Ok(())
+}
+
+#[test]
+fn a_legacy_block_in_the_checkpoint_stays_chair_text() -> Result {
+    let rig = TestRig::new()?;
+    binding(&rig)?;
+    let checkpoint = store(&rig, "legacy-session")?;
+    let legacy = "notes\n\n<!-- provenant:session-state:begin -->\nBlock-digest: abc\n## Provenant session state\nAuto-saved: old\n<!-- provenant:session-state:end -->\n";
+    save(&checkpoint, legacy)?;
+    let input =
+        json!({"hook_event_name":"PreCompact","session_id":"legacy-session","cwd":rig.project});
+    assert_eq!(code(&run_hook(&rig, "pre-compact", &input)?), 0);
+    assert_eq!(checkpoint_text(&checkpoint)?, legacy);
+    assert!(autosave_text(&checkpoint)?.contains("Auto-saved: "));
+    assert!(!autosave_text(&checkpoint)?.contains("Auto-saved: old"));
+    let output = run_hook(&rig, "compact", &start(&rig, "legacy-session", "compact"))?;
+    let text = context(&output)?;
+    assert!(text.contains("Auto-saved: old"), "{text}");
     Ok(())
 }
 
@@ -227,7 +270,9 @@ fn pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing() -> 
         json!({"hook_event_name":"PreCompact","session_id":"new-session","cwd":rig.project});
     let output = run_hook(&rig, "pre-compact", &input)?;
     assert_eq!(code(&output), 0);
-    assert!(checkpoint_text(&checkpoint)?.starts_with(STATE_BEGIN));
+    // Only the hook's file exists; the chair has no checkpoint.
+    assert!(checkpoint.read()?.is_none());
+    assert!(autosave_text(&checkpoint)?.starts_with("## Provenant session state"));
     let output = run_hook(&rig, "session-start", &start(&rig, "new-session", "resume"))?;
     let text = context(&output)?;
     assert!(text.contains("only automatically saved"), "{text}");
@@ -247,26 +292,25 @@ fn stop_hook_refreshes_only_an_existing_quiet_checkpoint() -> Result {
     let output = run_hook(&rig, "stop", &input)?;
     assert_eq!(code(&output), 0);
     assert!(output.stdout.bytes.is_empty());
-    assert!(checkpoint.read()?.is_none());
+    assert!(checkpoint.read()?.is_none() && checkpoint.read_autosave()?.is_none());
     // A fresh checkpoint is left alone.
     save(&checkpoint, "notes")?;
     run_hook(&rig, "stop", &input)?;
     assert_eq!(checkpoint_text(&checkpoint)?, "notes");
-    // A quiet one gets the block appended after the chair's text.
-    let (_, project) = binding(&rig)?;
-    let file: PathBuf = rig.state.join(format!(
-        "workflow/projects/{project}/sessions/stop-session/checkpoint.md"
-    ));
+    assert!(checkpoint.read_autosave()?.is_none());
+    // A quiet one gets the state saved beside it, and the chair's file stays.
+    let file = checkpoint_file(&rig, "stop-session")?;
     fs::File::options()
         .write(true)
         .open(&file)?
         .set_modified(SystemTime::now() - Duration::from_secs(20 * 60))?;
+    let modified = fs::metadata(&file)?.modified()?;
     let output = run_hook(&rig, "stop", &input)?;
     assert_eq!(code(&output), 0);
     assert!(output.stdout.bytes.is_empty());
-    let text = checkpoint_text(&checkpoint)?;
-    assert!(text.starts_with("notes\n\n"), "{text}");
-    assert!(text.contains(STATE_BEGIN));
+    assert_eq!(checkpoint_text(&checkpoint)?, "notes");
+    assert_eq!(fs::metadata(&file)?.modified()?, modified);
+    assert!(autosave_text(&checkpoint)?.contains("Auto-saved: "));
     Ok(())
 }
 
@@ -282,6 +326,7 @@ fn lane_sessions_report_but_never_write_checkpoint_state() -> Result {
     let output = run_hook(&rig, "pre-compact", &input)?;
     assert_eq!(code(&output), 0);
     assert_eq!(checkpoint_text(&checkpoint)?, "notes");
+    assert!(checkpoint.read_autosave()?.is_none());
     Ok(())
 }
 

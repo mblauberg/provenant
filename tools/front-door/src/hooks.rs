@@ -309,10 +309,20 @@ fn checkpoint(
             digest = state.digest(session::DIGEST_LIMIT);
         }
         Moment::PreCompact | Moment::Stop if !in_lane => {
-            let quiet = current.as_ref().is_some_and(|checkpoint| {
-                let modified = checkpoint.modified_at.as_micros() / 1_000_000;
-                wall < modified || wall - modified >= STOP_INTERVAL.as_secs() as i64
-            });
+            // Quiet means neither the chair's checkpoint nor the last autosave
+            // changed within the interval.
+            let last = [
+                current.as_ref().map(|checkpoint| checkpoint.modified_at),
+                store.read_autosave().ok().flatten().map(|a| a.modified_at),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|at| at.as_micros() / 1_000_000)
+            .max();
+            let quiet = current.is_some()
+                && last.is_some_and(|modified| {
+                    wall < modified || wall - modified >= STOP_INTERVAL.as_secs() as i64
+                });
             // A turn ends often: refresh only a checkpoint that exists and has
             // been quiet. Compaction may create the first one.
             if moment == Moment::PreCompact || quiet {
@@ -354,7 +364,7 @@ fn checkpoint(
         &digest,
     ))
 }
-/// Collect state and merge it into the checkpoint under the checkpoint lock.
+/// Collect state and save it to the hook-owned file beside the checkpoint.
 fn autosave(
     store: &provenant_workflow::session::SessionStore,
     globals: &Globals,
@@ -373,15 +383,10 @@ fn autosave(
     };
     let state = crate::hook_state::collect(globals, cwd, &want, deadline);
     let stamp = String::from(clock.wall_now()?);
-    store.update_autosaved(
-        true,
-        // The edit runs under the checkpoint lock, so a chair save that landed
-        // after the read above is merged, never overwritten. The recorded
-        // digest names the one block this autosave may replace.
-        |existing, recorded| {
-            let saved = session::autosave_document(existing, recorded, &state, wall, &stamp)?;
-            Ok(Some((saved.markdown, Some(saved.digest))))
-        },
+    // The chair's checkpoint is never written here: the state goes to the
+    // hook-owned file beside it.
+    store.write_autosave(
+        state.document(&stamp, session::BLOCK_LIMIT).as_bytes(),
         WaitBudget::cli(clock.mono_now(), 1)?,
         &CancelToken::new(),
         clock,

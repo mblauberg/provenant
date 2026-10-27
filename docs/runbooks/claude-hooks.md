@@ -40,7 +40,10 @@ section ends with `this count is partial; run <command>`, where the command
 lists the next page and repeats the hook's `--state-dir` (made absolute and
 single-quoted) when it used a non-default one, so it reads the same store. If
 that path is not valid UTF-8 or holds control characters, no runnable command
-is shown, only a note to page with the state directory the hook used. A partial count is never shown as complete.
+is shown, only a note to page with the state directory the hook used. The
+command is also shown only if it survives rendering byte for byte (at most 512
+bytes, no `<`, `>` or backticks); otherwise a plain note names the cursor. A
+partial count is never shown as complete.
 
 A section the hook could not read is listed as unavailable, never as empty.
 The hook budget is 4 seconds in total, with the lane, PR and worktree reads
@@ -48,45 +51,31 @@ running in parallel; a read that overruns leaves its section unavailable.
 
 ## What the autosave keeps
 
-`pre-compact` and `stop` append one block after the chair's text:
+`pre-compact` and `stop` save the derived state to `autosave.md` in the
+session's directory, beside `checkpoint.md`:
 
 ```text
-<!-- provenant:session-state:begin -->
-Block-digest: <SHA-256 of the lines below, up to the end marker>
 ## Provenant session state
-Chair-saved-unix: 1761500000
 Auto-saved: 2026-10-27T03:00:00Z
 ...
-<!-- provenant:session-state:end -->
 ```
 
-- Only the block the last autosave wrote is replaced. A digest proves
-  integrity, not authorship, so each autosave records the digest of the block
-  it wrote in workflow session state (`autosave.digest`, beside the checkpoint
-  and outside its body), and a block is replaced only when its digest both
-  verifies its content and equals that record. A valid block the chair copied
-  into their notes, marker lines in the chair's own text, and a block whose
-  content was edited all stay untouched, and a fresh block is appended after
-  them. With no record, or when zero or several blocks match it (for example the
-  chair copied the latest block), nothing is treated as ours and a fresh block is
-  appended. A managed block is replaced where it stands; every other byte,
-  including trailing newlines, is kept, and an appended block adds only the
-  separator it needs. Everything outside the
-  recorded block, including every authority reference the chair wrote, is kept
-  as written.
-- A `workflow session save` replaces the whole file, block included; the next
-  autosave adds a fresh block. `Chair-saved-unix` records when the chair last
-  saved, and later autosaves keep it, which is how "settled since the last
-  chair save" survives a compaction.
-- The block is derived from the run store, `worktree list` and `pr status`. It
+- The chair's checkpoint is never written by a hook. Its bytes, trailing
+  newlines and modification time stay as the chair left them, a copy of the
+  saved state in the chair's notes is just notes, and "settled since the last
+  chair save" is measured from the checkpoint's own modification time.
+- `session-start` and `compact` show the chair's checkpoint, then
+  `autosave.md`, then the freshly derived digest, under the 8 KiB cap.
+- A `workflow session save` replaces only `checkpoint.md`; the next autosave
+  rewrites only `autosave.md`. A checkpoint from an earlier release that holds
+  an in-body state block keeps it as ordinary chair text; the new file starts
+  alongside it.
+- The saved state is derived from the run store, `worktree list` and `pr status`. It
   grants no authority, and the chair's notes stay the record of intent.
-- The read-modify-write runs under the checkpoint lock, so a chair save that
-  lands mid-hook is merged, never overwritten.
-- `pre-compact` creates a checkpoint when none exists. The next SessionStart
+- The write takes the checkpoint lock, so it never interleaves with a chair save.
+- `pre-compact` creates `autosave.md` when no checkpoint exists. The next SessionStart
   then reports that it holds only automatically saved state and that chair
-  notes still need saving. `stop` never creates one.
-- If the chair's text leaves under 512 bytes of the 32 KiB limit, nothing is
-  written and stderr says why. Shorten the checkpoint and save again.
+  notes still need saving. `stop` never creates either.
 - Hooks inside a lane (a confined Claude lane) report but never write.
 
 ## Worktree hooks

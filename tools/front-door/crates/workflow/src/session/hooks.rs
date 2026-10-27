@@ -106,32 +106,46 @@ pub fn hook_context_with(
             "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None);
     };
     let store = SessionStore::new(root.clone(), project, session.clone());
-    let (status, markdown, cause) = match store.read() {
-        Ok(Some(checkpoint)) => match clock.wall_now() {
-            Ok(now) => {
-                let age =
-                    i128::from(now.as_micros()) - i128::from(checkpoint.modified_at.as_micros());
-                if age < 0 || age > i128::from(max_age.as_micros()) {
-                    (CheckpointStatus::Stale, None, None)
-                } else {
-                    {
-                        let chair = super::state::split(
-                            &checkpoint.markdown,
-                            checkpoint.autosave_digest.as_deref(),
-                        )
-                        .chair;
-                        if super::state::has_chair_text(&chair) {
-                            (CheckpointStatus::Present, Some(chair), None)
-                        } else {
-                            (CheckpointStatus::StateOnly, None, None)
-                        }
-                    }
-                }
-            }
-            Err(error) => (CheckpointStatus::Unavailable, None, Some(error.to_string())),
-        },
-        Ok(None) => (CheckpointStatus::Missing, None, None),
-        Err(error) => (CheckpointStatus::Unavailable, None, Some(read_cause(error))),
+    // The chair's checkpoint and the hook-owned autosave file are read apart
+    // and rendered one after the other; neither is ever merged into the other.
+    let (status, markdown, cause) = match (store.read(), store.read_autosave(), clock.wall_now()) {
+        (Err(error), _, _) | (_, Err(error), _) => {
+            (CheckpointStatus::Unavailable, None, Some(read_cause(error)))
+        }
+        (_, _, Err(error)) => (CheckpointStatus::Unavailable, None, Some(error.to_string())),
+        (Ok(checkpoint), Ok(autosave), Ok(now)) => {
+            let fresh = |at: provenant_core::UtcMicros| {
+                let age = i128::from(now.as_micros()) - i128::from(at.as_micros());
+                (0..=i128::from(max_age.as_micros())).contains(&age)
+            };
+            let chair_stale = checkpoint.as_ref().is_some_and(|c| !fresh(c.modified_at));
+            let chair = checkpoint
+                .as_ref()
+                .filter(|c| fresh(c.modified_at))
+                .map(|c| c.markdown.clone())
+                .filter(|text| super::state::has_chair_text(text));
+            let saved = autosave
+                .as_ref()
+                .filter(|a| fresh(a.modified_at))
+                .map(|a| a.markdown.clone())
+                .filter(|text| super::state::has_chair_text(text));
+            let status = if chair.is_some() {
+                CheckpointStatus::Present
+            } else if chair_stale {
+                CheckpointStatus::Stale
+            } else if checkpoint.is_some() || saved.is_some() {
+                CheckpointStatus::StateOnly
+            } else if autosave.is_some() {
+                CheckpointStatus::Stale
+            } else {
+                CheckpointStatus::Missing
+            };
+            let both = match (chair, saved) {
+                (Some(chair), Some(saved)) => Some(format!("{chair}\n\n{saved}")),
+                (one, other) => one.or(other),
+            };
+            (status, both, None)
+        }
     };
     let state = match status {
         CheckpointStatus::Present => {

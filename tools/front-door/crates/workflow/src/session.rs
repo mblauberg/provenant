@@ -76,21 +76,17 @@ pub enum SessionError {
 pub struct Checkpoint {
     pub markdown: String,
     pub modified_at: UtcMicros,
-    /// Digest of the last managed block an autosave wrote, kept beside the
-    /// checkpoint rather than in it. Only a block with this digest is ours.
-    pub autosave_digest: Option<String>,
 }
 
-/// Where the last autosaved block's digest lives, outside the checkpoint body.
-const AUTOSAVE_DIGEST_FILE: &str = "autosave.digest";
-const AUTOSAVE_DIGEST_LIMIT: u64 = 128;
-
-fn recorded_digest(dir: &Directory) -> Option<String> {
-    let mut file = dir.open_read(OsStr::new(AUTOSAVE_DIGEST_FILE)).ok()?;
-    let bytes = file.read_bounded(AUTOSAVE_DIGEST_LIMIT).ok()?;
-    let text = std::str::from_utf8(&bytes).ok()?.trim();
-    (!text.is_empty()).then(|| text.to_owned())
+/// The state a hook derived and saved beside the checkpoint. Only hooks write
+/// it; the chair's checkpoint is never modified by an autosave.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Autosave {
+    pub markdown: String,
+    pub modified_at: UtcMicros,
 }
+/// Hook-owned file beside `checkpoint.md`.
+const AUTOSAVE_FILE: &str = "autosave.md";
 
 /// StateRoot must already exist. Reads create nothing; saves create only this key.
 pub struct SessionStore {
@@ -153,6 +149,62 @@ impl SessionStore {
         .require_durable()
         .map_err(SessionError::Durability)
     }
+    /// Replaces the hook-owned autosave file, creating the session directory
+    /// when missing. `checkpoint.md` is never opened for writing.
+    pub fn write_autosave(
+        &self,
+        text: &[u8],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), SessionError> {
+        if text.len() as u64 > CHECKPOINT_LIMIT {
+            return Err(SessionError::TooLarge);
+        }
+        std::str::from_utf8(text)?;
+        let dir = self.directory(true)?;
+        let _lock = dir.lock(
+            OsStr::new("checkpoint.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )?;
+        check_wait(budget, cancel, clock).map_err(|stop| match stop {
+            WaitStop::Cancelled => SessionError::from(FsError::Cancelled {
+                path: self.root.as_path().into(),
+            }),
+            WaitStop::Deadline => SessionError::Deadline,
+        })?;
+        dir.atomic_write(
+            OsStr::new(AUTOSAVE_FILE),
+            ".autosave.",
+            text,
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(SessionError::Durability)
+    }
+    /// The hook-owned autosave file, if any hook has written one.
+    pub fn read_autosave(&self) -> Result<Option<Autosave>, SessionError> {
+        let read = || -> Result<Autosave, SessionError> {
+            let dir = self.directory(false)?;
+            let mut file = dir.open_read(OsStr::new(AUTOSAVE_FILE))?;
+            let text = file.read_bounded(CHECKPOINT_LIMIT)?;
+            let markdown = std::str::from_utf8(&text)?.to_owned();
+            let micros = i64::try_from(file.metadata()?.modified_ns / 1000)
+                .map_err(|_| provenant_core::TimeError::WallRange)?;
+            Ok(Autosave {
+                markdown,
+                modified_at: UtcMicros::from_micros(micros)?,
+            })
+        };
+        match read() {
+            Ok(autosave) => Ok(Some(autosave)),
+            Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     /// Atomic replacement allows a consistent unlocked read of one held file.
     pub fn read(&self) -> Result<Option<Checkpoint>, SessionError> {
         let read = || -> Result<Checkpoint, SessionError> {
@@ -165,7 +217,6 @@ impl SessionStore {
             Ok(Checkpoint {
                 markdown,
                 modified_at: UtcMicros::from_micros(micros)?,
-                autosave_digest: recorded_digest(&dir),
             })
         };
         match read() {
@@ -183,29 +234,6 @@ impl SessionStore {
         &self,
         create: bool,
         edit: impl FnOnce(Option<&str>) -> Result<Option<String>, SessionError>,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-        clock: &dyn Clock,
-    ) -> Result<bool, SessionError> {
-        self.update_autosaved(
-            create,
-            |text, _| Ok(edit(text)?.map(|next| (next, None))),
-            budget,
-            cancel,
-            clock,
-        )
-    }
-    /// As [`update`](Self::update), for the autosave. `edit` also gets the
-    /// digest recorded for the last block an autosave wrote, and may return a
-    /// new digest to record once the replacement is durable. The record lives
-    /// beside the checkpoint, so a chair cannot copy it by copying text.
-    pub fn update_autosaved(
-        &self,
-        create: bool,
-        edit: impl FnOnce(
-            Option<&str>,
-            Option<&str>,
-        ) -> Result<Option<(String, Option<String>)>, SessionError>,
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
@@ -230,8 +258,7 @@ impl SessionStore {
             Err(error) if error.is_not_found() => None,
             Err(error) => return Err(error.into()),
         };
-        let recorded = recorded_digest(&dir);
-        let Some((next, digest)) = edit(current.as_deref(), recorded.as_deref())? else {
+        let Some(next) = edit(current.as_deref())? else {
             return Ok(false);
         };
         if next.len() as u64 > CHECKPOINT_LIMIT {
@@ -251,19 +278,6 @@ impl SessionStore {
         )?
         .require_durable()
         .map_err(SessionError::Durability)?;
-        if let Some(digest) = digest {
-            // After the checkpoint: a failure here leaves the old record, which
-            // matches no block, so the next autosave appends instead of
-            // replacing.
-            dir.atomic_write(
-                OsStr::new(AUTOSAVE_DIGEST_FILE),
-                ".digest.",
-                digest.as_bytes(),
-                PublishMode::Replace,
-            )?
-            .require_durable()
-            .map_err(SessionError::Durability)?;
-        }
         Ok(true)
     }
 }

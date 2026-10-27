@@ -1,11 +1,8 @@
-//! Lane, pull request and worktree state that Claude hooks report and keep in
-//! a session checkpoint. Rendering is pure: callers collect the facts.
-//! The managed block is derived data. It grants no authority and never
-//! replaces the chair's own text, which is preserved byte for byte.
+//! Lane, pull request and worktree state that Claude hooks report and save
+//! beside a session checkpoint. Rendering is pure: callers collect the facts.
+//! The saved state is derived data in a file only hooks write. It grants no
+//! authority, and no autosave ever opens the chair's checkpoint for writing.
 
-pub const STATE_BEGIN: &str = "<!-- provenant:session-state:begin -->";
-pub const STATE_END: &str = "<!-- provenant:session-state:end -->";
-const CHAIR_SAVED: &str = "Chair-saved-unix: ";
 const AUTO_SAVED: &str = "Auto-saved: ";
 /// Most lines one section shows before it summarises the rest.
 const SECTION_LINES: usize = 8;
@@ -15,6 +12,8 @@ const FIELD_LIMIT: usize = 160;
 pub const PR_REF_LIMIT: usize = 8;
 pub const DIGEST_LIMIT: usize = 3 * 1024;
 pub const BLOCK_LIMIT: usize = 6 * 1024;
+/// Longest next-page command shown as a runnable command.
+const NEXT_PAGE_LIMIT: usize = 512;
 
 /// Strip what could forge a marker, a heading or terminal control output.
 pub fn clean(text: &str, limit: usize) -> String {
@@ -104,7 +103,8 @@ struct Section {
 impl SessionState {
     fn sections(&self, worktrees: bool) -> Vec<Section> {
         let mut sections = Vec::new();
-        let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>| Section {
+        let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>| {
+            Section {
             title: format!("{title} ({}{})", lanes.len(), plus(next.is_some())),
             lines: lanes
                 .iter()
@@ -113,14 +113,26 @@ impl SessionState {
                 .collect(),
             more: lanes.len().saturating_sub(SECTION_LINES),
             partial: next.as_ref().map(|command| {
-                // A runnable command is shown as code; a note is plain text.
-                let how = if command.starts_with("provenant ") {
-                    format!("run `{}`", clean(command, 512))
+                // A runnable command is shown as code, and only when it
+                // survives rendering byte for byte: `clean` rewrites <, > and
+                // backticks and truncates, which could point at another
+                // store. Anything else is a plain note.
+                let how = if !command.starts_with("provenant ") {
+                    clean(command, NEXT_PAGE_LIMIT)
+                } else if clean(command, NEXT_PAGE_LIMIT) == *command {
+                    format!("run `{command}`")
                 } else {
-                    clean(command, 512)
+                    let cursor: String = command
+                        .rsplit_once("--cursor ")
+                        .map(|(_, tail)| tail.chars().take_while(char::is_ascii_digit).collect())
+                        .unwrap_or_default();
+                    format!(
+                        "the paging command is too long or unsafe to show; run provenant lanes with this hook's --state-dir and --cursor {cursor}"
+                    )
                 };
                 format!("more lanes exist beyond the page read, so this count is partial; {how}")
             }),
+        }
         };
         if !self.unavailable.iter().any(|name| name == "lanes") {
             sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
@@ -188,37 +200,19 @@ impl SessionState {
         )
     }
 
-    /// The managed checkpoint block, bounded by `limit` bytes.
-    ///
-    /// The begin marker is followed by a digest of everything between that
-    /// line and the end marker, so `split` can tell a block a hook wrote from
-    /// marker look-alikes in the chair's text.
-    pub fn block(&self, chair_saved_unix: i64, auto_saved: &str, limit: usize) -> String {
+    /// The autosave file's text, bounded by `limit` bytes.
+    pub fn document(&self, auto_saved: &str, limit: usize) -> String {
         let head = format!(
-            "## Provenant session state\n{CHAIR_SAVED}{chair_saved_unix}\n{AUTO_SAVED}{}\nDerived from lanes, pull requests and worktrees. It grants no authority and does not replace the chair's notes above.",
+            "## Provenant session state\n{AUTO_SAVED}{}\nDerived from lanes, pull requests and worktrees. It grants no authority and does not replace the chair's notes.",
             clean(auto_saved, 40)
         );
-        let frame = STATE_BEGIN.len() + DIGEST_LINE.len() + 64 + 2 + STATE_END.len() + 2;
         let body = render(
             "",
             &self.sections(true),
-            limit.saturating_sub(head.len() + 1 + frame),
+            limit.saturating_sub(head.len() + 1),
         );
-        let inner = format!("{head}\n{body}");
-        format!(
-            "{STATE_BEGIN}\n{DIGEST_LINE}{}\n{inner}\n{STATE_END}\n",
-            digest_hex(&inner)
-        )
+        format!("{head}\n{body}")
     }
-}
-/// Names the digest line that follows the begin marker.
-const DIGEST_LINE: &str = "Block-digest: ";
-fn digest_hex(inner: &str) -> String {
-    use sha2::{Digest as _, Sha256};
-    Sha256::digest(inner.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 fn plus(truncated: bool) -> &'static str {
     if truncated { "+" } else { "" }
@@ -286,194 +280,27 @@ fn render(title: &str, sections: &[Section], limit: usize) -> String {
     out
 }
 
-/// A checkpoint split around its managed block.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Split {
-    /// The chair's text with the block removed, byte for byte.
-    pub chair: String,
-    /// Unix seconds the chair last saved, when the block recorded it.
-    pub chair_saved_unix: Option<i64>,
-}
-
-/// The span of the block the last autosave wrote: a begin marker on its own
-/// line, the digest line, the content, and the end marker, where the digest
-/// verifies the content and equals `recorded`, the digest the autosave stored
-/// outside the checkpoint. A digest proves integrity, not authorship, so a
-/// valid block the chair copied into their notes is not ours. With no record,
-/// or when zero or several blocks verify and match it, nothing is managed.
-fn managed_block(markdown: &str, recorded: Option<&str>) -> Option<(usize, usize)> {
-    let recorded = recorded?;
-    let mut found: Vec<(usize, usize)> = Vec::new();
-    let mut from = 0;
-    while let Some(offset) = markdown[from..].find(STATE_BEGIN) {
-        let begin = from + offset;
-        from = begin + STATE_BEGIN.len();
-        let at_line_start = begin == 0 || markdown.as_bytes()[begin - 1] == b'\n';
-        let rest = &markdown[from..];
-        let Some(rest) = rest.strip_prefix('\n').filter(|_| at_line_start) else {
-            continue;
-        };
-        let Some(rest) = rest.strip_prefix(DIGEST_LINE) else {
-            continue;
-        };
-        let Some((digest, rest)) = rest.split_once('\n') else {
-            continue;
-        };
-        let end_marker = format!("\n{STATE_END}");
-        let Some(inner_len) = rest.find(&end_marker) else {
-            continue;
-        };
-        if digest != recorded || digest != digest_hex(&rest[..inner_len]) {
-            continue;
-        }
-        let block_end = markdown.len() - rest.len() + inner_len + end_marker.len();
-        found.push((begin, block_end));
-    }
-    // A copy of the latest block (before or after the original) makes the
-    // record ambiguous; then no block is ours and no text is touched.
-    match found.as_slice() {
-        [only] => Some(*only),
-        _ => None,
-    }
-}
-
-/// Locate the managed block (see `managed_block`; `recorded` is the digest the
-/// last autosave stored). Anything else, including a
-/// stray, unmatched or unverified marker, stays in the chair's text so no
-/// chair prose is ever swallowed.
-pub fn split(markdown: &str, recorded: Option<&str>) -> Split {
-    let Some((begin, block_end)) = managed_block(markdown, recorded) else {
-        return Split {
-            chair: markdown.to_owned(),
-            chair_saved_unix: None,
-        };
-    };
-    let block = &markdown[begin..block_end];
-    let saved = block
-        .lines()
-        .find_map(|line| line.strip_prefix(CHAIR_SAVED))
-        .and_then(|value| value.trim().parse().ok());
-    let mut chair = String::with_capacity(markdown.len());
-    let (before, after) = (
-        markdown[..begin].trim_end_matches('\n'),
-        markdown[block_end..].trim_matches('\n'),
-    );
-    chair.push_str(before);
-    if !before.is_empty() && !after.is_empty() {
-        chair.push_str("\n\n");
-    }
-    chair.push_str(after);
-    Split {
-        chair,
-        chair_saved_unix: saved,
-    }
-}
-
 /// The chair's text, if it has any beyond whitespace.
 pub fn has_chair_text(chair: &str) -> bool {
     !chair.trim().is_empty()
 }
 
-/// Place `block` after the chair's text, keeping that text unchanged.
-pub fn compose(chair: &str, block: &str) -> String {
-    let mut out = chair.trim_end_matches('\n').to_owned();
-    if !out.is_empty() {
-        out.push_str("\n\n");
-    }
-    out.push_str(block);
-    out
-}
-
 /// What a hook needs from the saved checkpoint before collecting state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Baseline {
-    /// Unix seconds of the chair's last save: the block's record when an
-    /// autosave has run since, else the file's own modification time.
+    /// Unix seconds of the chair's last save: the checkpoint's own
+    /// modification time, which no autosave ever changes.
     pub chair_saved_unix: i64,
-    /// PR numbers the chair named in its own text.
+    /// PR numbers the chair named in their text.
     pub pr_refs: Vec<u64>,
 }
 
 /// Derive the baseline from a checkpoint read.
 pub fn baseline(checkpoint: &super::Checkpoint) -> Baseline {
-    let split = split(&checkpoint.markdown, checkpoint.autosave_digest.as_deref());
     Baseline {
-        chair_saved_unix: split
-            .chair_saved_unix
-            .unwrap_or(checkpoint.modified_at.as_micros() / 1_000_000),
-        pr_refs: pr_refs(&split.chair),
+        chair_saved_unix: checkpoint.modified_at.as_micros() / 1_000_000,
+        pr_refs: pr_refs(&checkpoint.markdown),
     }
-}
-
-/// A checkpoint after an autosave, with the digest of the block it holds,
-/// which the caller records outside the checkpoint.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Autosaved {
-    pub markdown: String,
-    pub digest: String,
-}
-
-/// The checkpoint Markdown after an autosave. `recorded` is the digest of the
-/// block the previous autosave wrote: only a block with that digest is
-/// replaced, and any other text, valid-looking blocks included, is left
-/// untouched with a new block appended. The chair's text is kept unchanged;
-/// when it leaves no room for a useful block, nothing is written.
-pub fn autosave_document(
-    existing: Option<&str>,
-    recorded: Option<&str>,
-    state: &SessionState,
-    default_chair_saved_unix: i64,
-    auto_saved: &str,
-) -> Result<Autosaved, super::SessionError> {
-    let span = existing.and_then(|text| managed_block(text, recorded).map(|span| (text, span)));
-    let saved = span
-        .and_then(|(text, (begin, end))| chair_saved(&text[begin..end]))
-        .unwrap_or(default_chair_saved_unix);
-    // Every byte outside the managed block is kept as it is. A managed block
-    // is replaced where it stands; otherwise the block is appended after the
-    // existing text with only the separator it needs.
-    let (prefix, suffix, separator) = match (existing, span) {
-        (_, Some((text, (begin, end)))) => (&text[..begin], &text[end..], 0),
-        (Some(text), None) => {
-            let trailing = text.len() - text.trim_end_matches('\n').len();
-            let separator = if text.is_empty() {
-                0
-            } else {
-                2usize.saturating_sub(trailing)
-            };
-            (text, "", separator)
-        }
-        (None, None) => ("", "", 0),
-    };
-    let used = prefix.len() + suffix.len() + separator;
-    let room = (super::CHECKPOINT_LIMIT as usize).saturating_sub(used);
-    if room < 512 {
-        return Err(super::SessionError::TooLarge);
-    }
-    let block = state.block(saved, auto_saved, BLOCK_LIMIT.min(room));
-    let digest = block
-        .lines()
-        .find_map(|line| line.strip_prefix(DIGEST_LINE))
-        .unwrap_or_default()
-        .to_owned();
-    let mut markdown = String::with_capacity(used + block.len());
-    markdown.push_str(prefix);
-    markdown.push_str(&"\n".repeat(separator));
-    if span.is_some() {
-        // The span stops before the newline that ends the end marker.
-        markdown.push_str(block.trim_end_matches('\n'));
-    } else {
-        markdown.push_str(&block);
-    }
-    markdown.push_str(suffix);
-    Ok(Autosaved { markdown, digest })
-}
-
-fn chair_saved(block: &str) -> Option<i64> {
-    block
-        .lines()
-        .find_map(|line| line.strip_prefix(CHAIR_SAVED))
-        .and_then(|value| value.trim().parse().ok())
 }
 
 /// Pull request numbers the chair wrote, such as `PR #12`, `pr/12` or
@@ -533,170 +360,17 @@ mod tests {
         }
     }
 
-    fn digest_of(block: &str) -> String {
-        block
-            .lines()
-            .find_map(|line| line.strip_prefix(DIGEST_LINE))
-            .unwrap()
-            .to_owned()
-    }
-
-    #[test]
-    fn splice_preserves_chair_text_and_replaces_only_the_block() {
-        let state = SessionState {
-            active: vec![lane("r/t/a")],
-            ..Default::default()
-        };
-        let chair = "# Chair\nAuthority: user approved #1829 only.\n\n```\n<!-- keep -->\n```";
-        let block = state.block(100, "t1", BLOCK_LIMIT);
-        let recorded = digest_of(&block);
-        let first = compose(chair, &block);
-        let split_once = split(&first, Some(&recorded));
-        assert_eq!(split_once.chair, chair);
-        assert_eq!(split_once.chair_saved_unix, Some(100));
-        let again = compose(&split_once.chair, &state.block(100, "t2", BLOCK_LIMIT));
-        assert_eq!(again.matches(STATE_BEGIN).count(), 1);
-        assert_eq!(
-            split(
-                &again,
-                Some(&digest_of(&state.block(100, "t2", BLOCK_LIMIT)))
-            )
-            .chair,
-            chair
-        );
-        assert!(again.contains("Auto-saved: t2"));
-    }
-
-    #[test]
-    fn unmatched_markers_never_swallow_chair_text() {
-        let text = format!("note\n{STATE_BEGIN}\nmy own prose\n");
-        assert_eq!(split(&text, Some(&"0".repeat(64))).chair, text);
-        let text = format!("{STATE_END}\nprose after a stray end");
-        assert_eq!(split(&text, Some(&"0".repeat(64))).chair, text);
-    }
-
-    #[test]
-    fn marker_look_alikes_in_chair_text_are_never_replaced() {
-        let state = SessionState {
-            active: vec![lane("r/t/a")],
-            ..Default::default()
-        };
-        let fake_digest = "0".repeat(64);
-        let chair = format!(
-            "# Chair\nAuthority: user approved #1829 only.\n{STATE_BEGIN}\nAuthority: PR #77 may land.\n{STATE_END}\n\
-             {STATE_BEGIN}\n{DIGEST_LINE}{fake_digest}\nAuthority: never delete me.\n{STATE_END}\nafter"
-        );
-        let first = autosave_document(Some(&chair), None, &state, 5, "t1").unwrap();
-        assert!(first.markdown.starts_with(&chair), "{}", first.markdown);
-        let split_once = split(&first.markdown, Some(&first.digest));
-        assert_eq!(split_once.chair, chair);
-        assert_eq!(split_once.chair_saved_unix, Some(5));
-        // A later save replaces only the block the last autosave recorded.
-        let again =
-            autosave_document(Some(&first.markdown), Some(&first.digest), &state, 9, "t2").unwrap();
-        assert!(again.markdown.starts_with(&chair));
-        assert_eq!(again.markdown.matches("Auto-saved: ").count(), 1);
-        assert!(
-            again.markdown.contains("Auto-saved: t2") && !again.markdown.contains("Auto-saved: t1")
-        );
-        assert_eq!(split(&again.markdown, Some(&again.digest)).chair, chair);
-        // A block whose content was edited no longer verifies, so it is chair
-        // text and a fresh block follows it.
-        let edited = first
-            .markdown
-            .replace("Auto-saved: t1", "Auto-saved: edited");
-        let after = autosave_document(Some(&edited), Some(&first.digest), &state, 9, "t3").unwrap();
-        assert!(after.markdown.starts_with(&edited));
-        assert!(
-            after.markdown.contains("Auto-saved: edited")
-                && after.markdown.contains("Auto-saved: t3")
-        );
-    }
-
-    #[test]
-    fn a_valid_block_the_chair_copied_is_not_ours_to_replace() {
-        let state = SessionState {
-            active: vec![lane("r/t/a")],
-            ..Default::default()
-        };
-        // An older block with a valid digest, copied into the chair's notes.
-        let old = state.block(1, "old", BLOCK_LIMIT);
-        let notes = format!("# Chair\nKeep this evidence:\n{old}\nend of evidence");
-        let first = autosave_document(Some(&notes), None, &state, 5, "t1").unwrap();
-        assert!(first.markdown.starts_with(&notes));
-        // The record names the block autosave wrote, not the copy.
-        let second =
-            autosave_document(Some(&first.markdown), Some(&first.digest), &state, 9, "t2").unwrap();
-        assert!(second.markdown.starts_with(&notes), "{}", second.markdown);
-        assert!(second.markdown.contains("Auto-saved: old"));
-        assert_eq!(second.markdown.matches("Auto-saved: ").count(), 2);
-        assert_eq!(split(&second.markdown, Some(&second.digest)).chair, notes);
-        // Even when the copy is the newest block and equals the record's text
-        // elsewhere, only an exact record match is managed.
-        assert_eq!(split(&notes, None).chair, notes);
-    }
-
-    #[test]
-    fn a_copy_of_the_latest_block_stops_replacement_in_either_order() {
-        let state = SessionState {
-            active: vec![lane("r/t/a")],
-            ..Default::default()
-        };
-        let first = autosave_document(Some("notes"), None, &state, 5, "t1").unwrap();
-        let block = first.markdown["notes\n\n".len()..].to_owned();
-        let after = format!("{}\nmy copy:\n{block}", first.markdown);
-        let before = format!("copy first:\n{block}\nthen\n{}", first.markdown);
-        for doc in [after, before] {
-            let next = autosave_document(Some(&doc), Some(&first.digest), &state, 9, "t2").unwrap();
-            assert!(next.markdown.starts_with(&doc), "{}", next.markdown);
-            assert_eq!(next.markdown.matches("Auto-saved: t1").count(), 2);
-            assert_eq!(next.markdown.matches("Auto-saved: t2").count(), 1);
-            // The fresh block is now the only match and is replaced alone.
-            let third =
-                autosave_document(Some(&next.markdown), Some(&next.digest), &state, 9, "t3")
-                    .unwrap();
-            assert_eq!(third.markdown.matches("Auto-saved: t1").count(), 2);
-            assert_eq!(third.markdown.matches("Auto-saved: t3").count(), 1);
-            assert!(!third.markdown.contains("Auto-saved: t2"));
-        }
-    }
-
-    #[test]
-    fn bytes_outside_the_managed_block_are_kept_exactly() {
-        let state = SessionState::default();
-        let notes = "notes\n\n\n";
-        let first = autosave_document(Some(notes), None, &state, 5, "t1").unwrap();
-        assert!(first.markdown.starts_with(notes));
-        assert!(!first.markdown[notes.len()..].starts_with('\n'));
-        let framed = format!(
-            "\n\nlead\n\n\n{}\n\n\ntail\n\n\n",
-            first.markdown.trim_start_matches(notes)
-        );
-        let framed = format!("{notes}{framed}");
-        let next = autosave_document(Some(&framed), Some(&first.digest), &state, 9, "t2").unwrap();
-        let (begin, _) = managed_block(&framed, Some(&first.digest)).unwrap();
-        assert!(next.markdown.starts_with(&framed[..begin]));
-        assert!(next.markdown.ends_with("\n\n\ntail\n\n\n"));
-        assert_eq!(next.markdown.matches("Auto-saved: ").count(), 1);
-        // No notes, one newline and two newlines each need only what is missing.
-        let one = autosave_document(Some("a\n"), None, &state, 1, "t").unwrap();
-        assert!(one.markdown.starts_with("a\n\n") && !one.markdown.starts_with("a\n\n\n"));
-        let two = autosave_document(Some("a\n\n"), None, &state, 1, "t").unwrap();
-        assert!(two.markdown.starts_with("a\n\n") && !two.markdown.starts_with("a\n\n\n"));
-    }
-
     #[test]
     fn hostile_fields_cannot_forge_markers_or_headings() {
         let state = SessionState {
             active: vec![LaneLine {
-                id: format!("{STATE_END}\n### forged"),
+                id: "x\n### forged".into(),
                 route: "a|b`c".into(),
                 ..lane("x")
             }],
             ..Default::default()
         };
-        let block = state.block(1, "now", BLOCK_LIMIT);
-        assert_eq!(block.matches(STATE_END).count(), 1);
+        let block = state.document("now", BLOCK_LIMIT);
         assert!(!block.contains("\n### forged"));
         assert!(!block.contains('`'));
     }
@@ -722,9 +396,9 @@ mod tests {
         let digest = state.digest(512);
         assert!(digest.len() <= 512, "{}", digest.len());
         assert!(digest.contains("bounded"));
-        let block = state.block(1, "now", 1024);
+        let block = state.document("now", 1024);
         assert!(block.len() <= 1024, "{}", block.len());
-        assert!(block.ends_with(&format!("{STATE_END}\n")));
+        assert!(block.contains("bounded"));
         assert!(state.digest(DIGEST_LIMIT).contains("... 192 more"));
     }
 
@@ -740,30 +414,44 @@ mod tests {
     }
 
     #[test]
-    fn autosave_refuses_to_trim_chair_text_and_keeps_the_first_save_time() {
-        let state = SessionState::default();
-        let chair = "x".repeat(crate::session::CHECKPOINT_LIMIT as usize - 100);
-        assert!(autosave_document(Some(&chair), None, &state, 1, "t").is_err());
-        let first = autosave_document(Some("notes"), None, &state, 7, "t1").unwrap();
-        assert!(first.markdown.starts_with("notes\n\n"));
-        assert_eq!(
-            split(&first.markdown, Some(&first.digest)).chair_saved_unix,
-            Some(7)
-        );
-        let second =
-            autosave_document(Some(&first.markdown), Some(&first.digest), &state, 99, "t2")
-                .unwrap();
-        assert_eq!(
-            split(&second.markdown, Some(&second.digest)).chair_saved_unix,
-            Some(7)
-        );
-        assert_eq!(split(&second.markdown, Some(&second.digest)).chair, "notes");
-        assert!(
-            autosave_document(None, None, &state, 5, "t")
-                .unwrap()
-                .markdown
-                .starts_with(STATE_BEGIN)
-        );
+    fn the_autosave_document_is_bounded_and_carries_no_chair_text() {
+        let state = SessionState {
+            active: vec![lane("r/t/a")],
+            ..Default::default()
+        };
+        let text = state.document("t1", BLOCK_LIMIT);
+        assert!(text.starts_with("## Provenant session state\nAuto-saved: t1\n"));
+        assert!(text.contains("r/t/a") && text.len() <= BLOCK_LIMIT);
+        assert!(state.document("t", 600).len() <= 600);
+    }
+
+    #[test]
+    fn a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte() {
+        let render = |command: &str| {
+            let state = SessionState {
+                settled: vec![lane("r/t/a")],
+                settled_more: Some(command.to_owned()),
+                ..Default::default()
+            };
+            state.digest(DIGEST_LIMIT)
+        };
+        let good = "provenant --state-dir '/s/a b' lanes --limit 100 --cursor 7";
+        assert!(render(good).contains(&format!("run `{good}`")));
+        for bad in [
+            "provenant --state-dir '/s/<x>' lanes --limit 100 --cursor 7".to_owned(),
+            "provenant --state-dir '/s/a>b' lanes --limit 100 --cursor 7".to_owned(),
+            "provenant --state-dir '/s/a`b' lanes --limit 100 --cursor 7".to_owned(),
+            format!(
+                "provenant --state-dir '/{}' lanes --limit 100 --cursor 7",
+                "d".repeat(600)
+            ),
+        ] {
+            let text = render(&bad);
+            assert!(!text.contains("run `provenant"), "{text}");
+            assert!(!text.contains("state-dir '/"), "{text}");
+            assert!(text.contains("--cursor 7"), "{text}");
+            assert!(text.contains("too long or unsafe"), "{text}");
+        }
     }
 
     #[test]

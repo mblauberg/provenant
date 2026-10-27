@@ -138,26 +138,30 @@ characters before they are shown.
   `tests/hooks_session.rs::restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair`
 - Owner: `crates/workflow/src/session/state.rs`, `src/hook_state.rs`, `src/hooks.rs`
 
-### Autosave keeps the chair's text
+### Autosave never writes the chair's checkpoint
 
-`pre-compact` saves, and `stop` refreshes a checkpoint quiet for ten minutes,
-one marked state block after the chair's text. Only that block is replaced;
-the read, edit and write run under the checkpoint lock, so a concurrent chair
-save is merged. The block records when the chair last saved. The text outside
-it is kept as written, and the save is refused rather than trimming it when
-under 512 bytes of the limit remain. `stop` never creates a checkpoint, a
-checkpoint holding only the block is reported as such, and lane sessions never
-write.
+`pre-compact` saves, and `stop` refreshes after ten quiet minutes (neither the
+checkpoint nor the last autosave changed), the derived lane, PR and worktree
+state to `autosave.md`, a file beside `checkpoint.md` that only hooks write.
+No autosave path opens `checkpoint.md` for writing, so the chair's text, its
+newlines and its modification time (the "last chair save" baseline) are never
+touched, and a copy of saved state in the chair's notes is never replaced.
+`session-start` and `compact` render the chair's checkpoint followed by
+`autosave.md`. A checkpoint that holds a block from an earlier release keeps it
+as chair text. `stop` never creates a session directory, `autosave.md` alone is
+reported as holding only automatically saved state, and lane sessions never
+write. A next-page command in the digest is shown only if it survives
+rendering byte for byte (within 512 bytes and free of `<`, `>` and backticks);
+otherwise a plain note names the cursor.
 - Why: automatic state must not erase the authority references the chair wrote
-  or hide that the chair has not saved notes.
-- Test: `crates/workflow/src/session/state.rs::splice_preserves_chair_text_and_replaces_only_the_block`;
-  `::unmatched_markers_never_swallow_chair_text`;
-  `::marker_look_alikes_in_chair_text_are_never_replaced`;
-  `::autosave_refuses_to_trim_chair_text_and_keeps_the_first_save_time`;
-  `crates/workflow/src/session.rs::update_edits_under_the_checkpoint_lock_and_creates_only_when_asked`;
-  `tests/hooks_session.rs::pre_compact_keeps_the_chair_text_and_replaces_only_its_own_block`;
+  or hide that the chair has not saved notes; separate files remove the
+  ownership question a shared file raises.
+- Test: `tests/hooks_session.rs::autosave_never_writes_the_chair_file_and_output_shows_both_parts`;
+  `::a_legacy_block_in_the_checkpoint_stays_chair_text`;
+  `::pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing`;
   `::stop_hook_refreshes_only_an_existing_quiet_checkpoint`;
-  `::lane_sessions_report_but_never_write_checkpoint_state`
+  `::lane_sessions_report_but_never_write_checkpoint_state`;
+  `crates/workflow/src/session/state.rs::a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte`
 - Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
 
 ## Session handoff
