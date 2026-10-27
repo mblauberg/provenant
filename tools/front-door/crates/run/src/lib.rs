@@ -32,7 +32,7 @@ pub use launch::{
     concurrency,
 };
 pub use plan::read_only_plan;
-pub use retention::{ProviderStateGc, ProviderStateIssue, TOMBSTONE};
+pub use retention::{AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE};
 pub use writer::{
     LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer,
     resolve_writer_proposal,
@@ -42,7 +42,7 @@ pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
 pub use reader::{
     ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
-    LaneTarget, OutputChunk, RunWorkSnapshot, fact,
+    LaneTarget, OutputChunk, fact,
 };
 pub use store::{NewAttempt, PreparedRun, TerminalPublication};
 use thiserror::Error;
@@ -132,6 +132,13 @@ pub enum RunError {
     Canonical(#[from] provenant_records::CanonicalError),
     #[error("run filesystem I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("run I/O operation {operation:?} failed at {path:?}: {source}")]
+    OperationIo {
+        operation: &'static str,
+        path: Option<std::path::PathBuf>,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("run record path is invalid")]
     Path(#[from] provenant_records::PathWireError),
 }

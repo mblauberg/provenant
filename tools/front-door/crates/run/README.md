@@ -50,11 +50,9 @@ the orphan remains unresolved; a result file alone cannot establish success.
 `AttemptReader` produces Serialize-only terminal facts, including optional
 provider timing and unknown route observations. Its iterator snapshots the
 upper sequence and reads at most 64 IDs per page, surfacing read/validation
-errors. `record`, `run`, `operation`, `events` and `work_snapshot` provide the
-other scoped reads. Workspace selection is refused until the confinement
-association exists. Work snapshots describe stored nonterminal work only;
-`reconcile` observes custody directly, and durable cursor acknowledgement
-arrives with the Fabric facade binding.
+errors. `record`, `run`, `operation` and `events` provide the other scoped
+reads; `reconcile` observes custody directly. `seen_cursor` and `ack_seen`
+maintain durable actor-scoped cursors for wait selections.
 
 `read_output` supports sealed prompt and result bytes, and the attempt's
 stderr capture, with exact offsets,
@@ -70,8 +68,8 @@ private directories without following links.
 
 Tests inject roots and clocks directly and use isolated `/tmp` directories.
 The subprocess crash fixture supplies a temporary HOME, state and harness
-config paths through supervisor's executor. The CLI already owns the native
-isolated `TestRig` in `tests/support`; no second CLI rig is introduced here.
+config paths through supervisor's executor. The CLI owns the native isolated
+`TestRig` in `tests/support`.
 
 ## Dispatch, admission and the guardian holder
 
@@ -94,8 +92,7 @@ operations. Incomplete quarantine stays retryable; review-required changes fail
 with retained evidence. Run seals the real quarantine manifest, and supervisor's
 `publish_release` binds its digest into the settlement receipt so custody can
 clear. The holder context carries a `RootSeed`
-because the guardian's environment is cleared. The design's "Decisions taken
-in steps 2+3" lists the limits and deferrals.
+because the guardian's environment is cleared.
 
 ## Controls
 
@@ -103,8 +100,11 @@ in steps 2+3" lists the limits and deferrals.
 `resume` accepts a continuation of one terminal attempt as a new run, once
 per attempt, and `start` hands the prior attempt to `Providers::prepare` so
 the exact session is continued. `reconcile` commits durable exits, withdraws
-launches that provably never reached a guardian, and reports anything else as
-held or uncertain without touching it. `open_runs` lists runs with
+launches that provably never reached a guardian, and settles attempts proven
+to belong to a previous boot as `lost`. Reboot recovery releases the reservation
+after the terminal transaction and preserves all attempt artefacts and worktree
+contents. `cancel` also performs this recovery. Other custody stays held or
+uncertain without being changed. `open_runs` lists runs with
 nonterminal work for a recovery scan.
 
 Provider preparation receives canonical per-attempt temporary and provider-state

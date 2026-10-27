@@ -1136,3 +1136,67 @@ fn set_creates_a_missing_private_state_directory() {
     );
     assert_eq!(read(&roots).unwrap().profile, Profile::Rigorous);
 }
+
+#[test]
+fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
+    for (text, key_path, line) in [
+        (
+            "schema_version=1\n[install]\nunknown=true",
+            "install.unknown",
+            3,
+        ),
+        ("schema_version=1\n[gc]\nunknown=true", "gc.unknown", 3),
+        (
+            "schema_version=1\n[retention]\nunknown=true",
+            "retention.unknown",
+            3,
+        ),
+        // The same name at two depths: the one serde rejected, not the first.
+        (
+            "schema_version=1\n[gc]\nidle_days=7\n[gc.projects.p]\nidle_days=7",
+            "gc.projects.p.idle_days",
+            5,
+        ),
+        (
+            "schema_version=1\n[gc]\nunknown=true\n[gc.projects.p]\nunknown=true",
+            "gc.unknown",
+            3,
+        ),
+        (
+            "schema_version=1\n[gc.projects.p]\nunknown=true",
+            "gc.projects.p.unknown",
+            3,
+        ),
+        (
+            "schema_version=1\n[install.targets.claude]\nunknown=true",
+            "install.targets.claude.unknown",
+            3,
+        ),
+    ] {
+        match load(&roots(), Some(text.as_bytes())) {
+            Err(ConfigError::Schema { rule, location }) => {
+                assert_eq!(rule, "unknown_key", "{text}");
+                assert_eq!(location.key_path, key_path, "{text}");
+                assert_eq!(location.line, line, "{text}");
+            }
+            other => panic!("{text}: expected unknown_key, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn wrong_value_type_in_a_serde_decoded_section_still_reports_type() {
+    for text in [
+        "schema_version=1\n[install]\nbin_dir=4",
+        "schema_version=1\n[gc]\nidle_days='7'",
+        "schema_version=1\n[retention]\nprovider_state_days='7'",
+    ] {
+        assert!(
+            matches!(
+                load(&roots(), Some(text.as_bytes())),
+                Err(ConfigError::Schema { rule: "type", .. })
+            ),
+            "{text}"
+        );
+    }
+}

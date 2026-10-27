@@ -23,6 +23,13 @@ provenant worktree remove fix-repo-example
 provenant worktree remove fix-repo-example --discard
 ```
 
+`git worktree add` registers a tree with Git, so `provenant worktree list` can
+see it, but writer dispatch also needs Provenant's custody registration.
+An advisory Fabric claim does not supply that registration. Fabric refuses
+such submissions with `worktree_unregistered` and the worktree path. Create
+a writer at the branch's tip with
+`provenant worktree create <new-branch> --base <branch>`.
+
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without
 `origin`, or if fetching fails, the primary checkout's integration branch
@@ -63,6 +70,9 @@ worktree operation. Writer temporary files live in the attempt's
 `tmp/candidate-N`; terminal commit attempts removal, and reconciliation
 retries once no reservation remains. Guardian settlement removes empty
 `scratch/`; unknown scratch contents and retained history stay on disk.
+GC retries `tmp/` cleanup for indexed terminal attempts after 24 hours,
+including child run stores. It checks reservations and writer locks and
+reports paths and allocated bytes; `--dry-run` previews the removals.
 
 Never share `CARGO_TARGET_DIR` across worktrees. Confined writers use
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical
@@ -77,10 +87,14 @@ derived from its verified identity before Git removes it. Cache cleanup holds
 the writer lock and uses verified detachment before deletion. A cleanup failure
 emits a warning; the worktree stays removed. Other orphaned caches and
 interrupted cleanup tombstones remain for `provenant gc`.
-GC collects idle caches (default seven days); `--free-floor SIZE` additionally
-collects eligible caches oldest-first by last write to reach a free-space
-floor. Both paths protect live writers and reservations. macOS default-state
-installs schedule cache GC every six hours; the `[gc]` configuration can
+GC collects idle caches (default seven days), then collects eligible caches
+oldest-first by last write to reach the free-space floor. The default floor
+is 10% of the state volume's capacity, at least 50 GiB; `gc.free_floor` or
+`--free-floor SIZE` overrides it. Both paths protect live writers and
+reservations. Writer dispatch refuses to launch below the floor on the
+worktree's volume and names `provenant gc` in its error; read-only lanes
+still start. GC alerts if the state volume remains below the floor after
+collection. macOS default-state installs run GC at load and hourly; `[gc]` can
 disable or adjust it. Bare `provenant gc` deletes eligible lane caches and
 previews merged worktree and declared output cleanup. `--apply` deletes those
 entries; `--dry-run` previews every class. The installed agent passes `--apply`.

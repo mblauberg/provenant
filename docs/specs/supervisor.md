@@ -330,13 +330,15 @@ the primary checkout's HEAD changed during the add.
 
 ### GC deletes only proven-idle state
 
-`gc` previews unless `--apply`. Cache collection takes the writer lock
+`gc` collects caches and expired provider state; merged worktree and output
+deletion requires `--apply`. `--dry-run` previews all collection.
+Cache collection takes the writer lock
 without waiting; a held lock keeps a cache live, and a missing lock, a
 reservation or unverifiable registration keeps it. v1 owners are never idle.
 Merged worktrees go only when clean, registered and with terminal lanes;
 output pruning skips tracked and keep paths, dirty trees, symlinks and
 writes within 24 hours. Deletion detaches and re-verifies identity first.
-- Why: GC runs unattended every six hours; any doubt keeps data.
+- Why: GC runs unattended at load and hourly; any doubt keeps data.
 - Test: `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_live_or_unobservable`;
   `src/worktree_tests.rs::gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links`
 - Owner: `crates/confinement/src/cache.rs`, `crates/confinement/src/worktrees.rs`

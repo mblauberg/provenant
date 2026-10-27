@@ -2175,13 +2175,51 @@ impl Resources for Host {
 #[derive(Default)]
 struct Fake {
     refuse: bool,
+    policy_task: Option<TaskId>,
     observed: Option<RouteRecord>,
     decoded: Cell<usize>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
 }
+
+#[test]
+fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let batch = two_tasks(2);
+    store.create(&batch, &call)?;
+    let providers = Fake {
+        refuse: true,
+        policy_task: Some(batch.request.tasks[0].task_id),
+        ..Default::default()
+    };
+    let started = store.start(batch.run_id, &providers, &|_, _| unreachable!(), &call)?;
+    assert_eq!(providers.prepared.get(), 1);
+    assert!(matches!(started.as_slice(), [
+        Started::Refused { attempt: first, kind: RefusalKind::Policy, reason },
+        Started::Refused { attempt: second, kind: RefusalKind::Preparation, .. },
+    ] if *first == batch.attempts[0].attempt_id && *second == batch.attempts[1].attempt_id
+        && reason.contains("provenant gc")));
+    for attempt in &batch.attempts {
+        assert_eq!(
+            terminal(&store, attempt.attempt_id, &call)?,
+            Outcome::Rejected
+        );
+    }
+    Ok(())
+}
+
 impl Providers for Fake {
+    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
+        if self.policy_task == Some(task.task_id) {
+            return Err("insufficient disk space; run `provenant gc`".into());
+        }
+        Ok(())
+    }
+
     fn prepare(
         &self,
         _: &TaskRequest,
@@ -3649,6 +3687,218 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
         );
         assert_eq!(std::fs::read_to_string(nested.join("s-1.lock"))?, "keep");
     }
+    Ok(())
+}
+
+#[test]
+fn cancel_queued_work_without_an_attempt_directory() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    let attempt = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    // The queued transaction can survive a crash before directory publication.
+    std::fs::remove_dir_all(attempt)?;
+    assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Cancelled);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Cancelled);
+    Ok(())
+}
+
+#[test]
+fn reconcile_recovers_a_writer_from_a_previous_boot() -> TestResult {
+    recover_rebooted_writer(false, false, true)
+}
+
+#[test]
+fn cancel_recovers_a_writer_from_a_previous_boot() -> TestResult {
+    recover_rebooted_writer(true, false, true)
+}
+
+#[test]
+fn reconcile_retries_reboot_release_after_the_terminal_commit() -> TestResult {
+    recover_rebooted_writer(false, true, true)
+}
+
+#[test]
+fn cancel_retries_reboot_release_after_the_terminal_commit() -> TestResult {
+    recover_rebooted_writer(true, true, true)
+}
+
+#[test]
+fn reconcile_retries_reboot_release_for_a_reader() -> TestResult {
+    recover_rebooted_writer(false, true, false)
+}
+
+fn recover_rebooted_writer(cancel_run: bool, interrupted: bool, writer: bool) -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    let worktree = temp.path().join("lane");
+    std::fs::create_dir(&worktree)?;
+    std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
+    run.request.tasks[0].writer = writer.then(|| WriterRequest {
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store
+        .claim(id, WallTime::from_micros(100)?, &call)?
+        .ok_or("not admitted")?;
+    let before = store.record(id, &call)?;
+    let scope = RunStore::scope(&before);
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let custody = if writer {
+        store
+            .writer_registry
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(&worktree))
+    } else {
+        context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", run.run_id))
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&custody)?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&custody)?,
+        scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let reservation = custody.join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+    let meta = attempt.metadata()?;
+    let guardian = serde_json::json!({
+        "boot": "darwin:00000000-0000-0000-0000-000000000000",
+        "pid": 123, "native_start": 1, "group_id": 123, "session_id": 123,
+    });
+    value["boot"] = guardian["boot"].clone();
+    value["guardian"] = guardian.clone();
+    value["launch_state"] = "spawned".into();
+    value["attempt_device"] = meta.device.into();
+    value["attempt_inode"] = meta.inode.into();
+    std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+    let summary =
+        serde_json::json!({"schema_version":1, "scope":scope, "requester":context.actor_id});
+    artifacts::seal(
+        &attempt,
+        "launch.json",
+        &serde_json::to_vec(&summary)?,
+        RECORD_LIMIT,
+    )?;
+    let checkpoint = serde_json::to_vec(
+        &serde_json::json!({"schema_version":1, "scope":scope, "guardian":guardian}),
+    )?;
+    artifacts::seal(&attempt, "process.json", &checkpoint, RECORD_LIMIT)?;
+    // Recovery preserves existing captures, results, scratch and provider history.
+    let telemetry = [
+        ("stdout.log", b"partial output".as_slice()),
+        ("stderr.log", b"partial diagnostics".as_slice()),
+        ("result.md", b"partial result".as_slice()),
+        ("process.json", checkpoint.as_slice()),
+    ];
+    for (name, bytes) in telemetry {
+        if name != "process.json" {
+            artifacts::seal(&attempt, name, bytes, CAPTURE_LIMIT)?;
+        }
+    }
+    let temporary = store.temporary_path(id, &call)?;
+    std::fs::write(temporary.join("keep"), "scratch")?;
+    artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
+    let history = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/provider-state", run.run_id));
+    std::fs::write(history.join("session"), "history")?;
+
+    if interrupted {
+        let recovery = provenant_supervisor::custody::acquire_recovery(
+            Directory::open_anchor(&custody)?,
+            call.budget,
+            &cancel,
+            &clock,
+        )?;
+        let proof = recovery
+            .after_reboot(&attempt, scope)?
+            .ok_or("reboot not proven")?;
+        store.commit_reboot_lost(&proof, &call)?;
+        drop(proof);
+        assert!(reservation.exists());
+        assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    }
+    if cancel_run {
+        assert_eq!(
+            store.cancel(id, "stop", &call)?,
+            CancelReceipt::AlreadyTerminal
+        );
+    } else {
+        assert_eq!(
+            store.reconcile(run.run_id, &Fake::default(), &call)?,
+            vec![(id, Reconciled::Finished)]
+        );
+    }
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    let fact = store.attempt(id, &call)?;
+    assert_eq!(fact.terminal_state, Outcome::Lost.into());
+    assert!(fact.output_refs.is_empty());
+    let after = store.record(id, &call)?;
+    assert_eq!(after.started_at, before.started_at);
+    assert_eq!(after.applied_route, before.applied_route);
+    assert_eq!(after.usage, before.usage);
+    assert_eq!(after.session, before.session);
+    assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
+    assert!(store.writer_fences()?.is_empty());
+    assert!(!reservation.exists());
+    assert!(
+        store
+            .reconcile(run.run_id, &Fake::default(), &call)?
+            .is_empty()
+    );
+    // Also retry a crash after fence release but before clearing the marker.
+    store.set_temporary_retained(id, true, &call)?;
+    assert!(
+        store
+            .reconcile(run.run_id, &Fake::default(), &call)?
+            .is_empty()
+    );
+    for (name, bytes) in telemetry {
+        assert_eq!(
+            attempt.read_bounded(std::ffi::OsStr::new(name), CAPTURE_LIMIT)?,
+            bytes
+        );
+    }
+    assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
+    assert_eq!(std::fs::read_to_string(history.join("session"))?, "history");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("unfinished.rs"))?,
+        "keep my work"
+    );
+    assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
+    assert!(store.open_runs(10, &call)?.is_empty());
     Ok(())
 }
 

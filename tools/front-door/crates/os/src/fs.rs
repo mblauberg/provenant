@@ -541,6 +541,10 @@ impl Directory {
     pub fn available_bytes(&self) -> std::io::Result<u64> {
         crate::sys::resources::available_bytes(&self.file)
     }
+    /// Total capacity of this directory's filesystem.
+    pub fn total_bytes(&self) -> std::io::Result<u64> {
+        crate::sys::resources::total_bytes(&self.file)
+    }
     /// Exclusive APFS allocation, or None when the filesystem omits it.
     /// Observes one normal component without following its final symlink.
     pub fn private_size_at(&self, name: &OsStr) -> Result<Option<u64>> {
@@ -724,16 +728,6 @@ impl Directory {
         destination: &OsStr,
     ) -> Result<()> {
         self.rename(source, destination_dir, destination, os::Rename::NoReplace)
-    }
-    // Kept crate-private until an authorised caller lands.
-    #[allow(dead_code)]
-    pub(crate) fn exchange(
-        &self,
-        source: &OsStr,
-        destination_dir: &Self,
-        destination: &OsStr,
-    ) -> Result<()> {
-        self.rename(source, destination_dir, destination, os::Rename::Exchange)
     }
     pub fn replace(
         &self,
@@ -1141,9 +1135,7 @@ pub fn entropy_128() -> Result<[u8; 16]> {
 pub fn temporary_name() -> Result<OsString> {
     let bytes = os::entropy::<12>().map_err(error("getentropy", Path::new("<temporary name>")))?;
     let mut name = String::from(".provenant-staging.");
-    for byte in bytes {
-        name.push_str(&format!("{byte:02x}"));
-    }
+    name.push_str(&provenant_core::hex(&bytes));
     Ok(name.into())
 }
 

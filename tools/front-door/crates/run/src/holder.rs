@@ -92,7 +92,12 @@ impl HolderContext {
         let mut delay = std::time::Duration::from_millis(100);
         for _ in 0..10 {
             match Self::open_once(raw) {
-                Err(RunError::Contention | RunError::Sqlite(_) | RunError::Io(_)) => {
+                Err(
+                    RunError::Contention
+                    | RunError::Sqlite(_)
+                    | RunError::Io(_)
+                    | RunError::OperationIo { .. },
+                ) => {
                     std::thread::park_timeout(delay);
                     delay = (delay * 2).min(std::time::Duration::from_secs(5));
                 }
@@ -322,6 +327,29 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        // Failed headless tools can leave only stderr. Keep the recognised
+        // provider diagnostic alongside any partial answer before sealing it.
+        if decoded.outcome == Outcome::Failed
+            && let Some(route) = &record.applied_route
+            && let Some(note) = providers.failure_diagnostic(
+                route,
+                // A diagnostic is best effort: an unreadable stderr must not stop sealing.
+                &read_sealed(attempt, "stderr.log", CAPTURE_LIMIT)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+            )
+        {
+            if !decoded.result.is_empty() {
+                decoded.result.push_str("\n\n");
+            }
+            decoded.result.push_str(&note);
+            decoded.result.push('\n');
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
+        }
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
@@ -374,6 +402,7 @@ impl RunStore {
                         task.deliver
                             .as_ref()
                             .map_or("origin", |deliver| deliver.remote.as_str()),
+                        task.base.as_deref(),
                     )
                 });
             match check {

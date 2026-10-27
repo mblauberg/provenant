@@ -456,19 +456,15 @@ fn scan_terminal(
 pub(crate) fn disk_alert(
     roots: &Roots,
     projects: &[provenant_core::ProjectId],
-    floor: Option<&str>,
+    floor: u64,
     dry_run: bool,
 ) -> Result<Vec<String>, Error> {
-    let Some(floor) = floor else {
-        return Ok(Vec::new());
-    };
-    let floor = provenant_config::parse_cache_size(floor)
-        .map_err(|_| Error::GcObservation("invalid alert threshold"))?;
     let root = Directory::open_anchor(roots.state.as_path())?;
     let free = root
         .available_bytes()
         .map_err(|_| Error::GcObservation("cannot read available disk space"))?;
-    let detail = format!("low_disk: {free} bytes available, threshold {floor}");
+    let detail =
+        format!("low_disk: {free} bytes available, threshold {floor} bytes; run `provenant gc`");
     if dry_run {
         return Ok(if free < floor {
             vec![detail]

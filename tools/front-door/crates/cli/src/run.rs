@@ -53,6 +53,8 @@ pub struct Fail {
     pub status: Status,
     pub kind: ErrorKind,
     pub message: String,
+    /// Safe typed detail retained for the MCP edge, without raw source errors.
+    pub detail: Option<provenant_fabric_runtime::coordination::facade::FacadeError>,
 }
 impl Fail {
     fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
@@ -60,11 +62,31 @@ impl Fail {
             status,
             kind,
             message: message.into(),
+            detail: None,
         }
     }
 }
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        let detail = match &error {
+            run::RunError::WorktreeUnregistered(path) => Some(FacadeError::WorktreeUnregistered {
+                path: path.to_string_lossy().into_owned(),
+            }),
+            run::RunError::Filesystem(error) | run::RunError::Publication(error) => {
+                Some(FacadeError::filesystem(error))
+            }
+            run::RunError::OperationIo {
+                operation, path, ..
+            } => Some(FacadeError::Io {
+                operation: (*operation).into(),
+                path: path
+                    .as_ref()
+                    .filter(|path| path.is_absolute())
+                    .map(|path| path.to_string_lossy().into_owned()),
+            }),
+            _ => None,
+        };
         let kind = ErrorKind::from(&error);
         let status = match kind {
             ErrorKind::Invalid
@@ -83,7 +105,10 @@ impl From<run::RunError> for Fail {
             | ErrorKind::ContinuationUnsupported => Status::Refused,
             _ => Status::Error,
         };
-        Self::new(status, kind, error.to_string())
+        Self {
+            detail,
+            ..Self::new(status, kind, error.to_string())
+        }
     }
 }
 /// A reply whose reader deadline expired still reports what it saw.
@@ -165,6 +190,24 @@ impl Registry<'_> {
     }
 }
 impl run::Providers for Registry<'_> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+        let Some(writer) = &task.writer else {
+            return Ok(());
+        };
+        let roots = self.roots.ok_or("routing context is unavailable")?;
+        let home = self.home.ok_or("home directory is unavailable")?;
+        let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+            .map_err(|error| error.to_string())?;
+        check_writer_disk(&config.gc, roots.state.as_path(), &writer.worktree, home)
+    }
+
+    fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
+        REGISTRY
+            .iter()
+            .find(|entry| Some(entry.adapter.id()) == route.provider.as_deref())?
+            .adapter
+            .failure_diagnostic(stderr)
+    }
     fn prepare(
         &self,
         task: &run::TaskRequest,
@@ -745,6 +788,56 @@ pub fn submit(
     submit_with_host(session, edge, submission, call, None)
 }
 
+fn check_writer_disk(
+    settings: &provenant_config::GcSettings,
+    state: &Path,
+    worktree: &Path,
+    home: &Path,
+) -> Result<(), String> {
+    check_writer_disk_with(settings, state, worktree, home, |mut path| {
+        loop {
+            match provenant_os::fs::Directory::open_anchor(path) {
+                Ok(directory) => {
+                    return directory
+                        .available_bytes()
+                        .map_err(|error| error.to_string());
+                }
+                Err(error) if error.is_not_found() => {
+                    path = path.parent().ok_or_else(|| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    })
+}
+
+fn check_writer_disk_with(
+    settings: &provenant_config::GcSettings,
+    state: &Path,
+    worktree: &Path,
+    home: &Path,
+    mut available: impl FnMut(&Path) -> Result<u64, String>,
+) -> Result<(), String> {
+    let floor = settings
+        .free_floor_bytes(state)
+        .map_err(|error| error.to_string())?;
+    let cache = home.join("Library/Caches/provenant-lane-cargo");
+    let (mut limiting, mut minimum) = (worktree, u64::MAX);
+    for path in [worktree, state, cache.as_path()] {
+        let bytes = available(path)?;
+        if bytes < minimum {
+            (limiting, minimum) = (path, bytes);
+        }
+    }
+    if minimum < floor {
+        return Err(format!(
+            "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; run `provenant gc` before dispatching a writer",
+            limiting.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Reuse the host's pinned launch inputs after its guardian has settled.
 pub fn submit_with_host(
     session: &Session,
@@ -756,6 +849,31 @@ pub fn submit_with_host(
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    // Nested proposals are checked by the host before provider preparation.
+    // A confined parent cannot open a sibling worktree to sample its volume.
+    if parent_attempt.is_none() {
+        for task in &submission.tasks {
+            if let Some(path) = &task.worktree {
+                let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+                check_writer_disk(
+                    &config.gc,
+                    edge.roots.state.as_path(),
+                    &writer.worktree,
+                    edge.home,
+                )
+                .map_err(|message| {
+                    let mut fail = Fail::new(Status::Refused, ErrorKind::Refused, message.clone());
+                    // Keep the volume, available bytes and floor for MCP callers.
+                    fail.detail = Some(
+                        provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                            reason: message,
+                        },
+                    );
+                    fail
+                })?;
+            }
+        }
+    }
     let profile = config
         .dispatch_profile(&submission.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -1257,7 +1375,7 @@ fn launch_on_host(
     // taken against the same key as on the lane-launch path of the test host.
     #[cfg(feature = "fixture")]
     if host.fixture_state_write {
-        return Ok(session.store.start_with_writer_lease(
+        let started = session.store.start_with_writer_lease(
             run,
             &registry,
             &holder,
@@ -1273,11 +1391,15 @@ fn launch_on_host(
             },
             validated,
             call,
-        )?);
+        )?;
+        check_launch_policy(&started)?;
+        return Ok(started);
     }
-    Ok(session
+    let started = session
         .service()
-        .start(run, &registry, &holder, validated, call)?)
+        .start(run, &registry, &holder, validated, call)?;
+    check_launch_policy(&started)?;
+    Ok(started)
 }
 fn launch_unknown(started: &[run::Started]) -> Vec<String> {
     started
@@ -1287,6 +1409,32 @@ fn launch_unknown(started: &[run::Started]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
+    // Preserve the receipt for existing unknown-handoff recovery, including
+    // Fabric's operation replay, even when another task was refused.
+    if started
+        .iter()
+        .any(|started| matches!(started, run::Started::Unknown { .. }))
+    {
+        return Ok(());
+    }
+    if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            attempt,
+            reason,
+            kind: run::RefusalKind::Policy,
+        } => Some((attempt, reason)),
+        _ => None,
+    }) {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::Refused,
+            format!("{attempt}: {reason}"),
+        ));
+    }
+    Ok(())
 }
 /// The lanes of a just-accepted run, optionally after waiting for all of them.
 fn report(
@@ -1363,6 +1511,14 @@ fn state_name(state: &run::AttemptState) -> String {
             .unwrap_or_default(),
     }
 }
+/// The state name and, for a terminal attempt, its recorded reason.
+pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
+    let reason = match state {
+        run::AttemptState::Terminal { reason, .. } => reason.clone(),
+        _ => None,
+    };
+    (state_name(state), reason)
+}
 fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
@@ -1413,7 +1569,14 @@ fn render_lanes(lanes: &[run::AttemptRecord], next: Option<u64>, root: &Path) ->
                     plain_text(&skipped.detail, usize::MAX)
                 ));
             }
-            if !lane.protected_paths.is_empty() {
+            let review_required = matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::ReviewRequired,
+                    ..
+                }
+            );
+            if review_required || !lane.protected_paths.is_empty() {
                 human.push_str(&format!(
                     "  review head={} paths={}\n",
                     lane.head
@@ -1795,14 +1958,11 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     align_utf8_tail(&mut chunk);
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     // The text alone cannot tell a clean success from one that needs the chair.
-    let reason = match &record.state {
-        run::AttemptState::Terminal { reason, .. } => reason.clone(),
-        _ => None,
-    };
+    let (state, reason) = state_and_reason(&record.state);
     Ok((
         json!({
             "attempt_id": id,
-            "state": state_name(&record.state),
+            "state": state,
             "reason": reason,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,
@@ -2455,6 +2615,80 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
 }
 
 #[cfg(test)]
+mod writer_disk_tests {
+    use super::*;
+
+    #[test]
+    fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
+        let refused = || run::Started::Refused {
+            attempt: AttemptId::from_bytes([1; 16]),
+            kind: run::RefusalKind::Policy,
+            reason: "insufficient disk space".into(),
+        };
+        let error = check_launch_policy(&[refused()])
+            .err()
+            .ok_or("policy refusal was ignored")?;
+        assert_eq!(error.status, Status::Refused);
+        assert_eq!(error.kind, ErrorKind::Refused);
+        // Let the existing unknown-handoff handling retain the full receipt.
+        check_launch_policy(&[
+            refused(),
+            run::Started::Unknown {
+                attempt: AttemptId::from_bytes([2; 16]),
+                error: "handoff unconfirmed".into(),
+            },
+        ])
+        .map_err(|error| error.message)?;
+        Ok(())
+    }
+
+    #[test]
+    fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
+        let settings = provenant_config::GcSettings {
+            free_floor: Some("100B".into()),
+            ..Default::default()
+        };
+        let state = Path::new("/state");
+        let worktree = Path::new("/worktree");
+        let home = Path::new("/home");
+        let cache = home.join("Library/Caches/provenant-lane-cargo");
+        for low in [worktree, state, cache.as_path()] {
+            let mut observed = Vec::new();
+            let result = check_writer_disk_with(&settings, state, worktree, home, |path| {
+                observed.push(path.to_path_buf());
+                Ok(if path == low { 99 } else { 1000 })
+            });
+            let error = result
+                .err()
+                .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
+            assert!(
+                error.contains("99 bytes available") && error.contains("floor 100 bytes"),
+                "{error}"
+            );
+            assert!(observed.contains(&low.to_path_buf()));
+        }
+        check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
+        Ok(())
+    }
+
+    #[test]
+    fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let settings = provenant_config::GcSettings {
+            free_floor: Some("1B".into()),
+            ..Default::default()
+        };
+        let state = base.join("missing/state");
+        let home = base.join("missing/home");
+        check_writer_disk(&settings, &state, &base, &home)?;
+        assert!(!base.join("missing").exists());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod lane_depth_tests {
     use super::*;
 
@@ -3047,6 +3281,46 @@ mod tests {
             "review head={} paths=.github/unsafepath.yml",
             "a".repeat(40)
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn render_lanes_shows_review_line_when_review_required_without_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "review-no-paths",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"terminal","outcome":"failed","exit_code":1,"finished_at":now,"reason":null},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        lane.state = run::AttemptState::Terminal {
+            outcome: run::Outcome::ReviewRequired,
+            exit_code: Some(0),
+            finished_at: now,
+            reason: None,
+        };
+        lane.protected_paths = vec![];
+        let (_, human) = render_lanes(&[lane], None, Path::new("/state"));
+        assert!(human.contains("  review head=unknown paths=\n"));
         Ok(())
     }
 

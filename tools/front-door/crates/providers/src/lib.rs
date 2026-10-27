@@ -50,8 +50,11 @@ pub fn quota_policies(registry: &[Registration]) -> Vec<provenant_quota::QuotaPo
 
 // Shared mechanics; each adapter supplies its own `prepare` builder.
 macro_rules! adapter {
-    ($ty:ty, $id:literal, $prepare:path) => {
+    ($ty:ty, $id:literal, $prepare:path $(, $diagnostic:path)?) => {
         impl crate::Adapter for $ty {
+            $(fn failure_diagnostic(&self, stderr: &[u8]) -> Option<String> {
+                $diagnostic(stderr)
+            })?
             fn id(&self) -> &'static str {
                 $id
             }

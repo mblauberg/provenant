@@ -45,7 +45,9 @@ worktrees, sparing live or unobservable writers. Idle removal takes the existing
 writer lock without waiting and releases it immediately after the tombstone
 rename. A held lock keeps the cache as live; a missing or unsafe lock, a
 reservation, or unverifiable registration keeps it as unobservable.
-Manual collection previews by default; `--apply` deletes. Scheduled GC also
+Bare `gc` deletes eligible caches and expired provider state; `--dry-run`
+previews all cleanup. `--apply` also deletes eligible merged worktrees and
+declared output. Scheduled GC also
 removes clean merged worktrees using fetched upstream ancestry and prunes
 explicitly configured regenerable output for known terminal lanes. The
 [configuration runbook](configuration.md#lane-cache-collection) describes
@@ -145,12 +147,13 @@ plists are preserved and block install. To recover, move the named plist
 aside, run `launchctl bootout gui/$UID/dev.provenant.peer`, then rerun install.
 
 The same macOS default-state install also manages
-`~/Library/LaunchAgents/dev.provenant.gc.plist`, with `StartInterval = 21600`
-(six hours). It runs `provenant gc` for registered projects, protecting live
-writers and reservations. Its stdout and stderr go to `<state>/gc/`.
+`~/Library/LaunchAgents/dev.provenant.gc.plist`, with `RunAtLoad = true` and
+`StartInterval = 3600` (hourly). It runs `provenant gc` for registered projects,
+protecting live writers and reservations. Its stdout and stderr go to `<state>/gc/`.
 `[gc] schedule = false` disables scheduled deletion; rerun install to remove
-the owned agent. The optional `idle_days` and `free_floor` keys become agent
-arguments on install. See [configuration](configuration.md#lane-cache-collection).
+the owned agent. `idle_days` and the free-space floor become agent arguments
+on install. When `free_floor` is unset, the floor is 10% of the state volume,
+at least 50 GiB. See [configuration](configuration.md#lane-cache-collection).
 
 The default-state install also manages
 `~/Library/LaunchAgents/dev.provenant.disk-guard.plist`. Enabled by default,

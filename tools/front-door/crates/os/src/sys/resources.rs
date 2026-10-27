@@ -99,6 +99,24 @@ pub fn memory() -> io::Result<MemorySample> {
 
 /// Bytes available to this unprivileged user on the filesystem holding `file`.
 pub(crate) fn available_bytes(file: &File) -> io::Result<u64> {
+    let stats = filesystem(file)?;
+    #[allow(clippy::useless_conversion)]
+    let blocks = u64::from(stats.f_bavail);
+    #[allow(clippy::useless_conversion)]
+    let size = u64::from(stats.f_frsize);
+    Ok(blocks.saturating_mul(size))
+}
+
+pub(crate) fn total_bytes(file: &File) -> io::Result<u64> {
+    let stats = filesystem(file)?;
+    #[allow(clippy::useless_conversion)]
+    let blocks = u64::from(stats.f_blocks);
+    #[allow(clippy::useless_conversion)]
+    let size = u64::from(stats.f_frsize);
+    Ok(blocks.saturating_mul(size))
+}
+
+fn filesystem(file: &File) -> io::Result<libc::statvfs> {
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
     // SAFETY: the descriptor is owned by file for the call; stats is a live,
     // writable statvfs buffer and the kernel retains no pointer.
@@ -107,12 +125,7 @@ pub(crate) fn available_bytes(file: &File) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: a successful fstatvfs initialised the record.
-    let stats = unsafe { stats.assume_init() };
-    #[allow(clippy::useless_conversion)]
-    let blocks = u64::from(stats.f_bavail);
-    #[allow(clippy::useless_conversion)]
-    let size = u64::from(stats.f_frsize);
-    Ok(blocks.saturating_mul(size))
+    Ok(unsafe { stats.assume_init() })
 }
 
 /// Sample an existing path's filesystem with one syscall, without opening it.
@@ -151,7 +164,9 @@ mod tests {
         let memory = super::memory().unwrap();
         assert!(memory.total_bytes > 0 && memory.available_bytes <= memory.total_bytes);
         let file = std::fs::File::open("/").unwrap();
-        assert!(super::available_bytes(&file).unwrap() > 0);
+        let available = super::available_bytes(&file).unwrap();
+        let total = super::total_bytes(&file).unwrap();
+        assert!(available > 0 && available <= total);
     }
 
     #[test]

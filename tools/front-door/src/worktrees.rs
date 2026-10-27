@@ -59,6 +59,8 @@ pub(crate) enum Error {
     Budget,
     #[error("{0}")]
     GcObservation(&'static str),
+    #[error("cannot read disk space: {0}")]
+    DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
 }
@@ -313,6 +315,18 @@ fn gc_data_summary(data: &GcData) -> String {
             human.push_str(&format!("{} {}\n", output.reason, output.path.display()));
         }
     }
+    for temporary in &data.provider_state.attempt_tmp {
+        human.push_str(&format!(
+            "{} attempt tmp {} ({} bytes)\n",
+            if data.report.dry_run {
+                "would remove"
+            } else {
+                "removed"
+            },
+            temporary.path.display(),
+            temporary.bytes
+        ));
+    }
     for alert in &data.alerts {
         human.push_str(&format!("{alert}\n"));
     }
@@ -454,13 +468,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
-    let alerts = crate::gc_support::disk_alert(
-        &roots,
-        &project_ids,
-        config.gc.alert_below.as_deref(),
-        command.dry_run,
-    )
-    .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
+    let free_floor = command
+        .free_floor
+        .map(Ok)
+        .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
+        .map_err(Error::DiskSpace)?;
     let mut worktree_cleanup = Vec::new();
     for project in &mut projects {
         let settings = config
@@ -568,7 +580,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::Budget)?;
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
-        free_floor_bytes: command.free_floor,
+        free_floor_bytes: Some(free_floor),
         dry_run: command.dry_run,
         protected_owners: lanes
             .iter()
@@ -577,7 +589,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .collect(),
         project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
     };
-    let report = match gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
+    let report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
         for project in &projects {
             if let Some(lane) = project.lanes.iter().find(|lane| lane.path == path) {
                 return worktrees::cache_writer_guard(
@@ -589,7 +601,20 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             }
         }
         Err(WorkerState::Unknown)
-    }) {
+    });
+    let alert_floor = config
+        .gc
+        .alert_below
+        .as_deref()
+        .map(provenant_config::parse_cache_size)
+        .transpose()
+        .map_err(|_| Error::GcObservation("invalid alert threshold"))?
+        .unwrap_or(0)
+        .max(free_floor);
+    // Observe after every collection class, including a partially failed sweep.
+    let alerts = crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
+        .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
+    let report = match report {
         Ok(report) => report,
         Err(error) => {
             return Err(Error::CacheGc(

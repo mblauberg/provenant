@@ -356,11 +356,7 @@ pub fn worktree_cargo_cache(
         digest.update(identity.device.to_le_bytes());
         digest.update(identity.inode.to_le_bytes());
     }
-    let name: String = digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let name = provenant_core::hex(&digest.finalize());
     let grant = PathGrant {
         path: home.join("Library/Caches/provenant-lane-cargo").join(name),
         scope: PathScope::Subtree,

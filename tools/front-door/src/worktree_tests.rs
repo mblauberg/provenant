@@ -110,6 +110,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
+            "dispatch_refuses_low_disk_writers",
+            "resume_refuses_low_disk_writer",
+            "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text",
             "lane_prepare_isolates_nested_state",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
@@ -138,6 +141,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
+                "dispatch_refuses_low_disk_writers" => dispatch_refuses_low_disk_writers(),
+                "resume_refuses_low_disk_writer" => resume_refuses_low_disk_writer(),
+                "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text" => gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "read_only_dispatch_applies_bound_git_and_project_writes" => {
                     crate::compose_tests::read_only_dispatch_applies_bound_git_and_project_writes()
@@ -1339,7 +1345,7 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
     rig.project = rig.home.clone();
     fs::write(
         rig.state.join("config.toml"),
-        b"schema_version=1\n[gc]\nschedule=false\n",
+        b"schema_version=1\n[gc]\nfree_floor='1B'\nschedule=false\n",
     )?;
     let disabled = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
     assert!(
@@ -1349,7 +1355,10 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
             .is_empty()
     );
     assert!(cache.is_dir());
-    fs::write(rig.state.join("config.toml"), b"schema_version=1\n")?;
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
     fs::write(registration.join("reservation.json"), b"reserved")?;
     let reserved = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
     assert!(
@@ -2051,6 +2060,13 @@ fn lane_prepare_isolates_nested_state() -> Result {
     );
     let home = rig.root.join("fixture-home");
     fs::create_dir_all(home.join(".claude-fixture"))?;
+    if !cfg!(target_os = "macos") {
+        // Off macOS, Claude keeps its login in the account directory, not a keychain.
+        fs::write(
+            home.join(".claude-fixture/.credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#,
+        )?;
+    }
     fs::create_dir_all(home.join(".codex"))?;
     fs::write(
         home.join(".codex/auth.json"),
@@ -2105,8 +2121,11 @@ fn lane_prepare_isolates_nested_state() -> Result {
             directory.to_str().ok_or("account path")?
         ));
     }
-    let config =
-        |depth: u8| format!("schema_version=1\n[knobs]\n'lanes.max_depth'={depth}\n{accounts}");
+    let config = |depth: u8| {
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n{accounts}"
+        )
+    };
     fs::write(rig.state.join("config.toml"), config(1))?;
     for (adapter, writer) in [
         ("codex", false),
@@ -3264,7 +3283,7 @@ fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
     );
     fs::write(
         rig.state.join("config.toml"),
-        format!("schema_version=1\n{output_config}"),
+        format!("schema_version=1\n[gc]\nfree_floor='1B'\n{output_config}"),
     )?;
     let queued_path = rig.project.join(".worktrees/queued");
     let queued_writer =
@@ -3315,7 +3334,9 @@ fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
     // Alert failure must not block reclamation, including on a full disk.
     fs::write(
         rig.state.join("config.toml"),
-        format!("schema_version=1\n[gc]\nalert_below='18446744073709551615B'\n{output_config}"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\nalert_below='18446744073709551615B'\n{output_config}"
+        ),
     )?;
     fs::write(rig.state.join("gc"), "blocked alert directory")?;
     let collected = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
@@ -3428,7 +3449,7 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     let attempt = prepared.attempts[0].attempt_id;
     store.create(&prepared, &call)?;
     let config = format!(
-        "schema_version=1\n[gc.projects.'{}']\nregenerable=['target','node_modules']\nkeep=['kept/target']\n",
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[gc.projects.'{}']\nregenerable=['target','node_modules']\nkeep=['kept/target']\n",
         context.project_id
     );
     fs::write(rig.state.join("config.toml"), &config)?;
@@ -3503,7 +3524,10 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     assert!(path.join("old/target").is_dir());
     fs::write(&request, sealed)?;
     // No declaration grants no output deletion.
-    fs::write(rig.state.join("config.toml"), "schema_version=1\n")?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
     fs::write(rig.state.join("config.toml"), config)?;
@@ -3522,13 +3546,325 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
     Ok(())
 }
 
+fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
+    use std::os::unix::fs::DirBuilderExt;
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "gc-tmp", "--json"])?;
+    let (_, context) = writer_context(&rig)?;
+    let store = open_writer_store(&context)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let mut input = writer_run(
+        provenant_run::WriterRequest {
+            project: rig.project.clone(),
+            worktree: rig.project.join(".worktrees/gc-tmp"),
+        },
+        "gc-tmp",
+        201,
+        "fixture",
+    )?;
+    input.request.tasks[0].writer = None;
+    input.created_at = provenant_core::WallTime::from_micros(1)?;
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    store.withdraw(
+        id,
+        provenant_run::AttemptState::Queued,
+        provenant_run::Outcome::Cancelled,
+        "fixture",
+        provenant_core::WallTime::from_micros(2)?,
+        &call,
+    )?;
+    let attempt = rig
+        .state
+        .join(format!("runs/{}/attempts/{id}", input.run_id));
+    let temporary = attempt.join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    fs::write(temporary.join("payload"), vec![1; 8192])?;
+    // Durable evidence and provider history must survive applied GC byte for byte.
+    let mut retained = BTreeMap::new();
+    for name in [
+        "prompt.txt",
+        "launch.json",
+        "stdout.log",
+        "stderr.log",
+        "result.md",
+        "process.json",
+        "process-exit.json",
+        "settlement.json",
+        "terminal-pending.json",
+        "terminal-commit.json",
+        "release.json",
+        "provider-history/candidate-0/sessions/session.jsonl",
+        "provider-history/candidate-0/thread_history_1.sqlite",
+    ] {
+        let path = attempt.join(name);
+        fs::create_dir_all(path.parent().ok_or("retained parent")?)?;
+        if !path.exists() {
+            fs::write(&path, format!("retained fixture: {name}\n\0"))?;
+        }
+        retained.insert(path.clone(), fs::read(path)?);
+    }
+    drop(store);
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    db.execute(
+        "UPDATE attempts SET tmp_retained=1 WHERE id=?1",
+        [id.to_string()],
+    )?;
+    let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    let removal = &preview["data"]["provider_state"]["attempt_tmp"][0];
+    assert_eq!(removal["path"], temporary.to_str().ok_or("tmp path")?);
+    let bytes = removal["bytes"].as_u64().ok_or("tmp bytes")?;
+    assert!(bytes >= 8192);
+    assert!(temporary.exists());
+    let text = command(&rig, &["gc", "--dry-run"])?;
+    assert_eq!(code(&text), 0);
+    let text = String::from_utf8(text.stdout.bytes)?;
+    assert!(text.contains("would remove attempt tmp"), "{text}");
+    assert!(
+        text.contains(temporary.to_str().ok_or("tmp path")?),
+        "{text}"
+    );
+    assert!(text.contains(&format!("{bytes} bytes")), "{text}");
+    assert!(temporary.exists());
+    let applied = ok(&rig, &["gc", "--apply", "--json"])?;
+    assert_eq!(
+        applied["data"]["provider_state"]["attempt_tmp"][0],
+        *removal
+    );
+    assert!(!temporary.exists());
+    for (path, bytes) in retained {
+        assert_eq!(
+            fs::read(&path)?,
+            bytes,
+            "{} changed during GC",
+            path.display()
+        );
+    }
+    let retained: bool = db.query_row(
+        "SELECT tmp_retained FROM attempts WHERE id=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(!retained);
+    Ok(())
+}
+
+fn dispatch_refuses_low_disk_writers() -> Result {
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "low-disk", "--json"])?;
+    let (roots, _) = writer_context(&rig)?;
+    let settings = provenant_config::read(&roots)?;
+    assert_eq!(settings.gc.free_floor_bytes(rig.state.as_path())?, 1);
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let prompt = rig.root.join("prompt.md");
+    fs::write(&prompt, "hello")?;
+    let output = command(
+        &rig,
+        &[
+            "dispatch",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--model",
+            "codex/id",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            ".worktrees/low-disk",
+            "--operation-id",
+            "low-disk",
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert!(
+        message.contains("available")
+            && message.contains("floor 18446744073709551615")
+            && message.contains("provenant gc"),
+        "{message}"
+    );
+    assert!(!rig.state.join("runs").exists());
+    let reader = ok(
+        &rig,
+        &[
+            "dispatch",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--model",
+            "codex/id",
+            "--operation-id",
+            "low-disk-reader",
+            "--json",
+        ],
+    )?;
+    assert_eq!(reader["status"], "ok", "{reader}");
+    assert!(rig.state.join("runs").exists());
+    Ok(())
+}
+
+fn resume_refuses_low_disk_writer() -> Result {
+    use provenant_run::AttemptReader;
+    let rig = repository()?;
+    ok(&rig, &["worktree", "create", "resume-disk", "--json"])?;
+    let (_, context) = writer_context(&rig)?;
+    let store = open_writer_store(&context)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let input = writer_run(
+        provenant_run::WriterRequest {
+            project: rig.project.clone(),
+            worktree: rig.project.join(".worktrees/resume-disk"),
+        },
+        "resume-disk-prior",
+        211,
+        "prior",
+    )?;
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    // Publish a synthetic provider exit through the normal immutable-record API.
+    let exit = provenant_supervisor::custody::ExitObservation {
+        publication: provenant_supervisor::custody::PublicationState::Durable,
+        scope: provenant_supervisor::custody::Scope {
+            run: input.run_id,
+            attempt: id,
+            generation: 0,
+        },
+        termination: Some(provenant_os::exec::Termination::Exit(0)),
+        never_spawned: false,
+        stop_reason: None,
+        delivered_signals: vec![],
+        reaped: vec![],
+        omitted_reaped: 0,
+        spared: vec![],
+        omitted_spared: 0,
+        warnings: vec![],
+        omitted_warnings: 0,
+        terminal_observed: true,
+        unresolved_cleanup: false,
+        unresolved_pids: vec![],
+        settlement_evidence:
+            provenant_supervisor::custody::SettlementEvidence::DarwinCensusAndCustodyLease,
+        stdout: Default::default(),
+        stderr: Default::default(),
+    };
+    let attempt = rig
+        .state
+        .join(format!("runs/{}/attempts/{id}", input.run_id));
+    let mut evidence = serde_json::to_value(&exit)?;
+    evidence["schema_version"] = 1.into();
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(attempt.join("process-exit.json"))?;
+    file.write_all(&serde_json::to_vec(&evidence)?)?;
+    drop(file);
+    store.publish_terminal(
+        id,
+        store.record(id, &call)?.revision,
+        &provenant_run::TerminalPublication {
+            outcome: provenant_run::Outcome::Succeeded,
+            started_at: Some(input.created_at),
+            finished_at: clock.wall_now()?,
+            provider_ms: Some(1),
+            reason: None,
+            result: "prior result",
+            complete: true,
+            redacted: false,
+            resolved_route: Some(fixture_route()),
+            applied_route: Some(fixture_route()),
+            observed_route: Some(fixture_route()),
+            usage: Default::default(),
+            session: Some("fixture-session".into()),
+        },
+        &exit,
+        &call,
+    )?;
+    drop(store);
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let prompt = rig.root.join("resume.txt");
+    fs::write(&prompt, "continue")?;
+    let output = command(
+        &rig,
+        &[
+            "resume",
+            &id.to_string(),
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--operation-id",
+            "resume-disk-low",
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "REFUSED", "{value}");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("provenant gc"),
+        "{value}"
+    );
+    let store = open_writer_store(&context)?;
+    // The CLI continuation belongs to its actor, rather than the fixture actor.
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let run: String = db.query_row(
+        "SELECT run FROM operations WHERE project=?1 AND operation=?2",
+        rusqlite::params![context.project_id.to_string(), "resume-disk-low"],
+        |row| row.get(0),
+    )?;
+    let run = provenant_core::RunId::parse(&run)?;
+    let attempts = store
+        .attempts(
+            provenant_run::AttemptFilter {
+                run_id: Some(run),
+                task_id: None,
+            },
+            &call,
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(attempts.len(), 1);
+    let refused = store.record(attempts[0].attempt_id, &call)?;
+    assert!(matches!(
+        refused.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Rejected,
+            ..
+        }
+    ));
+    assert!(refused.applied_route.is_none());
+    assert!(
+        !rig.state
+            .join(format!(
+                "runs/{}/attempts/{}/launch.json",
+                run, attempts[0].attempt_id
+            ))
+            .exists()
+    );
+    Ok(())
+}
+
 fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
     let rig = repository()?;
     ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let set_floor = |floor: &str| -> Result {
         fs::write(
             rig.state.join("config.toml"),
-            format!("schema_version=1\n[gc]\nalert_below='{floor}'\n"),
+            format!("schema_version=1\n[gc]\nfree_floor='{floor}'\nalert_below='1B'\n"),
         )?;
         Ok(())
     };

@@ -108,13 +108,19 @@ impl stdio::Factory for Factory {
         }
     }
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError> {
-        Ok(Service::new(
-            self.coordination()?,
-            BoundFacade { factory: self },
-            &self.clock,
+        let coordination = self.coordination().map_err(|error| {
+            let typed = FacadeError::from(&error);
+            if matches!(typed, FacadeError::Io { .. }) {
+                ServiceError::Facade(scope_io(typed, "open coordination store"))
+            } else {
+                ServiceError::Coordination(error)
+            }
+        })?;
+        Ok(
+            Service::new(coordination, BoundFacade { factory: self }, &self.clock)
+                .with_limits(self.context.config.limits.clone())
+                .with_lane_restrictions(self.context.in_lane),
         )
-        .with_limits(self.context.config.limits.clone())
-        .with_lane_restrictions(self.context.in_lane))
     }
 }
 struct BoundFacade<'a> {
@@ -307,6 +313,17 @@ impl F3Facade for BoundFacade<'_> {
             return Err(FacadeError::Cancelled);
         }
         Ok(page)
+    }
+}
+
+/// Retain lower-level diagnostics while naming the request that failed.
+fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
+    match error {
+        FacadeError::Io { operation, path } => FacadeError::Io {
+            operation: format!("{scope}: {operation}"),
+            path,
+        },
+        other => other,
     }
 }
 
@@ -807,12 +824,12 @@ fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
             | E::BundleHeadMismatch
             | E::TransportConflict
             | E::RemoteMoved => FacadeError::Conflict,
-            _ => FacadeError::Io,
+            _ => FacadeError::io("landing"),
         };
     }
     error
         .downcast_ref::<provenant_fabric_store::Error>()
-        .map_or(FacadeError::Io, FacadeError::from)
+        .map_or(FacadeError::io("landing"), FacadeError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1082,7 +1099,7 @@ pub(crate) fn remote_base(
         .filter(|(key, _)| !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key)))
         .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])
         .collect();
-    let executor = SystemExecutor::new(1).map_err(|_| FacadeError::Io)?;
+    let executor = SystemExecutor::new(1).map_err(|_| FacadeError::io("create Git executor"))?;
     let git_output = |args: &[&str]| -> Result<Vec<u8>, FacadeError> {
         let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
             .chain(
@@ -1164,19 +1181,17 @@ fn events_within<T: serde::Serialize>(events: &[T], max_bytes: u64) -> Result<us
     Ok(events.len())
 }
 fn run_error(error: provenant_run::RunError) -> FacadeError {
-    kind_error(provenant_run::ErrorKind::from(&error))
+    fail_error(error.into())
 }
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
-    kind_error(fail.kind)
+    fail.detail.unwrap_or_else(|| kind_error(fail.kind))
 }
 /// Translate a typed run category at the MCP edge. `ErrorKind` is the one
 /// categorisation of run errors; this only renders it.
 fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;
     match kind {
-        E::SecretInput | E::Refused | E::WorktreeUnregistered | E::Unsupported => {
-            FacadeError::ConfinementRefused
-        }
+        E::SecretInput | E::Refused | E::Unsupported => FacadeError::ConfinementRefused,
         E::LaneDepth => FacadeError::LaneDepth,
         E::LaneContext
         | E::ParentAttempt
@@ -1194,13 +1209,14 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         E::ContinuationUnsupported => FacadeError::ContinuationUnsupported,
         E::ProviderStateExpired => FacadeError::ProviderStateExpired,
         E::OwnerUnavailable => FacadeError::OwnerUnavailable,
-        E::StateCorrupt => FacadeError::StateCorrupt,
+        // An unregistered worktree must arrive with typed detail and its path.
+        E::StateCorrupt | E::WorktreeUnregistered => FacadeError::StateCorrupt,
         E::BaseUnreachable => FacadeError::BaseUnreachable,
         E::BranchExists => FacadeError::BranchExists,
         E::LaneCoordinationRefused => FacadeError::LaneCoordinationRefused,
         E::UpgradeRefused => FacadeError::UpgradeRefused,
         E::PeerVersion => FacadeError::PeerVersion,
-        _ => FacadeError::Io,
+        _ => FacadeError::io("run operation"),
     }
 }
 impl BinaryRunOwner<'_> {
@@ -1459,6 +1475,15 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
+        self.submit_inner(input, budget, cancel)
+            .map_err(|error| scope_io(error, "submit"))
+    }
+    fn submit_inner(
+        &mut self,
+        input: SubmitInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
             operation_id,
@@ -1642,10 +1667,14 @@ impl BinaryRunOwner<'_> {
                 FacadeError::BaseUnreachable
             }
             crate::worktrees::Error::Worktree(WorktreeError::Cancelled) => FacadeError::Cancelled,
-            _ => FacadeError::Io,
+            _ => FacadeError::io("create peer worktree"),
         })?;
         Ok(provenant_fabric_runtime::runs::PeerWorktree {
-            path: info.path.to_str().ok_or(FacadeError::Io)?.to_owned(),
+            path: info
+                .path
+                .to_str()
+                .ok_or(FacadeError::io("create peer worktree"))?
+                .to_owned(),
             branch: spec.branch,
         })
     }
@@ -1677,6 +1706,7 @@ impl BinaryRunOwner<'_> {
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
+        let (state, reason) = provenant_cli::run::state_and_reason(&record.state);
         let digest = |chunk: &provenant_run::OutputChunk| {
             provenant_core::Digest::from_bytes(*chunk.digest.bytes())
         };
@@ -1709,6 +1739,8 @@ impl BinaryRunOwner<'_> {
                     return Ok(OutputResult::Chunk {
                         target,
                         part,
+                        state,
+                        reason,
                         offset,
                         next_offset,
                         eof,
@@ -1737,6 +1769,8 @@ impl BinaryRunOwner<'_> {
                 Ok(OutputResult::Chunk {
                     target,
                     part,
+                    state,
+                    reason,
                     offset: chunk.offset,
                     next_offset: chunk.next_offset,
                     eof: chunk.eof,
@@ -2388,13 +2422,14 @@ impl Factory {
                 } else {
                     self.cwd.join(document)
                 };
-                let path = provenant_os::fs::canonicalize(&path).map_err(|_| FacadeError::Io)?;
+                let path = provenant_os::fs::canonicalize(&path)
+                    .map_err(|_| FacadeError::io("access graph journal"))?;
                 if !path.starts_with(&self.cwd) {
                     return Err(FacadeError::ConfinementRefused);
                 }
                 let bytes = provenant_os::fs::FileHandle::open_source(&path)
                     .and_then(|mut file| file.read_bounded(1_048_576))
-                    .map_err(|_| FacadeError::Io)?;
+                    .map_err(|_| FacadeError::io("access graph journal"))?;
                 let document: GraphDocument = provenant_records::decode_v1(
                     bytes.as_slice(),
                     provenant_records::Limits::CONFIG,
@@ -2429,7 +2464,9 @@ impl Factory {
                     // Unreadable is not corrupt: a denied or vanished read stays Io.
                     JournalError::Filesystem(_)
                     | JournalError::Io(_)
-                    | JournalError::DurabilityUnconfirmed(_) => FacadeError::Io,
+                    | JournalError::DurabilityUnconfirmed(_) => {
+                        FacadeError::io("access graph journal")
+                    }
                     _ => FacadeError::StateCorrupt,
                 }
             })?
@@ -2440,7 +2477,7 @@ impl Factory {
                 self.context.identity.project,
                 id,
             )
-            .map_err(|_| FacadeError::Io)?;
+            .map_err(|_| FacadeError::io("access graph journal"))?;
             return Ok(run);
         }
         let mut journal = FileJournal::open(
@@ -2451,7 +2488,7 @@ impl Factory {
             cancel,
             &self.clock,
         )
-        .map_err(|_| FacadeError::Io)?;
+        .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
@@ -2484,7 +2521,7 @@ impl Factory {
                 id,
                 None,
             )
-            .map_err(|_| FacadeError::Io)?;
+            .map_err(|_| FacadeError::io("access graph journal"))?;
             return Ok(run);
         }
         let mut checkpoint = journal
@@ -2494,7 +2531,9 @@ impl Factory {
         if matches!(input, GraphInput::Cancel { .. }) {
             // Persist the admission fence before asking the run owner to stop live attempts.
             checkpoint.cancelled = true;
-            journal.save(&checkpoint).map_err(|_| FacadeError::Io)?;
+            journal
+                .save(&checkpoint)
+                .map_err(|_| FacadeError::io("access graph journal"))?;
             let mut owner = BinaryRunOwner {
                 factory: self,
                 allow_remote: true,
@@ -2654,6 +2693,10 @@ pub fn graph(
                 Some(FacadeError::NotFound)
             ) {
                 (provenant_records::Outcome::Invalid, "not_found")
+            } else if let Some(error @ FacadeError::DispatchRefused { .. }) =
+                error.downcast_ref::<FacadeError>()
+            {
+                (provenant_records::Outcome::Refused, error.code())
             } else {
                 (provenant_records::Outcome::Error, "graph_owner")
             };
@@ -2722,7 +2765,7 @@ impl Factory {
             }
             let after = store
                 .run_event_cursor(ctx.identity.project, host, &request)
-                .map_err(|_| FacadeError::Io)?;
+                .map_err(|_| FacadeError::io("read run event cursor"))?;
             let result = if host == ctx.identity.host {
                 owner.events(after, 64, budget, cancel)
             } else {
@@ -2885,6 +2928,43 @@ pub fn events(
 #[cfg(test)]
 mod peer_tests {
     #[test]
+    fn submit_io_keeps_the_inner_operation_without_inventing_a_path() {
+        let error = super::scope_io(super::FacadeError::io("access Fabric database"), "submit");
+        assert_eq!(
+            error,
+            super::FacadeError::Io {
+                operation: "submit: access Fabric database".into(),
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn writer_repository_open_failure_keeps_its_operation_and_project_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let request = provenant_run::WriterRequest {
+            project: root.clone(),
+            worktree: root.join("writer"),
+        };
+        let project = provenant_core::ProjectId::from_bytes([1; 16]);
+        let error = match provenant_run::prepare_writer(&request, &root, project) {
+            Ok(_) => return Err("non-repository unexpectedly opened".into()),
+            Err(error) => super::run_error(error),
+        };
+        assert_eq!(
+            serde_json::to_value(error)?,
+            serde_json::json!({
+                "code": "io",
+                "operation": "open writer repository",
+                "path": root,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn typed_run_errors_keep_their_codes() {
         for (error, expected) in [
             (provenant_run::RunError::Nonterminal, "not_terminal"),
@@ -2916,10 +2996,17 @@ mod peer_tests {
             super::FacadeError::NotTerminal,
             super::FacadeError::OperationConflict,
             super::FacadeError::OwnerUnavailable,
+            super::FacadeError::Io {
+                operation: "openat directory".into(),
+                path: Some("/state/worktrees".into()),
+            },
+            super::FacadeError::WorktreeUnregistered {
+                path: "/repo/.worktrees/writer".into(),
+            },
         ] {
-            let expected = error.code();
+            let expected = error.clone();
             let response = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
-                error: super::FacadeError::Io,
+                error: super::FacadeError::io("test"),
             });
             let response: super::PeerResult =
                 serde_json::from_slice(&serde_json::to_vec(&response)?)?;
@@ -2931,10 +3018,35 @@ mod peer_tests {
                 status,
                 kind,
                 message: error.to_string(),
+                detail: Some(error),
             };
-            assert_eq!(super::fail_error(fail).code(), expected);
+            assert_eq!(super::fail_error(fail), expected);
         }
         Ok(())
+    }
+    #[test]
+    fn events_within_trims_whole_events_and_counts_separators() {
+        // Serialised sizes are 4, 12 and 3 bytes; the array adds brackets and commas.
+        let events = ["aa", "bbbbbbbbbb", "c"];
+        for (max_bytes, kept) in [
+            (65536, 3),
+            // Two events are 2 + 4 + 1 + 12 = 19 bytes; the comma counts.
+            (19, 2),
+            (18, 1),
+            // One event is 2 + 4 bytes.
+            (6, 1),
+            (5, 0),
+            (0, 0),
+        ] {
+            assert_eq!(
+                super::events_within(&events, max_bytes).unwrap(),
+                kept,
+                "{max_bytes}"
+            );
+        }
+        // A large event stops the page even when a later small one would fit.
+        assert_eq!(super::events_within(&events, 10).unwrap(), 1);
+        assert_eq!(super::events_within::<&str>(&[], 2).unwrap(), 0);
     }
     #[test]
     fn host_probe_budget_is_shared_fairly() {
@@ -2948,7 +3060,7 @@ mod peer_tests {
             operation_id: provenant_core::OperationId::parse("stop")?,
         };
         let reply = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
-            error: super::FacadeError::Io,
+            error: super::FacadeError::io("test"),
         });
         let super::PeerResult::Error { error } = reply else {
             return Err("expected error".into());

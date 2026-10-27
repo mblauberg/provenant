@@ -109,7 +109,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     // The same pin reaches a writer lane beside the access flags.
     let project = rig.project.to_str().ok_or("project")?;
     let commit = rig.execute(
-        std::path::Path::new("/usr/bin/git"),
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
         &[
             "-C",
             project,
@@ -285,7 +285,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
 
 #[test]
 fn help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf() -> Result {
-    let mut rig = TestRig::new()?;
+    let mut rig = TestRig::new()?.without_state()?;
     rig.env.retain(|(key, _)| {
         key != "HOME" && key != "PROVENANT_ROOT" && key != "PROVENANT_STATE_DIR"
     });
@@ -532,7 +532,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
 
 #[test]
 fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let defaults = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&defaults), 0);
     let value: serde_json::Value = serde_json::from_slice(&defaults.stdout.bytes)?;
@@ -569,7 +569,7 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
 #[test]
 fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
-    let mut rig = TestRig::new()?;
+    let mut rig = TestRig::new()?.without_state()?;
     let bin = rig.root.join("status-bin");
     fs::create_dir(&bin)?;
     let claude = bin.join("claude");
@@ -619,7 +619,7 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
 #[test]
 fn hosts_doctor_remote_uses_fixed_command_and_rejects_incomplete_responses() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
-    let mut rig = TestRig::new()?;
+    let mut rig = TestRig::new()?.without_state()?;
     let bin = rig.root.join("ssh-bin");
     fs::create_dir(&bin)?;
     let ssh = bin.join("ssh");

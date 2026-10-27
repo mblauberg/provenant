@@ -61,7 +61,7 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
 }
 #[test]
 fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Result {
-    let rig = rig()?;
+    let rig = rig()?.without_state()?;
     call(&rig, &["route", "--help"], 0)?;
     let listed = call(&rig, &["route", "list", "--adapter", "opencode"], 0)?;
     assert_eq!(listed["command"], "route list");
@@ -84,13 +84,13 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
             "route",
             "resolve",
             "--model",
-            "codex/gpt-6.1-sol",
+            "codex/gpt-6.1-terra",
             "--fallback",
             "opencode/openrouter/~anthropic/claude-haiku-latest,agy/explicit",
         ],
         0,
     )?;
-    assert_eq!(resolved["data"]["model"], "gpt-6.1-sol");
+    assert_eq!(resolved["data"]["model"], "gpt-6.1-terra");
     assert_eq!(resolved["data"]["effort"], Value::Null);
     assert_eq!(
         resolved["data"]["readiness"]["reason"],
@@ -111,11 +111,16 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     fs::create_dir_all(&selected)?;
     let project = selected.to_str().ok_or("fixture project")?;
     let initialized = rig.execute(
-        std::path::Path::new("/usr/bin/git"),
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
         &["init", "-q", project],
         None,
     )?;
-    assert_eq!(code(&initialized), 0);
+    assert_eq!(
+        code(&initialized),
+        0,
+        "git init stderr={}",
+        String::from_utf8_lossy(&initialized.stderr.bytes)
+    );
     assert_ne!(
         fs::canonicalize(&selected)?,
         fs::canonicalize(&rig.project)?
@@ -337,7 +342,7 @@ fn named_routes_are_read_only_and_fail_closed() -> Result {
 }
 #[test]
 fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
-    let rig = rig()?;
+    let rig = rig()?.without_state()?;
     for args in [
         vec!["route", "resolve"],
         vec![

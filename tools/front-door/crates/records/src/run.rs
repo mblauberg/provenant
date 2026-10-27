@@ -544,16 +544,6 @@ pub struct RunEvent {
     #[serde(default)]
     pub trace: crate::Trace,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunCursor {
-    pub schema_version: u64,
-    pub project_id: ProjectId,
-    pub actor_id: ActorId,
-    pub selection: String,
-    pub sequence: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

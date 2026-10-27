@@ -4,7 +4,7 @@ use crate::{
     *,
 };
 use provenant_confinement::valid_read_only_writable;
-use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime, WorkScope};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime};
 use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
@@ -110,9 +110,14 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
     else {
         return Err(RunError::Nonterminal);
     };
-    let output = r
-        .result
-        .ok_or(RunError::Validation("terminal result missing"))?;
+    let output_refs = match r.result {
+        Some(output) => vec![OutputRef {
+            path: output.path,
+            digest: output.digest,
+        }],
+        None if outcome == Outcome::Lost && exit_code.is_none() => Vec::new(),
+        None => return Err(RunError::Validation("terminal result missing")),
+    };
     Ok(AttemptFact {
         attempt_id: r.attempt_id,
         task_id: r.task_id,
@@ -131,10 +136,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         delivery_id: r.delivery_id,
         subject: r.subject,
         head: r.head,
-        output_refs: vec![OutputRef {
-            path: output.path,
-            digest: output.digest,
-        }],
+        output_refs,
         requested_route: Some(r.requested_route.projection()),
         applied_route: r.applied_route.map(Into::into),
         observed_route: r.observed_route.map(Into::into),
@@ -234,13 +236,6 @@ pub struct LaneQuery {
 pub struct LanePage {
     pub lanes: Vec<AttemptRecord>,
     pub next: Option<u64>,
-}
-#[derive(Debug)]
-pub struct RunWorkSnapshot {
-    pub generation: u64,
-    pub observed_at: WallTime,
-    pub active_count: u64,
-    pub active_attempts: Vec<AttemptId>,
 }
 impl RunStore {
     pub fn operation(
@@ -698,22 +693,6 @@ impl RunStore {
             Ok(page)
         })
     }
-    pub fn work_snapshot(&self, scope: WorkScope, call: &Request<'_>) -> Result<RunWorkSnapshot> {
-        let run = match scope {
-            WorkScope::Project(project) if project == self.context.project_id => None,
-            WorkScope::Run { project, run } if project == self.context.project_id => Some(run),
-            _ => return Err(RunError::Refused),
-        };
-        call.retry(|| {
-            let mut query = self.db.prepare("SELECT id FROM attempts WHERE project=?1 AND terminal=0 AND (?2 IS NULL OR run=?2) ORDER BY sequence LIMIT 257")?;
-            let rows = query.query_map(params![self.context.project_id.to_string(), run.map(|id| id.to_string())], |r| r.get::<_, String>(0))?;
-            let mut active = Vec::new();
-            for row in rows { active.push(AttemptId::parse(&row?).map_err(|_| RunError::Validation("attempt index ID"))?); }
-            if active.len() > 256 { return Err(RunError::Validation("snapshot exceeds active bound")); }
-            let generation = if let Some(run) = run { self.run_on(&self.db, run)?.generation } else { 0 };
-            Ok(RunWorkSnapshot { generation, observed_at: call.clock.wall_now().map_err(|_| RunError::Validation("wall clock"))?, active_count: active.len() as u64, active_attempts: active })
-        })
-    }
 }
 pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
     grants.len() <= provenant_confinement::MAX_WRITE_GRANTS
@@ -780,11 +759,12 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
         ..
     } = r.state
     {
-        let result = r
-            .result
-            .as_ref()
-            .ok_or(RunError::Validation("terminal result missing"))?;
-        // Only a refusal or cancellation before spawn lacks exit evidence.
+        // A proven reboot loses the attempt without manufacturing an exit or
+        // result. Existing telemetry remains as it was at the crash.
+        let lost = outcome == Outcome::Lost && exit_code.is_none();
+        if r.result.is_none() && !lost {
+            return Err(RunError::Validation("terminal result missing"));
+        }
         match &r.exit_evidence {
             Some(evidence)
                 if evidence.path
@@ -797,6 +777,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
             Some(_) => {}
             None if matches!(outcome, Outcome::Rejected | Outcome::Cancelled)
                 && r.started_at.is_none() => {}
+            None if lost => {}
             None => return Err(RunError::Validation("terminal exit evidence missing")),
         }
         if finished_at < r.queued_at
@@ -806,8 +787,10 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
             return Err(RunError::Validation("attempt timestamps"));
         }
         if outcome == Outcome::Succeeded
-            && (!result.complete
-                || result.bytes == 0
+            && (r
+                .result
+                .as_ref()
+                .is_none_or(|result| !result.complete || result.bytes == 0)
                 || exit_code != Some(0)
                 || !verified_route(
                     r.resolved_route.as_ref(),

@@ -18,5 +18,3 @@ SessionStart output uses `hookSpecificOutput`, `hookEventName` and
 `additionalContext`, as defined by both hosts. PreCompact returns advisory
 `systemMessage` only, with no blocking decision. Claude discards that field;
 the composition edge can also report `HookContext::diagnostic` to stderr.
-No legacy Python output is an oracle. CLI exit and registration tests belong
-to lane I; managed registration changes belong to lane J.

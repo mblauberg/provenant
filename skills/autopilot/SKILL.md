@@ -5,11 +5,9 @@ description: "Use when an open-ended mission must continue across sessions until
 
 # Autopilot
 
-Autopilot guides a long-running mission. It delegates bounded work to
-`orchestrate` and decisions or software changes to their owning skills. The run
-and Fabric own task state, execution, admission, and recovery; this skill keeps
-the mission goal and user authority clear. It does not create a second queue,
-lease ledger, or run journal.
+Delegate bounded work to `orchestrate` and decisions or changes to their
+owning skills. The run and Fabric own execution state; keep mission goals and
+authority clear without a second queue or journal.
 
 The mission remains open until the user sets `STATUS: STOP` in its goal. An
 empty lane list or an idle run means there is no eligible work now; it does not
@@ -42,14 +40,11 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
 5. Respect bounded retry and escalation rules from the owning lifecycle. Do
    not bypass a user gate, widen the build ceiling, or infer authority from a
    worker's result.
-6. When work is interrupted, use `provenant reconcile --id RUN`, then resume
-   the exact attempt with `fabric_run`'s `resume` operation
-   (`target: { attempt }`, `expected_generation: 0`, `operation_id`, `prompt`).
-   `expected_generation` counts earlier continuations, so pass 0; it is not the
-   attempt record's `generation`. Preserve partial outputs and verify the
-   target before retrying.
+6. After interruption, reconcile and resume the exact attempt following
+   [recovery](references/recovery-and-cadence.md#interruption-and-resume).
+   Preserve partial outputs, verify the target and use `expected_generation: 0`.
 7. Before compaction or a substantial handoff, save a bounded Markdown
-   checkpoint for the actual host session with
+   checkpoint for the host session with
    `provenant workflow session save <session-id> --file <checkpoint.md>`.
    Include authority/evidence references, verified progress, next actions,
    blockers, and a resume trigger.
@@ -59,12 +54,9 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
 
 ## Mission evidence and STOP
 
-Keep durable project knowledge in its existing owner. Run lanes and Fabric
-retain live task state and results; a session checkpoint carries only the
-context needed to resume one host session. SessionStart injects only the
-checkpoint for its exact key, or an explicit missing/stale status. PreCompact
-reports whether that checkpoint needs saving. Neither hook expands authority
-or selects a latest file.
+Keep durable project knowledge with its existing owner and live state in run
+lanes and Fabric. Apply `session` for keyed checkpoints: hooks neither expand
+authority nor select another session's latest file.
 
 When the user sets `STATUS: STOP`, reconcile current work, verify the outcome,
 and provide a concise handoff with completed evidence, remaining work, and any

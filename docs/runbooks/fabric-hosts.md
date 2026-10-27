@@ -33,8 +33,8 @@ dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
 ## Local graphs
 
 Use a graph for a writer followed by a review. Create and register the writer's
-worktree first with `provenant worktree create`, then save a project-local
-document such as `graph.json`:
+worktree first with `provenant worktree create`, then save the following
+as a graph file in the project:
 
 ```json
 {
@@ -193,13 +193,13 @@ bounds frames to 1 MiB and refuses identity or version mismatches.
 Tasks and messages have no `legacy` or `legacy_output_path` members. A store
 or peer reply that still carries one, even as null, is refused.
 
-Every request and reply envelope carries integer `protocol`, currently 3.
+Every request and reply envelope carries integer `protocol`, currently 5.
 Ingress refuses a different protocol before decoding or executing the action,
 replying with `peer_version` and its own version. The client checks the reply
 protocol; a missing field or the released peer's decode refusal means protocol
 1. Each call uses one SSH connection. A difference fails the call with
 `peer_version` (`PEER_VERSION` on the CLI), for example: "peer workshop speaks
-protocol 1, this host speaks 3; upgrade both". Peers must be upgraded together.
+protocol 1, this host speaks 5; upgrade both". Peers must be upgraded together.
 There is no capability negotiation or support for older peers. The framing
 envelope's `version` remains 1.
 
@@ -217,7 +217,7 @@ opens it after the upgrade finds a newer schema and fails with `state_corrupt`.
 
 Install the same release on both hosts and restart their peer agents, MCP
 servers and running workers after upgrading. `not_terminal` and
-`operation_conflict` now travel unchanged over the peer wire; the CLI reports
+`operation_conflict` travel unchanged over the peer wire; the CLI reports
 `NONTERMINAL` and `OPERATION_CONFLICT`. An unavailable run owner reports
 `OWNER_UNAVAILABLE`, distinct from an operation's `UNSUPPORTED` refusal.
 
@@ -388,7 +388,7 @@ provenant workflow session handoff --to workshop --account personal \
   --no-checkpoint --wip --note "Finish the failing parser test on feat/x."
 ```
 
-Read-only investigation, from a written prompt with a log attached, while
+Investigation from a written prompt with a log attached, while
 this tree stays dirty:
 
 ```sh

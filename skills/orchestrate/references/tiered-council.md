@@ -73,9 +73,8 @@ overrule it.
   chair chooses and records the next exact model.
 - The Rust Fabric task schema has no `confidential` field. For a CLI
   eligibility check, run `provenant route resolve --route NAME --confidential`;
-  the resolver excludes models without `trains_on_prompts = false`. The newly
-  added Sol, Astra, Sonnet 5.5, Opus 5.5 and Gemini Flash rows remain
-  unclassified until privacy evidence is recorded.
+  the resolver excludes models without `trains_on_prompts = false`. Inspect
+  each model's current catalogue row before selecting a confidential route.
 - A council of N is N explicit model tasks. Verify each task's resolved route;
   do not count repeated selections as distinct family coverage.
 - Run the full hierarchy per wave (an integrated branch, a combined capture

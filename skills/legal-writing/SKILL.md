@@ -5,10 +5,9 @@ description: "Use for Australian legal drafting, review, condensation, source ch
 
 # Australian legal writing
 
-General Australian legal style, document-shape and source-discipline layer.
-Stricter project and forum instructions override it. This is drafting
-assistance, not legal advice: verify current law, forms and procedure against
-official sources and retain qualified or human review for filing-facing work.
+Stricter project and forum instructions prevail. Verify current law, forms
+and procedure against official sources; retain qualified or human review for
+filing-facing work. This is drafting assistance, not legal advice.
 
 This skill is a specialisation of the `natural-writing` hub. The hub owns the
 Australian English default, the anti-AI taxonomy and the condense pass; this
@@ -38,8 +37,8 @@ source altitude must survive the rewrite.
 2. Choose `draft`, `rewrite`, `condense`, `diagnose`, `correspondence`,
    `decision-overview` or `final-scrub`. Load [legal concision](references/legal-concision-and-anti-ai.md)
    for all prose; the reference map in
-   [validation-checklists.md](references/validation-checklists.md) gives the
-   remaining reference each mode, document type or content type needs.
+   [validation-checklists.md](references/validation-checklists.md) maps
+   references by mode, document and content type.
 3. Classify each sentence by legal function before polishing. Affidavits and
    witness statements give evidence; submissions argue; orders command;
    chronologies organise; internal notes analyse; correspondence communicates.

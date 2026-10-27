@@ -150,7 +150,7 @@
     {
       "id": "q926",
       "relation": "boundary",
-      "prompt": "Review PR 812 with the full model hierarchy: DeepSeek and GLM free lenses per file, Sonnet and Sol judging their findings, Opus and Astra deciding.",
+      "prompt": "Review PR 812 with the full model hierarchy: DeepSeek and GLM free lenses per file, Sonnet and Terra judging their findings, Opus and Sol deciding.",
       "tags": [
         "composition",
         "tiered-council"
