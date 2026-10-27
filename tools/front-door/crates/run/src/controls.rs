@@ -119,6 +119,56 @@ impl Reconciled {
 }
 
 impl RunStore {
+    /// A previous boot ended every member of this attempt's process tree.
+    /// Keep both exclusions until the canonical commit precedes fence release.
+    fn settle_rebooted(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
+        if record.state == AttemptState::Queued {
+            return Ok(false);
+        }
+        let Ok(attempt) = self.attempt_dir(record.run_id, record.attempt_id, false) else {
+            return Ok(false);
+        };
+        if !matches!(record.state, AttemptState::Terminal { .. })
+            && read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+        {
+            // A durable exit retains its canonical completion path and facts.
+            return Ok(false);
+        }
+        // Recovery needs the persisted binding, not a fresh Git inspection of
+        // the worktree the interrupted writer left behind.
+        let Ok(fences) = self.writer_fences() else {
+            return Ok(false);
+        };
+        let fence = fences
+            .into_iter()
+            .find(|fence| fence.scope == Self::scope(record));
+        let directory = match fence {
+            Some(fence) => provenant_os::fs::Directory::open_anchor(
+                fence.reservation.parent().ok_or(RunError::UnsafePath)?,
+            )?,
+            None => self.attempt_dir(record.run_id, record.attempt_id, false)?,
+        };
+        let Ok(recovery) = custody::acquire_recovery(
+            directory,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        ) else {
+            return Ok(false);
+        };
+        let Some(proof) = recovery
+            .after_reboot(&attempt, Self::scope(record))
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
+        else {
+            return Ok(false);
+        };
+        self.commit_reboot_lost(&proof, call)?;
+        proof
+            .release()
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        self.set_temporary_retained(record.attempt_id, false, call)?;
+        Ok(true)
+    }
     /// Writer exclusion for an attempt, taken without waiting: failure means a
     /// guardian (or an inheritor of its lease) still holds custody.
     fn orphan_recovery(
@@ -261,6 +311,9 @@ impl RunStore {
         }
         loop {
             let record = self.record(id, call)?;
+            if self.settle_rebooted(&record, call)? {
+                return Ok(CancelReceipt::AlreadyTerminal);
+            }
             match record.state {
                 AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
                 AttemptState::Queued => {
@@ -593,6 +646,9 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<Option<Reconciled>> {
+        if self.settle_rebooted(record, call)? {
+            return Ok(Some(Reconciled::Finished));
+        }
         let id = record.attempt_id;
         let scope = Self::scope(record);
         let path = self
@@ -632,6 +688,38 @@ impl RunStore {
                 )));
             }
             None => {}
+        }
+        if matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Lost,
+                exit_code: None,
+                ..
+            }
+        ) && record.exit_evidence.is_none()
+        {
+            // The retry marker covers release, including reader reservations.
+            // Once released, preserved scratch must never enter normal cleanup.
+            match self
+                .attempt_dir(record.run_id, id, false)
+                .and_then(|attempt| read_sealed(&attempt, "reservation.json", RECORD_LIMIT))
+            {
+                Ok(Some(_)) => {
+                    return Ok(Some(Reconciled::uncertain(
+                        UncertainReason::GuardianNotObservable,
+                    )));
+                }
+                Ok(None) => {}
+                Err(RunError::Filesystem(error)) if error.is_not_found() => {}
+                Err(error) => {
+                    return Ok(Some(Reconciled::TemporaryRetained {
+                        path,
+                        reason: error.to_string(),
+                    }));
+                }
+            }
+            self.set_temporary_retained(id, false, call)?;
+            return Ok(None);
         }
         let attempt = match self
             .attempt_dir(record.run_id, id, false)
@@ -719,6 +807,9 @@ impl RunStore {
         let scope = Self::scope(record);
         if record.state == AttemptState::Queued {
             return Ok(Reconciled::Queued);
+        }
+        if self.settle_rebooted(record, call)? {
+            return Ok(Reconciled::Finished);
         }
         let dir = || self.attempt_dir(record.run_id, id, false);
         match custody::reattach(dir()?, scope) {

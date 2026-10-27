@@ -110,9 +110,14 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
     else {
         return Err(RunError::Nonterminal);
     };
-    let output = r
-        .result
-        .ok_or(RunError::Validation("terminal result missing"))?;
+    let output_refs = match r.result {
+        Some(output) => vec![OutputRef {
+            path: output.path,
+            digest: output.digest,
+        }],
+        None if outcome == Outcome::Lost && exit_code.is_none() => Vec::new(),
+        None => return Err(RunError::Validation("terminal result missing")),
+    };
     Ok(AttemptFact {
         attempt_id: r.attempt_id,
         task_id: r.task_id,
@@ -131,10 +136,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         delivery_id: r.delivery_id,
         subject: r.subject,
         head: r.head,
-        output_refs: vec![OutputRef {
-            path: output.path,
-            digest: output.digest,
-        }],
+        output_refs,
         requested_route: Some(r.requested_route.projection()),
         applied_route: r.applied_route.map(Into::into),
         observed_route: r.observed_route.map(Into::into),
@@ -757,11 +759,12 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
         ..
     } = r.state
     {
-        let result = r
-            .result
-            .as_ref()
-            .ok_or(RunError::Validation("terminal result missing"))?;
-        // Only a refusal or cancellation before spawn lacks exit evidence.
+        // A proven reboot loses the attempt without manufacturing an exit or
+        // result. Existing telemetry remains as it was at the crash.
+        let lost = outcome == Outcome::Lost && exit_code.is_none();
+        if r.result.is_none() && !lost {
+            return Err(RunError::Validation("terminal result missing"));
+        }
         match &r.exit_evidence {
             Some(evidence)
                 if evidence.path
@@ -774,6 +777,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
             Some(_) => {}
             None if matches!(outcome, Outcome::Rejected | Outcome::Cancelled)
                 && r.started_at.is_none() => {}
+            None if lost => {}
             None => return Err(RunError::Validation("terminal exit evidence missing")),
         }
         if finished_at < r.queued_at
@@ -783,8 +787,10 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
             return Err(RunError::Validation("attempt timestamps"));
         }
         if outcome == Outcome::Succeeded
-            && (!result.complete
-                || result.bytes == 0
+            && (r
+                .result
+                .as_ref()
+                .is_none_or(|result| !result.complete || result.bytes == 0)
                 || exit_code != Some(0)
                 || !verified_route(
                     r.resolved_route.as_ref(),
