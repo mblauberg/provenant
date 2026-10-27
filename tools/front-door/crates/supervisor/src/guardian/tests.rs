@@ -199,3 +199,21 @@ fn darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes()
         &history
     ));
 }
+
+#[test]
+fn an_unreadable_host_clock_is_named_in_the_admission_refusal() {
+    assert_eq!(
+        admission_refusal(&CustodyError::AdmissionClock),
+        "startup spacing cannot be judged: host clock or boot identity unreadable"
+    );
+    for other in [
+        CustodyError::Busy,
+        CustodyError::Io(io::Error::other("/private/state/admission.sqlite3")),
+    ] {
+        assert_eq!(
+            admission_refusal(&other),
+            "admission refused",
+            "no other error, and none of its text, reaches the refusal"
+        );
+    }
+}

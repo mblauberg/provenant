@@ -480,6 +480,17 @@ impl provenant_os::capture::DecodedEventSink for Events {
         Ok(())
     }
 }
+/// The reason a refused admission publishes, which becomes the lane's reason.
+/// Only a host clock that cannot be read is named; any other error stays
+/// `admission refused`, never carrying its text or a path.
+fn admission_refusal(error: &CustodyError) -> &'static str {
+    match error {
+        CustodyError::AdmissionClock => {
+            "startup spacing cannot be judged: host clock or boot identity unreadable"
+        }
+        _ => "admission refused",
+    }
+}
 impl Driver<'_> {
     // The guardian owns process lifecycle and its elapsed-time budgets.
     #[allow(clippy::disallowed_methods)]
@@ -502,9 +513,9 @@ impl Driver<'_> {
             }
         };
         if let Some(holder) = self.holder
-            && holder.admit(&self.holder_context, &self.attempt).is_err()
+            && let Err(error) = holder.admit(&self.holder_context, &self.attempt)
         {
-            return self.never_spawned("admission refused");
+            return self.never_spawned(admission_refusal(&error));
         }
         let started = Instant::now();
         let budgets =
