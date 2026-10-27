@@ -296,6 +296,17 @@ fn read_attachments(paths: &[PathBuf]) -> Result<Vec<Attachment>, Refusal> {
     Ok(attachments)
 }
 
+/// The checkpoint store a hand-off saves to, keeping the configured number of
+/// revisions like `workflow session save`.
+fn checkpoint_store(
+    roots: &provenant_core::Roots,
+    project: provenant_core::ProjectId,
+    session: HostSessionId,
+) -> SessionStore {
+    SessionStore::new(roots.state.clone(), project, session)
+        .with_revisions(provenant_cli::workflow::session_revisions(roots))
+}
+
 fn session_id(explicit: Option<&str>) -> Result<Option<HostSessionId>, Refusal> {
     let text = match explicit {
         Some(text) => Some(text.to_owned()),
@@ -406,7 +417,7 @@ fn execute(
     let store = session
         .as_ref()
         .filter(|_| !args.no_checkpoint)
-        .map(|id| SessionStore::new(src.roots.state.clone(), project, id.clone()));
+        .map(|id| checkpoint_store(&src.roots, project, id.clone()));
     let checkpoint = store
         .as_ref()
         .map(SessionStore::read)
@@ -1150,6 +1161,46 @@ mod tests {
         let err = read_attachments(&[big, small]).err().unwrap();
         assert!(err.message.contains("512 KiB"), "{}", err.message);
         assert!(read_attachments(&[temp.path().to_path_buf()]).is_err());
+    }
+
+    #[test]
+    fn a_handoff_checkpoint_keeps_the_configured_number_of_revisions() {
+        use provenant_core::{CancelToken, Clock, PathResolver, ProjectId, RootInputs, WaitBudget};
+        struct Plain;
+        impl PathResolver for Plain {
+            fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+                Ok(path.to_path_buf())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut inputs = RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Plain).unwrap();
+        fs::create_dir_all(roots.state.as_path()).unwrap();
+        fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[retention]\nsession_revisions=2\n",
+        )
+        .unwrap();
+        let store = checkpoint_store(
+            &roots,
+            ProjectId::from_bytes([3; 16]),
+            HostSessionId::parse("handoff-session").unwrap(),
+        );
+        let (clock, cancel) = (SystemClock::new(), CancelToken::new());
+        for text in ["one\n", "two\n", "three\n", "four\n"] {
+            let budget = WaitBudget::cli(clock.mono_now(), 30).unwrap();
+            store
+                .save(text.as_bytes(), budget, &cancel, &clock)
+                .unwrap();
+        }
+        let kept: Vec<u64> = store
+            .revisions()
+            .unwrap()
+            .iter()
+            .map(|revision| revision.revision)
+            .collect();
+        assert_eq!(kept, [3, 4], "[retention] session_revisions applies");
     }
 
     #[test]

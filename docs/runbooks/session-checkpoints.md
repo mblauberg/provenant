@@ -31,7 +31,8 @@ rewriting history.
 
 The session keeps its newest 8 revisions, the current one included. Set
 `[retention] session_revisions` (1 to 64) in `<state>/config.toml` to change
-it; 1 keeps no history. The key is read on every save, and older revisions are
+it; 1 keeps no history. The key is read on every save, including the one
+`session handoff` makes, and older revisions are
 deleted when a save writes the history that no longer names them. A revision
 is at most 256 KiB, so a session holds at most 16 MiB of history. A revision
 whose text no longer matches its recorded hash is refused with `HISTORY`.

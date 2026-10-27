@@ -116,7 +116,8 @@ A save keeps the checkpoint it replaces as numbered revision `N`, in
 parent and a SHA-256 in `revisions.json`, all under the save's existing lock.
 The order is: store the old text, publish the new checkpoint, publish the
 history, then delete revisions beyond `retention.session_revisions` (default 8,
-1 to 64, current included). A save that stops part-way leaves a complete
+1 to 64, current included), whether the save comes from `session save` or from
+`session handoff`. A save that stops part-way leaves a complete
 checkpoint, and the next one records the revision it finds; unreadable history
 never blocks a save. Identical text adds no revision. Each revision is held to
 the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
@@ -128,6 +129,7 @@ text; a revision whose text fails its hash is refused with `HISTORY`.
   `::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
   `::an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost`;
   `::unreadable_history_never_blocks_a_save_and_a_changed_revision_is_refused`;
+  `src/handoff.rs::a_handoff_checkpoint_keeps_the_configured_number_of_revisions`;
   `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`
 

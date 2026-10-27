@@ -435,11 +435,7 @@ fn execute(
         Workflow::Session(Session::Save { session_id, file }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
             let text = read_input(&file)?;
-            // An unreadable config must not stop a checkpoint from being saved.
-            let keep = provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
-                .map_or(provenant_workflow::session::REVISIONS_DEFAULT, |config| {
-                    config.retention.session_revisions
-                });
+            let keep = session_revisions(&edge.roots);
             let saved = SessionStore::new(edge.roots.state.clone(), project, id)
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
@@ -651,6 +647,16 @@ fn human_text(command: &str, data: &Value) -> String {
             .collect(),
         _ => crate::terse(data),
     }
+}
+
+/// How many revisions a session checkpoint keeps, from `[retention]`. Every
+/// path that saves a checkpoint applies it. An unreadable config must not stop
+/// a checkpoint from being saved, so it falls back to the default.
+pub fn session_revisions(roots: &Roots) -> u64 {
+    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_or(provenant_workflow::session::REVISIONS_DEFAULT, |config| {
+            config.retention.session_revisions
+        })
 }
 
 pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &Path) -> u8 {
