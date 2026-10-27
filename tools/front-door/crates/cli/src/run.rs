@@ -1895,9 +1895,34 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }
-fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
-    if let Some(placement) = targets::placement(edge, &command.attempt.0, false)? {
+/// The most lines `output --tail` returns; a larger request is clamped.
+const TAIL_MAX: u64 = 500;
+
+fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    let site = match command.host.as_deref() {
+        Some(host) => Some(remote::site(edge, host)?),
+        None => None,
+    };
+    if let Some(remote::Site::Peer(host)) = site {
+        return remote::output_on_peer(&command, host, edge);
+    }
+    if site.is_none()
+        && let Some(placement) = targets::placement(edge, &command.attempt.0, false)?
+    {
         return remote::output(&command, &placement, edge);
+    }
+    // `HOST/ATTEMPT` is the form a graph `attempt_ref` has; a host qualifier
+    // is not a run, so it never has to match the record.
+    if command.attempt.is_qualified_pair()
+        && let Some(qualifier) = command.attempt.0.run
+    {
+        match remote::qualifier_site(edge, qualifier) {
+            Some(remote::Site::Peer(host)) if site.is_none() => {
+                return remote::output_on_peer(&command, host, edge);
+            }
+            Some(remote::Site::Local) => command.attempt.0.run = None,
+            _ => {}
+        }
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -1964,7 +1989,8 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         max_bytes: command.max_bytes,
     };
     let mut chunk = session.service().output(id, part, range, &call)?;
-    if let Some(lines) = command.tail {
+    let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
+    if let Some(lines) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
         chunk = session.service().output(id, part, range, &call)?;
         let text = &chunk.bytes;
@@ -1983,8 +2009,7 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
     let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
     // The text alone cannot tell a clean success from one that needs the chair.
     let (state, reason) = state_and_reason(&record.state);
-    Ok((
-        json!({
+    let mut data = json!({
             "attempt_id": id,
             "state": state,
             "reason": reason,
@@ -1997,9 +2022,12 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
             "complete": chunk.complete,
             "digest": chunk.digest,
             "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
-        }),
-        text,
-    ))
+    });
+    if let Some(lines) = tail {
+        data["tail"] = json!(lines);
+        data["tail_clamped"] = json!(command.tail != tail);
+    }
+    Ok((data, text))
 }
 
 /// The attempt's trace, then each parent's, nearest first. The chain ends at an
@@ -2303,7 +2331,15 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let target = command.attempt.0;
+    let mut target = command.attempt.0.clone();
+    if command.attempt.is_qualified_pair()
+        && target
+            .run
+            .and_then(|qualifier| remote::qualifier_site(edge, qualifier))
+            == Some(remote::Site::Local)
+    {
+        target.run = None;
+    }
     let prior = target.attempt.ok_or(Fail::new(
         Status::Invalid,
         ErrorKind::Invalid,

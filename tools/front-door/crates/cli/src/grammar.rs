@@ -331,14 +331,33 @@ impl FromStr for Target {
         Ok(Self { run, task, attempt })
     }
 }
+/// One attempt: a bare ID, `RUN/ATTEMPT`, `HOST/ATTEMPT` (a graph
+/// `attempt_ref`) or `RUN/TASK/ATTEMPT`. In the two-part form the qualifier
+/// is parsed into `Target::run` and resolved against stored runs and known
+/// hosts later; `task` is `None` only there.
 #[derive(Debug, Clone)]
 pub struct Attempt(pub Target);
+impl Attempt {
+    /// Whether the target is the two-part `QUALIFIER/ATTEMPT` form.
+    pub fn is_qualified_pair(&self) -> bool {
+        self.0.run.is_some() && self.0.task.is_none() && self.0.attempt.is_some()
+    }
+}
 impl FromStr for Attempt {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let target: Target = text.parse()?;
+        const EXPECTED: &str = "expected ATTEMPT, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT";
+        let mut parts = text.split('/');
+        if let (Some(qualifier), Some(attempt), None) = (parts.next(), parts.next(), parts.next()) {
+            return Ok(Self(Target {
+                run: Some(qualifier.parse().map_err(|_| "invalid run or host ID")?),
+                task: None,
+                attempt: Some(attempt.parse().map_err(|_| "invalid attempt ID")?),
+            }));
+        }
+        let target: Target = text.parse().map_err(|_| EXPECTED)?;
         if target.attempt.is_none() {
-            return Err("expected ATTEMPT or RUN/TASK/ATTEMPT");
+            return Err(EXPECTED);
         }
         Ok(Self(target))
     }
@@ -435,16 +454,19 @@ pub enum Part {
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
+    /// Attempt ID, or RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT
     pub attempt: Attempt,
+    /// Read a configured peer's own attempt, by label or host ID
+    #[arg(long)]
+    pub host: Option<String>,
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
-    /// Read the last N lines instead of an offset
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=500))]
+    /// Read the last N lines instead of an offset (above 500 is clamped to 500)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub tail: Option<u64>,
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", value_parser = clap::value_parser!(u64).range(1..=65536))]
@@ -479,7 +501,7 @@ pub struct Prompt {
 }
 #[derive(Debug, Args)]
 pub struct Resume {
-    /// Attempt ID, optionally qualified as RUN/TASK/ATTEMPT
+    /// Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
@@ -769,7 +791,16 @@ mod target_tests {
         assert_eq!(qualified.0.run, Some(run));
         assert_eq!(qualified.0.task, Some(task));
         assert_eq!(qualified.0.attempt, Some(attempt));
-        assert!(format!("{run}/{task}").parse::<Attempt>().is_err());
+        // A graph `attempt_ref` is `HOST/ATTEMPT`; `RUN/ATTEMPT` has the same shape.
+        let pair: Attempt = format!("{run}/{attempt}").parse().unwrap();
+        assert!(pair.is_qualified_pair());
+        assert_eq!(pair.0.run, Some(run));
+        assert_eq!(pair.0.task, None);
+        assert_eq!(pair.0.attempt, Some(attempt));
+        assert!(!qualified.is_qualified_pair());
+        assert!(!bare.is_qualified_pair());
+        assert!(format!("{run}/").parse::<Attempt>().is_err());
+        assert!(format!("/{attempt}").parse::<Attempt>().is_err());
         for invalid in [
             "",
             "invalid",

@@ -218,6 +218,44 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
     assert_eq!(value["data"]["bytes"]["data"], "hello");
+    // `RUN/ATTEMPT` and `--host local` name the same local attempt, and a
+    // `--tail` above the bound is clamped, not refused (#1837).
+    let run_attempt = format!(
+        "{}/{}",
+        lane["run_id"].as_str().ok_or("run")?,
+        lane["attempt_id"].as_str().ok_or("attempt")?
+    );
+    for words in [
+        vec!["output", &run_attempt, "--part", "prompt", "--json"],
+        vec![
+            "output",
+            lane["attempt_id"].as_str().ok_or("attempt")?,
+            "--host",
+            "local",
+            "--part",
+            "prompt",
+            "--json",
+        ],
+    ] {
+        let again = rig.command(&words)?;
+        assert_eq!(code(&again), 0, "{words:?} {again:?}");
+        let again: serde_json::Value = serde_json::from_slice(&again.stdout.bytes)?;
+        assert_eq!(again["data"]["bytes"]["data"], "hello", "{words:?}");
+    }
+    let tail = rig.command(&[
+        "output", &attempt, "--part", "prompt", "--tail", "9999", "--json",
+    ])?;
+    assert_eq!(code(&tail), 0, "{tail:?}");
+    let tail: serde_json::Value = serde_json::from_slice(&tail.stdout.bytes)?;
+    assert_eq!(tail["data"]["tail"], 500);
+    assert_eq!(tail["data"]["tail_clamped"], true);
+    assert_eq!(tail["data"]["bytes"]["data"], "hello");
+    let wrong_run = format!(
+        "{}/{}",
+        "ff".repeat(16),
+        lane["attempt_id"].as_str().ok_or("attempt")?
+    );
+    assert_ne!(code(&rig.command(&["output", &wrong_run, "--json"])?), 0);
 
     let trace = rig.command(&["output", &attempt, "--trace", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&trace.stdout.bytes)?;

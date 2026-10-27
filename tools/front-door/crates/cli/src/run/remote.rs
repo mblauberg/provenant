@@ -78,10 +78,22 @@ struct Placed {
 }
 impl Placement {
     fn select_target(&self, target: &crate::Target) -> Result<Vec<(HostId, AttemptId)>, Fail> {
-        let attempt = target.attempt.filter(|id| {
+        let (mut task, mut attempt) = (target.task, target.attempt);
+        // `RUN/ATTEMPT`: the second part names a placed attempt, not a task.
+        if let (Some(second), None) = (task, attempt) {
+            let candidate = AttemptId::from_bytes(*second.as_bytes());
+            if self
+                .attempts
+                .iter()
+                .any(|placed| placed.attempt_id == candidate)
+            {
+                (task, attempt) = (None, Some(candidate));
+            }
+        }
+        let attempt = attempt.filter(|id| {
             target.run.is_some() || self.attempts.iter().any(|placed| placed.attempt_id == *id)
         });
-        self.select(target.task, attempt)
+        self.select(task, attempt)
     }
     /// Attempts the target names, in dispatch order.
     fn select(
@@ -427,6 +439,44 @@ pub(super) fn names_local_host(edge: &Edge<'_>, host: &str) -> Result<bool, Fail
         || peer.context.peer_host(host) == Some(local))
 }
 
+/// Where a host named on the command line runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Site {
+    Local,
+    Peer(HostId),
+}
+
+/// Resolve `--host`: this machine, or a configured peer by label or host ID.
+pub(super) fn site(edge: &Edge<'_>, host: &str) -> Result<Site, Fail> {
+    if names_local_host(edge, host)? {
+        return Ok(Site::Local);
+    }
+    let peer = Peer::open(edge)?;
+    peer.project()?;
+    peer.context
+        .peer_host(host)
+        .map(Site::Peer)
+        .ok_or_else(|| unknown_host(host))
+}
+
+/// The host a two-part `HOST/ATTEMPT` qualifier names, when it is a host ID
+/// of this machine or a configured peer rather than a run. A qualifier that
+/// cannot be checked (no Fabric identity here) is a run.
+pub(super) fn qualifier_site(edge: &Edge<'_>, qualifier: RunId) -> Option<Site> {
+    let id = HostId::from_bytes(*qualifier.as_bytes());
+    let peer = Peer::open(edge).ok()?;
+    if peer.context.identity.host == id {
+        Some(Site::Local)
+    } else {
+        peer.context
+            .config
+            .peers
+            .values()
+            .any(|configured| configured.host == id)
+            .then_some(Site::Peer(id))
+    }
+}
+
 pub(super) fn names_peer(edge: &Edge<'_>, host: &str) -> Result<bool, Fail> {
     Ok(Peer::open(edge)?.context.peer_host(host).is_some())
 }
@@ -727,6 +777,33 @@ pub(super) fn output(
             "attempt required",
         ));
     };
+    read_output(command, host, attempt, Peer::open_for(edge, [placement])?)
+}
+
+/// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
+/// local placement. The peer resolves the attempt and applies its own
+/// confinement and access rules; any run or task in the target is not checked.
+pub(super) fn output_on_peer(
+    command: &Output,
+    host: HostId,
+    edge: &Edge<'_>,
+) -> Result<(Value, String), Fail> {
+    let attempt = command
+        .attempt
+        .0
+        .attempt
+        .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
+    let peer = Peer::open(edge)?;
+    peer.project()?;
+    read_output(command, host, attempt, peer)
+}
+
+fn read_output(
+    command: &Output,
+    host: HostId,
+    attempt: AttemptId,
+    peer: Peer,
+) -> Result<(Value, String), Fail> {
     let part = match command.part {
         Part::Result => OutputPart::Result,
         Part::Stderr => OutputPart::Stderr,
@@ -739,7 +816,6 @@ pub(super) fn output(
     if command.trace {
         return Err(unsupported("--trace"));
     }
-    let peer = Peer::open_for(edge, [placement])?;
     let input = OutputInput::Read {
         target: AttemptTarget {
             attempt,

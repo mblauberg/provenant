@@ -558,10 +558,13 @@ fn constraints(path: &str) -> Vec<String> {
             "since must precede until",
         ],
         "provenant resume" => &[
-            "target is an ATTEMPT ID or RUN/TASK/ATTEMPT",
+            "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
             "prompt is at most 1 MiB; expected generation is 0",
         ],
-        "provenant output" => &["target is an ATTEMPT ID or RUN/TASK/ATTEMPT"],
+        "provenant output" => &[
+            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
+            "tail above 500 lines is clamped to 500",
+        ],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],
     };
@@ -572,7 +575,6 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
         "wait" | "provider_timeout" => Some((1, 14400)),
         "limit" => Some((1, 100)),
         "concurrency" => Some((1, 8)),
-        "tail" => Some((1, 500)),
         "max_bytes" => Some((1, 65536)),
         "read_root" | "write_root" => Some((0, 32)),
         "capability" => Some((0, 16)),
@@ -644,7 +646,8 @@ mod tests {
         invalid(&["lanes", "--limit", "101"]);
         let attempt = "11".repeat(16) + &format!("/{}/{}", "22".repeat(16), "33".repeat(16));
         valid(&["output", &attempt, "--tail", "500", "--max-bytes", "65536"]);
-        invalid(&["output", &attempt, "--tail", "501"]);
+        valid(&["output", &attempt, "--tail", "501"]);
+        invalid(&["output", &attempt, "--tail", "0"]);
         invalid(&["output", &attempt, "--max-bytes", "65537"]);
         invalid(&["output", &attempt, "--offset", "0", "--tail", "1"]);
         valid(&["output", &attempt, "--trace"]);
@@ -652,6 +655,12 @@ mod tests {
         invalid(&["output", &attempt, "--trace", "--part", "prompt"]);
         invalid(&["output", &attempt, "--trace", "--tail", "1"]);
         valid(&["output", &"11".repeat(16)]);
+        valid(&["output", &"11".repeat(16), "--host", "workshop"]);
+        valid(&[
+            "output",
+            &format!("{}/{}", "11".repeat(16), "33".repeat(16)),
+        ]);
+        invalid(&["output", &format!("{}/", "11".repeat(16))]);
     }
     #[test]
     fn lanes_accept_repeatable_state_and_since_filters() {

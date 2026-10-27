@@ -2786,6 +2786,7 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
 
     let task = lane["task_id"].as_str().ok_or("task")?;
     let target = format!("{run}/{task}/{attempt}");
+    let peer_text = peer.to_string();
     let (status, stderr) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
     if cfg!(target_os = "macos") {
         assert_eq!(status, 0, "{stderr} {placed}");
@@ -2810,9 +2811,29 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
             "{stderr}"
         );
     }
+    let status_of_stderr = status;
     let (status, tail) = json_command(&rig, &["output", &target, "--tail", "5", "--json"])?;
     assert_ne!(status, 0);
     assert_eq!(tail["error"]["code"], "UNSUPPORTED", "{tail}");
+    // The peer's own attempt is reachable without a placement: `--host`, and
+    // the `HOST/ATTEMPT` form of a graph `attempt_ref` (#1837).
+    let by_host = format!("{peer}/{attempt}");
+    for words in [
+        vec!["output", &attempt, "--host", "workshop"],
+        vec!["output", &attempt, "--host", &peer_text],
+        vec!["output", &by_host],
+    ] {
+        let mut words = words;
+        words.extend(["--part", "stderr", "--json"]);
+        let (direct_status, direct) = json_command(&rig, &words)?;
+        assert_eq!(direct_status, status_of_stderr, "{words:?} {direct}");
+        if cfg!(target_os = "macos") {
+            assert_eq!(direct["data"]["host"], peer_text, "{words:?} {direct}");
+            assert_eq!(direct["data"]["bytes"], stderr["data"]["bytes"], "{direct}");
+        } else {
+            assert_eq!(direct["error"]["code"], "NOT_FOUND", "{words:?} {direct}");
+        }
+    }
 
     let (status, cancelled) = json_command(
         &rig,
