@@ -151,7 +151,7 @@ aside, run `launchctl bootout gui/$UID/dev.provenant.peer`, then rerun install.
 
 The same macOS default-state install also manages
 `~/Library/LaunchAgents/dev.provenant.gc.plist`, with `RunAtLoad = true` and
-`StartInterval = 3600` (hourly). It runs `provenant gc` for registered projects,
+`StartInterval = 86400` (daily). It runs `provenant gc` for registered projects,
 protecting live writers and reservations. Its stdout and stderr go to `<state>/gc/`.
 `[gc] schedule = false` disables scheduled deletion; rerun install to remove
 the owned agent. `idle_days` and the free-space floor become agent arguments

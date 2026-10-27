@@ -106,7 +106,7 @@ is 10% of the state volume's capacity, at least 50 GiB; `gc.free_floor` or
 reservations. Writer dispatch refuses to launch below the floor on the
 worktree's volume and names `provenant gc` in its error; read-only lanes
 still start. GC alerts if the state volume remains below the floor after
-collection. macOS default-state installs run GC at load and hourly; `[gc]` can
+collection. macOS default-state installs run GC at load and daily; `[gc]` can
 disable or adjust it. Bare `provenant gc` deletes eligible lane caches and
 previews merged worktree and declared output cleanup. `--apply` deletes those
 entries; `--dry-run` previews every class. The installed agent passes `--apply`.
@@ -121,6 +121,11 @@ output requires a clean or ignored-only managed worktree whose associated
 lanes are all known terminal. Ignored output may be pruned; tracked paths,
 configured keep paths, symlinks and output written within 24 hours are kept.
 See the [configuration runbook](runbooks/configuration.md#lane-cache-collection).
+Settlement collects the lane's declared ignored output and Cargo cache without
+an idle delay, even when the worktree stays for delivery pickup. Successful
+settlement, delivery integration and `pr land` prune eligible worktrees and
+caches. Event collection uses the same GC lock as the daily sweep and keeps
+foreign worktrees out of scope.
 Output pruning holds the worktree's writer lock; the repository lock is held
 only for individual worktree removals. Tracked paths and their ancestors are
 indexed once per worktree.

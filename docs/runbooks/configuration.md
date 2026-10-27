@@ -94,8 +94,8 @@ The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
 results, exit evidence, recorded digests and small captures survive. The same
 rule applies inside child stores, whose databases and retained evidence stay.
 GC reports `provider_state.attempt_logs`; disk reports measure `attempt_logs`.
-`gc.schedule = false` disables scheduled retention sweeps too;
-settlement pruning and low-space collection still run.
+`gc.schedule = false` disables scheduled retention sweeps and automatic
+pressure collection; settlement and landing cleanup still run.
 
 The optional `[gc]` section controls the macOS per-user schedule:
 

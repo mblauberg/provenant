@@ -564,6 +564,17 @@ pub(crate) fn land_cleanup(
         roots::Product::Required,
     )?;
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+    let _collection = match event_collection_lock(&roots) {
+        Ok(lock) => lock,
+        Err(Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
+            return Ok(LandWorktree {
+                registered: true,
+                kept: Some(COLLECTION_BUSY.into()),
+                ..Default::default()
+            });
+        }
+        Err(error) => return Err(error),
+    };
     with_context(
         &roots,
         &home,
@@ -642,7 +653,7 @@ pub(crate) fn land_cleanup(
                 .filter(|entry| entry.removed)
                 .map(|entry| entry.path)
                 .collect();
-            match worktrees::remove(
+            match worktrees::remove_with_output(
                 context,
                 WorktreeRemove::Name {
                     name: branch.to_owned(),
@@ -651,6 +662,10 @@ pub(crate) fn land_cleanup(
                     expected_head: Some(tip),
                 },
                 cancel,
+                &provenant_config::ProjectGcSettings {
+                    regenerable,
+                    ..settings
+                },
             ) {
                 Ok(outcome) => {
                     landed.removed = !outcome.removed.is_empty();
@@ -665,6 +680,45 @@ pub(crate) fn land_cleanup(
             Ok(landed)
         },
     )
+}
+
+/// How long an event caller (settlement or landing) waits for a busy
+/// collection pass before deferring to the next sweep.
+pub(crate) const EVENT_LOCK_WAIT_SECS: u64 = if cfg!(test) { 1 } else { 5 };
+pub(crate) const COLLECTION_BUSY: &str = "GC collection busy; the next sweep collects it";
+
+pub(crate) fn collection_lock(
+    roots: &provenant_core::Roots,
+) -> Result<provenant_os::fs::LockGuard, Error> {
+    collection_lock_for(roots, None)
+}
+
+/// Take the collection lock, waiting a bounded time for a pass in progress.
+pub(crate) fn event_collection_lock(
+    roots: &provenant_core::Roots,
+) -> Result<provenant_os::fs::LockGuard, Error> {
+    collection_lock_for(roots, Some(EVENT_LOCK_WAIT_SECS))
+}
+
+fn collection_lock_for(
+    roots: &provenant_core::Roots,
+    wait_secs: Option<u64>,
+) -> Result<provenant_os::fs::LockGuard, Error> {
+    let budget = match wait_secs {
+        Some(seconds) => WaitBudget::cli(SystemClock.mono_now(), seconds)
+            .map_err(|_| Error::GcObservation("invalid GC lock wait"))?,
+        None => WaitBudget::nonblocking(SystemClock.mono_now()),
+    };
+    provenant_config::private_directory(&roots.state.as_path().join("gc"), true)
+        .map_err(|_| Error::GcObservation("cannot establish GC lock directory"))?;
+    let directory = Directory::open_anchor(&roots.state.as_path().join("gc"))?;
+    Ok(directory.lock(
+        OsStr::new("collection.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+        budget,
+        &CancelToken::new(),
+        &SystemClock,
+    )?)
 }
 
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
@@ -686,16 +740,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let _collection = if command.dry_run {
         None
     } else {
-        provenant_config::private_directory(&roots.state.as_path().join("gc"), true)
-            .map_err(|_| Error::GcObservation("cannot establish GC lock directory"))?;
-        let directory = Directory::open_anchor(&roots.state.as_path().join("gc"))?;
-        Some(directory.lock(
-            OsStr::new("collection.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-            WaitBudget::nonblocking(SystemClock.mono_now()),
-            &CancelToken::new(),
-            &SystemClock,
-        )?)
+        Some(collection_lock(&roots)?)
     };
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();

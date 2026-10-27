@@ -2332,6 +2332,87 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<dyn Error>> {
+        for keep in [false, true] {
+            let fixture = Fixture::new()?;
+            fs::write(fixture.root.join(".git/info/exclude"), "build/\nsaved/\n")?;
+            let test = TestContext::new(&fixture)?;
+            let context = test.context();
+            let info = create(
+                &context,
+                WorktreeCreate {
+                    branch: "regenerated".into(),
+                    base: None,
+                },
+                &cancel(),
+            )?;
+            let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
+            let tree = verify_worktree(&fixture.repo, &info.path)?;
+            save_owner(
+                &tree,
+                &WorktreeOwner {
+                    attempt_id: Some(attempt),
+                    operation_id: Some("regenerated-create".parse()?),
+                    branch: "regenerated".into(),
+                    base: info.head.to_string(),
+                    host: provenant_core::HostId::from_bytes([3; 16]),
+                    created_at: context.clock.wall_now()?,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            )?;
+            let output = info.path.join("saved/new");
+            fs::create_dir_all(info.path.join("build"))?;
+            fs::write(info.path.join("build/old"), "initial output")?;
+            let calls = std::cell::Cell::new(0);
+            let terminal = |_: &Path| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    // Recreate ignored output after collection, before final removal.
+                    assert!(!info.path.join("build/old").exists());
+                    assert!(fs::create_dir_all(output.parent().unwrap_or(&info.path)).is_ok());
+                    assert!(fs::write(&output, "regenerated output").is_ok());
+                }
+                true
+            };
+            let kept = if keep {
+                vec!["saved/new".into()]
+            } else {
+                vec![]
+            };
+            let policy = WorktreeGcPolicy {
+                upstream: Some(info.head),
+                terminal: &terminal,
+                no_live_lanes: &|_| true,
+                regenerable: &["build".into(), "saved".into()],
+                keep: &kept,
+                written_before_ns: i128::MAX,
+                foreign_merged_clean: false,
+                foreign_idle_before_ns: None,
+                dry_run: false,
+            };
+            let result = prune_owned(
+                &context,
+                &info.path,
+                attempt,
+                info.head,
+                info.head,
+                &policy,
+                &cancel(),
+            );
+            assert_eq!(calls.get(), 2);
+            if keep {
+                assert!(matches!(result, Err(WorktreeError::IgnoredPaths(_))));
+                assert_eq!(fs::read_to_string(&output)?, "regenerated output");
+            } else {
+                assert_eq!(result?.removed.len(), 1);
+                assert!(!info.path.exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let test = TestContext::new(&fixture)?;
