@@ -1056,6 +1056,7 @@ fn dispatch_with_workers(
                             name: branch,
                             discard: false,
                             integration: None,
+                            expected_head: Some(info.head),
                         },
                         &cancel,
                     )?;
@@ -3533,6 +3534,7 @@ fn fresh_continuation_worktree(
                         name: format!("lane/resume-{}", input.attempt_id),
                         discard: false,
                         integration: None,
+                        expected_head: Some(info.head),
                     },
                     call.cancel,
                 )
