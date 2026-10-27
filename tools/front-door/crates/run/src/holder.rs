@@ -238,19 +238,28 @@ impl RunStore {
             providers,
             call,
         )?;
-        crate::writer::settle_launch_staging(attempt)?;
         if let Some(recovery) = recovery {
-            custody::publish_release(attempt, exit.scope)
-                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
-            let commit = recovery
-                .verify_settlement(attempt)
-                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
-            let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
-            recovery
-                .settle(commit, &mut scratch)
-                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+            self.settle_recovered(attempt, recovery)?;
+        } else {
+            crate::writer::settle_launch_staging(attempt)?;
         }
         Ok(record)
+    }
+    pub(crate) fn settle_recovered(
+        &self,
+        attempt: &Directory,
+        recovery: custody::Recovery,
+    ) -> Result<()> {
+        crate::writer::settle_launch_staging(attempt)?;
+        custody::publish_release(attempt, recovery.scope())
+            .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        let commit = recovery
+            .verify_settlement(attempt)
+            .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
+        recovery
+            .settle(commit, &mut scratch)
+            .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
     fn finish_in_custody(
         &self,
