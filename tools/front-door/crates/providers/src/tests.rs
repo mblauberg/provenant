@@ -2342,7 +2342,10 @@ fn claude_fresh_token_does_not_create_refresh_lock() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join(".claude");
     let now = 1_000_000_000_u64;
-    let item = format!(r#"{{"claudeAiOauth":{{"accessToken":"fixture-access","refreshToken":"fixture-refresh","expiresAt":{}}}}}"#, now + 3_600_000);
+    let item = format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"fixture-access","refreshToken":"fixture-refresh","expiresAt":{}}}}}"#,
+        now + 3_600_000
+    );
     let script = FileCredentialScript::new(
         &config,
         KeychainScript {
@@ -2357,8 +2360,7 @@ fn claude_fresh_token_does_not_create_refresh_lock() {
         user: OsStr::new("u"),
         config_dir: &config,
     };
-    refresh_if_expiring(&script, &login, &|| now, now + 60_000, None)
-        .expect("fresh token");
+    refresh_if_expiring(&script, &login, &|| now, now + 60_000, None).expect("fresh token");
     assert!(!config.join("provenant-oauth-refresh.lock").exists());
 }
 
