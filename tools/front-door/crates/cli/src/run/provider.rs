@@ -195,13 +195,14 @@ fn prepare_with(
     }
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
+    let mut plan_errors = std::collections::BTreeMap::new();
     for adapter in REGISTRY
         .iter()
         .map(|entry| entry.adapter.id())
         .filter(|adapter| eligible(adapter))
     {
         // Repository-bound read-only grants are checked per candidate below.
-        if confinement_request(
+        match confinement_request(
             project_id,
             ConfinementRoots {
                 cwd: &cwd,
@@ -217,13 +218,15 @@ fn prepare_with(
             adapter,
         )
         .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
-        .is_ok()
         {
-            access.push(provenant_routing::AccessContext {
+            Ok(_) => access.push(provenant_routing::AccessContext {
                 adapter,
                 disclosure_ref: &digest,
                 confinement_ref: &digest,
-            });
+            }),
+            Err(error) => {
+                plan_errors.insert(adapter, error);
+            }
         }
     }
     let requested_adapter = match &task.route {
@@ -280,7 +283,20 @@ fn prepare_with(
         };
         let adapter = registration.adapter;
         if let provenant_records::RouteReadiness::Unavailable { reason } = &route.readiness {
-            reasons.push(skip(&label, SkipKind::Unavailable, format!("{reason:?}")));
+            // An adapter left out of `access` names its confinement error, not the router's denial.
+            let detail = plan_errors
+                .get(route.adapter.as_str())
+                .filter(|_| {
+                    matches!(
+                        reason,
+                        provenant_records::RouteExclusionReason::DisclosureDenied
+                    )
+                })
+                .map_or_else(
+                    || format!("{reason:?}"),
+                    |error| format!("confinement plan: {error}"),
+                );
+            reasons.push(skip(&label, SkipKind::Unavailable, detail));
             continue;
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route) {
