@@ -395,6 +395,76 @@ mod tests {
         ));
     }
     #[test]
+    fn autosave_has_the_same_bounds_and_lock_but_keeps_the_chair_file_separate() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let clock = clock(0);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let write = |text: &[u8], cancel: &CancelToken, clock: &dyn Clock| {
+            selected.write_autosave(text, budget, cancel, clock)
+        };
+        let cancel = CancelToken::new();
+        let big = vec![b'x'; CHECKPOINT_LIMIT as usize + 1];
+        assert!(selected.read_autosave().unwrap().is_none());
+        assert!(matches!(
+            write(&big, &cancel, &clock),
+            Err(SessionError::TooLarge)
+        ));
+        assert!(matches!(
+            write(&[0xff], &cancel, &clock),
+            Err(SessionError::Utf8(_))
+        ));
+        assert!(!path(&root, project, "host-1").exists());
+
+        let exact = "é".repeat(CHECKPOINT_LIMIT as usize / 2);
+        write(exact.as_bytes(), &cancel, &clock).unwrap();
+        assert_eq!(selected.read_autosave().unwrap().unwrap().markdown, exact);
+        assert!(selected.read().unwrap().is_none());
+        save(&selected, b"chair notes").unwrap();
+        write(b"replacement", &cancel, &clock).unwrap();
+        let saved = selected.read_autosave().unwrap().unwrap();
+        assert_eq!(saved.markdown, "replacement");
+
+        cancel.cancel();
+        assert!(matches!(
+            write(b"cancelled", &cancel, &clock),
+            Err(SessionError::Filesystem(FsError::Cancelled { .. }))
+        ));
+        let expired = TestClock::new(
+            UtcMicros::from_micros(0).unwrap(),
+            MonoTime::from_micros(1_000_000),
+        );
+        selected
+            .update(
+                true,
+                |_| {
+                    assert!(matches!(
+                        write(b"contended", &CancelToken::new(), &expired),
+                        Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
+                    ));
+                    Ok(None)
+                },
+                budget,
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+        assert_eq!(selected.read_autosave().unwrap().unwrap(), saved);
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "chair notes");
+
+        let file = path(&root, project, "host-1").join(AUTOSAVE_FILE);
+        std::fs::write(&file, [0xff]).unwrap();
+        assert!(matches!(
+            selected.read_autosave(),
+            Err(SessionError::Utf8(_))
+        ));
+        std::fs::write(file, big).unwrap();
+        assert!(matches!(
+            selected.read_autosave(),
+            Err(SessionError::Filesystem(FsError::TooLarge { .. }))
+        ));
+    }
+    #[test]
     fn refuses_traversal_and_command_injection_in_host_keys() {
         for id in [
             "",
