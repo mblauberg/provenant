@@ -47,6 +47,8 @@ default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the
 lane lineage for a previously lane-owned tree. Explicit unowned and adopted
 checkouts resume in place unless a lane owner now names another lineage.
+Attempts recorded before #1855 have no launch evidence of running under an
+owned tree, so continuation resumes them in place (fail open).
 A missing or reassigned checkout uses a fresh owned worktree when fallback is
 allowed. Its receipt records `continuation: fresh`. Add `--no-fallback` to require
 provider resume.

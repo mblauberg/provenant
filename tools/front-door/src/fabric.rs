@@ -2563,6 +2563,7 @@ fn settlement_retention_reason(
     ) {
         return Some("lane did not succeed; worktree retained for resume");
     }
+    // The tree is kept on purpose without a Delivered receipt (e.g. NoNewCommits); reclaimed via gc or disk reclaim.
     if (delivery_requested || delivery.is_some())
         && !delivery.is_some_and(|receipt| {
             matches!(
