@@ -1,3 +1,5 @@
+## Behaviour changes
+
 GC can reclaim idle Git-ignored declared output from linked worktrees without
 ending a lane. Nested repositories protect their containing output directory.
 Explicit worktree removal allows that declared output and names
