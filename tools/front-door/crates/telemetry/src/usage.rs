@@ -39,6 +39,10 @@ struct Event {
     /// Only the project, and only when attribution is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     trace: Option<Trace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
 }
 
 fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
@@ -114,6 +118,8 @@ pub fn record_cli(
             duration_ms,
             timestamp: now.to_string(),
             trace: project_trace(project_id),
+            account: None,
+            session: None,
         },
         true,
     );
@@ -137,9 +143,76 @@ pub fn record_tool(
             duration_ms,
             timestamp: now.to_string(),
             trace: project_trace(project_id),
+            account: None,
+            session: None,
         },
         false,
     );
+}
+
+/// Record the serving account resolved by the chair's SessionStart hook.
+pub fn record_chair(
+    roots: &Roots,
+    clock: &dyn Clock,
+    account: &str,
+    session: &str,
+    project: ProjectId,
+) {
+    let Ok(now) = clock.wall_now() else { return };
+    let _ = append(
+        roots,
+        Event {
+            kind: "chair.session".into(),
+            unit: "claude".into(),
+            exit_code: None,
+            outcome: None,
+            duration_ms: 0,
+            timestamp: now.to_string(),
+            trace: project_trace(Some(project)),
+            account: Some(account.into()),
+            session: Some(session.into()),
+        },
+        true,
+    );
+}
+
+#[derive(Debug)]
+pub struct ChairSession {
+    pub adapter: String,
+    pub account: String,
+    pub session: String,
+    pub project: ProjectId,
+}
+
+/// Recent chair observations. The caller deduplicates repeated SessionStart
+/// events by project, account and session within the selected window.
+pub fn chair_sessions(
+    roots: &Roots,
+    since: jiff::Timestamp,
+    until: jiff::Timestamp,
+) -> Result<Vec<ChairSession>, UsageError> {
+    Ok(events(roots)?
+        .into_iter()
+        .filter_map(|event| {
+            if event.kind != "chair.session" || event.unit != "claude" {
+                return None;
+            }
+            let time = event
+                .timestamp
+                .parse::<provenant_core::WallTime>()
+                .ok()?
+                .as_timestamp();
+            if time < since || time >= until {
+                return None;
+            }
+            Some(ChairSession {
+                adapter: event.unit,
+                account: event.account?,
+                session: event.session?,
+                project: event.trace?.project?,
+            })
+        })
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -159,18 +232,8 @@ pub struct Report {
     pub units: Vec<Unit>,
 }
 
-/// Count events in `[since, until)` over the installed `inventory` of
-/// `(kind, unit)` pairs, which report zero calls until used.
-pub fn report(
-    roots: &Roots,
-    inventory: impl IntoIterator<Item = (String, String)>,
-    since: Option<jiff::Timestamp>,
-    until: Option<jiff::Timestamp>,
-) -> Result<Report, UsageError> {
-    let mut units: BTreeMap<(String, String, Option<ProjectId>), u64> = inventory
-        .into_iter()
-        .map(|(kind, unit)| ((kind, unit, None), 0))
-        .collect();
+fn events(roots: &Roots) -> Result<Vec<Event>, UsageError> {
+    let mut events = Vec::new();
     let directory = match Directory::open_anchor(roots.state.as_path()) {
         Ok(directory) => Some(directory),
         Err(error) if error.is_not_found() => None,
@@ -195,29 +258,45 @@ pub fn report(
                 let Ok(event) = serde_json::from_slice::<Event>(line) else {
                     continue;
                 };
-                if !EVENT_KINDS.contains(&event.kind.as_str()) || event.unit.len() > 128 {
-                    continue;
-                }
-                let Ok(time) = event.timestamp.parse::<provenant_core::WallTime>() else {
-                    continue;
-                };
-                let time = time.as_timestamp();
-                if since.is_some_and(|since| time < since)
-                    || until.is_some_and(|until| time >= until)
-                {
-                    continue;
-                }
-                let calls = units
-                    .entry((event.kind.clone(), event.unit.clone(), None))
-                    .or_default();
-                *calls = calls.saturating_add(1);
-                if let Some(project_id) = event.trace.and_then(|trace| trace.project) {
-                    let calls = units
-                        .entry((event.kind, event.unit, Some(project_id)))
-                        .or_default();
-                    *calls = calls.saturating_add(1);
-                }
+                events.push(event);
             }
+        }
+    }
+    Ok(events)
+}
+
+/// Count events in `[since, until)` over the installed `inventory` of
+/// `(kind, unit)` pairs, which report zero calls until used.
+pub fn report(
+    roots: &Roots,
+    inventory: impl IntoIterator<Item = (String, String)>,
+    since: Option<jiff::Timestamp>,
+    until: Option<jiff::Timestamp>,
+) -> Result<Report, UsageError> {
+    let mut units: BTreeMap<(String, String, Option<ProjectId>), u64> = inventory
+        .into_iter()
+        .map(|(kind, unit)| ((kind, unit, None), 0))
+        .collect();
+    for event in events(roots)? {
+        if !EVENT_KINDS.contains(&event.kind.as_str()) || event.unit.len() > 128 {
+            continue;
+        }
+        let Ok(time) = event.timestamp.parse::<provenant_core::WallTime>() else {
+            continue;
+        };
+        let time = time.as_timestamp();
+        if since.is_some_and(|since| time < since) || until.is_some_and(|until| time >= until) {
+            continue;
+        }
+        let calls = units
+            .entry((event.kind.clone(), event.unit.clone(), None))
+            .or_default();
+        *calls = calls.saturating_add(1);
+        if let Some(project_id) = event.trace.and_then(|trace| trace.project) {
+            let calls = units
+                .entry((event.kind, event.unit, Some(project_id)))
+                .or_default();
+            *calls = calls.saturating_add(1);
         }
     }
     let mut units: Vec<_> = units

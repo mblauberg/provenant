@@ -552,11 +552,19 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         let context = Context::new(globals, &input.cwd)?;
         check_time(Some(deadline))?;
         if start {
+            let accounts = crate::registered_claude(&context.roots)?;
+            let target = current(&accounts, &context)?;
+            let (_, project) = crate::hooks::project_id(globals, &input.cwd)?;
+            provenant_telemetry::usage::record_chair(
+                &context.roots,
+                &provenant_os::clock::SystemClock::new(),
+                target.key(),
+                input.session_id.as_str(),
+                project,
+            );
             if context.store().pending(now())?.is_none() {
                 return Ok(None);
             }
-            let accounts = crate::registered_claude(&context.roots)?;
-            let target = current(&accounts, &context)?;
             check_time(Some(deadline))?;
             let Some(handoff) = context
                 .store()

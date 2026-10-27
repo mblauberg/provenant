@@ -217,7 +217,6 @@ fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec:
 #[test]
 fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     let rig = configured()?;
-    assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
     for _ in 0..2 {
         let output = hook(&rig, true, "ordinary-session")?;
         assert_eq!(code(&output), 0);

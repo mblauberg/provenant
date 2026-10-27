@@ -78,6 +78,83 @@ fn detail() -> Window {
         ..Window::default()
     }
 }
+
+#[test]
+fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
+    use crate::usage::ChairSession;
+    let mut first = fact(1, Some(100));
+    first.usage.cache_read = Some(900);
+    first.usage.cache_write = None;
+    let project = first.project_id;
+    let mut second = fact(2, Some(200));
+    second.project_id = ProjectId::from_bytes([3; 16]);
+    let mut other_account = fact(3, Some(300));
+    other_account.resolved_route.as_mut().unwrap().account_label = Some("other".into());
+    let mut unknown = fact(4, None);
+    unknown.resolved_route = None;
+    let chair = || ChairSession {
+        adapter: "p".into(),
+        account: "account".into(),
+        session: "session".into(),
+        project,
+    };
+    let rows = quota_usage(
+        [first, second, other_account, unknown],
+        [chair(), chair()],
+        &Window::default(),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 4);
+    let row = rows
+        .iter()
+        .find(|r| r.project == project && r.account.as_deref() == Some("account"))
+        .unwrap();
+    assert_eq!(row.lane_attempts, 1);
+    assert_eq!(row.chair_sessions, 1);
+    assert_eq!(row.lane_usage.uncached_input.known, 100);
+    assert_eq!(row.lane_usage.cache_read.known, 900);
+    assert_eq!(row.lane_usage.cache_write.missing, 1);
+    assert_eq!(row.lane_usage.cache_write.known, 0);
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.account.is_none())
+            .unwrap()
+            .lane_usage
+            .uncached_input
+            .missing,
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|r| r.lane_usage.uncached_input.known)
+            .sum::<u64>(),
+        600
+    );
+}
+
+#[test]
+fn quota_usage_respects_the_window_and_rejects_duplicates_and_overflow() {
+    let window = Window {
+        since: Some(WallTime::from_micros(1).unwrap()),
+        until: Some(WallTime::from_micros(2).unwrap()),
+        ..Window::default()
+    };
+    let mut old = fact(2, Some(900));
+    old.finished_at = WallTime::from_micros(0).unwrap();
+    let mut future = fact(3, Some(900));
+    future.finished_at = WallTime::from_micros(2).unwrap();
+    let rows = quota_usage([fact(1, Some(100)), old, future], [], &window).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].lane_usage.uncached_input.known, 100);
+    assert!(matches!(
+        quota_usage([fact(1, None), fact(1, None)], [], &window),
+        Err(TelemetryError::InvalidFact(_))
+    ));
+    assert!(matches!(
+        quota_usage([fact(1, Some(u64::MAX)), fact(2, Some(1))], [], &window),
+        Err(TelemetryError::Overflow)
+    ));
+}
 /// Complete cost in microdollars, absent when any cost is unknown.
 fn cost(totals: &Totals) -> Option<u64> {
     totals

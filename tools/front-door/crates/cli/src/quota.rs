@@ -57,6 +57,14 @@ pub enum Power {
 pub enum Quota {
     /// Show recorded provider quota
     Show(Filter),
+    /// Show recorded use across projects by account, chair sessions and lanes
+    Usage {
+        #[command(flatten)]
+        adapter: Filter,
+        /// Recent UTC days to include
+        #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
+        days: u32,
+    },
     /// Set menu bar display choices, then show quota
     ///
     /// With no options nothing changes. `--icon` takes `most_constrained` or an
@@ -103,6 +111,12 @@ impl From<Power> for schedule::Power {
 }
 #[derive(Debug, Error)]
 pub(crate) enum EdgeError {
+    #[error(transparent)]
+    Usage(#[from] provenant_telemetry::usage::UsageError),
+    #[error(transparent)]
+    Telemetry(#[from] provenant_telemetry::TelemetryError),
+    #[error(transparent)]
+    Run(#[from] provenant_run::RunError),
     #[error(transparent)]
     Quota(#[from] QuotaError),
     #[error(transparent)]
@@ -460,7 +474,10 @@ fn execute(
 ) -> Result<QuotaReport, EdgeError> {
     let all = Filter { adapter: None };
     let (filter, tick) = match command {
-        Quota::Show(filter) => (filter, None),
+        Quota::Show(filter)
+        | Quota::Usage {
+            adapter: filter, ..
+        } => (filter, None),
         Quota::Display { headline, icon } => {
             crate::accounts::set_quota_display(roots, headline.map(Into::into), icon.as_deref())
                 .map_err(EdgeError::Display)?;
@@ -656,6 +673,183 @@ fn execute(
     decorate(&mut shown, &entries, &settings.display);
     Ok(shown)
 }
+fn usage_report(
+    roots: &Roots,
+    filter: &Filter,
+    days: u32,
+) -> Result<(serde_json::Value, String), EdgeError> {
+    use provenant_run::{AttemptFilter, AttemptReader, ExecutionContext, Request, RunStore};
+    use provenant_telemetry::{MAX_ATTEMPTS, Window};
+    let clock = SystemClock::new();
+    let until = clock.wall_now().map_err(|_| EdgeError::Time)?;
+    let since = provenant_core::WallTime::from_micros(
+        until.as_timestamp().as_microsecond() - i64::from(days) * 86_400_000_000,
+    )
+    .map_err(|_| EdgeError::Time)?;
+    let window = Window {
+        since: Some(since),
+        until: Some(until),
+        ..Window::default()
+    };
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 10).map_err(|_| EdgeError::Time)?,
+        cancel: &cancel,
+    };
+    let projects = provenant_config::registered_projects(roots)?;
+    let mut facts = Vec::new();
+    for project in &projects {
+        let context = ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: project.project_id(),
+            // Read-only facts do not use actor authority; prompts are never read.
+            actor_id: provenant_core::ActorId::from_bytes([0; 16]),
+            read_prompts: false,
+        };
+        if let Some(store) = RunStore::open_read_only(&context, &call)? {
+            for fact in store.attempts(AttemptFilter::default(), &call)? {
+                let fact = fact?;
+                if fact.finished_at < since || fact.finished_at >= until {
+                    continue;
+                }
+                if facts.len() as u64 >= MAX_ATTEMPTS {
+                    return Err(provenant_telemetry::TelemetryError::TooLarge(
+                        "100,000 selected attempts",
+                    )
+                    .into());
+                }
+                facts.push(fact);
+            }
+        }
+    }
+    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .domains
+        .accounts;
+    let mut chairs = provenant_telemetry::usage::chair_sessions(
+        roots,
+        since.as_timestamp(),
+        until.as_timestamp(),
+    )?;
+    // Lane facts retain labels; chair observations retain the resolved key.
+    for chair in &mut chairs {
+        if let Some(entry) = accounts
+            .entries
+            .values()
+            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
+        {
+            chair.account = entry.label.clone();
+        }
+    }
+    let mut rows = provenant_telemetry::quota_usage(facts, chairs, &window)?;
+    if let Some(adapter) = &filter.adapter {
+        rows.retain(|row| row.adapter.as_ref() == Some(adapter));
+    }
+    let note = "Chair token usage is not recorded; chair rows count distinct sessions observed in this window only. Historical chair tokens are not recovered. Usage logs are bounded and rotated; lane tokens are recorded terminal usage, not provider quota percentages.";
+    let mut human = format!("Recorded use: {since} to {until}\n{note}\n");
+    for row in &rows {
+        let project = projects
+            .iter()
+            .find(|p| p.project_id() == row.project)
+            .map_or_else(
+                || row.project.to_string(),
+                |p| p.common_dir().display().to_string(),
+            );
+        human.push_str(&format!(
+            "{} [{}] project={} ({})\n  chair: {} sessions\n  lanes: {} attempts\n",
+            row.account
+                .as_deref()
+                .unwrap_or("unknown account")
+                .escape_debug(),
+            row.adapter
+                .as_deref()
+                .unwrap_or("unknown adapter")
+                .escape_debug(),
+            project.escape_debug(),
+            row.project,
+            row.chair_sessions,
+            row.lane_attempts
+        ));
+        for (label, total) in [
+            ("uncached input", &row.lane_usage.uncached_input),
+            ("cache read", &row.lane_usage.cache_read),
+            ("cache write", &row.lane_usage.cache_write),
+            (
+                "output excluding reasoning",
+                &row.lane_usage.output_excluding_reasoning,
+            ),
+            ("reasoning", &row.lane_usage.reasoning),
+        ] {
+            if row.lane_attempts > 0 {
+                human.push_str(&format!(
+                    "    {label}: {} tokens; {} attempts missing this category\n",
+                    total.known, total.missing
+                ));
+            }
+        }
+    }
+    if rows.is_empty() {
+        human.push_str("No recorded use in this window.\n");
+    }
+    let data = serde_json::json!({
+        "since": since, "until": until, "rows": rows, "chair_usage_note": note,
+        "projects": projects.iter().map(|p| serde_json::json!({"project":p.project_id(), "common_dir":p.common_dir()})).collect::<Vec<_>>(),
+    });
+    if serde_json::to_vec(&data)?.len() as u64 > MAX_RECORD_BYTES {
+        return Err(EdgeError::TooLarge);
+    }
+    Ok((data, human))
+}
+
+fn quota_human(report: &QuotaReport) -> String {
+    let mut human = format!(
+        "Quota: {}/{} current readings\n",
+        report.coverage.known, report.coverage.total
+    );
+    if let Some(warning) = &report.display_icon_warning {
+        human.push_str(&format!("Warning: {warning}\n"));
+    }
+    for row in &report.accounts {
+        let status = serde_json::to_value(row.status)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into())
+            .to_uppercase();
+        let age = row
+            .age_seconds
+            .map_or_else(|| "unknown".into(), |age| format!("{age}s"));
+        human.push_str(&format!(
+            "{} [{}]: {status}, age {age}",
+            row.account.label, row.account.adapter
+        ));
+        if let Some(snapshot) = &row.snapshot {
+            if matches!(row.status, QuotaStatus::Stale | QuotaStatus::AuthRequired) {
+                human.push_str(" (last known)");
+            }
+            for window in &snapshot.windows {
+                human.push_str(&format!(
+                    "; {} {}.{:02}% used",
+                    window.pool.escape_debug(),
+                    window.used_basis_points / 100,
+                    window.used_basis_points % 100
+                ));
+            }
+        }
+        if let Some(error) = row.error {
+            let reason = serde_json::to_value(error)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into());
+            human.push_str(&format!("; refresh failed: {reason}"));
+            if error == ProbeFailure::Auth {
+                human.push_str(" (needs login in this identity)");
+            }
+        }
+        human.push('\n');
+    }
+    human.push_str(&format!("Report: {}\n", report.report_path));
+    human
+}
 pub fn run(
     command: Quota,
     globals: &crate::Globals,
@@ -663,65 +857,24 @@ pub fn run(
     registry: &[provenant_providers::Registration],
     effects: &dyn QuotaEffects,
     publish: impl FnOnce(
-        &CommandResult<Option<provenant_quota::QuotaReport>>,
+        &CommandResult<Option<serde_json::Value>>,
     ) -> io::Result<provenant_records::AbsolutePath>,
 ) -> u8 {
     let name = match command {
         Quota::Show(_) => "quota show",
+        Quota::Usage { .. } => "quota usage",
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
-    let result = execute(&command, roots, registry, effects);
+    let result = match &command {
+        Quota::Usage { adapter, days } => usage_report(roots, adapter, *days),
+        _ => execute(&command, roots, registry, effects).and_then(|report| {
+            let human = quota_human(&report);
+            Ok((serde_json::to_value(report)?, human))
+        }),
+    };
     let (envelope, human) = match result {
-        Ok(report) => {
-            let mut human = format!(
-                "Quota: {}/{} current readings\n",
-                report.coverage.known, report.coverage.total
-            );
-            if let Some(warning) = &report.display_icon_warning {
-                human.push_str(&format!("Warning: {warning}\n"));
-            }
-            for row in &report.accounts {
-                let status = serde_json::to_value(row.status)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "unknown".into())
-                    .to_uppercase();
-                let age = row
-                    .age_seconds
-                    .map_or_else(|| "unknown".into(), |age| format!("{age}s"));
-                human.push_str(&format!(
-                    "{} [{}]: {status}, age {age}",
-                    row.account.label, row.account.adapter
-                ));
-                if let Some(snapshot) = &row.snapshot {
-                    if matches!(row.status, QuotaStatus::Stale | QuotaStatus::AuthRequired) {
-                        human.push_str(" (last known)");
-                    }
-                    for window in &snapshot.windows {
-                        human.push_str(&format!(
-                            "; {} {}.{:02}% used",
-                            window.pool.escape_debug(),
-                            window.used_basis_points / 100,
-                            window.used_basis_points % 100
-                        ));
-                    }
-                }
-                if let Some(error) = row.error {
-                    let reason = serde_json::to_value(error)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_owned))
-                        .unwrap_or_else(|| "unknown".into());
-                    human.push_str(&format!("; refresh failed: {reason}"));
-                    if error == ProbeFailure::Auth {
-                        human.push_str(" (needs login in this identity)");
-                    }
-                }
-                human.push('\n');
-            }
-            human.push_str(&format!("Report: {}\n", report.report_path));
-            (CommandResult::new(name, Outcome::Ok, Some(report)), human)
-        }
+        Ok((report, human)) => (CommandResult::new(name, Outcome::Ok, Some(report)), human),
         Err(error) => {
             let status = match &error {
                 EdgeError::Config(provenant_config::ConfigError::Read { .. }) => Outcome::Error,
@@ -750,7 +903,7 @@ pub fn run(
     } else {
         crate::RenderMode::Human {
             text: &human,
-            read_only: matches!(command, Quota::Show(_)),
+            read_only: matches!(command, Quota::Show(_) | Quota::Usage { .. }),
         }
     };
     let outcome = crate::render_or_publish(
