@@ -946,7 +946,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn provider_creates_private_state_under_a_permissive_parent_umask() {
+    fn provider_creates_private_state_regardless_of_parent_umask() {
         let root = tempfile::tempdir().unwrap();
         let directory = provenant_os::fs::Directory::open_anchor(root.path()).unwrap();
         let lease = directory
@@ -955,33 +955,35 @@ mod tests {
                 provenant_os::fs::LockMode::Exclusive,
             )
             .unwrap();
-        let argv: Vec<OsString> = ["/bin/sh", "-c", "mkdir made && : > made.txt"]
+        let argv: Vec<OsString> = ["/bin/sh", "-c", "umask; mkdir made && : > made.txt"]
             .into_iter()
             .map(Into::into)
             .collect();
         let env = [(OsString::from("PATH"), OsString::from("/bin:/usr/bin"))];
         let boot = super::super::census::SystemProcessObserver::boot_identity().unwrap();
-        // SAFETY: umask only swaps this process's creation mask; the previous
-        // mask is restored straight after the spawn.
-        let previous = unsafe { libc::umask(0o022) };
-        let spawned = ProviderGroup::spawn(
+        let mut group = ProviderGroup::spawn(
             provenant_os::sys::raw_exec::SpawnSpec {
                 argv: &argv,
                 env: Some(&env),
                 cwd: root.path(),
                 input: false,
                 secret_input: None,
-                capture_stdout: false,
+                capture_stdout: true,
                 capture_stderr: false,
             },
             &lease,
             &boot,
-        );
-        // SAFETY: restores the mask read above.
-        let during = unsafe { libc::umask(previous) };
-        assert_eq!(during, 0o022, "the parent umask must not change");
-        let mut group = spawned.unwrap();
+        )
+        .unwrap();
         assert!(group.child.as_mut().unwrap().wait().unwrap().success());
+        let mut stdout = String::new();
+        group
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        assert_eq!(stdout.trim(), "0077");
         let mode = |name: &str| {
             std::fs::metadata(root.path().join(name))
                 .unwrap()
