@@ -152,7 +152,10 @@ as chair text. `stop` never creates a session directory, `autosave.md` alone is
 reported as holding only automatically saved state, and lane sessions never
 write. A next-page command in the digest is shown only if it survives
 rendering byte for byte (within 512 bytes and free of `<`, `>` and backticks);
-otherwise a plain note names the cursor.
+otherwise a plain note names the cursor. Every other command a hook prints
+(the digest heading, the `pr status` hint, the `Save:` line, the `session show`
+pointer) repeats the hook's non-default `--state-dir` on the same terms, so
+following it reaches the store the hook used; one that cannot is not printed.
 - Why: automatic state must not erase the authority references the chair wrote
   or hide that the chair has not saved notes; separate files remove the
   ownership question a shared file raises.
@@ -161,7 +164,10 @@ otherwise a plain note names the cursor.
   `::pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing`;
   `::stop_hook_refreshes_only_an_existing_quiet_checkpoint`;
   `::lane_sessions_report_but_never_write_checkpoint_state`;
-  `crates/workflow/src/session/state.rs::a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte`
+  `crates/workflow/src/session/state.rs::a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte`;
+  `::the_digest_title_names_the_store_it_was_read_from`;
+  `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
+  `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
 - Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
 
 ## Session handoff

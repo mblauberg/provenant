@@ -5,7 +5,9 @@
 //! calls run in parallel under one deadline.
 use provenant_cli::Globals;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_workflow::session::{LaneLine, PrLine, PrUnread, SessionState, WorktreeLine};
+use provenant_workflow::session::{
+    CommandPrefix, LaneLine, PrLine, PrUnread, SessionState, WorktreeLine,
+};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -112,7 +114,10 @@ impl<'a> Cli<'a> {
 }
 
 pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) -> SessionState {
-    let mut state = SessionState::default();
+    let mut state = SessionState {
+        commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
+        ..Default::default()
+    };
     let executor = SystemExecutor::new(4 + want.pr_refs.len()).ok();
     let cli = executor
         .as_ref()
@@ -213,12 +218,6 @@ fn route(lane: &Value) -> String {
         .or_else(|| requested("name"))
         .unwrap_or_else(|| "unresolved".into())
 }
-/// Single-quote `text` for a POSIX shell: a quote becomes `'\''`.
-fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-/// Starts a note that is shown as plain text instead of as a command.
-const PLAIN_NOTE: &str = "page with: ";
 /// How to list the page after `cursor`, for the same listing the hook read.
 /// Only the digits of a cursor are kept, since it reaches a command. A
 /// non-default state directory the collector used is made absolute (against
@@ -227,12 +226,11 @@ const PLAIN_NOTE: &str = "page with: ";
 /// cannot be quoted faithfully, so no runnable command is given, only a note.
 fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>, cwd: &Path) -> String {
     let cursor: String = cursor.chars().filter(char::is_ascii_digit).collect();
-    let (mut command, note) = provenant_prefix(state_dir, cwd);
-    command.push_str(&if settled {
-        format!(" lanes --all --limit {LANE_PAGE}")
+    let mut command = if settled {
+        format!("lanes --all --limit {LANE_PAGE}")
     } else {
-        format!(" lanes --limit {LANE_PAGE}")
-    });
+        format!("lanes --limit {LANE_PAGE}")
+    };
     if settled {
         for outcome in TERMINAL {
             command.push_str(" --state ");
@@ -243,45 +241,11 @@ fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>, cwd: &Path) 
         command.push_str(" --cursor ");
         command.push_str(&cursor);
     }
-    if note {
-        format!(
-            "{PLAIN_NOTE}{command} and the --state-dir this hook used (its path cannot be shown safely)"
-        )
-    } else {
-        command
-    }
-}
-/// `provenant` plus the collector's non-default state directory, quoted, and
-/// whether that directory could not be shown safely (so only a note is fit).
-fn provenant_prefix(state_dir: Option<&Path>, cwd: &Path) -> (String, bool) {
-    let mut command = String::from("provenant");
-    let mut note = false;
-    if let Some(state) = state_dir {
-        let absolute = cwd.join(state);
-        match absolute
-            .to_str()
-            .filter(|s| !s.chars().any(char::is_control))
-        {
-            Some(text) => {
-                command.push_str(" --state-dir ");
-                command.push_str(&shell_quote(text));
-            }
-            None => note = true,
-        }
-    }
-    (command, note)
+    CommandPrefix::new(state_dir, cwd).command(&command)
 }
 /// How to read a PR's status from the store the hook used.
 fn pr_status_command(number: u64, state_dir: Option<&Path>, cwd: &Path) -> String {
-    let (mut command, note) = provenant_prefix(state_dir, cwd);
-    command.push_str(&format!(" pr status {number}"));
-    if note {
-        format!(
-            "{PLAIN_NOTE}{command} and the --state-dir this hook used (its path cannot be shown safely)"
-        )
-    } else {
-        command
-    }
+    CommandPrefix::new(state_dir, cwd).command(&format!("pr status {number}"))
 }
 /// Lanes from a `lanes` listing. With `settled_after_unix`, only lanes that
 /// finished later count. The cursor, when present, names a further page the

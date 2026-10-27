@@ -15,6 +15,72 @@ pub const BLOCK_LIMIT: usize = 6 * 1024;
 /// Longest next-page command shown as a runnable command.
 const NEXT_PAGE_LIMIT: usize = 512;
 
+/// Starts a note that is shown as plain text instead of as a command.
+const PLAIN_NOTE: &str = "page with: ";
+
+/// `provenant` plus the non-default state directory a hook ran against, so
+/// every command a hook shows reads or writes the store the hook used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandPrefix {
+    text: String,
+    /// False when the directory cannot be quoted faithfully (not UTF-8, or
+    /// holds control characters): no runnable command may then be shown.
+    shown: bool,
+}
+impl Default for CommandPrefix {
+    fn default() -> Self {
+        Self {
+            text: "provenant".into(),
+            shown: true,
+        }
+    }
+}
+impl CommandPrefix {
+    /// A relative directory is made absolute against `cwd` (where the hook
+    /// ran) and quoted for a POSIX shell.
+    pub fn new(state_dir: Option<&std::path::Path>, cwd: &std::path::Path) -> Self {
+        let mut prefix = Self::default();
+        if let Some(state) = state_dir {
+            match cwd
+                .join(state)
+                .to_str()
+                .filter(|s| !s.chars().any(char::is_control))
+            {
+                Some(text) => {
+                    prefix.text.push_str(" --state-dir ");
+                    prefix.text.push_str(&shell_quote(text));
+                }
+                None => prefix.shown = false,
+            }
+        }
+        prefix
+    }
+
+    /// `provenant [--state-dir DIR] {rest}` only when it would survive
+    /// rendering byte for byte: `clean` rewrites <, > and backticks and
+    /// truncates, which could point at another store. Otherwise `None`.
+    pub fn runnable(&self, rest: &str) -> Option<String> {
+        let command = format!("{} {rest}", self.text);
+        (self.shown && clean(&command, NEXT_PAGE_LIMIT) == command).then_some(command)
+    }
+
+    /// The command, or a plain note when the directory cannot be shown safely.
+    pub fn command(&self, rest: &str) -> String {
+        let command = format!("{} {rest}", self.text);
+        if self.shown {
+            command
+        } else {
+            format!(
+                "{PLAIN_NOTE}{command} and the --state-dir this hook used (its path cannot be shown safely)"
+            )
+        }
+    }
+}
+/// Single-quote `text` for a POSIX shell: a quote becomes `'\''`.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 /// Strip what could forge a marker, a heading or terminal control output.
 pub fn clean(text: &str, limit: usize) -> String {
     let mut out = String::new();
@@ -98,6 +164,8 @@ pub struct SessionState {
     pub prs_unread: Vec<PrUnread>,
     pub worktrees: Vec<WorktreeLine>,
     pub unavailable: Vec<String>,
+    /// How commands the output shows reach the store the collector used.
+    pub commands: CommandPrefix,
 }
 
 struct Section {
@@ -212,8 +280,15 @@ impl SessionState {
 
     /// Bounded text for a SessionStart hook. Read-only; nothing is saved.
     pub fn digest(&self, limit: usize) -> String {
+        let how = match (
+            self.commands.runnable("lanes"),
+            self.commands.runnable("pr status"),
+        ) {
+            (Some(lanes), Some(pr)) => format!("`{lanes}` and `{pr}`"),
+            _ => "provenant lanes and provenant pr status with this hook's --state-dir".into(),
+        };
         render(
-            "Provenant state for this project (read-only; re-derive with `provenant lanes` and `provenant pr status`)",
+            &format!("Provenant state for this project (read-only; re-derive with {how})"),
             &self.sections(false),
             limit,
         )
@@ -471,6 +546,27 @@ mod tests {
             assert!(text.contains("--cursor 7"), "{text}");
             assert!(text.contains("too long or unsafe"), "{text}");
         }
+    }
+
+    #[test]
+    fn the_digest_title_names_the_store_it_was_read_from() {
+        let cwd = std::path::Path::new("/work");
+        let with = |dir: &str| SessionState {
+            commands: CommandPrefix::new(Some(std::path::Path::new(dir)), cwd),
+            ..Default::default()
+        };
+        let title = with("/s/a b").digest(DIGEST_LIMIT);
+        assert!(
+            title.contains(
+                "`provenant --state-dir '/s/a b' lanes` and `provenant --state-dir '/s/a b' pr status`"
+            ),
+            "{title}"
+        );
+        let title = with("/s/a>b").digest(DIGEST_LIMIT);
+        assert!(!title.contains("`provenant"), "{title}");
+        assert!(title.contains("this hook's --state-dir"), "{title}");
+        let title = SessionState::default().digest(DIGEST_LIMIT);
+        assert!(title.contains("`provenant lanes` and `provenant pr status`"));
     }
 
     #[test]

@@ -361,7 +361,10 @@ fn checkpoint(
         input,
         &clock,
         DurationMicros::from_micros(24 * 60 * 60 * 1_000_000),
-        &digest,
+        session::Advice {
+            digest: &digest,
+            commands: &session::CommandPrefix::new(globals.state_dir.as_deref(), cwd),
+        },
     ))
 }
 /// Collect state and save it to the hook-owned file beside the checkpoint.

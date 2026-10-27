@@ -745,6 +745,104 @@ mod tests {
             assert!(context.contains("session save 7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37 --file"));
         }
     }
+    fn hook_with(
+        root: &StateRoot,
+        project: ProjectId,
+        commands: &CommandPrefix,
+        micros: i64,
+    ) -> HookContext {
+        hook_context_with(
+            root,
+            project,
+            HookEvent::SessionStart,
+            FIXTURES[0].0.as_bytes(),
+            &clock(micros),
+            DurationMicros::ZERO,
+            Advice {
+                digest: "",
+                commands,
+            },
+        )
+    }
+    fn context(response: &HookContext) -> String {
+        let wire: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
+        wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    const FIXTURE_ID: &str = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37";
+
+    #[test]
+    fn the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one() {
+        use std::os::unix::ffi::OsStrExt;
+        let (_temp, root, project) = setup();
+        let cwd = std::path::Path::new("/work");
+        let custom = CommandPrefix::new(Some(std::path::Path::new("rel/it's state")), cwd);
+        let text = context(&hook_with(&root, project, &custom, 0));
+        assert!(
+            text.contains(&format!(
+                "Save: provenant --state-dir '/work/rel/it'\\''s state' workflow session save {FIXTURE_ID} --file <checkpoint.md>"
+            )),
+            "{text}"
+        );
+        // The default store shows the plain command.
+        let text = context(&hook_with(&root, project, &CommandPrefix::default(), 0));
+        assert!(text.contains(&format!(
+            "Save: provenant workflow session save {FIXTURE_ID} --file"
+        )));
+        // A directory that cannot round-trip is never shown as a command.
+        let hostile = [
+            std::path::PathBuf::from("/s/a\nb"),
+            std::path::PathBuf::from("/s/a>b"),
+            std::path::PathBuf::from("/s/a`b"),
+            std::path::PathBuf::from(format!("/{}", "d".repeat(600))),
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/s/\xff")),
+        ];
+        for dir in hostile {
+            let prefix = CommandPrefix::new(Some(&dir), cwd);
+            let text = context(&hook_with(&root, project, &prefix, 0));
+            assert!(
+                !text.contains(&format!(
+                    "Save: provenant workflow session save {FIXTURE_ID}"
+                )),
+                "{text}"
+            );
+            assert!(
+                text.contains("default store") && text.contains("this hook's --state-dir"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, FIXTURE_ID);
+        save(&selected, "x".repeat(20_000).as_bytes()).unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let long = std::path::PathBuf::from(format!("/{}", "s".repeat(400)));
+        for (dir, shown) in [
+            (std::path::PathBuf::from("/st ate"), true),
+            (long, true),
+            (std::path::PathBuf::from("/s/a\nb"), false),
+        ] {
+            let prefix = CommandPrefix::new(Some(&dir), std::path::Path::new("/work"));
+            let response = hook_with(&root, project, &prefix, mtime);
+            assert!(response.stdout.len() <= HOOK_OUTPUT_LIMIT);
+            let text = context(&response);
+            let quoted = format!("--state-dir '{}'", dir.display());
+            assert_eq!(
+                text.contains(&format!(
+                    "read it with `provenant {quoted} workflow session show {FIXTURE_ID}`"
+                )),
+                shown,
+                "{text}"
+            );
+            assert!(text.contains("Checkpoint excerpt"), "{text}");
+        }
+    }
+
     #[test]
     fn malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback() {
         let (_temp, root, project) = setup();

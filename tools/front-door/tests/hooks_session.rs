@@ -165,6 +165,38 @@ fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
 }
 
 #[test]
+fn hints_from_a_hook_on_a_custom_store_carry_its_state_dir() -> Result {
+    let rig = TestRig::new()?;
+    save(
+        &store(&rig, "custom-session")?,
+        "Chair notes: delivered PR #7.",
+    )?;
+    let state = rig.state.to_str().ok_or("state path is not UTF-8")?;
+    let input = serde_json::to_vec(&start(&rig, "custom-session", "resume"))?;
+    let output = rig.execute(
+        Path::new(BINARY),
+        &["--state-dir", state, "hook", "claude", "session-start"],
+        Some(&input),
+    )?;
+    assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
+    assert!(output.stdout.bytes.len() <= 8192);
+    let text = context(&output)?;
+    let prefix = format!("provenant --state-dir '{state}'");
+    assert!(
+        text.contains(&format!(
+            "Save: {prefix} workflow session save custom-session --file <checkpoint.md>"
+        )),
+        "{text}"
+    );
+    assert!(text.contains(&format!("`{prefix} lanes`")), "{text}");
+    // No command the hook prints may name the default store.
+    for line in text.lines().filter(|line| line.contains("provenant ")) {
+        assert!(line.contains("--state-dir"), "{line}");
+    }
+    Ok(())
+}
+
+#[test]
 fn restart_hook_ignores_other_start_sources_and_bad_input() -> Result {
     let rig = TestRig::new()?;
     save(&store(&rig, "restart-session")?, "notes")?;

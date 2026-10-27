@@ -45,6 +45,14 @@ command is also shown only if it survives rendering byte for byte (at most 512
 bytes, no `<`, `>` or backticks); otherwise a plain note names the cursor. A
 partial count is never shown as complete.
 
+Every command a hook prints reaches the store the hook used. The digest
+heading, the `pr status` hint, the `Save:` line and the `workflow session show`
+pointer in a truncated excerpt all repeat the hook's `--state-dir` the same way
+(absolute, single-quoted) when it was non-default. A hint that could not
+round-trip is never printed as a command: the `Save:` line then says that no
+runnable command is shown and that a save without the hook's `--state-dir` goes
+to the default store.
+
 A section the hook could not read is listed as unavailable, never as empty.
 The hook budget is 4 seconds in total, with the lane, PR and worktree reads
 running in parallel; a read that overruns leaves its section unavailable.
