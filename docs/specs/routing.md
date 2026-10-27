@@ -108,8 +108,10 @@ Agy auto-approves tools in headless read-only and writer lanes. The outer
 confinement profile is the boundary: read-only lanes may execute system
 programs from `/bin`, `/usr/bin` and `/usr/libexec`, with PATH restricted to
 `/usr/bin:/bin` and global and system Git configuration disabled. Their only
-write grants remain attempt scratch and private state. Agy result
-`denied_actions` are reported as provider denials naming the action.
+write grants remain attempt scratch and private state. Like read-only Codex
+lanes, read-only Agy lanes can run system programs with the lane's existing
+network access, so read roots must not hold anything the lane may not see.
+Agy result `denied_actions` are reported as provider denials naming the action.
 - Why: headless permission prompts otherwise deny read-only commands, and a
   remaining denial must not be mistaken for an empty response.
 - Test: `crates/providers/src/tests.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
