@@ -43,7 +43,7 @@ pub enum CustodyError {
     /// it can reach the user without any path.
     #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
     AdmissionClock,
-    #[error("custody I/O failed")]
+    #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Filesystem(#[from] FsError),
@@ -1182,7 +1182,7 @@ pub struct Recovery {
     pub(crate) directory: Directory,
     pub(crate) lease: LockGuard,
     pub(crate) reservation: Reservation,
-    // Only the guardian can mint this after its durable exit and cleanup.
+    // The guardian's durable cleanup or native reboot proof establishes this.
     pub(crate) guardian_quiescent: bool,
 }
 
@@ -1200,6 +1200,13 @@ impl RebootRecovery {
     /// transaction. No attempt artefacts or worktree contents are removed.
     pub fn release(self) -> Result<()> {
         clear_reservation(&self.recovery.directory, self.scope())
+    }
+    /// Keep writer exclusion for normal terminal settlement, which reacquires
+    /// attempt custody while verifying the canonical release artefacts.
+    pub fn into_recovery(mut self) -> Recovery {
+        // Reboot ended the guardian; writer exclusion remains while verify_settlement reacquires custody.
+        self.recovery.guardian_quiescent = true;
+        self.recovery
     }
 }
 pub fn acquire_recovery(
@@ -1352,12 +1359,21 @@ impl Recovery {
             || self.reservation.attempt_device != Some(metadata.device)
             || self.reservation.attempt_inode != Some(metadata.inode)
         {
-            return Err(CustodyError::InvalidRecord);
-        }
-        if !previous_boot(&self.reservation, observer) {
             return Ok(None);
         }
-        let custody = attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+        let boot = observer.boot_identity().map_err(|error| {
+            CustodyError::Io(io::Error::other(format!(
+                "boot identity unavailable: {error}"
+            )))
+        })?;
+        if boot == self.reservation.boot {
+            return Ok(None);
+        }
+        let custody = match attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive) {
+            Ok(custody) => custody,
+            Err(FsError::LockTimeout { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
         Ok(Some(RebootRecovery {
             recovery: self,
             _custody: custody,

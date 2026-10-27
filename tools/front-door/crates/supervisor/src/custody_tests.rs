@@ -439,7 +439,14 @@ fn reboot_recovery_requires_native_proof() -> TestResult {
         let attempt = Directory::open_anchor(attempt.path())?;
         let recovery = spawned_reboot_recovery(root.path(), &attempt, BOOT, 10, 20)?;
         let world = RebootWorld { boot };
-        let proof = recovery.after_reboot_with(&attempt, scope(), &world)?;
+        let result = recovery.after_reboot_with(&attempt, scope(), &world);
+        if boot.is_none() {
+            assert!(matches!(result, Err(CustodyError::Io(ref error))
+                if error.to_string().contains("boot identity unavailable")));
+            assert!(root.path().join("reservation.json").exists());
+            continue;
+        }
+        let proof = result?;
         assert_eq!(proof.is_some(), expected, "boot={boot:?}");
         if let Some(proof) = proof {
             assert_eq!(proof.scope(), scope());
@@ -523,17 +530,7 @@ fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> Test
             boot: Some("darwin:11111111-1111-1111-1111-111111111111"),
         };
         let result = recovery.after_reboot_with(attempt, target, &world);
-        match refusal {
-            Refusal::Scope | Refusal::Attempt => {
-                assert!(matches!(result, Err(CustodyError::InvalidRecord)));
-            }
-            Refusal::Custody => {
-                assert!(matches!(
-                    result,
-                    Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
-                ));
-            }
-        }
+        assert!(result?.is_none(), "unavailable evidence is not proof");
         assert_eq!(std::fs::read(root.path().join("reservation.json"))?, before);
     }
     Ok(())

@@ -3,6 +3,7 @@
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, OperationId, RunId, WallTime};
 use provenant_supervisor::{
+    census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, Scope, StopReceipt},
     machine::StopReason,
 };
@@ -106,6 +107,72 @@ impl std::fmt::Display for UncertainReason {
 
 /// How long recovery waits after each of TERM and KILL for an orphan to go.
 const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(test)]
+mod reboot_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_exit_is_not_reboot_proof() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        unavailable_reboot_evidence(false)
+    }
+
+    #[test]
+    fn corrupt_reservation_is_not_reboot_proof()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        unavailable_reboot_evidence(true)
+    }
+
+    fn unavailable_reboot_evidence(
+        corrupt_reservation: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let path = context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        let reservation = path.join("reservation.json");
+        let cause = if corrupt_reservation {
+            std::fs::write(&reservation, b"corrupt reservation")?;
+            "record is invalid"
+        } else {
+            std::fs::create_dir(path.join("process-exit.json"))?;
+            "process-exit.json"
+        };
+        let before = std::fs::read(&reservation).ok();
+        assert!(matches!(store.settle_rebooted(
+            &store.record(id, &call)?,
+            &call,
+            &SystemProcessObserver
+        )?, Some(Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { error } })
+            if error.contains("reboot proof unavailable") && error.contains(cause)));
+        assert!(matches!(
+            store.cancel(id, "stop", &call)?,
+            CancelReceipt::Unobservable { reason } if reason.contains("reboot proof unavailable") && reason.contains(cause)
+        ));
+        assert_eq!(std::fs::read(&reservation).ok(), before);
+        assert_eq!(store.record(id, &call)?.state, AttemptState::Running);
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod lineage_tests {
@@ -567,53 +634,95 @@ impl Reconciled {
 impl RunStore {
     /// A previous boot ended every member of this attempt's process tree.
     /// Keep both exclusions until the canonical commit precedes fence release.
-    fn settle_rebooted(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
+    fn settle_rebooted(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        _observer: &dyn ProcessObserver,
+    ) -> Result<Option<Reconciled>> {
         if record.state == AttemptState::Queued {
-            return Ok(false);
+            return Ok(None);
         }
-        let Ok(attempt) = self.attempt_dir(record.run_id, record.attempt_id, false) else {
-            return Ok(false);
+        // Collection failures are uncertain; settlement errors still propagate.
+        let collect = || -> Result<_> {
+            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            if !matches!(record.state, AttemptState::Terminal { .. })
+                && read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+            {
+                // A durable exit retains its canonical completion path and facts.
+                return Ok(None);
+            }
+            // Recovery needs the persisted binding, not a fresh Git inspection of
+            // the worktree the interrupted writer left behind.
+            let fences = self.writer_fences()?;
+            let fence = fences
+                .into_iter()
+                .find(|fence| fence.scope == Self::scope(record));
+            let directory = match fence {
+                Some(fence) => provenant_os::fs::Directory::open_anchor(
+                    fence.reservation.parent().ok_or(RunError::UnsafePath)?,
+                )?,
+                None => attempt.try_clone()?,
+            };
+            let recovery = match custody::acquire_recovery(
+                directory,
+                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                call.cancel,
+                call.clock,
+            ) {
+                Ok(recovery) => recovery,
+                Err(CustodyError::Filesystem(error))
+                    if error.is_not_found()
+                        || matches!(error, provenant_os::fs::FsError::LockTimeout { .. }) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(RunError::Io(std::io::Error::other(error.to_string()))),
+            };
+            #[cfg(test)]
+            let proof = provenant_supervisor::fixture::after_reboot_with(
+                recovery,
+                &attempt,
+                Self::scope(record),
+                _observer,
+            );
+            #[cfg(not(test))]
+            let proof = recovery.after_reboot(&attempt, Self::scope(record));
+            let proof =
+                proof.map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+            Ok(proof.map(|proof| (attempt, proof)))
         };
-        if !matches!(record.state, AttemptState::Terminal { .. })
-            && read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+        let (attempt, proof) = match collect() {
+            Ok(Some(collected)) => collected,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Ok(Some(Reconciled::uncertain(
+                    UncertainReason::ReconcileFailed {
+                        error: format!("reboot proof unavailable: {error}"),
+                    },
+                )));
+            }
+        };
+        if matches!(record.state, AttemptState::Terminal { .. })
+            && !(matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Lost,
+                    exit_code: None,
+                    ..
+                }
+            ) && record.exit_evidence.is_none())
         {
-            // A durable exit retains its canonical completion path and facts.
-            return Ok(false);
+            self.settle_recovered(&attempt, proof.into_recovery())?;
+        } else {
+            // Lost without exit evidence deliberately preserves scratch.
+            self.commit_reboot_lost(&proof, call)?;
+            proof
+                .release()
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         }
-        // Recovery needs the persisted binding, not a fresh Git inspection of
-        // the worktree the interrupted writer left behind.
-        let Ok(fences) = self.writer_fences() else {
-            return Ok(false);
-        };
-        let fence = fences
-            .into_iter()
-            .find(|fence| fence.scope == Self::scope(record));
-        let directory = match fence {
-            Some(fence) => provenant_os::fs::Directory::open_anchor(
-                fence.reservation.parent().ok_or(RunError::UnsafePath)?,
-            )?,
-            None => self.attempt_dir(record.run_id, record.attempt_id, false)?,
-        };
-        let Ok(recovery) = custody::acquire_recovery(
-            directory,
-            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-            call.cancel,
-            call.clock,
-        ) else {
-            return Ok(false);
-        };
-        let Some(proof) = recovery
-            .after_reboot(&attempt, Self::scope(record))
-            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
-        else {
-            return Ok(false);
-        };
-        self.commit_reboot_lost(&proof, call)?;
-        proof
-            .release()
-            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         self.set_temporary_retained(record.attempt_id, false, call)?;
-        Ok(true)
+        Ok(Some(Reconciled::Finished))
     }
     /// Writer exclusion for an attempt, taken without waiting: failure means a
     /// guardian (or an inheritor of its lease) still holds custody.
@@ -726,8 +835,17 @@ impl RunStore {
         errors
     }
     // Cancellation coordinates with a real guardian handoff under a hard cap.
-    #[allow(clippy::disallowed_methods)]
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
+        self.cancel_with_observer(id, reason, call, &SystemProcessObserver)
+    }
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn cancel_with_observer(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<CancelReceipt> {
         // Half the budget for waiting on the handoff; the rest for the store.
         let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
         let deadline = std::time::Instant::now() + std::time::Duration::from_micros(remaining / 2);
@@ -757,8 +875,16 @@ impl RunStore {
         }
         loop {
             let record = self.record(id, call)?;
-            if self.settle_rebooted(&record, call)? {
-                return Ok(CancelReceipt::AlreadyTerminal);
+            if let Some(state) = self.settle_rebooted(&record, call, observer)? {
+                return Ok(match state {
+                    Reconciled::Finished => CancelReceipt::AlreadyTerminal,
+                    Reconciled::Uncertain { reason } => CancelReceipt::Unobservable {
+                        reason: reason.to_string(),
+                    },
+                    other => CancelReceipt::Unobservable {
+                        reason: format!("{other:?}"),
+                    },
+                });
             }
             match record.state {
                 AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
@@ -1141,6 +1267,15 @@ impl RunStore {
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
+        self.reconcile_with_observer(run, providers, call, &SystemProcessObserver)
+    }
+    pub(crate) fn reconcile_with_observer(
+        &self,
+        run: RunId,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<Vec<(AttemptId, Reconciled)>> {
         let mut ids: Vec<String> = call.retry(|| {
             let mut query = self
                 .db
@@ -1160,7 +1295,7 @@ impl RunStore {
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
             let state = self
-                .reconcile_attempt(id, providers, call)
+                .reconcile_attempt(id, providers, call, observer)
                 .unwrap_or_else(|error| {
                     Some(Reconciled::uncertain(UncertainReason::ReconcileFailed {
                         error: error.to_string(),
@@ -1272,9 +1407,10 @@ impl RunStore {
         &self,
         record: &AttemptRecord,
         call: &Request<'_>,
+        observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
-        if self.settle_rebooted(record, call)? {
-            return Ok(Some(Reconciled::Finished));
+        if let Some(state) = self.settle_rebooted(record, call, observer)? {
+            return Ok(Some(state));
         }
         let id = record.attempt_id;
         let scope = Self::scope(record);
@@ -1415,12 +1551,13 @@ impl RunStore {
         id: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
+        observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
         if matches!(record.state, AttemptState::Terminal { .. }) {
-            return self.reconcile_terminal_temporary(&record, call);
+            return self.reconcile_terminal_temporary(&record, call, observer);
         }
-        self.reconcile_live_attempt(&record, providers, call)
+        self.reconcile_live_attempt(&record, providers, call, observer)
             .map(Some)
     }
 
@@ -1429,14 +1566,15 @@ impl RunStore {
         record: &AttemptRecord,
         providers: &dyn Providers,
         call: &Request<'_>,
+        observer: &dyn ProcessObserver,
     ) -> Result<Reconciled> {
         let id = record.attempt_id;
         let scope = Self::scope(record);
         if record.state == AttemptState::Queued {
             return Ok(Reconciled::Queued);
         }
-        if self.settle_rebooted(record, call)? {
-            return Ok(Reconciled::Finished);
+        if let Some(state) = self.settle_rebooted(record, call, observer)? {
+            return Ok(state);
         }
         let dir = || self.attempt_dir(record.run_id, id, false);
         match custody::reattach(dir()?, scope) {
@@ -1467,7 +1605,7 @@ impl RunStore {
                             Ok(report) if report.survivors.is_empty() => {
                                 drop(recovery);
                                 // The exit is settled: commit it as any other.
-                                self.reconcile_attempt(id, providers, call)
+                                self.reconcile_attempt(id, providers, call, observer)
                                     .map(|state| state.unwrap_or(Reconciled::Finished))
                             }
                             Ok(report) => Ok(Reconciled::Escaped {
