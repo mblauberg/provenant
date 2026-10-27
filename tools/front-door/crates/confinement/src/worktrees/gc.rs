@@ -990,6 +990,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn foreign_output_recency_uses_only_declared_directory_mtime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let output = temp.path().join("target");
+        std::fs::create_dir_all(output.join("nested"))?;
+        let artifact = output.join("nested/artifact");
+        std::fs::write(&artifact, "output")?;
+        let set_time = |path: &Path, seconds| -> std::io::Result<()> {
+            std::fs::File::open(path)?.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+            )
+        };
+        set_time(temp.path(), 100)?;
+        set_time(&output, 200)?;
+        set_time(&artifact, 1_000)?;
+        let root = Directory::open_anchor(temp.path())?;
+        let mut protected = ProtectedPaths::new(&[]);
+        protected.ignored.insert("target".into());
+        let policy = WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &["target".into()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: true,
+            foreign_idle_before_ns: None,
+        };
+        assert_eq!(newest_foreign(&root, &protected, &policy)?, 200_000_000_000);
+        set_time(&artifact, 2_000)?;
+        assert_eq!(newest_foreign(&root, &protected, &policy)?, 200_000_000_000);
+        set_time(&output, 300)?;
+        assert_eq!(newest_foreign(&root, &protected, &policy)?, 300_000_000_000);
+        Ok(())
+    }
+
+    #[test]
     fn removal_skips_idle_cap_and_foreign_skips_declared_output_contents()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

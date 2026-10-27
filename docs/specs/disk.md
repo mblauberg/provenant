@@ -110,8 +110,10 @@ are required. Repository custody protects registration rechecks; every
 worktree is verified against the Git common directory. The primary stays
 protected and local refs survive this policy's removals.
 Foreign idleness scans the non-output tree within 1,000,000 entries and five
-seconds. Declared ignored output contributes its directory-entry mtime rather
-than a recursive idle scan. Removal still checks nested repository boundaries.
+seconds. Declared ignored output contributes only its top-level directory mtime:
+the scanner skips its contents, so neither deep writes nor the worktree root
+stand in for output age. Root and non-output mtimes independently protect recent
+work outside output. Removal still checks nested repository boundaries.
 Brief repository custody establishes writer state. Bulk output pruning holds
 writer custody only. Exclusive repository custody is reacquired after pruning
 for the final recheck and Git removal.
