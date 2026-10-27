@@ -1605,6 +1605,7 @@ mod tests {
                         dry_run,
                         project_owners: [owner.clone()].into(),
                         protected_owners: [(owner.clone(), state)].into(),
+                        selected_only: false,
                         free_floor_bytes: None,
                     };
                     let mut probes = 0;

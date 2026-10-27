@@ -149,6 +149,7 @@ fn collect_resolved(
         free_floor_bytes: None,
         protected_owners: Default::default(),
         project_owners: Default::default(),
+        selected_only: false,
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;

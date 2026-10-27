@@ -526,7 +526,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         command.idle_days
     };
     let mut worktree_cleanup = Vec::new();
-    for project in projects.iter_mut().filter(|_| !command.pressure) {
+    for project in &mut projects {
         let settings = config
             .gc
             .projects
@@ -543,9 +543,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             |context, cancel| {
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
-                let (upstream, upstream_error) = match crate::gc_support::fetch_default(context) {
-                    Ok(upstream) => (upstream, None),
-                    Err(error) => (None, Some(error.to_string())),
+                let (upstream, upstream_error) = if command.pressure {
+                    (None, None)
+                } else {
+                    match crate::gc_support::fetch_default(context) {
+                        Ok(upstream) => (upstream, None),
+                        Err(error) => (None, Some(error.to_string())),
+                    }
                 };
                 // Fetch can take a while, so begin the single sweep snapshot
                 // only after it completes. A stale snapshot is refreshed by
@@ -610,8 +614,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         foreign_idle_before_ns: Some(
                             now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
                         ),
-                        foreign_merged_clean: settings.foreign_worktrees
-                            == provenant_config::ForeignWorktrees::MergedClean,
+                        foreign_merged_clean: !command.pressure
+                            && settings.foreign_worktrees
+                                == provenant_config::ForeignWorktrees::MergedClean,
                         dry_run: command.dry_run || !command.apply,
                     },
                     cancel,

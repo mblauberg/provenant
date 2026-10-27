@@ -78,3 +78,5 @@ remaining errors with the owner of each reported path.
 
 Automatic pressure collection honours `gc.schedule=false`. Writer admission
 collects only the launching project; the disk guard uses scheduled enumeration.
+Pressure sweeps prune declared idle output, with a one-day floor below the
+configured free-space floor, while retaining worktrees and skipping fetches.

@@ -145,7 +145,8 @@ survive. The same policy visits indexed child stores. Disk inventory reports
 Writer admission makes one collection attempt bounded to five seconds before
 refusing low disk, then rechecks the worktree, state and cache volumes.
 Refusals include reported reclaimed bytes. A timeout can remove data without
-returning a byte report. Pressure collection skips Git fetches and worktree
+returning a byte report. Pressure collection still prunes declared idle output,
+using the one-day idle floor when below the free floor. It skips Git fetches and worktree
 deletion and honours `gc.schedule=false`. Admission-triggered collection
 selects only the launching project, including its caches and temporary run
 payloads; it does not enumerate other registered projects. Applied sweeps share

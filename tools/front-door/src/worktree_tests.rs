@@ -1318,6 +1318,9 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
 
 fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> Result {
     let mut rig = repository()?;
+    fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
+    git(&rig, &["add", ".gitignore"])?;
+    git(&rig, &["commit", "-qm", "ignore output"])?;
     ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let worktree = rig.project.join(".worktrees/idle");
     let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
@@ -1418,6 +1421,42 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
     assert!(removed["data"]["free_bytes_before"].is_u64());
     assert!(removed["data"]["free_bytes_after"].is_u64());
     assert!(!cache.exists());
+    let project_id = project
+        .file_name()
+        .ok_or("project id")?
+        .to_str()
+        .ok_or("project id")?;
+    fs::write(
+        rig.state.join("config.toml"),
+        format!("schema_version=1\n[gc.projects.'{project_id}']\nregenerable=['target']\n"),
+    )?;
+    fs::create_dir(worktree.join("target"))?;
+    fs::write(worktree.join("target/artifact"), "old output")?;
+    age_gc_output(&worktree.join("target"))?;
+    let pressure = ok(
+        &rig,
+        &[
+            "gc",
+            "--scheduled",
+            "--pressure",
+            "--apply",
+            "--free-floor",
+            "18446744073709551615B",
+            "--json",
+        ],
+    )?;
+    assert!(worktree.is_dir());
+    assert!(!worktree.join("target").exists());
+    assert_eq!(
+        pressure["data"]["worktree_cleanup"][0]["idle_output"][0]["removed"],
+        true
+    );
+    assert!(
+        pressure["data"]["worktree_cleanup"][0]["worktrees"]["removed"]
+            .as_array()
+            .ok_or("removed")?
+            .is_empty()
+    );
     Ok(())
 }
 
