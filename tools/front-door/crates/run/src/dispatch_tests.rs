@@ -3334,13 +3334,13 @@ fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    // A ledger from before lane classes, holding one lease.
+    // A ledger from before lane classes, holding one lease and no start, so
+    // the upgrade holds no class (the carried start has its own tests).
     old_ledger(
         &store,
         "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
          CREATE INDEX lease_projects ON leases(project);
          CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
-         INSERT INTO spacing(id,last_start) VALUES (1,10000);
          INSERT INTO leases(attempt,project,store) VALUES ('legacy','project',x'2f6e6f77686572652f');
          PRAGMA user_version=1;",
     )?;
