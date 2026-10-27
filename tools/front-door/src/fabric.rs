@@ -2063,6 +2063,7 @@ impl BinaryRunOwner<'_> {
                 ref operation_id,
                 ref prompt,
                 expected_generation,
+                no_fallback,
             } => {
                 if self.factory.context.in_lane {
                     if target
@@ -2097,7 +2098,7 @@ impl BinaryRunOwner<'_> {
                 let session = self.session(budget, cancel)?;
                 let call = self.call(budget, cancel);
                 let (run, started) = self.with_edge(|edge| {
-                    provenant_cli::run::continue_attempt(
+                    provenant_cli::run::continue_attempt_mode(
                         &session,
                         edge,
                         target.attempt,
@@ -2105,6 +2106,7 @@ impl BinaryRunOwner<'_> {
                         prompt.clone(),
                         expected_generation,
                         &call,
+                        !no_fallback,
                     )
                 })?;
                 let receipt =
@@ -2237,8 +2239,11 @@ pub(crate) fn advance_settled_graphs(
         &settled.roots.checkout,
         host.configuration_root.clone(),
     )?;
-    settle_owned_worktree(&settled, &roots, workers, None)?;
-    let mut first_error = None;
+    // A lane's settlement must not stop unrelated graphs from advancing.
+    // Settlement records its own retention reason on the attempt.
+    let settlement_error = settle_owned_worktree(&settled, &roots, workers, None).err();
+    let settlement_reason = settlement_error.as_ref().map(|error| error.to_string());
+    let mut first_error = settlement_error;
     for id in FileJournal::graph_ids(&roots.state, settled.project_id)? {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let Some(execution) =
@@ -2283,16 +2288,33 @@ pub(crate) fn advance_settled_graphs(
             advance(&execution.document, &mut owner, &mut journal)?;
             Ok(())
         })();
+        // If the attempt store itself refused the retention receipt, retain
+        // the error on the graph containing this lane, without affecting
+        // the status or advancement of any other graph.
+        let settlement_reason = settlement_reason.as_deref().filter(|_| {
+            FileJournal::read_checkpoint(&roots.state, settled.project_id, &id)
+                .ok()
+                .flatten()
+                .is_some_and(|checkpoint| {
+                    checkpoint.nodes.iter().any(|node| {
+                        node.attempts.iter().any(|attempt| {
+                            attempt
+                                .attempt_ref
+                                .as_deref()
+                                .and_then(|reference| reference.rsplit_once('/'))
+                                .and_then(|(_, attempt)| attempt.parse().ok())
+                                == Some(settled.attempt_id)
+                        })
+                    })
+                })
+        });
         // The guardian's output is discarded, so `graph status` shows a failure.
+        let advance_reason = result.as_ref().err().map(|error| error.to_string());
         let recorded = FileJournal::set_advance_error(
             &roots.state,
             settled.project_id,
             &id,
-            result
-                .as_ref()
-                .err()
-                .map(|error| error.to_string())
-                .as_deref(),
+            advance_reason.as_deref().or(settlement_reason),
         );
         if let Err(error) = result {
             first_error.get_or_insert(error);
@@ -2339,105 +2361,225 @@ fn settle_owned_worktree(
     let Some(writer) = task.writer else {
         return Ok(());
     };
-    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
-    let mut settings = config
-        .gc
-        .projects
-        .get(&settled.project_id.to_string())
-        .cloned()
-        .unwrap_or_default();
-    if !settings.regenerable.iter().any(|name| name == "target") {
-        settings.regenerable.push("target".into());
+    if let Some(receipt) = replay_worktree_settlement(
+        store
+            .worktree_settlement(record.attempt_id, &call)?
+            .as_ref(),
+        &writer.worktree,
+    )? {
+        record_worktree_settlement(&store, record.attempt_id, &receipt)?;
+        return Ok(());
     }
-    let result = crate::worktrees::with_context(
-        roots,
-        &settled.roots.home,
-        &writer.project,
-        std::time::Duration::from_secs(120),
-        workers,
-        |context, cancel| {
-            let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
-                .map_err(worktrees::WorktreeError::from)?;
-            let Some(owner) = worktrees::load_owner(&tree)? else {
-                return Ok(None);
-            };
-            if owner.origin != WorktreeOrigin::Lane || owner.attempt_id != Some(record.attempt_id) {
-                return Ok(None);
-            }
-            let states = || {
-                crate::gc_support::lane_states(
-                    roots,
-                    &settled.roots.home,
-                    &settled.roots.checkout,
-                    settled.project_id,
-                )
-                .ok()
-            };
-            let terminal = |path: &Path| {
-                states().as_ref().and_then(|snapshot| snapshot.get(path)) == Some(&true)
-            };
-            let no_live =
-                |path: &Path| states().is_some_and(|snapshot| snapshot.no_live_lanes(path));
-            let upstream = delivery_override
-                .or(record.delivery.as_ref())
-                .filter(|receipt| {
-                    matches!(
-                        receipt.state,
-                        provenant_run::WriterDeliveryState::Delivered { .. }
+    let pickup = store.delivered(record.attempt_id, &call)?;
+    let delivery_request = pickup
+        .as_ref()
+        .map(|(request, _)| request)
+        .or(task.deliver.as_ref());
+    let delivery = delivery_override
+        .or(pickup.as_ref().map(|(_, receipt)| receipt))
+        .or(record.delivery.as_ref());
+    if let Some(reason) =
+        settlement_retention_reason(&record.state, task.deliver.is_some(), delivery)
+    {
+        let receipt = serde_json::json!({
+            "schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason
+        });
+        record_worktree_settlement(&store, record.attempt_id, &receipt)?;
+        return Ok(());
+    }
+    let mut pruning_intent = None;
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
+        let settings = config
+            .gc
+            .projects
+            .get(&settled.project_id.to_string())
+            .cloned()
+            .unwrap_or_default();
+        Ok(crate::worktrees::with_context(
+            roots,
+            &settled.roots.home,
+            &writer.project,
+            std::time::Duration::from_secs(120),
+            workers,
+            |context, cancel| {
+                let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
+                    .map_err(worktrees::WorktreeError::from)?;
+                let Some(owner) = worktrees::load_owner(&tree)? else {
+                    return Ok(None);
+                };
+                if owner.origin != WorktreeOrigin::Lane
+                    || owner.attempt_id != Some(record.attempt_id)
+                {
+                    return Ok(None);
+                }
+                let states = || {
+                    crate::gc_support::lane_states(
+                        roots,
+                        &settled.roots.home,
+                        &settled.roots.checkout,
+                        settled.project_id,
                     )
-                })
-                .map(|receipt| {
-                    if receipt.remote.is_empty() {
-                        format!("refs/heads/{}", receipt.branch)
-                    } else {
-                        format!("refs/remotes/{}/{}", receipt.remote, receipt.branch)
-                    }
+                    .ok()
+                };
+                let terminal = |path: &Path| {
+                    states().as_ref().and_then(|snapshot| snapshot.get(path)) == Some(&true)
+                };
+                let no_live =
+                    |path: &Path| states().is_some_and(|snapshot| snapshot.no_live_lanes(path));
+                let upstream = delivery
+                    .filter(|receipt| {
+                        matches!(
+                            receipt.state,
+                            provenant_run::WriterDeliveryState::Delivered { .. }
+                        )
+                    })
+                    .map(|receipt| {
+                        if receipt.remote.is_empty() {
+                            format!("refs/heads/{}", receipt.branch)
+                        } else {
+                            format!("refs/remotes/{}/{}", receipt.remote, receipt.branch)
+                        }
+                    });
+                let upstream = upstream.as_deref().unwrap_or(&owner.base);
+                let git = provenant_os::git::git_executable()
+                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                let pinned = provenant_run::resolve_git_base(&git, &writer.project, upstream)
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                let Some(head) = record.head.or_else(|| {
+                    (record.provider_launched == Some(false))
+                        .then(|| owner.base.parse().ok())
+                        .flatten()
+                }) else {
+                    return Err(worktrees::WorktreeError::InvalidOutput.into());
+                };
+                let policy = WorktreeGcPolicy {
+                    // A push or open PR has not landed the branch. Only an
+                    // integration receipt grants local branch cleanup.
+                    upstream: delivery_request
+                        .filter(|request| {
+                            matches!(
+                                request.mode,
+                                provenant_records::run::DeliveryMode::Integrate(_)
+                            )
+                        })
+                        .map(|_| pinned),
+                    terminal: &terminal,
+                    no_live_lanes: &no_live,
+                    regenerable: &settings.regenerable,
+                    keep: &settings.keep,
+                    written_before_ns: i128::MAX,
+                    dry_run: false,
+                };
+                let intent = serde_json::json!({
+                    "schema_version":1, "state":"pruning", "worktree":writer.worktree,
+                    "branch":format!("refs/heads/{}", owner.branch)
                 });
-            let upstream = upstream.as_deref().unwrap_or(&owner.base);
-            let git = provenant_os::git::git_executable()
-                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-            let pinned = provenant_run::resolve_git_base(&git, &writer.project, upstream)
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-            let Some(head) = record.head.or_else(|| {
-                (record.provider_launched == Some(false))
-                    .then(|| owner.base.parse().ok())
-                    .flatten()
-            }) else {
-                return Err(worktrees::WorktreeError::InvalidOutput.into());
-            };
-            let policy = WorktreeGcPolicy {
-                upstream: Some(pinned),
-                terminal: &terminal,
-                no_live_lanes: &no_live,
-                regenerable: &settings.regenerable,
-                keep: &settings.keep,
-                written_before_ns: i128::MAX,
-                dry_run: false,
-            };
-            Ok(Some(worktrees::prune_owned(
-                context,
-                &writer.worktree,
-                record.attempt_id,
-                head,
-                pinned,
-                &policy,
-                cancel,
-            )?))
-        },
-    );
+                record_worktree_settlement(&store, record.attempt_id, &intent)
+                    .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
+                pruning_intent = Some(intent);
+                Ok(Some(worktrees::prune_owned(
+                    context,
+                    &writer.worktree,
+                    record.attempt_id,
+                    head,
+                    pinned,
+                    &policy,
+                    cancel,
+                )?))
+            },
+        )?)
+    })();
     let receipt = match result {
         Ok(None) => return Ok(()),
         Ok(Some(result)) => {
             serde_json::json!({"schema_version":1, "state":"pruned", "worktree": writer.worktree, "result":result})
         }
         Err(error) => {
-            serde_json::json!({"schema_version":1, "state":"retained", "worktree": writer.worktree, "reason":error.to_string()})
+            if let Some(mut pruned) =
+                replay_worktree_settlement(pruning_intent.as_ref(), &writer.worktree)?
+            {
+                pruned["cleanup_warning"] = serde_json::json!(error.to_string());
+                pruned
+            } else {
+                serde_json::json!({"schema_version":1, "state":"retained", "worktree": writer.worktree, "reason":error.to_string()})
+            }
         }
     };
-    store.record_worktree_settlement(record.attempt_id, &receipt, &call)?;
+    // The Git mutation has its own 120-second bound. Start a fresh storage
+    // budget after it so a completed prune can always publish its receipt.
+    record_worktree_settlement(&store, record.attempt_id, &receipt)?;
     Ok(())
+}
+
+fn record_worktree_settlement(
+    store: &provenant_run::RunStore,
+    id: provenant_core::AttemptId,
+    receipt: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        cancel: &cancel,
+    };
+    store.record_worktree_settlement(id, receipt, &call)?;
+    Ok(())
+}
+
+fn settlement_retention_reason(
+    state: &provenant_run::AttemptState,
+    delivery_requested: bool,
+    delivery: Option<&provenant_run::WriterDeliveryReceipt>,
+) -> Option<&'static str> {
+    if !matches!(
+        state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Succeeded,
+            ..
+        }
+    ) {
+        return Some("lane did not succeed; worktree retained for resume");
+    }
+    if (delivery_requested || delivery.is_some())
+        && !delivery.is_some_and(|receipt| {
+            matches!(
+                receipt.state,
+                provenant_run::WriterDeliveryState::Delivered { .. }
+            )
+        })
+    {
+        return Some("delivery has not succeeded; worktree retained for pickup");
+    }
+    None
+}
+
+fn replay_worktree_settlement(
+    receipt: Option<&serde_json::Value>,
+    worktree: &Path,
+) -> Result<Option<serde_json::Value>, std::io::Error> {
+    let Some(receipt) = receipt else {
+        return Ok(None);
+    };
+    if receipt["state"] == "pruned" {
+        return Ok(Some(receipt.clone()));
+    }
+    if receipt["state"] != "pruning" || receipt["worktree"] != serde_json::json!(worktree) {
+        return Ok(None);
+    }
+    match std::fs::symlink_metadata(worktree) {
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut receipt = receipt.clone();
+            receipt["state"] = serde_json::json!("pruned");
+            receipt["recovered_from_intent"] = serde_json::json!(true);
+            Ok(Some(receipt))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn settle_delivered_attempt(
@@ -2451,10 +2593,31 @@ pub(crate) fn settle_delivered_attempt(
     let Some(id) = reply.result.data["attempt_id"].as_str() else {
         return Ok(());
     };
+    // `lane deliver --deliver none` has no delivery receipt to settle.
+    if reply.result.data["delivery"].is_null() {
+        return Ok(());
+    }
     let id = id.parse()?;
     let delivery = serde_json::from_value::<provenant_run::WriterDeliveryReceipt>(
         reply.result.data["delivery"].clone(),
     )?;
+    if matches!(
+        delivery.state,
+        provenant_run::WriterDeliveryState::Delivered { .. }
+    ) {
+        let context = Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        provenant_fabric_runtime::graph::FileJournal::retry_delivered_attempt(
+            &edge.roots.state,
+            context.identity.project,
+            id,
+            budget,
+            &cancel,
+            &clock,
+        )?;
+    }
     if let Some(receipt) = settle_attempt(edge, id, Some(&delivery), workers)? {
         reply.human.push_str(&format!(
             "worktree {}{}\n",
@@ -2547,6 +2710,11 @@ fn settle_attempt(
         sealed: None,
     };
     settle_owned_worktree(&settled, edge.roots, workers, delivery)?;
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        cancel: &cancel,
+    };
     Ok(store.worktree_settlement(id, &call)?)
 }
 
@@ -2584,22 +2752,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 .ok_or(FacadeError::StateCorrupt)?;
             let (_, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
             let id = id.parse().map_err(|_| FacadeError::StateCorrupt)?;
-            let chunk = session
-                .service()
-                .output(
-                    id,
-                    provenant_run::ArtifactPart::Result,
-                    provenant_run::ByteRange {
-                        offset: 0,
-                        max_bytes: 4096,
-                    },
-                    &call,
-                )
-                .map_err(run_error)?;
+            let attempt = session.service().status(id, &call).map_err(run_error)?;
             body.push_str(&format!(
-                "### {} ({id})\n\n{}\n\n",
-                node.id,
-                String::from_utf8_lossy(&chunk.bytes)
+                "Node {}: attempt {id}, run {}\n\n",
+                node.id, attempt.run_id
             ));
         }
         let url = provenant_run::HostDeliveryContext::capture()
@@ -2617,32 +2773,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         replay: provenant_fabric_runtime::graph::Replay<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
-        let delivery = if let Some(mode) = replay.delivery {
-            let branch = if let Some(path) = worktree {
-                let writer = provenant_run::resolve_writer(
-                    self.factory.context.roots.state.as_path(),
-                    &self.factory.cwd,
-                    Path::new(path),
-                )
-                .map_err(run_error)?;
-                provenant_run::prepare_writer(
-                    &writer,
-                    self.factory.context.roots.state.as_path(),
-                    self.factory.context.identity.project,
-                )
-                .map_err(run_error)?
-                .branch
-                .as_str()
-                .trim_start_matches("refs/heads/")
-                .to_owned()
-            } else {
-                String::new()
-            };
-            provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
-                .map_err(run_error)?
-        } else {
-            None
-        };
         let mut owner = BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
@@ -2658,6 +2788,32 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             };
             (target, Some(reference.to_owned()))
         } else {
+            let delivery = if let Some(mode) = replay.delivery {
+                let branch = if let Some(path) = worktree {
+                    let writer = provenant_run::resolve_writer(
+                        self.factory.context.roots.state.as_path(),
+                        &self.factory.cwd,
+                        Path::new(path),
+                    )
+                    .map_err(run_error)?;
+                    provenant_run::prepare_writer(
+                        &writer,
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                    )
+                    .map_err(run_error)?
+                    .branch
+                    .as_str()
+                    .trim_start_matches("refs/heads/")
+                    .to_owned()
+                } else {
+                    String::new()
+                };
+                provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
+                    .map_err(run_error)?
+            } else {
+                None
+            };
             let operation_id = graph_operation("graph-attempt-operation", key)?;
             let input = SubmitInput::Submit {
                 operation_id,
@@ -2729,13 +2885,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         });
                     }
                 }
+                let pickup = store
+                    .delivered(attempt.attempt_id, &call)
+                    .map_err(run_error)?;
+                let effective_delivery = pickup
+                    .as_ref()
+                    .map(|(_, receipt)| receipt)
+                    .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
                 Ok(AttemptObservation::Terminal {
                     launched,
                     attempt_ref: reference,
                     outcome: match outcome {
                         Outcome::Succeeded
-                            if attempt.delivery.as_ref().is_some_and(|delivery| {
+                            if effective_delivery.is_some_and(|delivery| {
                                 matches!(
                                     delivery.state,
                                     provenant_records::run::WriterDeliveryState::Failed { .. }
@@ -2822,7 +2985,21 @@ impl Factory {
                     provenant_records::Limits::CONFIG,
                 )
                 .map_err(|_| FacadeError::InvalidInput)?;
+                if let Some(branch) = &document.integration_branch {
+                    provenant_run::HostDeliveryContext::validate_integration_target(
+                        &self.cwd, branch,
+                    )
+                    .map_err(run_error)?;
+                }
                 for node in &document.nodes {
+                    if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
+                        &node.delivery
+                    {
+                        provenant_run::HostDeliveryContext::validate_integration_target(
+                            &self.cwd, target,
+                        )
+                        .map_err(run_error)?;
+                    }
                     if node.prompt.len() as u64 > self.context.config.limits.body_bytes {
                         return Err(FacadeError::InvalidInput);
                     }
@@ -3320,6 +3497,120 @@ pub fn events(
 }
 #[cfg(test)]
 mod peer_tests {
+    #[test]
+    fn deliver_none_does_not_try_to_settle_a_missing_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct NoWorkers;
+        impl provenant_confinement::worktrees::WorkerObserver for NoWorkers {
+            fn observe_roots(
+                &self,
+                _: &[std::path::PathBuf],
+            ) -> std::collections::BTreeMap<
+                std::path::PathBuf,
+                provenant_confinement::worktrees::WorkerState,
+            > {
+                std::collections::BTreeMap::new()
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let assets = root.join("assets");
+        std::fs::create_dir(&home)?;
+        std::fs::create_dir(&assets)?;
+        let roots = crate::roots::child(&home, &assets, root.join("state"))?;
+        let edge = provenant_cli::run::Edge {
+            roots: &roots,
+            home: &home,
+            assets: &assets,
+            cwd: &assets,
+        };
+        let mut reply = provenant_cli::run::Reply {
+            result: provenant_records::CommandResult::new(
+                "lane deliver",
+                provenant_records::Outcome::Ok,
+                serde_json::json!({"attempt_id":"unused", "deliver":"none"}),
+            ),
+            human: "delivery disabled\n".into(),
+        };
+        super::settle_delivered_attempt(&edge, &mut reply, &NoWorkers)?;
+        assert_eq!(reply.human, "delivery disabled\n");
+        assert!(reply.result.data["worktree_settlement"].is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_run::{AttemptState, Outcome, WriterDeliveryReceipt, WriterDeliveryState};
+        let delivered = WriterDeliveryReceipt {
+            schema_version: 1,
+            remote: "origin".into(),
+            branch: "lane".into(),
+            head: None,
+            state: WriterDeliveryState::Delivered { pull_request: None },
+        };
+        for outcome in [
+            Outcome::Failed,
+            Outcome::RateLimited,
+            Outcome::Cancelled,
+            Outcome::TimedOut,
+            Outcome::Rejected,
+        ] {
+            let state = AttemptState::Terminal {
+                outcome,
+                exit_code: Some(1),
+                finished_at: provenant_core::WallTime::from_micros(0)?,
+                reason: None,
+            };
+            assert!(super::settlement_retention_reason(&state, false, None).is_some());
+            assert!(super::settlement_retention_reason(&state, true, Some(&delivered)).is_some());
+        }
+        let succeeded = AttemptState::Terminal {
+            outcome: Outcome::Succeeded,
+            exit_code: Some(0),
+            finished_at: provenant_core::WallTime::from_micros(0)?,
+            reason: None,
+        };
+        assert!(super::settlement_retention_reason(&succeeded, false, None).is_none());
+        assert!(super::settlement_retention_reason(&succeeded, true, Some(&delivered)).is_none());
+        assert!(super::settlement_retention_reason(&succeeded, true, None).is_some());
+        let failed_delivery = WriterDeliveryReceipt {
+            state: WriterDeliveryState::NotAttempted,
+            ..delivered
+        };
+        assert!(
+            super::settlement_retention_reason(&succeeded, true, Some(&failed_delivery)).is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_intent_replays_a_prune_after_a_crash() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let worktree = temp.path().join("lane");
+        std::fs::create_dir(&worktree)?;
+        let intent = serde_json::json!({
+            "schema_version":1, "state":"pruning", "worktree":worktree
+        });
+        assert!(super::replay_worktree_settlement(Some(&intent), &worktree)?.is_none());
+        std::fs::remove_dir(&worktree)?;
+        let receipt = super::replay_worktree_settlement(Some(&intent), &worktree)?
+            .ok_or("missing recovered prune receipt")?;
+        assert_eq!(receipt["state"], "pruned");
+        assert_eq!(receipt["recovered_from_intent"], true);
+        assert_eq!(
+            super::replay_worktree_settlement(Some(&receipt), &worktree)?,
+            Some(receipt)
+        );
+        assert!(
+            super::replay_worktree_settlement(Some(&intent), &temp.path().join("other"))?.is_none()
+        );
+        let retained = serde_json::json!({"state":"retained", "worktree":worktree});
+        assert!(super::replay_worktree_settlement(Some(&retained), &worktree)?.is_none());
+        Ok(())
+    }
+
     #[test]
     fn submit_io_keeps_the_inner_operation_without_inventing_a_path() {
         let error = super::scope_io(super::FacadeError::io("access Fabric database"), "submit");

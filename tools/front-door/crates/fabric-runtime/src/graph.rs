@@ -300,6 +300,77 @@ pub struct FileJournal {
 }
 
 impl FileJournal {
+    /// A successful explicit delivery reopens only nodes fenced by that attempt.
+    pub fn retry_delivered_attempt(
+        root: &StateRoot,
+        project: ProjectId,
+        attempt: provenant_core::AttemptId,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), JournalError> {
+        let attempt = attempt.to_string();
+        for id in Self::graph_ids(root, project)? {
+            let snapshot = match Self::read_checkpoint(root, project, &id) {
+                Ok(Some(checkpoint)) => checkpoint,
+                Ok(None) => continue,
+                Err(error) => {
+                    Self::set_advance_error(root, project, &id, Some(&error.to_string()))?;
+                    continue;
+                }
+            };
+            if snapshot.cancelled
+                || !snapshot.nodes.iter().any(|node| {
+                    node.state == NodeState::Failed
+                        && node.attempts.last().is_some_and(|last| {
+                            last.outcome == Some(AttemptOutcome::OtherFailure)
+                                && last
+                                    .attempt_ref
+                                    .as_deref()
+                                    .and_then(|reference| reference.rsplit('/').next())
+                                    == Some(attempt.as_str())
+                        })
+                })
+            {
+                continue;
+            }
+            let mut journal = Self::open(root, project, &id, budget, cancel, clock)?;
+            let Some(mut checkpoint) = journal.load(&id)? else {
+                continue;
+            };
+            if checkpoint.cancelled {
+                continue;
+            }
+            let mut changed = false;
+            for node in &mut checkpoint.nodes {
+                if node.state != NodeState::Failed {
+                    continue;
+                }
+                if let Some(last) = node.attempts.last_mut()
+                    && last.outcome == Some(AttemptOutcome::OtherFailure)
+                    && last
+                        .attempt_ref
+                        .as_deref()
+                        .and_then(|reference| reference.rsplit('/').next())
+                        == Some(attempt.as_str())
+                {
+                    node.state = NodeState::Running;
+                    last.state = AttemptState::Starting;
+                    last.outcome = None;
+                    changed = true;
+                }
+            }
+            if changed {
+                for node in &mut checkpoint.nodes {
+                    if node.state == NodeState::Blocked {
+                        node.state = NodeState::Pending;
+                    }
+                }
+                journal.save(&checkpoint)?;
+            }
+        }
+        Ok(())
+    }
     pub fn open(
         root: &StateRoot,
         project: ProjectId,
@@ -959,6 +1030,12 @@ fn validate_plan(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
+        if let (Some(integration), Some(DeliveryMode::Integrate(target))) =
+            (&document.integration_branch, &node.delivery)
+            && integration != target
+        {
+            return Err("node integration target differs from graph integration branch");
+        }
         validate_access(node.access, node.worktree.as_deref())?;
         if node.access == AccessMode::ReadOnly
             && !matches!(node.delivery, None | Some(DeliveryMode::None))
@@ -1322,19 +1399,59 @@ mod tests {
 
     #[test]
     fn legacy_checkpoint_keeps_its_digest_without_delivery_fields() {
-        let document = graph(vec![node("reader", route("fixture"))]);
-        let mut owner = FakeOwner {
-            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
-            ..Default::default()
-        };
-        let result = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-        let mut legacy = serde_json::to_value(&result.checkpoint).unwrap();
-        legacy.as_object_mut().unwrap().remove("delivered");
-        legacy.as_object_mut().unwrap().remove("pull_request");
-        let parsed: GraphCheckpoint = serde_json::from_value(legacy.clone()).unwrap();
+        let fixture = include_str!("fixtures/legacy-graph-checkpoint.json");
+        for field in [
+            "delivery_required",
+            "delivered",
+            "pull_request",
+            "integration_branch",
+            "delivery",
+        ] {
+            assert!(!fixture.contains(&format!("\"{field}\"")));
+        }
+        let temp = crate::test_support::tempdir().expect("legacy fixture directory");
+        std::fs::write(temp.path().join("graph-g-test.json"), fixture)
+            .expect("write frozen fixture");
+        let directory = Directory::open_anchor(temp.path()).expect("fixture directory");
+        let stored = load_checkpoint(&directory, "g-test")
+            .expect("verify original digest")
+            .expect("legacy checkpoint");
         assert_eq!(
-            CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &legacy).unwrap(),
-            CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &parsed).unwrap()
+            stored.digest,
+            "sha256:9e6f6b7b7d78fee26418cb7ff5ef4e8e1149f7ba733514184259a680d8ecfa77"
+        );
+        let mut journal = MemoryJournal(Some(stored.checkpoint));
+        let mut owner = FakeOwner::default();
+        let result = advance(&stored.execution.document, &mut owner, &mut journal)
+            .expect("resume legacy graph");
+        assert_eq!(result.status, GraphStatus::Complete);
+        assert!(owner.calls.is_empty());
+        let mut corrupt: serde_json::Value = serde_json::from_str(fixture).expect("fixture JSON");
+        corrupt["execution"]["document"]["nodes"][0]["prompt"] = serde_json::json!("tampered");
+        std::fs::write(
+            temp.path().join("graph-g-test.json"),
+            serde_json::to_vec(&corrupt).expect("corrupt JSON"),
+        )
+        .expect("write corrupt fixture");
+        assert!(matches!(
+            load_checkpoint(&directory, "g-test"),
+            Err(JournalError::BadDigest)
+        ));
+    }
+
+    #[test]
+    fn graph_refuses_node_integration_target_mismatch() {
+        use provenant_records::run::DeliveryMode;
+        let mut writer = node("writer", route("fixture"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some(".worktrees/writer".into());
+        writer.delivery = Some(DeliveryMode::Integrate("origin/other".into()));
+        let mut document = graph(vec![writer]);
+        document.integration_branch = Some("origin/integration".into());
+        document.delivery = Some(DeliveryMode::Pr);
+        assert_eq!(
+            validate_plan(&document).err(),
+            Some("node integration target differs from graph integration branch")
         );
     }
 
@@ -1763,6 +1880,72 @@ mod file_tests {
                 attempt_ref: Some("fixture-attempt".into()),
             })
         }
+    }
+    #[test]
+    fn delivery_retry_reopens_only_the_matching_failed_attempt() {
+        let temp = crate::test_support::tempdir().expect("state fixture");
+        let base = std::fs::canonicalize(temp.path()).expect("absolute state");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+            .expect("private state");
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.clone());
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver).expect("state root");
+        let project = ProjectId::from_bytes([1; 16]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5).expect("budget");
+        let mut legacy: StoredCheckpoint =
+            serde_json::from_str(include_str!("fixtures/legacy-graph-checkpoint.json"))
+                .expect("legacy fixture");
+        let node = &mut legacy.checkpoint.nodes[0];
+        node.state = NodeState::Failed;
+        node.attempts[0].outcome = Some(AttemptOutcome::OtherFailure);
+        {
+            let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock)
+                .expect("journal");
+            journal.bind(legacy.execution).expect("bind execution");
+            journal.save(&legacy.checkpoint).expect("failed delivery");
+        }
+        FileJournal::retry_delivered_attempt(
+            &root,
+            project,
+            provenant_core::AttemptId::from_bytes([7; 16]),
+            budget,
+            &cancel,
+            &clock,
+        )
+        .expect("unrelated pickup");
+        assert_eq!(
+            FileJournal::read_checkpoint(&root, project, "g-test")
+                .expect("checkpoint")
+                .expect("graph")
+                .nodes[0]
+                .state,
+            NodeState::Failed
+        );
+        FileJournal::retry_delivered_attempt(
+            &root,
+            project,
+            "22222222222222222222222222222222".parse().expect("attempt"),
+            budget,
+            &cancel,
+            &clock,
+        )
+        .expect("successful pickup");
+        let checkpoint = FileJournal::read_checkpoint(&root, project, "g-test")
+            .expect("checkpoint")
+            .expect("graph");
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+        assert_eq!(
+            checkpoint.nodes[0].attempts[0].state,
+            AttemptState::Starting
+        );
+        assert_eq!(checkpoint.nodes[0].attempts[0].outcome, None);
+        assert!(
+            FileJournal::pending_execution(&root, project, "g-test")
+                .expect("pending graph")
+                .is_some()
+        );
     }
     #[test]
     fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "digest": "sha256:9e6f6b7b7d78fee26418cb7ff5ef4e8e1149f7ba733514184259a680d8ecfa77",
+  "checkpoint": {
+    "schema_version": 1,
+    "graph_id": "g-test",
+    "plan_digest": "sha256:2f7f01c7804da30a4f2c2f8ed9dc458e8b239bf79ad491babe15c9c82bb9b014",
+    "cancelled": false,
+    "nodes": [
+      {
+        "id": "reader",
+        "worktree": null,
+        "state": "succeeded",
+        "attempts": [
+          {
+            "key": {
+              "graph_id": "g-test",
+              "node_id": "reader",
+              "route_index": 0
+            },
+            "route": {
+              "adapter": "fixture",
+              "model": "fixture/model"
+            },
+            "state": "terminal",
+            "attempt_ref": "11111111111111111111111111111111/22222222222222222222222222222222",
+            "outcome": "succeeded",
+            "launched": true,
+            "launch_actor": "33333333333333333333333333333333"
+          }
+        ]
+      }
+    ]
+  },
+  "execution": {
+    "directory": "/legacy/project",
+    "document": {
+      "schema_version": 1,
+      "graph_id": "g-test",
+      "nodes": [
+        {
+          "id": "reader",
+          "prompt": "work for reader",
+          "access": "read_only",
+          "depends_on": [],
+          "route": {
+            "adapter": "fixture",
+            "model": "fixture/model"
+          }
+        }
+      ]
+    }
+  }
+}
