@@ -506,7 +506,7 @@ fn bootstrap_with(
                 .filter(|pid| *pid != 0)
         };
         let previous_pid = pid(&before);
-        let (ok, error) = run(
+        run(
             &["kickstart".as_ref(), "-k".as_ref(), service.as_ref()],
             home,
         )?;
@@ -527,15 +527,8 @@ fn bootstrap_with(
             }
             std::thread::park_timeout(remaining.min(Duration::from_millis(300)));
         }
-        let reason = "agent did not restart with a new running pid";
-        return Err(AgentError::Launchctl(
-            "kickstart",
-            if ok {
-                reason.into()
-            } else {
-                format!("{error}; {reason}")
-            },
-        ));
+        // A replaced binary can leave launchd's lightweight code requirement
+        // stale. Boot out and bootstrap to refresh it when kickstart stalls.
     }
     if loaded {
         run(&["bootout".as_ref(), service.as_ref()], home)?;
@@ -978,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn kickstart_failure_with_a_restarted_service_succeeds() {
+    fn kickstart_failure_with_a_restarted_service_needs_no_bootstrap() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let mut calls = Vec::new();
@@ -1004,15 +997,26 @@ mod tests {
     }
 
     #[test]
-    fn kickstart_requires_a_new_running_pid_even_when_the_command_succeeds() {
+    fn kickstart_without_a_new_running_pid_reports_bootstrap_failure() {
         use super::*;
         for kickstart_ok in [true, false] {
             let root = tempfile::tempdir().unwrap();
             let mut prints = 0;
+            let mut bootouts = 0;
+            let mut bootstraps = 0;
             let error = bootstrap_with(root.path(), root.path(), false, |args, _| {
                 if args[0] == OsStr::new("kickstart") {
                     assert_eq!(args[1], OsStr::new("-k"));
                     return Ok((kickstart_ok, "exit 113".into()));
+                }
+                if args[0] == OsStr::new("bootout") {
+                    bootouts += 1;
+                    return Ok((true, String::new()));
+                }
+                if args[0] == OsStr::new("bootstrap") {
+                    assert_eq!(bootouts, 1);
+                    bootstraps += 1;
+                    return Ok((false, "bootstrap refused".into()));
                 }
                 assert_eq!(args[0], OsStr::new("print"));
                 prints += 1;
@@ -1026,9 +1030,29 @@ mod tests {
             })
             .unwrap_err()
             .to_string();
-            assert!(error.contains("agent did not restart with a new running pid"));
-            assert_eq!(error.contains("exit 113"), !kickstart_ok);
+            assert_eq!(error, "launchctl bootstrap failed: bootstrap refused");
+            assert_eq!(bootouts, 1);
+            assert_eq!(bootstraps, 5);
         }
+    }
+
+    #[test]
+    fn kickstart_without_a_new_pid_boots_out_and_bootstraps() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let mut calls = Vec::new();
+        bootstrap_with(root.path(), root.path(), false, |args, _| {
+            calls.push(args[0].to_owned());
+            Ok((true, "state = spawn scheduled\n last exit code = 78".into()))
+        })
+        .unwrap();
+        assert_eq!(calls[0], OsStr::new("print"));
+        assert_eq!(calls[1], OsStr::new("kickstart"));
+        assert!(calls[2..calls.len() - 2].iter().all(|call| call == "print"));
+        assert_eq!(
+            &calls[calls.len() - 2..],
+            ["bootout", "bootstrap"].map(OsString::from)
+        );
     }
 
     /// A stand-in for the worktree owner's registry entry name.
