@@ -295,6 +295,52 @@ pub(crate) fn pr_land_leaves_a_reused_branch_name_alone() -> Result {
     Ok(())
 }
 
+pub(crate) fn pr_land_deletes_an_unregistered_branch_only_at_the_merged_head() -> Result {
+    // No worktree is registered for `feat`. After the cleanup check passes,
+    // another process moves `feat` to the base, which also contains it. The
+    // deletion is pinned to the merged head, so it leaves that branch alone.
+    let landing = landing()?;
+    unregister(&landing)?;
+    let moved = git(&landing.rig, &["rev-parse", "origin/main"])?;
+    let (status, detail) = race(&landing, &["branch", "-f", "feat", "origin/main"])?;
+    assert_eq!(status, "refused", "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, moved);
+
+    // Undisturbed, the same branch at the merged head is deleted.
+    let landing = self::landing()?;
+    unregister(&landing)?;
+    let (status, detail) = race(&landing, &[])?;
+    assert_eq!(status, "done", "{detail}");
+    assert!(!branch_exists(&landing.rig, "feat")?);
+    Ok(())
+}
+
+/// The `branch` step when `between` runs after the cleanup check.
+fn race(landing: &Landing, between: &[&str]) -> Result<(String, String)> {
+    let mut argv = vec!["--land-race", landing.head.as_str()];
+    argv.extend_from_slice(between);
+    let argv: Vec<_> = argv.into_iter().map(std::ffi::OsString::from).collect();
+    let output = landing
+        .rig
+        .execute_os(&std::env::current_exe()?, &argv, None)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let text = String::from_utf8(output.stdout.bytes)?;
+    let (status, detail) = text.split_once('\n').ok_or("race output")?;
+    Ok((status.to_owned(), detail.trim().to_owned()))
+}
+
+/// Drop the `feat` worktree and keep its branch.
+fn unregister(landing: &Landing) -> Result {
+    let path = landing.worktree.to_str().ok_or("path")?;
+    git(&landing.rig, &["worktree", "remove", "--force", path])?;
+    Ok(())
+}
+
 /// The message of a refused `pr open`, which is a usage error.
 fn open_refusal(rig: &TestRig, args: &[&str]) -> Result<String> {
     let mut argv = vec!["pr", "open"];

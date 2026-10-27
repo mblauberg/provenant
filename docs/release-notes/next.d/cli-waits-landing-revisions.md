@@ -18,12 +18,14 @@ order, scanning up to 1000 lanes.
 `pr land NUMBER --head SHA` waits for CI, merges at that head through the
 existing merge path, then fetches, fast-forwards a clean local base, removes
 the merged branch's worktree (after its declared build output) and deletes the
-branch with `git branch -d`. Each follow-up step refuses and reports rather than
+branch, only while it is still at the merged head and not checked out in any
+worktree. Each follow-up step refuses and reports rather than
 forcing, and cleanup only touches a local branch whose tip is exactly the head
 the pull request merged: a fork's head leaves a same-named local branch alone,
 so does a branch recreated or advanced to another tip, and a worktree holding
 commits the base lacks is kept along with its branch. Removal refuses if the
-worktree's HEAD moves after that check. `pr open --from-attempt` builds the pull
+worktree's HEAD moves after that check, and the branch deletion keeps a branch
+that moves off the merged head after it. `pr open --from-attempt` builds the pull
 request body from the attempt's receipts into the repository template, and
 `pr status` prints one line per pull request.
 

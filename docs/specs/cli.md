@@ -172,14 +172,20 @@ incomplete evidence.
 that head unchanged, then follows up locally: fetch the base, fast-forward the
 local base only in a checkout with no changes, delete declared build output
 and remove the branch's registered worktree through `worktree remove`, and
-delete the merged branch with `git branch -d`. The two cleanup steps act only
+delete the merged branch. The two cleanup steps act only
 on a local branch of the pull request's name whose tip is exactly the head the
 pull request merged: a head in another repository (a fork) leaves a same-named
 local branch and its worktree alone, so does a branch recreated or advanced to
 any other tip (even one the base contains), and a local branch whose tip the
 fetched base does not contain is refused and keeps its worktree as well as the
 branch. Removal carries that head and refuses, under the worktree lock, if the
-worktree's HEAD has moved since it was checked. The head is required. A failure
+worktree's HEAD has moved since it was checked. The branch deletion carries it
+too: with no registered worktree it refuses a branch checked out in any
+worktree, then deletes with `git update-ref -d <branch> <head>`, which
+compares the branch against the merged head and deletes in one ref
+transaction, so a branch moved after the check is kept. (A checkout of the
+branch that begins between the checked-out test and the deletion is not
+caught.) The head is required. A failure
 before the merge changes nothing. After it, each step refuses and reports
 instead of forcing, and the command exits 1 with `merged: true`.
 - Why: a landing is four routine steps, and none of them may widen what was

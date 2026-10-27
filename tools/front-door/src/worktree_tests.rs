@@ -104,6 +104,29 @@ pub fn main() -> std::process::ExitCode {
                 }
             }
         }
+        // The branch deletion of `pr land` with another process acting after
+        // the cleanup check: `--land-race <merged head> [<git argument>...]`.
+        Some("--land-race") => {
+            let result = (|| -> Result<String> {
+                let merged = args.get(1).and_then(|arg| arg.to_str()).ok_or("head")?;
+                let between: Vec<&str> =
+                    args.iter().skip(2).filter_map(|arg| arg.to_str()).collect();
+                let (status, detail) = crate::pr::land::delete_after_check(
+                    &std::env::current_dir()?,
+                    merged.parse()?,
+                    &between,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(format!("{status}\n{detail}\n"))
+            })();
+            match result {
+                Ok(text) => {
+                    let _ = write!(std::io::stdout().lock(), "{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => exit("land race", Err(error)),
+            }
+        }
         Some("--state-dir" | "internal") => {
             ExitCode::from(crate::dispatch(provenant_cli::parse(args), &Fixture))
         }
@@ -151,6 +174,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_changes_nothing_when_the_merge_does_not_happen",
             "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone",
             "pr_land_leaves_a_reused_branch_name_alone",
+            "pr_land_deletes_an_unregistered_branch_only_at_the_merged_head",
             "pr_open_refuses_what_the_receipts_cannot_support",
         ],
         |name| {
@@ -231,6 +255,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "pr_land_leaves_a_reused_branch_name_alone" => {
                     crate::pr_land_tests::pr_land_leaves_a_reused_branch_name_alone()
+                }
+                "pr_land_deletes_an_unregistered_branch_only_at_the_merged_head" => {
+                    crate::pr_land_tests::pr_land_deletes_an_unregistered_branch_only_at_the_merged_head()
                 }
                 "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone" => {
                     crate::pr_land_tests::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone()

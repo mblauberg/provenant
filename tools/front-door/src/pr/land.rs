@@ -152,6 +152,7 @@ fn follow_up(
                 branch,
                 base,
                 &upstream,
+                tip,
                 branch_gone,
             )?);
         }
@@ -304,14 +305,16 @@ fn fast_forward(
     })
 }
 
-/// Delete the merged local branch with `git branch -d`, which itself refuses a
-/// branch that is not fully merged.
+/// Delete the merged local branch, but only while it is still at `tip`, the
+/// head the cleanup check verified: `git update-ref -d` compares and deletes in
+/// one locked ref transaction, so a branch moved since the check is kept.
 fn delete_branch(
     git: &Git,
     project: &Path,
     branch: &str,
     base: &str,
     upstream: &str,
+    tip: GitOid,
     already_gone: bool,
 ) -> Result<Step> {
     if already_gone {
@@ -341,10 +344,39 @@ fn delete_branch(
             format!("{branch} has commits that {upstream} does not contain"),
         ));
     }
-    Ok(match git.run(project, &["branch", "-d", branch])? {
-        (true, _) => Step::new("branch", Status::Done, format!("{branch} deleted")),
-        (false, detail) => Step::new("branch", Status::Refused, detail),
-    })
+    // `git branch -d` would refuse a branch checked out in any worktree, but it
+    // deletes whatever the branch holds by then. Keep that refusal here and
+    // make the deletion itself conditional on the merged head.
+    if let Some(path) = checkout_of(git, project, branch)? {
+        return Ok(Step::new(
+            "branch",
+            Status::Refused,
+            format!("{branch} is checked out at {path}"),
+        ));
+    }
+    let tip = tip.to_string();
+    Ok(
+        match git.run(project, &["update-ref", "-d", &local, &tip])? {
+            (true, _) => {
+                // Like `git branch -d`, drop the branch's tracking settings, but
+                // only when no other process has recreated the branch meanwhile.
+                let (recreated, _) =
+                    git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
+                if !recreated {
+                    git.run(
+                        project,
+                        &["config", "--remove-section", &format!("branch.{branch}")],
+                    )?;
+                }
+                Step::new("branch", Status::Done, format!("{branch} deleted"))
+            }
+            (false, detail) => Step::new(
+                "branch",
+                Status::Refused,
+                format!("{branch} is no longer at the merged head {tip}, so it is kept: {detail}"),
+            ),
+        },
+    )
 }
 
 pub(super) fn run(
@@ -439,4 +471,36 @@ pub(super) fn run(
         ));
     }
     emit(&report, globals, &text, false)
+}
+
+/// Test seam: the cleanup check for `feat` merged at `merged` into `main`, then
+/// the Git command `between` (another process acting, none when empty), then
+/// the branch deletion. The status and detail of the `branch` step.
+#[cfg(test)]
+pub(crate) fn delete_after_check(
+    project: &Path,
+    merged: GitOid,
+    between: &[&str],
+) -> Result<(String, String)> {
+    let git = Git::new()?;
+    let pull: Pull = serde_json::from_value(json!({
+        "state": "MERGED",
+        "baseRefName": "main",
+        "headRefName": "feat",
+        "isCrossRepository": false,
+    }))?;
+    let upstream = "origin/main";
+    let tip = match cleanup_target(&git, project, &pull, merged, upstream)? {
+        Cleanup::Prune(tip) => tip,
+        Cleanup::Skip(_, why) => return Err(format!("the branch was not prunable: {why}").into()),
+    };
+    if !between.is_empty() {
+        let (moved, detail) = git.run(project, between)?;
+        if !moved {
+            return Err(format!("the interleaved command failed: {detail}").into());
+        }
+    }
+    let step = delete_branch(&git, project, "feat", "main", upstream, tip, false)?;
+    let status = serde_json::to_value(step.status)?;
+    Ok((status.as_str().unwrap_or_default().to_owned(), step.detail))
 }
