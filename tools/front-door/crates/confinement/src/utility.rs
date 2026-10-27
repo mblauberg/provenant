@@ -864,7 +864,9 @@ fn git_args(
         }
         GitRead::DiffWorktree { paths } => {
             let mut args = vec![
-                "diff".into(),
+                // `git diff` can refresh and rewrite the real index even with
+                // optional locks disabled. The plumbing command only reads it.
+                "diff-files".into(),
                 "--no-ext-diff".into(),
                 "--no-textconv".into(),
                 "--no-renames".into(),
@@ -1307,7 +1309,47 @@ pub(crate) mod tests {
     use crate::test_support::{Fixture, add_poisoned_gitlink, assert_raw_git_runs_poison_filter};
     use std::error::Error;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
+
+    #[test]
+    fn worktree_diff_preserves_index_and_reports_edits() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let path = fixture.root.join("AGENTS.md");
+        fs::write(&path, b"baseline\n")?;
+        fixture.run(&["add", "AGENTS.md"])?;
+        fixture.run(&["commit", "-m", "baseline"])?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        let index = crate::git_evidence::read_index_fingerprint(fixture.repo.private_dir())?;
+        let read_diff = || {
+            run_utility(
+                &fixture.executor,
+                GitRead::DiffWorktree {
+                    paths: vec![RepoPath::new(Path::new("AGENTS.md"))?],
+                },
+                &fixture.repo,
+                &fixture.runtime,
+                fixture.budget()?,
+                &CancelToken::new(),
+            )
+        };
+        assert!(read_diff()?.stdout.bytes.is_empty());
+        assert_eq!(
+            index,
+            crate::git_evidence::read_index_fingerprint(fixture.repo.private_dir())?
+        );
+        fs::write(&path, b"changed\n")?;
+        let diff = read_diff()?.stdout.bytes;
+        assert!(
+            diff.windows(b"+changed\n".len())
+                .any(|part| part == b"+changed\n")
+        );
+        assert_eq!(
+            index,
+            crate::git_evidence::read_index_fingerprint(fixture.repo.private_dir())?
+        );
+        Ok(())
+    }
 
     #[test]
     fn utility_reads_status_and_head_through_the_executor() -> Result<(), Box<dyn Error>> {
