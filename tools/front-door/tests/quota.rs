@@ -726,7 +726,7 @@ fn show_carries_display_blocks_and_display_command_persists() -> Result {
 fn show_warns_when_display_icon_account_is_not_registered() -> Result {
     use std::os::unix::fs::PermissionsExt;
     let rig = TestRig::in_directory(&std::env::temp_dir())?;
-    std::fs::create_dir(&rig.state)?;
+    std::fs::create_dir_all(&rig.state)?;
     std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
     let path = rig.state.join("config.toml");
     let before = "schema_version = 1\n[domains.quota.display]\nicon = 'codex-removed'\n";

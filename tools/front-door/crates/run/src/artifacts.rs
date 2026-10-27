@@ -21,7 +21,7 @@ pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os:
     remove_entry_tree(attempt, OsStr::new("tmp"))
 }
 
-/// Reconcile alone may dispose of lock-named payloads after proving the
+/// Reconcile and retention GC may dispose of lock-named payloads after proving the
 /// attempt terminal and unreserved. It checks worktree reservations first,
 /// then holds the attempt's writer lock, which excludes read-only guardians.
 /// It does not hold the worktree writer lock during deletion.

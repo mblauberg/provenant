@@ -235,7 +235,7 @@ fn ownership_and_expired_fences_are_refused() -> Result {
 }
 #[test]
 fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     for args in [
         vec![
             "fabric",
@@ -394,7 +394,7 @@ fn landing_observation_never_acquires_and_release_is_replayable() -> Result {
 #[test]
 fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
     let rig = TestRig::new()?;
-    std::fs::create_dir(&rig.state)?;
+    std::fs::create_dir_all(&rig.state)?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
     std::fs::write(
@@ -439,7 +439,7 @@ fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
 fn linked_worktrees_share_projects_and_ignore_git_redirects() -> Result {
     let mut rig = TestRig::new()?;
     let output = rig.execute(
-        std::path::Path::new("/usr/bin/git"),
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
         &[
             "-c",
             "user.name=Fixture",
@@ -455,7 +455,7 @@ fn linked_worktrees_share_projects_and_ignore_git_redirects() -> Result {
     assert_eq!(code(&output), 0);
     let linked = rig.home.join("linked");
     let output = rig.execute(
-        std::path::Path::new("/usr/bin/git"),
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
         &[
             "worktree",
             "add",
@@ -501,7 +501,7 @@ fn linked_worktrees_share_projects_and_ignore_git_redirects() -> Result {
 
 #[test]
 fn malformed_fence_tokens_never_reach_either_error_renderer() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let secret = "0123456789abcdef0123456789abcdefx";
     let args = [
         "fabric",
@@ -530,7 +530,11 @@ fn non_git_directories_beneath_home_stay_local_and_remote_homes_refuse_local_wri
     std::fs::create_dir(&rig.project)?;
     let local = call(&rig, &["fabric", "identity"], 0)?;
     assert_eq!(local["data"]["federation"], Value::Null);
-    let output = rig.execute(std::path::Path::new("/usr/bin/git"), &["init", "-q"], None)?;
+    let output = rig.execute(
+        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
+        &["init", "-q"],
+        None,
+    )?;
     assert_eq!(code(&output), 0);
     let git = call(&rig, &["fabric", "identity"], 0)?;
     let key = git["data"]["federation"]["key"]
@@ -562,7 +566,7 @@ fn non_git_directories_beneath_home_stay_local_and_remote_homes_refuse_local_wri
 
 #[test]
 fn positional_fence_tokens_never_reach_either_error_renderer() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let secret = "0123456789abcdef0123456789abcdef";
     for option in ["--generation", "--unknown"] {
         let args = [
@@ -589,7 +593,7 @@ fn positional_fence_tokens_never_reach_either_error_renderer() -> Result {
 
 #[test]
 fn embedded_and_uppercase_fence_tokens_never_reach_either_error_renderer() -> Result {
-    let rig = TestRig::new()?;
+    let rig = TestRig::new()?.without_state()?;
     let lower = "0123456789abcdef0123456789abcdef";
     let upper = lower.to_ascii_uppercase();
     for (stray, secret) in [

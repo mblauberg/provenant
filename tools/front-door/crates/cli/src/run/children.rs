@@ -385,6 +385,11 @@ fn scan_queued(
                 break;
             }
             Ok(_) => {}
+            Err(error) if error.status == Status::Refused => {
+                if let Err(error) = store.refuse_queued(id, &error.message, call) {
+                    scan.error = Some(error.to_string());
+                }
+            }
             Err(error) => scan.error = Some(error.message),
         }
     }
@@ -450,6 +455,43 @@ mod tests {
     use super::*;
     use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs, RunId, TaskId};
     use provenant_records::CanonicalV1;
+
+    #[test]
+    fn child_policy_refusal_settles_attempt_without_parent_launch_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let (context, child) = child_fixture(temp.path(), &clock)?;
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = run::RunStore::open(&context, &call)?.with_sealed_requester(context.actor_id);
+        store.create(&child, &call)?;
+        let authority = ChildAuthority {
+            parent: child.request.parent_attempt.ok_or("parent missing")?,
+            task: &child.request.tasks[0],
+            depth: 1,
+            maximum: 2,
+        };
+        let refusal = "host resource policy refused the child";
+        let scan = scan_queued(
+            &store,
+            vec![child.run_id],
+            &authority,
+            &std::sync::Arc::new(std::sync::Mutex::new(None)),
+            &call,
+            |_, _| Err(Fail::new(Status::Refused, run::ErrorKind::Refused, refusal)),
+        )?;
+        assert!(scan.error.is_none(), "{:?}", scan.error);
+        let record = store.record(child.attempts[0].attempt_id, &call)?;
+        assert!(
+            matches!(&record.state, run::AttemptState::Terminal { outcome: run::Outcome::Rejected, reason: Some(reason), .. }
+            if reason == refusal),
+            "{:?}",
+            record.state
+        );
+        assert!(record.applied_route.is_none());
+        Ok(())
+    }
 
     #[test]
     fn deferral_stops_the_scan_before_validating_the_next_run()

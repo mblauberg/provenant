@@ -178,6 +178,7 @@ mod tests {
 
 #[doc(hidden)]
 pub mod child;
+pub(crate) mod clock;
 pub(crate) mod pid;
 #[doc(hidden)]
 pub mod raw_exec;

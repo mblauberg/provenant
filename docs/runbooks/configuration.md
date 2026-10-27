@@ -62,7 +62,12 @@ before applying an authorised install.
 GC also applies [terminal provider-state retention](gc.md). The separate
 `[retention] provider_state_days = 7` key accepts 1 to 3650 and is reread on
 each sweep without reinstalling. Known credential entries expire after
-24 hours. `gc.schedule = false` disables scheduled provider-state sweeps too;
+24 hours. GC also reclaims `tmp/` directories from indexed terminal attempts
+after 24 hours, across the state run store and its child stores. Nonterminal
+attempts, writer locks and retained reservations prevent deletion. GC JSON
+reports the paths and observed allocated bytes in `provider_state.attempt_tmp`;
+text output lists each path and byte count. `--dry-run` previews these removals.
+`gc.schedule = false` disables scheduled retention sweeps too;
 settlement cache pruning still runs.
 
 The optional `[gc]` section controls the macOS per-user schedule:
@@ -71,8 +76,8 @@ The optional `[gc]` section controls the macOS per-user schedule:
 [gc]
 schedule = true
 idle_days = 7
-# free_floor = "20G"
-# alert_below = "10G"
+# free_floor = "100G"
+# alert_below = "150G"
 
 # Use the project ID from `provenant fabric identity`.
 [gc.projects."PROJECT_ID"]
@@ -83,8 +88,9 @@ keep = ["web/target"]
 `gc.schedule` defaults to true. Setting it to false prevents subsequent
 scheduled collections; rerun `install` to boot out the agent and remove its
 unchanged receipt-owned plist. `gc.idle_days` accepts 1 to 3650 (default 7).
-`gc.free_floor` is unset by default. When set, it requests additional cache
-collection until available disk space reaches that size, after the usual
+`gc.free_floor` defaults to 10% of the state volume's capacity, with a minimum
+of 50 GiB. Set it to override that floor. GC requests additional cache
+collection until available disk space reaches the floor, after the usual
 orphaned, tombstoned and idle pass. Sizes are whole binary units: `B`, `K`,
 `M`, `G`, `T`, or `KiB` through `TiB`; plain numbers mean GiB.
 On APFS, local snapshots can keep deletions from increasing available space, so
@@ -93,13 +99,20 @@ Rerun `install` after changing the idle threshold or floor to update the
 agent's arguments. Edit these keys in `config.toml`; they are separate from
 the harness knob registry.
 
-The schedule runs every six hours, only for installations in the account's
+The schedule runs at load and hourly, only for installations in the account's
 default state root. Logs are `<state>/gc/stdout.log` and
 `<state>/gc/stderr.log`. It discovers registered projects without requiring a
 checkout as its working directory. Unobservable projects keep their caches.
 Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
+
+Writer dispatch and resume refuse to launch when the minimum available space
+across the worktree, state and lane-cache volumes is below the floor. The error
+names the limiting path, available bytes and the floor and directs you to
+`provenant gc`. Read-only dispatch remains available. This is a point-in-time
+check with no space reservation: concurrent writers can each pass and then
+consume the same free space.
 
 Bare `provenant gc` deletes eligible caches and previews merged worktree and
 declared output cleanup. Pass `--apply` to delete those entries too, or
@@ -119,13 +132,68 @@ parent traversal are refused. Unknown or non-terminal lanes, dirty worktrees,
 recent writes within 24 hours and symlinks prevent pruning. Failures skip
 individual entries. Lane caches still use their existing GC path.
 
-`gc.alert_below` accepts the same size syntax as `free_floor` and is unset by
-default. Applied collections emit a Fabric note with entity `gc.low_disk` and
-a gc log message once per observed dip below this threshold on the state
-filesystem. A reading at or above it rearms the alert. The latch persists
+After collection, GC checks available space on the state volume against the
+floor. `gc.alert_below` can raise the alert threshold and accepts the same
+size syntax as `free_floor`. Applied collections emit a Fabric note with
+entity `gc.low_disk` and a gc log message once per observed dip below the
+threshold. A reading at or above it rearms the alert. The latch persists
 under `<state>/gc/`; a preview reports low space without changing it. An alert
 failure is logged without blocking collection. This setting is read each run
 and does not require reinstalling the agent.
+
+## Disk guard
+
+On macOS, the per-user disk guard checks available space on the state volume
+at login and every two minutes. It is enabled by default for installations
+in the account's default state root. Configure it in `config.toml`:
+
+```toml
+[disk_guard]
+enabled = true
+warn = "60G"
+pause = "25G"
+resume = "50G"
+processes = [
+  "cargo", "rustc", "ld", "ld64", "clang", "clang++", "cc1", "cc1plus",
+  "sccache", "swift-frontend", "swift-build", "xcodebuild", "turbo", "esbuild"
+]
+```
+
+Sizes use the same binary units as `gc.free_floor`; plain numbers mean GiB.
+Thresholds must satisfy `0 < pause < resume <= warn`. `processes` replaces the
+default list with exact executable names, without paths or whitespace. An
+empty list disables pausing while retaining warnings and GC.
+
+Below `warn`, the guard runs `gc --scheduled --apply` using GC's configured
+free floor at most once every 30 minutes. It warns at most once every 30 minutes while
+space remains at or above `pause`. Below `pause`, it sends `SIGSTOP` to
+matching processes owned by the current user and sends a critical notification
+at most once every five minutes. Paused process identities are saved under
+`<state>/disk-guard/`. They receive `SIGCONT` only when space reaches `resume`;
+STOP checks the PID, owner, executable name and UTC start time. CONT checks
+the PID, owner and executable name, tolerating changes to saved start-time text.
+Records from before the current boot are discarded, and identity mismatches
+are logged. The guard excludes itself and its descendants; `provenant` is
+rejected as a configured process name.
+While its processes remain paused, the checker stays running and checks free
+space every two minutes. launchd does not start another instance while it is
+running. On recovery, it checks only the recorded PIDs before resuming them.
+
+Rerun `install` after changing any disk guard setting. The installer puts
+the settings in the LaunchAgent's arguments, so routine healthy checks need
+no config reads. The healthy path performs one `statfs` call on the
+state volume and one metadata check for `<state>/disk-guard/paused.json`, then
+exits before normal CLI initialisation, without process
+enumeration, GC, Fabric, network requests or log writes. State is written only
+when it changes.
+The paused-state file also acts as a recovery marker. If the checker crashes,
+the next scheduled check reads it even when space has recovered to `warn` or
+above, and resumes the recorded builds once space reaches `resume`.
+Reinstalling restarts the checker and resumes saved processes even when the
+settings are unchanged, including records saved before recovery markers existed.
+Setting `enabled = false` and reinstalling stops the owned agent and resumes
+its saved paused processes. See [installation](install.md#install) for plist
+ownership and uninstall behaviour.
 
 ## Writer extra write paths
 

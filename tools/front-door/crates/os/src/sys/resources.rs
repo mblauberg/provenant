@@ -3,6 +3,8 @@
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 /// Bytes the kernel can hand to a new process without paging out live work,
 /// and installed physical memory.
@@ -97,6 +99,24 @@ pub fn memory() -> io::Result<MemorySample> {
 
 /// Bytes available to this unprivileged user on the filesystem holding `file`.
 pub(crate) fn available_bytes(file: &File) -> io::Result<u64> {
+    let stats = filesystem(file)?;
+    #[allow(clippy::useless_conversion)]
+    let blocks = u64::from(stats.f_bavail);
+    #[allow(clippy::useless_conversion)]
+    let size = u64::from(stats.f_frsize);
+    Ok(blocks.saturating_mul(size))
+}
+
+pub(crate) fn total_bytes(file: &File) -> io::Result<u64> {
+    let stats = filesystem(file)?;
+    #[allow(clippy::useless_conversion)]
+    let blocks = u64::from(stats.f_blocks);
+    #[allow(clippy::useless_conversion)]
+    let size = u64::from(stats.f_frsize);
+    Ok(blocks.saturating_mul(size))
+}
+
+fn filesystem(file: &File) -> io::Result<libc::statvfs> {
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
     // SAFETY: the descriptor is owned by file for the call; stats is a live,
     // writable statvfs buffer and the kernel retains no pointer.
@@ -105,11 +125,35 @@ pub(crate) fn available_bytes(file: &File) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: a successful fstatvfs initialised the record.
+    Ok(unsafe { stats.assume_init() })
+}
+
+/// Sample an existing path's filesystem with one syscall, without opening it.
+pub(crate) fn available_bytes_at(path: &Path) -> io::Result<u64> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    #[cfg(target_os = "macos")]
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    #[cfg(target_os = "linux")]
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: path is NUL-terminated and stats is a live, writable record of
+    // the exact type required by the call; the kernel retains neither pointer.
+    #[cfg(target_os = "macos")]
+    let result = unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) };
+    // SAFETY: same pointer and buffer guarantees as the macOS call above.
+    #[cfg(target_os = "linux")]
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful syscall initialised the record.
     let stats = unsafe { stats.assume_init() };
     #[allow(clippy::useless_conversion)]
     let blocks = u64::from(stats.f_bavail);
-    #[allow(clippy::useless_conversion)]
-    let size = u64::from(stats.f_frsize);
+    #[cfg(target_os = "macos")]
+    let size = u64::from(stats.f_bsize);
+    #[cfg(target_os = "linux")]
+    let size = stats.f_frsize;
     Ok(blocks.saturating_mul(size))
 }
 
@@ -120,6 +164,19 @@ mod tests {
         let memory = super::memory().unwrap();
         assert!(memory.total_bytes > 0 && memory.available_bytes <= memory.total_bytes);
         let file = std::fs::File::open("/").unwrap();
-        assert!(super::available_bytes(&file).unwrap() > 0);
+        let available = super::available_bytes(&file).unwrap();
+        let total = super::total_bytes(&file).unwrap();
+        assert!(available > 0 && available <= total);
+    }
+
+    #[test]
+    fn path_sample_uses_unprivileged_available_space() {
+        assert!(super::available_bytes_at(std::path::Path::new("/")).unwrap() > 0);
+        assert_eq!(
+            super::available_bytes_at(std::path::Path::new("/\0invalid"))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
     }
 }

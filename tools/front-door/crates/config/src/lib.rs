@@ -5,7 +5,9 @@
 //! library errors retain their typed cause; CLI classifies inspected defects.
 #![forbid(unsafe_code)]
 
+mod disk_guard;
 mod domains;
+pub use disk_guard::DiskGuardSettings;
 mod gc;
 pub use gc::{GcSettings, ProjectGcSettings, parse_cache_size};
 mod harness;
@@ -159,6 +161,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub domains: D,
     pub install: InstallSettings,
     pub gc: GcSettings,
+    pub disk_guard: DiskGuardSettings,
     pub retention: RetentionSettings,
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,
@@ -188,9 +191,9 @@ pub struct ConfigInspection {
 pub use managed::{
     Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
     InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
-    ReleaseSmoke, SelectorChange, Snapshots, Targets, gc_agent_plist, inspect_install, install,
-    installed_binary, peer_agent_plist, plan_and_install, plan_install, private_directory,
-    uninstall,
+    ReleaseSmoke, SelectorChange, Snapshots, Targets, disk_guard_agent_plist, gc_agent_plist,
+    inspect_install, install, installed_binary, peer_agent_plist, plan_and_install, plan_install,
+    private_directory, uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

@@ -28,6 +28,24 @@ impl Default for GcSettings {
 }
 
 impl GcSettings {
+    /// The configured floor, or 10% of the state volume with a 50 GiB minimum.
+    /// Installation can render before the state directory has been created.
+    pub fn free_floor_bytes(&self, state: &Path) -> std::io::Result<u64> {
+        if let Some(size) = &self.free_floor {
+            return parse_cache_size(size).map_err(std::io::Error::other);
+        }
+        let mut path = state;
+        loop {
+            match provenant_os::fs::Directory::open_anchor(path) {
+                Ok(volume) => return Ok(default_free_floor(volume.total_bytes()?)),
+                Err(error) if error.is_not_found() => {
+                    path = path.parent().ok_or_else(|| std::io::Error::other(error))?;
+                }
+                Err(error) => return Err(std::io::Error::other(error)),
+            }
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if !(1..=3650).contains(&self.idle_days) {
             return Err("idle_days_range");
@@ -43,6 +61,10 @@ impl GcSettings {
         }
         Ok(())
     }
+}
+
+fn default_free_floor(total_bytes: u64) -> u64 {
+    (total_bytes / 10).max(50 * 1024_u64.pow(3))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +123,23 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn free_floor_defaults_to_ten_percent_with_a_fifty_gib_minimum() {
+        let gib = 1024_u64.pow(3);
+        assert_eq!(super::default_free_floor(100 * gib), 50 * gib);
+        assert_eq!(super::default_free_floor(1000 * gib), 100 * gib);
+        let settings = super::GcSettings {
+            free_floor: Some("20G".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings
+                .free_floor_bytes(std::path::Path::new("/missing/state"))
+                .unwrap(),
+            20 * gib
+        );
+    }
+
     #[test]
     fn cache_sizes_accept_binary_suffixes_and_plain_gib_and_refuse_overflow() {
         for size in ["20", "20G", "20GiB", "20gib"] {

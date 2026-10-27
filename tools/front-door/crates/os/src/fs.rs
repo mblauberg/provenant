@@ -88,6 +88,12 @@ pub fn effective_uid() -> u32 {
     os::effective_uid()
 }
 
+/// Unprivileged free bytes on an existing path's filesystem. This performs one
+/// filesystem-stat call with no open, metadata lookup or ancestor resolution.
+pub fn available_bytes_at(path: &Path) -> io::Result<u64> {
+    crate::sys::resources::available_bytes_at(path)
+}
+
 /// Resolve trusted setup paths without granting filesystem mutation authority.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemPathResolver;
@@ -534,6 +540,10 @@ impl Directory {
     /// Unprivileged free bytes on this directory's filesystem, for admission.
     pub fn available_bytes(&self) -> std::io::Result<u64> {
         crate::sys::resources::available_bytes(&self.file)
+    }
+    /// Total capacity of this directory's filesystem.
+    pub fn total_bytes(&self) -> std::io::Result<u64> {
+        crate::sys::resources::total_bytes(&self.file)
     }
     /// Exclusive APFS allocation, or None when the filesystem omits it.
     /// Observes one normal component without following its final symlink.
