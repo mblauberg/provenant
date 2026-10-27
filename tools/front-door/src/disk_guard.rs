@@ -464,6 +464,7 @@ fn discard_prior_boot(
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)] // The worktree driver includes this module without libtest.
 mod tests {
     use super::*;
     const GIB: u64 = 1024_u64.pow(3);
@@ -573,7 +574,7 @@ mod tests {
     #[test]
     fn next_healthy_tick_recovers_after_the_paused_checker_dies() {
         let tmp = tempfile::tempdir().unwrap();
-        let directory = guard_directory(tmp.path()).unwrap();
+        let directory = guard_directory(&tmp.path().canonicalize().unwrap()).unwrap();
         let original = process(10, 501, "cargo");
         let mut host = Fake {
             free: 24 * GIB,
@@ -825,7 +826,7 @@ mod tests {
     #[test]
     fn uninstall_resumes_only_recorded_identities_and_persists_the_empty_set() {
         let tmp = tempfile::tempdir().unwrap();
-        let directory = guard_directory(tmp.path()).unwrap();
+        let directory = guard_directory(&tmp.path().canonicalize().unwrap()).unwrap();
         let original = process(10, 501, "cargo");
         save(
             &directory,
@@ -989,7 +990,7 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(state.paused, [original.clone()]);
+        assert_eq!(state.paused, std::slice::from_ref(&original));
         host.fail_free = false;
         let mut reused = original;
         reused.name = "unrelated".into();

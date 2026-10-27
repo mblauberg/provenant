@@ -195,6 +195,7 @@ fn parse_process(line: &str) -> io::Result<Process> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
     #[test]
     fn pressure_gc_leaves_the_configured_free_floor_in_effect() {

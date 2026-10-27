@@ -163,6 +163,7 @@ pub fn stop(home: &Path) -> Result<(), AgentError> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
     #[test]
     fn plist_runs_at_load_and_every_two_minutes_with_escaped_paths() {

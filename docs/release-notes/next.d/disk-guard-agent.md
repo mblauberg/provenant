@@ -1,4 +1,4 @@
-## Added
+## Additions
 
 - macOS default-state installs now include a per-user disk guard that checks
   space every two minutes. It warns and runs GC below 60 GiB, pauses matching
