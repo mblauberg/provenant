@@ -5602,6 +5602,37 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn lane_access_refuses_write_root_overlapping_the_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let worktree = temp.path().join("work").join("tree");
+        let inside = worktree.join("src");
+        std::fs::create_dir_all(&state)?;
+        std::fs::create_dir_all(&inside)?;
+        let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+            mode: Mode::WorktreeWrite,
+            worktree: Some(worktree.clone()),
+            read_root,
+            write_root,
+            network: None,
+            capability: Vec::new(),
+        };
+        for overlapping in [worktree.clone(), temp.path().join("work")] {
+            let message = lane_access(&access(Vec::new(), vec![overlapping]), &state)
+                .err()
+                .map(|fail| fail.message)
+                .unwrap_or_default();
+            assert!(
+                message.contains("--write-root") && message.contains("already grants"),
+                "{message}"
+            );
+        }
+        // A read root on the worktree and a write root beneath it stay valid.
+        assert!(lane_access(&access(vec![worktree.clone()], vec![inside]), &state).is_ok());
+        Ok(())
+    }
+    #[test]
     fn paged_output_never_splits_a_character() {
         let bytes = "a☀b".as_bytes();
         let mut chunk = run::OutputChunk {
