@@ -41,7 +41,7 @@ const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
 /// workspace's `target/` holds ~100,000 entries), so its census bound is
 /// higher than a worktree's. It stays bounded and censused.
 #[cfg(target_os = "macos")]
-const MAX_CACHE_TREE_ENTRIES: usize = 2_000_000;
+const MAX_CACHE_TREE_ENTRIES: usize = 500_000;
 /// The retained provider state copy shares this depth limit.
 #[cfg(target_os = "macos")]
 const MAX_WRITABLE_TREE_DEPTH: usize = 32;
@@ -2496,7 +2496,7 @@ mod tests {
         ));
         assert!(!error.to_string().contains("byte bound"));
         // The disposable lane build cache outgrows a worktree-sized census.
-        const { assert!(MAX_CACHE_TREE_ENTRIES > 10 * MAX_WRITABLE_TREE_ENTRIES) };
+        const { assert!(MAX_CACHE_TREE_ENTRIES >= 5 * MAX_WRITABLE_TREE_ENTRIES) };
         Ok(())
     }
 
