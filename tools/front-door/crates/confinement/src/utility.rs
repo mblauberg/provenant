@@ -1517,7 +1517,7 @@ pub(crate) mod tests {
         assert!(stderr.contains("[REDACTED]"));
         assert!(!stderr.chars().any(char::is_control));
         assert!(!stderr.contains('\u{202e}'));
-        let long_secret = format!("{}https://user:secret@example.invalid/", "x".repeat(970));
+        let long_secret = format!("{}https://user:secret@example.invalid/", "x".repeat(990));
         let excerpt = fetch_stderr_excerpt(long_secret.as_bytes());
         assert!(!excerpt.contains("secret"));
         assert!(excerpt.contains("[REDACTED]"));
