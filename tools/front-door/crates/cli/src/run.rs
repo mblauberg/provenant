@@ -5402,7 +5402,11 @@ mod tests {
                 .as_ref()
         );
         // Read-only Claude records its selected account's exact state-write path.
-        let account = root.path().join("accounts/claude/projects/project-key");
+        // The lookup never follows links, so build the grant from the resolved temp root.
+        let account = root
+            .path()
+            .canonicalize()?
+            .join("accounts/claude/projects/project-key");
         std::fs::create_dir_all(&account)?;
         let path = account.join("sess-1848.jsonl");
         std::fs::write(&path, "{}\n")?;
