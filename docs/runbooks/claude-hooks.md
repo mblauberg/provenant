@@ -88,8 +88,16 @@ must print the new worktree's absolute path and nothing else on stdout.
   `<repo>/.worktrees/claude-<name>`, owned and listed by
   `provenant worktree list`. A name Claude reuses finds its earlier worktree
   only when that is a linked worktree at the exact path above, on
-  `claude/<name>`, clean, with no live writer, and marked as made by this hook
-  (a `provenant-claude-hook` file in the worktree's Git admin directory). The
+  `claude/<name>`, clean, with no live writer, and still owned by the creation
+  that made it. Each creation writes a record (canonical path, branch, the HEAD
+  it was made at and a random token) to the worktree's Git admin directory
+  (`provenant-claude-hook`) and to Provenant's state
+  (`<state>/hooks/claude-worktrees/`). Reuse needs both copies present and equal,
+  and path, branch and HEAD to match the tree now, so a tree removed and
+  recreated by hand, repurposed, or moved on by a commit is not adopted.
+  `worktree-remove` deletes the state record with the tree. The record guards
+  against adopting a tree the hook did not make; a same-user process that
+  forges both copies is outside that threat model. The
   primary checkout, a tree made by hand or by another tool, a tree elsewhere
   and a dirty tree are never reused: the hook exits 2 and names the reason.
 - `worktree-remove` removes only a linked worktree that `provenant worktree

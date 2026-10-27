@@ -8,7 +8,7 @@
 use crate::hook_state::Cli;
 use provenant_cli::Globals;
 use provenant_os::{exec::SystemExecutor, sys::hook_io};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -33,6 +33,16 @@ struct RemoveInput {
     hook_event_name: String,
     worktree_path: PathBuf,
     cwd: Option<PathBuf>,
+}
+
+/// Provenant's state root for this hook, as the other commands resolve it.
+fn state_root(globals: &Globals, cwd: &Path) -> Result<PathBuf, Error> {
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::At(cwd),
+        crate::roots::Product::Optional,
+    )?;
+    Ok(resolved.roots.state.as_path().to_path_buf())
 }
 
 fn fail(hook: &str, error: &dyn std::fmt::Display) -> u8 {
@@ -73,9 +83,14 @@ fn entry_path(entry: &serde_json::Value) -> Option<PathBuf> {
 /// The worktree an earlier call of this hook made for `branch`, if it can be
 /// reused. Only the linked worktree at the exact path `worktree create` gives
 /// the branch qualifies, and only when it is clean, has no live writer and
-/// carries this hook's ownership mark. The primary checkout never qualifies. `Err(None)` means no worktree holds
+/// carries this hook's ownership record for this creation, with HEAD still
+/// where the hook made it. The primary checkout never qualifies. `Err(None)` means no worktree holds
 /// the branch, so the create failure stands alone.
-fn reusable(list: &serde_json::Value, branch: &str) -> Result<PathBuf, Option<String>> {
+fn reusable(
+    state: &Path,
+    list: &serde_json::Value,
+    branch: &str,
+) -> Result<PathBuf, Option<String>> {
     let wanted = format!("refs/heads/{branch}");
     let entries = list.as_array().map_or(&[][..], Vec::as_slice);
     let Some(holder) = entries.iter().find(|e| e["branch"] == wanted.as_str()) else {
@@ -101,15 +116,32 @@ fn reusable(list: &serde_json::Value, branch: &str) -> Result<PathBuf, Option<St
     if holder["dirty"] != "clean" {
         return refuse("it has uncommitted or ignored files");
     }
-    if !hook_owned(&path, branch) {
+    let head = holder["head"].as_str().unwrap_or_default();
+    if !hook_owned(state, &path, branch, head) {
         return refuse("it was not created by this hook");
     }
     Ok(path)
 }
 
-/// Marker the hook leaves in a worktree's Git admin directory (not in the
-/// tree, so it never shows as a change, and Git deletes it with the worktree).
+/// Name of the ownership record in a worktree's Git admin directory (not in
+/// the tree, so it never shows as a change, and Git deletes it with the
+/// worktree).
 const OWNER_MARKER: &str = "provenant-claude-hook";
+
+/// What one creation by this hook established. Reuse needs the copy in the
+/// admin directory and the copy in Provenant's state to agree with each other
+/// and with the tree as it stands: the same canonical path, the same branch,
+/// the HEAD the hook created it at, and the random token of that creation. A
+/// tree removed and recreated by hand, or repurposed, carries none of these.
+/// Forgery by the same user is outside the threat model: the aim is never to
+/// adopt a tree the hook did not make.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+struct Ownership {
+    path: PathBuf,
+    branch: String,
+    head: String,
+    token: String,
+}
 
 /// The admin directory a linked worktree's `.git` file points at.
 fn admin_dir(worktree: &Path) -> Option<PathBuf> {
@@ -118,16 +150,67 @@ fn admin_dir(worktree: &Path) -> Option<PathBuf> {
     (dir.is_absolute() && dir.parent()?.file_name()? == "worktrees").then_some(dir)
 }
 
-fn mark_owned(worktree: &Path, branch: &str) -> Result<(), Error> {
-    let dir = admin_dir(worktree).ok_or("no Git admin directory for the worktree")?;
-    std::fs::write(dir.join(OWNER_MARKER), branch)?;
+/// The state-side record for a canonical worktree path.
+fn record_path(state: &Path, canonical: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    // Only a file name: the record's own fields are what reuse checks.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    let name = format!("{:016x}", hasher.finish());
+    state
+        .join("hooks")
+        .join("claude-worktrees")
+        .join(format!("{name}.json"))
+}
+
+fn random_token() -> Result<String, Error> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn mark_owned(state: &Path, worktree: &Path, branch: &str, head: &str) -> Result<(), Error> {
+    let canonical = std::fs::canonicalize(worktree)?;
+    let admin = admin_dir(&canonical).ok_or("no Git admin directory for the worktree")?;
+    let record = Ownership {
+        path: canonical.clone(),
+        branch: branch.to_owned(),
+        head: head.to_owned(),
+        token: random_token()?,
+    };
+    let text = serde_json::to_vec(&record)?;
+    let stored = record_path(state, &canonical);
+    std::fs::create_dir_all(stored.parent().ok_or("no state directory")?)?;
+    std::fs::write(&stored, &text)?;
+    std::fs::write(admin.join(OWNER_MARKER), &text)?;
     Ok(())
 }
 
-fn hook_owned(worktree: &Path, branch: &str) -> bool {
-    admin_dir(worktree)
-        .and_then(|dir| std::fs::read_to_string(dir.join(OWNER_MARKER)).ok())
-        .is_some_and(|recorded| recorded == branch)
+/// Whether both records exist, agree, and describe this tree as it is now.
+fn hook_owned(state: &Path, worktree: &Path, branch: &str, head: &str) -> bool {
+    let Ok(canonical) = std::fs::canonicalize(worktree) else {
+        return false;
+    };
+    let read = |path: PathBuf| -> Option<Ownership> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    };
+    let (Some(admin), Some(stored)) = (
+        admin_dir(&canonical).and_then(|dir| read(dir.join(OWNER_MARKER))),
+        read(record_path(state, &canonical)),
+    ) else {
+        return false;
+    };
+    admin == stored
+        && !stored.token.is_empty()
+        && stored.path == canonical
+        && stored.branch == branch
+        && stored.head == head
+}
+
+/// Drop the state-side record once the hook has removed the tree.
+fn forget(state: &Path, canonical: &Path) {
+    let _ = std::fs::remove_file(record_path(state, canonical));
 }
 
 // Hook I/O is bounded by real monotonic deadlines.
@@ -143,11 +226,13 @@ pub fn create(globals: &Globals) -> u8 {
         let deadline = Instant::now() + WORK_TIME;
         let executor = SystemExecutor::new(1)?;
         let cli = Cli::new(globals, &input.cwd, &executor).ok_or("cannot find this executable")?;
+        let state = state_root(globals, &input.cwd)?;
         let created = cli.data(&["worktree", "create", &branch], WORK_TIME, deadline);
         let path = match created {
             Ok(data) => {
                 let path = entry_path(&data).ok_or("worktree create returned no path")?;
-                if let Err(error) = mark_owned(&path, &branch) {
+                let head = data["head"].as_str().unwrap_or_default();
+                if let Err(error) = mark_owned(&state, &path, &branch, head) {
                     // Without the mark a later call cannot reuse this tree.
                     let _ = writeln!(io::stderr().lock(), "worktree-create: not marked: {error}");
                 }
@@ -159,7 +244,7 @@ pub fn create(globals: &Globals) -> u8 {
                 let list = cli
                     .data(&["worktree", "list"], LIST_TIME, deadline)
                     .map_err(|_| cause.clone())?;
-                reusable(&list, &branch).map_err(|reason| match reason {
+                reusable(&state, &list, &branch).map_err(|reason| match reason {
                     Some(reason) => format!("{cause}; not reusing the existing worktree: {reason}"),
                     None => cause,
                 })?
@@ -229,6 +314,11 @@ pub fn remove(globals: &Globals) -> u8 {
             .and_then(|name| name.to_str())
             .ok_or("worktree name is not UTF-8")?;
         let outcome = cli.data(&["worktree", "remove", name], WORK_TIME, deadline)?;
+        if !target.exists() {
+            if let Ok(state) = state_root(globals, &cwd) {
+                forget(&state, &target);
+            }
+        }
         if target.exists() {
             let reason = outcome["retained"][0]["reason"].as_str().unwrap_or("kept");
             return Err(format!("worktree kept: {reason}").into());

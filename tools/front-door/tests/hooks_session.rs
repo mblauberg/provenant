@@ -404,6 +404,100 @@ fn worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths() -> Result {
     Ok(())
 }
 
+fn made_tree(rig: &TestRig, name: &str) -> Result<PathBuf> {
+    let made = run_hook(rig, "worktree-create", &worktree_input(rig, name))?;
+    assert_eq!(
+        code(&made),
+        0,
+        "{}",
+        String::from_utf8_lossy(&made.stderr.bytes)
+    );
+    Ok(PathBuf::from(
+        String::from_utf8(made.stdout.bytes)?.trim_end(),
+    ))
+}
+
+fn state_record(rig: &TestRig) -> Result<PathBuf> {
+    let dir = rig.state.join("hooks").join("claude-worktrees");
+    let mut records: Vec<_> = fs::read_dir(&dir)?
+        .filter_map(std::result::Result::ok)
+        .collect();
+    assert_eq!(records.len(), 1, "{dir:?}");
+    Ok(records.remove(0).path())
+}
+
+#[test]
+fn ownership_is_specific_to_one_creation_and_ends_with_the_tree() -> Result {
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    // Happy path: the record exists in state and in the admin directory, and
+    // the same name reuses the tree; removal by the hook deletes the record.
+    let path = made_tree(&rig, "owned")?;
+    let record = state_record(&rig)?;
+    assert_eq!(
+        code(&run_hook(
+            &rig,
+            "worktree-create",
+            &worktree_input(&rig, "owned")
+        )?),
+        0
+    );
+    let removed = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
+    assert_eq!(code(&removed), 0);
+    assert!(!record.exists(), "state record outlived the tree");
+    // A tree recreated by hand at the same path and branch is not adopted,
+    // though the state record of the first creation is still on disk.
+    let path = made_tree(&rig, "stale")?;
+    let stale = state_record(&rig)?;
+    git(
+        &rig,
+        &["worktree", "remove", "--force", ".worktrees/claude-stale"],
+    )?;
+    assert!(stale.is_file());
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".worktrees/claude-stale",
+            "claude/stale",
+        ],
+    )?;
+    let stderr = refused_create(&rig, "stale")?;
+    assert!(stderr.contains("was not created by this hook"), "{stderr}");
+    assert!(path.is_dir());
+    fs::remove_file(&stale)?;
+    // A record whose token differs from the tree's marker is refused.
+    let path = made_tree(&rig, "token")?;
+    let record = state_record(&rig)?;
+    let mut value: Value = serde_json::from_slice(&fs::read(&record)?)?;
+    value["token"] = json!("00000000000000000000000000000000");
+    fs::write(&record, serde_json::to_vec(&value)?)?;
+    let stderr = refused_create(&rig, "token")?;
+    assert!(stderr.contains("was not created by this hook"), "{stderr}");
+    // A tree whose HEAD has moved since the hook made it is not adopted.
+    fs::remove_file(&record)?;
+    fs::remove_dir_all(rig.state.join("hooks"))?;
+    let _ = path;
+    let moved = made_tree(&rig, "moved")?;
+    git(
+        &rig,
+        &[
+            "-C",
+            moved.to_str().ok_or("path")?,
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+    )?;
+    let stderr = refused_create(&rig, "moved")?;
+    assert!(stderr.contains("was not created by this hook"), "{stderr}");
+    Ok(())
+}
+
 fn refused_create(rig: &TestRig, name: &str) -> Result<String> {
     let output = run_hook(rig, "worktree-create", &worktree_input(rig, name))?;
     assert_eq!(code(&output), 2, "{name}");
