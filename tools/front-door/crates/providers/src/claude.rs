@@ -756,6 +756,10 @@ enum Event {
         result: Option<String>,
         #[serde(default)]
         api_error_status: Option<u16>,
+        // The result carries the run total; assistant messages only carry
+        // streaming placeholders.
+        #[serde(default)]
+        usage: Option<Usage>,
     },
     #[serde(other)]
     Other,
@@ -765,7 +769,6 @@ struct Message {
     model: String,
     role: String,
     content: Vec<Content>,
-    usage: Option<Usage>,
 }
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -778,8 +781,15 @@ enum Content {
 }
 #[derive(Deserialize)]
 struct Usage {
+    // Cursor shares this result shape and spells the counts in camelCase.
+    #[serde(alias = "inputTokens")]
     input_tokens: u64,
+    #[serde(alias = "outputTokens")]
     output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
@@ -823,12 +833,6 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     }
                 }
             }
-            if let Some(usage) = message.usage {
-                events.push(E::Usage {
-                    input: usage.input_tokens,
-                    output: usage.output_tokens,
-                });
-            }
             events
         }
         Event::Result {
@@ -837,8 +841,17 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             is_error,
             result,
             api_error_status,
+            usage,
         } => {
             let mut events = vec![E::Session(session_id)];
+            if let Some(usage) = usage {
+                events.push(E::Usage {
+                    input: usage.input_tokens,
+                    output: usage.output_tokens,
+                    cache_read: usage.cache_read_input_tokens,
+                    cache_write: usage.cache_creation_input_tokens,
+                });
+            }
             if api_error_status == Some(401) {
                 events.push(E::AuthRequired);
             } else if is_error || subtype != "success" {

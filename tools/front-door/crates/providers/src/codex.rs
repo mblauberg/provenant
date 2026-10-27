@@ -207,6 +207,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             E::Usage {
                 input: usage.input_tokens,
                 output: usage.output_tokens,
+                cache_read: None,
+                cache_write: None,
             },
             E::Terminal,
         ],

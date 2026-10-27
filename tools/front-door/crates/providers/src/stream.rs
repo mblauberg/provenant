@@ -8,6 +8,10 @@ pub enum ProviderEvent {
     Usage {
         input: u64,
         output: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write: Option<u64>,
     },
     Refusal,
     QuotaLimited {
