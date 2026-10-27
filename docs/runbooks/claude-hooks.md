@@ -37,8 +37,10 @@ The digest is read-only and at most 3 KiB; the whole hook output stays under
 Each lane listing reads one page of 100. When more exist, the count shows a
 `+` (for example `Lanes settled since the last chair save (3+)`) and the
 section ends with `this count is partial; run <command>`, where the command
-lists the next page and repeats the hook's `--state-dir` (shell-quoted)
-when it used a non-default one, so it reads the same store. A partial count is never shown as complete.
+lists the next page and repeats the hook's `--state-dir` (made absolute and
+single-quoted) when it used a non-default one, so it reads the same store. If
+that path is not valid UTF-8 or holds control characters, no runnable command
+is shown, only a note to page with the state directory the hook used. A partial count is never shown as complete.
 
 A section the hook could not read is listed as unavailable, never as empty.
 The hook budget is 4 seconds in total, with the lane, PR and worktree reads
@@ -65,7 +67,11 @@ Auto-saved: 2026-10-27T03:00:00Z
   verifies its content and equals that record. A valid block the chair copied
   into their notes, marker lines in the chair's own text, and a block whose
   content was edited all stay untouched, and a fresh block is appended after
-  them. With no record, nothing is treated as ours. Everything outside the
+  them. With no record, or when zero or several blocks match it (for example the
+  chair copied the latest block), nothing is treated as ours and a fresh block is
+  appended. A managed block is replaced where it stands; every other byte,
+  including trailing newlines, is kept, and an appended block adds only the
+  separator it needs. Everything outside the
   recorded block, including every authority reference the chair wrote, is kept
   as written.
 - A `workflow session save` replaces the whole file, block included; the next

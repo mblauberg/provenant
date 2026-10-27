@@ -151,10 +151,12 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             (Ok(Ok(active)), Ok(Ok(settled))) => {
                 let (lanes, next) = parse_lanes(&active, None);
                 state.active = lanes;
-                state.active_more = next.map(|cursor| next_page(&cursor, false, cli.state_dir));
+                state.active_more =
+                    next.map(|cursor| next_page(&cursor, false, cli.state_dir, cli.cwd));
                 let (lanes, next) = parse_lanes(&settled, Some(want.settled_after_unix));
                 state.settled = lanes;
-                state.settled_more = next.map(|cursor| next_page(&cursor, true, cli.state_dir));
+                state.settled_more =
+                    next.map(|cursor| next_page(&cursor, true, cli.state_dir, cli.cwd));
             }
             _ => state.unavailable.push("lanes".into()),
         }
@@ -208,22 +210,34 @@ fn route(lane: &Value) -> String {
         .or_else(|| requested("name"))
         .unwrap_or_else(|| "unresolved".into())
 }
-/// Single-quote `text` for a POSIX shell: a quote becomes `'\''`. Control
-/// characters are dropped, since the command is shown on one line.
+/// Single-quote `text` for a POSIX shell: a quote becomes `'\''`.
 fn shell_quote(text: &str) -> String {
-    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-    format!("'{}'", clean.replace('\'', "'\\''"))
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
-/// The command that lists the page after `cursor`, for the same listing the
-/// hook read. Only the digits of a cursor are kept, since it reaches a command.
-/// A non-default state directory the collector used is repeated, quoted for a
-/// POSIX shell, so the command reads the same store.
-fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>) -> String {
+/// Starts a note that is shown as plain text instead of as a command.
+const PLAIN_NOTE: &str = "page with: ";
+/// How to list the page after `cursor`, for the same listing the hook read.
+/// Only the digits of a cursor are kept, since it reaches a command. A
+/// non-default state directory the collector used is made absolute (against
+/// the directory the collector ran in) and repeated, quoted for a POSIX shell.
+/// A state directory that is not valid UTF-8 or holds control characters
+/// cannot be quoted faithfully, so no runnable command is given, only a note.
+fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>, cwd: &Path) -> String {
     let cursor: String = cursor.chars().filter(char::is_ascii_digit).collect();
     let mut command = String::from("provenant");
+    let mut note = false;
     if let Some(state) = state_dir {
-        command.push_str(" --state-dir ");
-        command.push_str(&shell_quote(&state.to_string_lossy()));
+        let absolute = cwd.join(state);
+        match absolute
+            .to_str()
+            .filter(|s| !s.chars().any(char::is_control))
+        {
+            Some(text) => {
+                command.push_str(" --state-dir ");
+                command.push_str(&shell_quote(text));
+            }
+            None => note = true,
+        }
     }
     command.push_str(&if settled {
         format!(" lanes --all --limit {LANE_PAGE}")
@@ -240,7 +254,13 @@ fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>) -> String {
         command.push_str(" --cursor ");
         command.push_str(&cursor);
     }
-    command
+    if note {
+        format!(
+            "{PLAIN_NOTE}{command} and the --state-dir this hook used (its path cannot be shown safely)"
+        )
+    } else {
+        command
+    }
 }
 /// Lanes from a `lanes` listing. With `settled_after_unix`, only lanes that
 /// finished later count. The cursor, when present, names a further page the
@@ -374,22 +394,42 @@ mod tests {
             {"run_id":"r","task_id":"t","attempt_id":"a","state":"failed","finished_at":"2026-10-27T01:00:00Z"}
         ],"next_cursor":"1042"});
         let (lanes, next) = parse_lanes(&data, Some(0));
-        let command = next_page(&next.unwrap_or_default(), true, None);
+        let cwd = Path::new("/work");
+        let command = next_page(&next.unwrap_or_default(), true, None, cwd);
         assert!(
             command.starts_with("provenant lanes --all --limit 100 --state succeeded"),
             "{command}"
         );
         assert!(command.ends_with("--cursor 1042"), "{command}");
         assert_eq!(
-            next_page("1; rm -rf /", false, None),
+            next_page("1; rm -rf /", false, None, cwd),
             "provenant lanes --limit 100 --cursor 1"
         );
         // A non-default state directory is repeated, safely quoted.
-        let custom = next_page("7", false, Some(Path::new("/s/it's here")));
+        let custom = next_page("7", false, Some(Path::new("/s/it's here")), cwd);
         assert_eq!(
             custom,
             "provenant --state-dir '/s/it'\\''s here' lanes --limit 100 --cursor 7"
         );
+        // A relative one is made absolute against the collector's directory.
+        assert_eq!(
+            next_page("7", false, Some(Path::new("rel/state")), cwd),
+            "provenant --state-dir '/work/rel/state' lanes --limit 100 --cursor 7"
+        );
+        // Control characters and non-UTF-8 bytes give a note, never a command.
+        use std::os::unix::ffi::OsStrExt;
+        for bad in [
+            Path::new("/s/a\nb"),
+            Path::new(std::ffi::OsStr::from_bytes(b"/s/\xff")),
+        ] {
+            let note = next_page("7", false, Some(bad), cwd);
+            assert!(
+                note.starts_with("page with: provenant lanes --limit 100 --cursor 7 and")
+                    && note.contains("--state-dir this hook used")
+                    && !note.contains("/s/"),
+                "{note}"
+            );
+        }
         let state = SessionState {
             settled: lanes,
             settled_more: Some(command),

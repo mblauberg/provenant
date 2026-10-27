@@ -83,7 +83,8 @@ pub struct SessionState {
     pub active: Vec<LaneLine>,
     pub settled: Vec<LaneLine>,
     /// When the listing held lanes beyond the page the collector read, the
-    /// command that lists the next page. The count shown is then partial.
+    /// command that lists the next page, or a plain note on how to when no safe
+    /// command exists. The count shown is then partial.
     pub active_more: Option<String>,
     pub settled_more: Option<String>,
     pub prs: Vec<PrLine>,
@@ -112,10 +113,13 @@ impl SessionState {
                 .collect(),
             more: lanes.len().saturating_sub(SECTION_LINES),
             partial: next.as_ref().map(|command| {
-                format!(
-                    "more lanes exist beyond the page read, so this count is partial; run `{}`",
+                // A runnable command is shown as code; a note is plain text.
+                let how = if command.starts_with("provenant ") {
+                    format!("run `{}`", clean(command, 512))
+                } else {
                     clean(command, 512)
-                )
+                };
+                format!("more lanes exist beyond the page read, so this count is partial; {how}")
             }),
         };
         if !self.unavailable.iter().any(|name| name == "lanes") {
