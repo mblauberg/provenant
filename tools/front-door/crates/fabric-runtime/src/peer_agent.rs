@@ -449,7 +449,7 @@ fn launchctl_with(
     ];
     let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
     options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let outcome = executor.execute(options)?;
     let ok = outcome.termination == Termination::Exit(0) && !outcome.timed_out;
