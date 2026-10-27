@@ -8,7 +8,10 @@ use provenant_core::GitOid;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::Path;
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +77,53 @@ fn checkout_of(git: &Git, project: &Path, branch: &str) -> Result<Option<String>
             path = Some(found);
         } else if line == wanted {
             return Ok(path.map(str::to_owned));
+        }
+    }
+    Ok(None)
+}
+
+/// How a worktree is using a branch.
+enum Use {
+    CheckedOut,
+    Rebased,
+    Bisected,
+}
+
+/// The worktree using `branch` and how: checked out, or, on a detached HEAD,
+/// paused in a rebase of it or a bisect started from it. `git branch -d`
+/// refuses all three, but `git worktree list` reports only the first.
+fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
+    if let Some(path) = checkout_of(git, project, branch)? {
+        return Ok(Some((path, Use::CheckedOut)));
+    }
+    let Some(listing) = git.full(project, &["worktree", "list", "--porcelain"])? else {
+        return Err("cannot list worktrees".into());
+    };
+    let head = format!("refs/heads/{branch}");
+    for path in listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+    {
+        let dir = Path::new(path);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(git_dir) = git.full(dir, &["rev-parse", "--absolute-git-dir"])? else {
+            return Err(format!("cannot find the Git directory of {path}").into());
+        };
+        let git_dir = PathBuf::from(git_dir.trim_end_matches('\n'));
+        let names = |file: &str, wanted: &str| -> Result<bool> {
+            match fs::read_to_string(git_dir.join(file)) {
+                Ok(text) => Ok(text.trim() == wanted),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(format!("cannot read {file} of {path}: {error}").into()),
+            }
+        };
+        if names("rebase-merge/head-name", &head)? || names("rebase-apply/head-name", &head)? {
+            return Ok(Some((path.to_owned(), Use::Rebased)));
+        }
+        if names("BISECT_START", branch)? {
+            return Ok(Some((path.to_owned(), Use::Bisected)));
         }
     }
     Ok(None)
@@ -344,14 +394,20 @@ fn delete_branch(
             format!("{branch} has commits that {upstream} does not contain"),
         ));
     }
-    // `git branch -d` would refuse a branch checked out in any worktree, but it
-    // deletes whatever the branch holds by then. Keep that refusal here and
-    // make the deletion itself conditional on the merged head.
-    if let Some(path) = checkout_of(git, project, branch)? {
+    // `git branch -d` would refuse a branch that any worktree has checked out,
+    // is rebasing or is bisecting, but it deletes whatever the branch holds by
+    // then. Keep that refusal here and make the deletion itself conditional on
+    // the merged head.
+    if let Some((path, how)) = holder_of(git, project, branch)? {
+        let how = match how {
+            Use::CheckedOut => "checked out",
+            Use::Rebased => "being rebased",
+            Use::Bisected => "being bisected",
+        };
         return Ok(Step::new(
             "branch",
             Status::Refused,
-            format!("{branch} is checked out at {path}"),
+            format!("{branch} is {how} at {path}"),
         ));
     }
     let tip = tip.to_string();

@@ -315,6 +315,85 @@ pub(crate) fn pr_land_deletes_an_unregistered_branch_only_at_the_merged_head() -
     Ok(())
 }
 
+pub(crate) fn pr_land_keeps_a_branch_held_by_a_paused_rebase() -> Result {
+    // The rebase leaves its worktree on a detached HEAD, so only the rebase
+    // state records that `feat` is still in use.
+    let landing = landing()?;
+    let held = hold(&landing, "rebase")?;
+    let (status, detail) = race(&landing, &[])?;
+    assert_eq!(status, "refused", "{detail}");
+    assert!(detail.contains("rebased"), "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+
+    // Once the rebase is aborted nothing holds the branch, so it is deleted.
+    git_in(&landing.rig, &held, &["rebase", "--abort"])?;
+    git_in(&landing.rig, &held, &["checkout", "-q", "--detach"])?;
+    let (status, detail) = race(&landing, &[])?;
+    assert_eq!(status, "done", "{detail}");
+    assert!(!branch_exists(&landing.rig, "feat")?);
+    Ok(())
+}
+
+pub(crate) fn pr_land_keeps_a_branch_held_by_a_bisect() -> Result {
+    let landing = landing()?;
+    let held = hold(&landing, "bisect")?;
+    let (status, detail) = race(&landing, &[])?;
+    assert_eq!(status, "refused", "{detail}");
+    assert!(detail.contains("bisected"), "{detail}");
+    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+
+    git_in(&landing.rig, &held, &["bisect", "reset"])?;
+    git_in(&landing.rig, &held, &["checkout", "-q", "--detach"])?;
+    let (status, detail) = race(&landing, &[])?;
+    assert_eq!(status, "done", "{detail}");
+    assert!(!branch_exists(&landing.rig, "feat")?);
+    Ok(())
+}
+
+/// A second worktree that has `feat` mid-`operation` on a detached HEAD, with
+/// the registered `feat` worktree dropped.
+fn hold(landing: &Landing, operation: &str) -> Result<PathBuf> {
+    unregister(landing)?;
+    let held = landing.rig.root.join("held");
+    git(
+        &landing.rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            held.to_str().ok_or("path")?,
+            "feat",
+        ],
+    )?;
+    if operation == "rebase" {
+        git_in(
+            &landing.rig,
+            &held,
+            &[
+                "-c",
+                "sequence.editor=sed -i.bak s/^pick/edit/",
+                "rebase",
+                "-q",
+                "-i",
+                "HEAD~1",
+            ],
+        )?;
+    } else {
+        let first = git_in(
+            &landing.rig,
+            &held,
+            &["rev-list", "--max-parents=0", "HEAD"],
+        )?;
+        git_in(&landing.rig, &held, &["bisect", "start", "HEAD", &first])?;
+    }
+    let listing = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
+    assert!(
+        !listing.contains("branch refs/heads/feat"),
+        "the worktree must be detached: {listing}"
+    );
+    Ok(held)
+}
+
 /// The `branch` step when `between` runs after the cleanup check.
 fn race(landing: &Landing, between: &[&str]) -> Result<(String, String)> {
     let mut argv = vec!["--land-race", landing.head.as_str()];
