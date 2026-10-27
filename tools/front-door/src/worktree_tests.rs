@@ -2622,9 +2622,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let selected_git =
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
-        if adapter == "claude" && writer {
+        if adapter == "claude" {
             // Claude's env scrub drops GIT_CONFIG_GLOBAL, so scratch git wraps
-            // the selected Git and sets it itself.
+            // the selected Git and sets it itself, for writers and readers.
             let wrapper = fs::read_to_string(&scratch_git)?;
             assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
             assert!(wrapper.contains(&format!("exec '{}'", selected_git.display())));

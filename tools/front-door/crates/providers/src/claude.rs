@@ -509,9 +509,9 @@ fn refresh_account(
 
 /// Claude uses the selected config directory. The host reads its login token
 /// and passes it through an inherited pipe, so the keychain stays
-/// unreadable. Writers additionally deny keychain services and the security
-/// executable, use private configuration and ask Claude to scrub subprocess
-/// credentials. Writer lanes may use Bash.
+/// unreadable. Both lane types deny keychain services and the security
+/// executable and ask Claude to scrub subprocess credentials. Writers use
+/// private configuration; read-only lanes retain their transcript location.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -561,7 +561,7 @@ fn prepare(
     argv.push(session_id.clone().into());
     let shell = access == Access::WorktreeWrite;
     let (mode, tools) = match access {
-        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob"),
+        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash"),
         Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
     };
     argv.extend(
@@ -605,7 +605,7 @@ fn prepare(
     let allowed_tools = if shell {
         "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
     } else {
-        "mcp__fabric__*"
+        "Bash,mcp__fabric__*"
     };
     let mut setup = input.provenant.claude(scratch, &mut argv, allowed_tools)?;
 
@@ -617,7 +617,7 @@ fn prepare(
     let mut env = base_env(input, scratch, &path);
     input
         .provenant
-        .environment(scratch, &mut env, &mut setup, shell)?;
+        .environment(scratch, &mut env, &mut setup, true)?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -642,17 +642,16 @@ fn prepare(
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
     let mut runtime_reads = vec![subtree(package)];
-    let mut tool_exec_roots = Vec::new();
+    let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
+    env.extend([
+        ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]);
+    // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
+    tool_exec_roots.push(subtree(scratch.join("bin")));
     if shell {
-        env.extend([
-            ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ]);
-        tool_exec_roots.extend(["/bin", "/usr/bin", "/usr/libexec"].map(subtree));
-        // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
-        tool_exec_roots.push(subtree(scratch.join("bin")));
         crate::launch::rust_tools(
             input,
             access,
@@ -684,7 +683,7 @@ fn prepare(
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
-                deny_keychain_access: shell,
+                deny_keychain_access: true,
                 tool_exec_roots,
                 tool_writes,
                 // Never the user's .claude.json, which can hold MCP secrets.

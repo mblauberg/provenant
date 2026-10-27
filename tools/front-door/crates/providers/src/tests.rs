@@ -1184,6 +1184,9 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+                "GIT_CONFIG_GLOBAL",
+                "GIT_CONFIG_NOSYSTEM",
             ],
             _ => &[],
         };
@@ -1268,7 +1271,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .expect("isolated settings");
                 assert_eq!(argv[sources + 1], "");
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
-                assert_eq!(argv[tools + 1], "Read,Grep,Glob");
+                assert_eq!(argv[tools + 1], "Read,Grep,Glob,Bash");
                 // The host's token is the only credential: no keychain or
                 // other credential path is readable. Only Provenant and its hook helpers are added.
                 assert!(
@@ -1286,8 +1289,32 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .iter()
                     .position(|arg| arg == "--allowedTools")
                     .expect("allow-list");
-                assert_eq!(argv[allowed + 1], "mcp__fabric__*");
+                assert_eq!(argv[allowed + 1], "Bash,mcp__fabric__*");
                 assert!(spec.profile.spec.authentication.is_empty());
+                assert!(spec.profile.spec.deny_keychain_access);
+                for (key, value) in [
+                    ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
+                    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                    ("GIT_CONFIG_NOSYSTEM", "1"),
+                ] {
+                    assert!(spec.env.iter().any(|(k, v)| k == key && v == value));
+                }
+                let roots: Vec<_> = spec
+                    .profile
+                    .spec
+                    .tool_exec_roots
+                    .iter()
+                    .map(|grant| grant.path.as_path())
+                    .collect();
+                assert_eq!(
+                    roots,
+                    ["/bin", "/usr/bin", "/usr/libexec", "/fixture/scratch/bin"].map(Path::new)
+                );
+                assert!(spec.setup.iter().any(|step| matches!(
+                    step, crate::launch::SetupStep::WriteExecutable { path, bytes }
+                        if path == Path::new("/fixture/scratch/bin/git")
+                            && String::from_utf8_lossy(bytes).contains("GIT_CONFIG_NOSYSTEM=1")
+                )));
                 assert!(
                     spec.profile
                         .spec
@@ -3525,6 +3552,21 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                     spec.env
                         .iter()
                         .any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && v == dir.as_os_str())
+                );
+                assert!(
+                    spec.profile
+                        .spec
+                        .runtime_reads
+                        .iter()
+                        .all(|g| !g.path.starts_with(&dir))
+                );
+                assert!(
+                    spec.profile
+                        .spec
+                        .state_writes
+                        .iter()
+                        .filter(|g| g.path.starts_with(&dir))
+                        .all(|g| g.path.starts_with(dir.join("projects")))
                 );
                 assert!(
                     spec.profile
