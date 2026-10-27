@@ -32,12 +32,30 @@ different digest fails with `operation_conflict` (exit 2).
 Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
 supervisor call happens inside a transaction. Admission bounds active lanes
-at 64 per host and 16 per project and queued lanes at 256 per host, with
+at 64 per host and 32 per project and queued lanes at 256 per host, with
 memory and disk floors, startup spacing and a deadline.
-- Why: an accepted receipt must mean durable admission.
+
+Each ticket and host ledger lease records a lane class: `writer` for a
+`worktree-write` lane, `read_only` for every other. Startup spacing is per
+class and measured only against the last start of that class: writers wait 20 s
+after the last writer start, and read-only lanes wait 2 s after the last
+read-only start, so a burst of provider launches is still staggered but a
+read-only lane never waits behind a writer. The memory floor (5 %) and disk
+floor (500 MiB) refuse both classes. A ledger row or ticket with no class is a
+writer; opening a version 1 ledger upgrades it in place and keeps its last
+start as the writer start.
+- Why: an accepted receipt must mean durable admission, and read-only lanes
+  must not queue behind writer spacing that exists to pace worktree and
+  provider startup.
 - Test: `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
+  `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
+  `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
+  `::read_only_lanes_are_spaced_2_seconds_apart`;
+  `::memory_floor_refuses_both_lane_classes`;
+  `::project_cap_allows_up_to_32_active_lanes`;
+  `::legacy_rows_without_a_class_are_treated_as_writers`;
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
-- Owner: `crates/run/src/admission.rs`
+- Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`
 
 ## Immutable attempts, no writer replay
 

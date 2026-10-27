@@ -291,7 +291,8 @@ impl RunStore {
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
                 let waves = index as u64 / input.request.concurrency.max(1);
-                self.queue_ticket(tx, &attempt, input.request.concurrency, waves.saturating_mul(task.provider_timeout_seconds))?;
+                let class = if task.writer.is_some() { LaneClass::Writer } else { LaneClass::ReadOnly };
+                self.queue_ticket(tx, &attempt, class, input.request.concurrency,waves.saturating_mul(task.provider_timeout_seconds))?;
             }
             Ok(())
         })?;

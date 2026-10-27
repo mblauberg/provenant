@@ -998,6 +998,7 @@ pub(super) fn open_writer_store(
     let mut store = provenant_run::RunStore::open(context, &call)?;
     store.set_admission_policy(provenant_run::AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..Default::default()
     });
     Ok(store)

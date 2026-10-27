@@ -25,7 +25,7 @@ pub(crate) struct AppliedWriteGrants {
 
 /// Hard host limits, independent of batch concurrency.
 pub const HOST_ACTIVE: u64 = 64;
-pub const PROJECT_ACTIVE: u64 = 16;
+pub const PROJECT_ACTIVE: u64 = 32;
 pub const HOST_QUEUED: u64 = 256;
 
 /// Floors and windows recorded on each ticket at submission. A task queued
@@ -35,18 +35,31 @@ pub const HOST_QUEUED: u64 = 256;
 pub struct AdmissionPolicy {
     pub memory_floor_basis_points: u64,
     pub disk_floor_bytes: u64,
+    /// Spacing between writer starts.
     pub startup_spacing_ms: u64,
+    /// Spacing between read-only starts, kept apart from the writer clock.
+    pub read_only_spacing_ms: u64,
     pub admission_seconds: u64,
 }
 impl Default for AdmissionPolicy {
-    /// Read-only defaults: five per cent memory, 500 MiB disk, 20 s spacing
-    /// and a one-hour admission deadline.
+    /// Defaults: five per cent memory, 500 MiB disk, 20 s writer spacing, 2 s
+    /// read-only spacing and a one-hour admission deadline.
     fn default() -> Self {
         Self {
             memory_floor_basis_points: 500,
             disk_floor_bytes: 500 * 1024 * 1024,
             startup_spacing_ms: 20_000,
+            read_only_spacing_ms: 2_000,
             admission_seconds: 3600,
+        }
+    }
+}
+impl AdmissionPolicy {
+    /// The spacing a lane of `class` waits out after the last start of its class.
+    pub fn spacing_ms(&self, class: LaneClass) -> u64 {
+        match class {
+            LaneClass::Writer => self.startup_spacing_ms,
+            LaneClass::ReadOnly => self.read_only_spacing_ms,
         }
     }
 }
@@ -74,6 +87,7 @@ impl RunStore {
         &self,
         tx: &Connection,
         attempt: &AttemptRecord,
+        class: LaneClass,
         concurrency: u64,
         queue_seconds: u64,
     ) -> Result<()> {
@@ -93,7 +107,8 @@ impl RunStore {
             active: false,
             memory_floor_basis_points: self.policy.memory_floor_basis_points,
             disk_floor_bytes: self.policy.disk_floor_bytes,
-            startup_spacing_ms: self.policy.startup_spacing_ms,
+            startup_spacing_ms: self.policy.spacing_ms(class),
+            lane_class: class,
             run_concurrency: concurrency,
             quota_permit: None,
             admission_deadline: deadline(
@@ -305,10 +320,8 @@ impl RunStore {
             if !crate::ledger::lease(
                 &ledger,
                 self.context.state_root.as_path(),
-                id,
-                old.project_id,
+                &ticket,
                 now.as_micros() / 1000,
-                sql_int(ticket.startup_spacing_ms)?,
                 call,
             )? {
                 return Ok(None);

@@ -699,7 +699,7 @@ fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
     // Make the replacement fully launchable, including its prompt and ticket.
     let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
     artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
-    store.queue_ticket(&store.db, &replacement, 1, 0)?;
+    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0)?;
     let revalidated = store.validate_child(
         nested.run_id,
         parent,
@@ -2323,6 +2323,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
 
     store.set_admission_policy(AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
     let serial = two_tasks(1);
@@ -2364,7 +2365,10 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         None,
         &call,
     )?;
-    assert!(store.claim(id, now, &call)?.is_none(), "20 s host spacing");
+    assert!(
+        store.claim(id, now, &call)?.is_none(),
+        "2 s read-only host spacing"
+    );
 
     // A one-second window from the queued time, 100 microseconds, so the
     // starved wait pauses on the virtual clock until the deadline.
@@ -2398,6 +2402,219 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     Ok(())
 }
 
+/// One-task run with its own IDs: a writer when `writer`, else read-only.
+fn lane(seed: u8, writer: bool) -> PreparedRun {
+    let mut run = batch(seed, 1);
+    if writer {
+        run.request.tasks[0].writer = Some(WriterRequest {
+            project: "/project".into(),
+            worktree: format!("/project/.worktrees/lane-{seed}").into(),
+        });
+    }
+    run
+}
+/// Create and start `run`, returning its only attempt ready to claim.
+fn starting(store: &RunStore, run: &PreparedRun, call: &Request<'_>) -> Result<AttemptId> {
+    store.create(run, call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        call,
+    )?;
+    Ok(id)
+}
+fn at(ms: i64) -> WallTime {
+    WallTime::from_micros(ms * 1000).unwrap()
+}
+
+#[test]
+fn read_only_lane_is_admitted_inside_a_writers_spacing_window() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let writer = starting(&store, &lane(20, true), &call)?;
+    let reader = starting(&store, &lane(21, false), &call)?;
+    assert!(store.claim(writer, at(10_000), &call)?.is_some());
+    assert!(
+        store.claim(reader, at(11_000), &call)?.is_some(),
+        "a writer that started 1 s ago does not space a read-only lane"
+    );
+    Ok(())
+}
+
+#[test]
+fn writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(30, true), &call)?;
+    let second = starting(&store, &lane(31, true), &call)?;
+    let third = starting(&store, &lane(32, true), &call)?;
+    let reader = starting(&store, &lane(33, false), &call)?;
+    assert!(store.claim(first, at(0), &call)?.is_some());
+    assert!(
+        store.claim(second, at(19_999), &call)?.is_none(),
+        "20 s between writers"
+    );
+    assert!(store.claim(reader, at(20_000), &call)?.is_some());
+    assert!(
+        store.claim(second, at(20_001), &call)?.is_some(),
+        "measured from the last writer, not the read-only start at 20 s"
+    );
+    assert!(store.claim(third, at(40_000), &call)?.is_none());
+    assert!(store.claim(third, at(40_001), &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn read_only_lanes_are_spaced_2_seconds_apart() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(40, false), &call)?;
+    let second = starting(&store, &lane(41, false), &call)?;
+    let third = starting(&store, &lane(42, false), &call)?;
+    assert!(store.claim(first, at(0), &call)?.is_some());
+    assert!(
+        store.claim(second, at(1_999), &call)?.is_none(),
+        "a burst of provider launches is still staggered"
+    );
+    assert!(store.claim(second, at(2_000), &call)?.is_some());
+    assert!(store.claim(third, at(3_999), &call)?.is_none());
+    assert!(store.claim(third, at(4_000), &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn memory_floor_refuses_both_lane_classes() -> TestResult {
+    // Each case has its own store and ledger, so only the floor can decide it.
+    for (seed, writer, available) in [
+        (50, true, 1),
+        (51, false, 1),
+        (52, true, 50),
+        (53, false, 50),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(seed, writer);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let admitted = store.admit(id, &attempt, &Host { available }, &clock, &cancel);
+        if available < 5 {
+            assert!(
+                matches!(admitted, Err(RunError::Refused)),
+                "1% memory is under the 5% floor (writer: {writer})"
+            );
+        } else {
+            assert_eq!(admitted?.state, AttemptState::Running, "writer: {writer}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn project_cap_allows_up_to_32_active_lanes() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    // Four runs of eight keep each run under its own batch concurrency.
+    let mut index = 0_i64;
+    for seed in 60..64 {
+        let run = batch(seed, 8);
+        store.create(&run, &call)?;
+        for attempt in &run.attempts {
+            let id = attempt.attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            // Spaced past both classes' windows so only the cap can refuse.
+            index += 1;
+            assert!(
+                store.claim(id, at(index * 20_000), &call)?.is_some(),
+                "lane {index} is within the 32-lane project cap"
+            );
+        }
+    }
+    let over = lane(70, false);
+    let id = starting(&store, &over, &call)?;
+    assert!(
+        store.claim(id, at(40 * 20_000), &call)?.is_none(),
+        "the 33rd lane waits for the project cap"
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    // A ledger from before lane classes: one global spacing row, 10 s in.
+    let file = store.writer_registry.join("admission.sqlite3");
+    std::fs::create_dir_all(&store.writer_registry)?;
+    let legacy = rusqlite::Connection::open(&file)?;
+    legacy.execute_batch(
+        "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+         CREATE INDEX lease_projects ON leases(project);
+         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
+         INSERT INTO spacing(id,last_start) VALUES (1,10000);
+         PRAGMA user_version=1;",
+    )?;
+    drop(legacy);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+
+    let old = starting(&store, &lane(80, false), &call)?;
+    // A ticket recorded before classes has no class field; strip it.
+    let raw: Vec<u8> = store.db.query_row(
+        "SELECT record FROM admission WHERE attempt=?1",
+        [old.to_string()],
+        |r| r.get(0),
+    )?;
+    let mut ticket: serde_json::Value = db::decode(&raw)?;
+    ticket
+        .as_object_mut()
+        .ok_or("ticket object")?
+        .remove("lane_class");
+    store.db.execute(
+        "UPDATE admission SET record=?1 WHERE attempt=?2",
+        rusqlite::params![db::bytes(&ticket)?, old.to_string()],
+    )?;
+    let reader = starting(&store, &lane(81, false), &call)?;
+
+    assert!(
+        store.claim(reader, at(11_000), &call)?.is_some(),
+        "the legacy start counts as a writer start, so it cannot hold a read-only lane"
+    );
+    assert!(
+        store.claim(old, at(11_001), &call)?.is_none(),
+        "a ticket with no class is a writer, spaced 20 s from the legacy start"
+    );
+    assert!(store.claim(old, at(30_000), &call)?.is_some());
+    Ok(())
+}
+
 #[test]
 fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -2413,14 +2630,21 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
             RunStore::open(&context(&base.join(name))?, &call)?.with_writer_registry(&host);
         store.set_admission_policy(AdmissionPolicy {
             startup_spacing_ms: 0,
+            read_only_spacing_ms: 0,
             ..AdmissionPolicy::default()
         });
         stores.push(store);
     }
-    // Each store fills half the project's host-wide limit with its own run.
-    let half = PROJECT_ACTIVE / 2;
-    let batches = [batch(1, half), batch(2, half)];
-    for (store, run) in stores.iter().zip(&batches) {
+    // Each store fills half the project's host-wide limit, in runs that stay
+    // inside one batch's concurrency.
+    let per_run = PROJECT_ACTIVE / 4;
+    let batches = [
+        batch(1, per_run),
+        batch(4, per_run),
+        batch(2, per_run),
+        batch(5, per_run),
+    ];
+    for (store, run) in stores.iter().flat_map(|s| [s, s]).zip(&batches) {
         store.create(run, &call)?;
         for attempt in &run.attempts {
             store.mark_starting(
@@ -2436,7 +2660,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
                 .ok_or("within the host limit")?;
         }
     }
-    // Counted per store, the second store would admit a ninth attempt.
+    // Counted per store, the second store would admit another attempt.
     let extra = batch(3, 1);
     let waiting = extra.attempts[0].attempt_id;
     stores[1].create(&extra, &call)?;
@@ -2627,6 +2851,7 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
     store.set_admission_policy(AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
     let batch = two_tasks(2);
@@ -3910,6 +4135,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
     store.set_admission_policy(AdmissionPolicy {
         startup_spacing_ms: 0,
+        read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
     let batch = two_tasks(2);

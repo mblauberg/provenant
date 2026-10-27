@@ -640,6 +640,7 @@ mod tests {
             run::RunStore::open(&context, &call)?.with_sealed_requester(context.actor_id);
         store.set_admission_policy(run::AdmissionPolicy {
             startup_spacing_ms: 0,
+            read_only_spacing_ms: 0,
             ..Default::default()
         });
         let task_id = child.request.tasks[0].task_id;
