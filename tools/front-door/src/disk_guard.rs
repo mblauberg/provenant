@@ -309,6 +309,16 @@ fn check(
     let pause = size(&settings.pause)?;
     let resume_bytes = size(&settings.resume)?;
     let warn = size(&settings.warn)?;
+    if !state.paused.is_empty()
+        && free < resume_bytes
+        && (state.free != Some(free) || state.resume_at != Some(resume_bytes))
+    {
+        // Builds stay stopped until the resume level, so `lanes` needs the
+        // current figures on every tick, not only below the pause level.
+        state.free = Some(free);
+        state.resume_at = Some(resume_bytes);
+        save(state)?;
+    }
     if free < pause {
         state.free = Some(free);
         state.resume_at = Some(resume_bytes);

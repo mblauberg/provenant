@@ -191,8 +191,14 @@ impl RunStore {
     /// The disk guard's saved state names its pause while it holds builds
     /// stopped: the free bytes it last saw and the level it resumes at.
     fn disk_guard_wait(&self) -> Option<String> {
-        let path = self.writer_registry.join("disk-guard/paused.json");
-        let state: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        let guard = Directory::open_anchor(&self.writer_registry)
+            .and_then(|root| root.open_directory("disk-guard".as_ref()))
+            .ok()?;
+        let raw = guard
+            .open_read("paused.json".as_ref())
+            .and_then(|mut file| file.read_bounded(RECORD_LIMIT))
+            .ok()?;
+        let state: serde_json::Value = serde_json::from_slice(&raw).ok()?;
         if state["paused"].as_array()?.is_empty() {
             return None;
         }
@@ -200,11 +206,12 @@ impl RunStore {
             let tenths = state[key].as_u64()? * 10 / 1024_u64.pow(3);
             Some(format!("{}.{}", tenths / 10, tenths % 10))
         };
-        Some(format!(
-            "disk guard paused builds (free {} GiB, resumes at {} GiB)",
-            gib("free")?,
-            gib("resume_at")?
-        ))
+        Some(match (gib("free"), gib("resume_at")) {
+            (Some(free), Some(resume)) => {
+                format!("disk guard paused builds (free {free} GiB, resumes at {resume} GiB)")
+            }
+            _ => "disk guard paused builds".to_owned(),
+        })
     }
     fn ticket(&self, db: &Connection, id: AttemptId) -> Result<AdmissionTicket> {
         let raw: Vec<u8> = db
