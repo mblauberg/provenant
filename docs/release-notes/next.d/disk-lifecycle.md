@@ -15,6 +15,7 @@ when `gc.schedule=false` disables it.
 `retention.logs_days` defaults to 30. Large stdout/stderr captures of closed
 runs, including child stores, expire with a 64 KiB tail retained. Disk reports
 measure captures separately as `attempt_logs`.
+Capture rows compact by class so disk reports remain bounded across many runs.
 
 Scheduled GC excludes stale, transient and non-Git project roots.
 `gc.data.unobserved_projects` remains an array of paths; `skipped_transient`

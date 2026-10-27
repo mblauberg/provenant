@@ -37,8 +37,8 @@ companions of an existing store while reading its live index.
    separately; [GC](gc.md) applies its terminal retention policy. The `attempt_logs` class measures
    stdout/stderr captures and retained tails separately from other evidence.
    Scratch, archived provider history and quarantine remain retained output.
-   Retained output, other run metadata and child stores are rolled up into one
-   row per class. Each
+   Captures, retained output, other run metadata and child stores are rolled up
+   into one row per class. Each
    aggregate's `count` records the number of inventory rows it represents.
    Temporary directories, caches and worktrees keep their individual paths.
 

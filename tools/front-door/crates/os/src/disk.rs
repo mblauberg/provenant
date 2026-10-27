@@ -60,7 +60,7 @@ pub struct DiskParts {
 #[derive(Debug, Default, Serialize)]
 pub struct DiskEntry {
     /// `lane_cache`, `worktree`, `host_target`, `attempt_tmp`,
-    /// `provider_state`, `attempt_retained`, `child_store` or `other_state`.
+    /// `provider_state`, `attempt_logs`, `attempt_retained`, `child_store` or `other_state`.
     /// The last four are folded into one aggregate per class.
     pub class: String,
     /// For an aggregate, the common ancestor of the folded paths.
@@ -521,7 +521,7 @@ impl DiskReport {
         for mut entry in self.entries.drain(..) {
             if matches!(
                 entry.class.as_str(),
-                "other_state" | "attempt_retained" | "child_store"
+                "other_state" | "attempt_logs" | "attempt_retained" | "child_store"
             ) {
                 if let Some(&index) = aggregates.get(&entry.class) {
                     let aggregate = &mut entries[index];

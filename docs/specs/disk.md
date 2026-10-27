@@ -159,6 +159,8 @@ terminal. A distinct `.log.tail` file retains the final 64 KiB. Results, exit
 evidence, original digest records, small captures and child-store databases
 survive. The same policy visits indexed child stores. Disk inventory reports
 `attempt_logs`; GC reports `provider_state.attempt_logs`.
+Disk reports compact capture observations by class, preserving byte totals and
+capture counts so many closed runs fit within the report limit.
 `output --part stderr` falls back to the retained `stderr.log.tail` when
 the full capture has expired. JSON reports `complete=false`; text marks the
 retained tail as truncated. Offsets and digest describe the retained bytes.

@@ -420,7 +420,20 @@ mod tests {
             .iter()
             .filter(|entry| entry["class"] == "host_target")
             .collect();
-        assert_eq!(targets.len(), 3);
+        assert_eq!(
+            targets
+                .iter()
+                .filter_map(|entry| entry["path"].as_str())
+                .map(PathBuf::from)
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                rig.project.join("target"),
+                rig.project.join(".worktrees/disk-fixture/target"),
+                rig.state.join("target")
+            ]
+            .into_iter()
+            .collect()
+        );
         for target in targets {
             let path = Path::new(target["path"].as_str().ok_or("target path")?);
             assert!(target.get("reclaim").is_none());
@@ -476,10 +489,7 @@ mod tests {
             };
             let attempt = state.join(format!("runs/{index}/attempts/a"));
             fs::create_dir_all(&attempt)?;
-            for (name, class) in [
-                ("result.md", "other_state"),
-                ("stdout.log", "attempt_retained"),
-            ] {
+            for (name, class) in [("result.md", "other_state"), ("stdout.log", "attempt_logs")] {
                 let part = attempt.join(name);
                 fs::write(&part, contents)?;
                 *expected.entry(class).or_default() += fs::symlink_metadata(part)?.blocks() * 512;
@@ -514,7 +524,16 @@ mod tests {
         }
         report.finish();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(report.entries.len(), 3);
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .map(|entry| entry.class.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["attempt_logs", "child_store", "other_state"]
+                .into_iter()
+                .collect()
+        );
         for entry in &report.entries {
             let count = RUNS + u64::from(entry.class == "other_state");
             assert_eq!(entry.count, Some(count));

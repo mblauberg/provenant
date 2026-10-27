@@ -477,7 +477,16 @@ mod tests {
         let mut report = DiskReport::new(state.into(), 0);
         RunStore::disk_usage_unindexed(&context.state_root, &mut report)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(report.entries.len(), 3);
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .map(|row| row.class.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["attempt_logs", "other_state", "provider_state"]
+                .into_iter()
+                .collect()
+        );
         let logs = report
             .entries
             .iter()
