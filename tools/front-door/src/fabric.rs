@@ -4023,6 +4023,85 @@ mod peer_tests {
     }
 
     #[test]
+    fn graph_submission_refuses_a_push_to_main_before_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_refuses_a_push_to_main_before_admission",
+        )? {
+            return Ok(());
+        }
+        use provenant_confinement::worktrees::{self, WorktreeCreate};
+        use provenant_fabric_runtime::graph::FileJournal;
+        let fixture = SettlementFixture::resumed()?;
+        let cancel = CancelToken::new();
+        let info = worktrees::with_context(
+            &fixture.roots,
+            &fixture.rig.home,
+            &fixture.rig.project,
+            &SystemClock,
+            &cancel,
+            |context| {
+                worktrees::create(
+                    &worktrees::WorktreeContext {
+                        workers: &FreeWorkers,
+                        ..*context
+                    },
+                    WorktreeCreate {
+                        branch: "main".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )
+            },
+        )?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join("protected-push-graph.json");
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":"protected-push",
+                "nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write",
+                    "worktree":info.path,"delivery":"push",
+                    "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?,
+        )?;
+        let result = factory.graph(
+            GraphInput::Run { document },
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &cancel,
+        );
+        assert!(
+            FileJournal::read_checkpoint(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "protected-push"
+            )?
+            .is_none(),
+            "protected push was admitted: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(FacadeError::ConfinementRefused)),
+            "{result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn graph_submission_pins_the_integration_base_across_replay()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
