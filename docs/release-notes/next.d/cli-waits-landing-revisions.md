@@ -20,8 +20,9 @@ order, scanning up to 1000 lanes.
 existing merge path, then fetches, fast-forwards a clean local base, removes
 the merged branch's worktree (after its declared build output) and deletes the
 branch, only while it is still at the merged head and not checked out, rebased or
-bisected in any worktree. Each follow-up step refuses and reports rather than
-forcing, and cleanup only touches a local branch whose tip is exactly the head
+bisected in any worktree. A checkout, rebase or bisect that starts between
+that check and the deletion is not caught. Each follow-up step refuses and
+reports rather than forcing, and cleanup only touches a local branch whose tip is exactly the head
 the pull request merged: a fork's head leaves a same-named local branch alone,
 so does a branch recreated or advanced to another tip, and a worktree holding
 commits the base lacks is kept along with its branch. Removal refuses if the

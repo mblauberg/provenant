@@ -299,7 +299,7 @@ repeat).
 | `fetch` | `git fetch <remote> <base>` | the fetch fails, or the fetched base does not hold the merged head |
 | `fast_forward` | moves the local base to the fetched one, in the checkout that has it, or by fetching `base:base` when none does | that checkout has any change, or the base has diverged |
 | `worktree` | deletes declared build output (`gc.projects.<id>.regenerable`, plus `target`), then removes the branch's registered worktree as `worktree remove` does | the worktree is dirty or has a live writer, this command runs inside it, its HEAD is not the merged head (it stays whole), or its HEAD moves after the check, which removal re-verifies under the worktree lock |
-| `branch` | deletes the merged local branch with `git update-ref -d <branch> <merged head>`, which deletes only if the branch is still at the merged head (a branch removed with its worktree is already gone) | the branch holds commits the fetched base lacks, any worktree has it checked out, mid-rebase or mid-bisect, or it moved off the merged head after the check (it is kept) |
+| `branch` | deletes the merged local branch with `git update-ref -d <branch> <merged head>`, which deletes only if the branch is still at the merged head (a branch removed with its worktree is already gone) | the branch holds commits the fetched base lacks, any worktree has it checked out, mid-rebase or mid-bisect, or it moved off the merged head after the check (it is kept); a checkout, rebase or bisect starting between the check and the delete is not caught |
 
 The `worktree` and `branch` steps act only on a local branch whose tip is the
 exact head the pull request merged. When the pull request's head is in another

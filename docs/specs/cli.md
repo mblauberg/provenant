@@ -185,7 +185,9 @@ branch. Removal carries that head and refuses, under the worktree lock, if the
 worktree's HEAD has moved since it was checked. The branch deletion carries it
 too: with no registered worktree it refuses a branch that any worktree has
 checked out, is rebasing (paused or not) or is bisecting, as `git branch -d`
-does, then deletes with `git update-ref -d <branch> <head>`, which compares
+does (read from Git's administrative directories, so a missing or unmounted
+checkout still holds its branch and an unreadable entry refuses), then deletes
+with `git update-ref -d <branch> <head>`, which compares
 the branch against the merged head and deletes in one ref transaction, so a
 branch moved after the check is kept. (A checkout, rebase or bisect of the
 branch that begins between that test and the deletion is not caught.) The head is required. A failure
