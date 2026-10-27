@@ -280,10 +280,18 @@ fn internal_lock_deadline_is_contention_and_keeps_the_report() -> Result {
 }
 
 #[test]
-fn failed_auth_refresh_shows_last_known_usage_age_and_stale_marker() -> Result {
+fn failed_auth_refresh_shows_last_known_usage_age_and_auth_marker() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let rig = quota_rig()?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
+    // The report lists only registered accounts (#1810).
+    support::register_account(
+        &rig,
+        "claude",
+        "pro",
+        "pro-account",
+        &rig.root.join("claude-pro"),
+    )?;
     let directory = rig.state.join("quota/pro-account");
     fs::create_dir(&directory)?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
@@ -304,12 +312,19 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_stale_marker() -> Result {
     assert_eq!(code(&out), 0);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let row = &value["data"]["accounts"][0];
-    assert_eq!(row["status"], "stale");
+    assert_eq!(row["status"], "auth_required");
     assert!(row["age_seconds"].as_u64().is_some_and(|age| age >= 10));
     assert_eq!(row["snapshot"]["windows"][0]["used_basis_points"], 5300);
     let human = rig.command(&["quota", "show"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
-    for expected in ["pro", "STALE", "last known", "53.00%", "age", "auth"] {
+    for expected in [
+        "pro",
+        "AUTH_REQUIRED",
+        "last known",
+        "53.00%",
+        "age",
+        "auth",
+    ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
     assert!(!text.contains('\u{1b}'));

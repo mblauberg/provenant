@@ -695,7 +695,7 @@ pub fn run(
                     row.account.label, row.account.adapter
                 ));
                 if let Some(snapshot) = &row.snapshot {
-                    if row.status == QuotaStatus::Stale {
+                    if matches!(row.status, QuotaStatus::Stale | QuotaStatus::AuthRequired) {
                         human.push_str(" (last known)");
                     }
                     for window in &snapshot.windows {
