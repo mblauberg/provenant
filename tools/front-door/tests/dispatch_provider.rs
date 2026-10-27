@@ -222,37 +222,94 @@ fn claude_fixture() -> Result<TestRig> {
 }
 
 fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
-    let rig = claude_fixture()?;
-    let cleanup = rig.process_cleanup();
-    let git = provenant_os::git::git_executable().ok_or("git")?;
-    for args in [
-        vec!["config", "user.name", "Fixture"],
-        vec!["config", "user.email", "fixture@example.invalid"],
-        vec!["commit", "--allow-empty", "-qm", "base"],
-        vec!["branch", "-M", "main"],
+    for (model, writer, suppress) in [
+        ("claude/claude-opus-5-5", true, false),
+        ("claude/claude-opus-5-5", true, true),
+        ("claude/claude-opus-5-5", false, false),
+        ("claude/claude-sonnet-5-5", true, false),
     ] {
-        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+        let rig = claude_fixture()?;
+        let cleanup = rig.process_cleanup();
+        if suppress {
+            let mut config = OpenOptions::new()
+                .append(true)
+                .open(rig.state.join("config.toml"))?;
+            writeln!(
+                config,
+                "\n[domains.routing]\nsuppress_opus_writer_warning = true"
+            )?;
+        }
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+            vec!["branch", "-M", "main"],
+        ] {
+            assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+        }
+        let prompt = rig.root.join("prompt.md");
+        fs::write(&prompt, "Reply OK without changing files.")?;
+        let mut args = vec![
+            "dispatch",
+            "--operation-id",
+            "opus-writer",
+            "--model",
+            model,
+            "--account",
+            "pro",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ];
+        if writer {
+            args.extend([
+                "--mode",
+                "worktree-write",
+                "--worktree-branch",
+                "fixture/opus",
+                "--base",
+                "main",
+                "--deliver",
+                "none",
+            ]);
+        }
+        let out = rig.command(&args)?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout.bytes),
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(reply["status"], "ok", "{reply}");
+        assert_eq!(
+            reply["data"]["lanes"][0]["applied_route"]["model"], model,
+            "{reply}"
+        );
+        if !writer || suppress || model.contains("sonnet") {
+            assert!(!stderr.contains("advisory"), "{stderr}");
+        } else {
+            let advisory = stderr
+                .lines()
+                .find(|line| line.contains("advisory"))
+                .ok_or_else(|| format!("missing Opus writer advisory: {stderr}"))?;
+            assert!(advisory.contains("claude/claude-opus-5-5"), "{advisory}");
+            assert!(advisory.contains("codex/gpt-6.1-sol"), "{advisory}");
+            assert!(advisory.contains("principal"), "{advisory}");
+            assert_eq!(
+                stderr
+                    .lines()
+                    .filter(|line| line.contains("advisory"))
+                    .count(),
+                1
+            );
+        }
+        rig.assert_legacy_unchanged()?;
+        cleanup.disarm();
     }
-    let prompt = rig.root.join("prompt.md");
-    fs::write(&prompt, "Reply OK without changing files.")?;
-    let out = rig.command(&[
-        "dispatch", "--operation-id", "opus-writer",
-        "--model", "claude/claude-opus-5-5", "--account", "pro",
-        "--mode", "worktree-write", "--worktree-branch", "fixture/opus",
-        "--base", "main", "--deliver", "none",
-        "--prompt-file", prompt.to_str().ok_or("prompt")?, "--json",
-    ])?;
-    assert_eq!(code(&out), 0, "{} {}",
-        String::from_utf8_lossy(&out.stdout.bytes),
-        String::from_utf8_lossy(&out.stderr.bytes));
-    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
-    let advisory = stderr.lines().find(|line| line.contains("advisory"))
-        .ok_or_else(|| format!("missing Opus writer advisory: {stderr}"))?;
-    assert!(advisory.contains("claude/claude-opus-5-5"), "{advisory}");
-    assert!(advisory.contains("codex/gpt-6.1-sol"), "{advisory}");
-    assert!(advisory.contains("principal"), "{advisory}");
-    rig.assert_legacy_unchanged()?;
-    cleanup.disarm();
     Ok(())
 }
 

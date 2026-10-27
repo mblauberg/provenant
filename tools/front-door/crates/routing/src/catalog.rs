@@ -36,22 +36,44 @@ impl RoutingConfig {
             return None;
         }
         let applied = format!("{}/{}", route.adapter, route.model);
-        let pool = route.pool_selection.as_ref().map(|receipt| receipt.pool.as_str())
-            .or_else(|| ["principal", "senior", "junior", "design", "writing", "utility"]
-                .into_iter().find(|name| catalogue.pools.get(*name)
-                    .is_some_and(|members| members.iter().any(|m| m.model.as_str() == applied))))?;
+        let pool = route
+            .pool_selection
+            .as_ref()
+            .map(|receipt| receipt.pool.as_str())
+            .or_else(|| {
+                [
+                    "principal",
+                    "senior",
+                    "junior",
+                    "design",
+                    "writing",
+                    "utility",
+                ]
+                .into_iter()
+                .find(|name| {
+                    catalogue
+                        .pools
+                        .get(*name)
+                        .is_some_and(|members| members.iter().any(|m| m.model.as_str() == applied))
+                })
+            })?;
         let members = self.pools.get(pool).or_else(|| catalogue.pools.get(pool))?;
         let cheaper = members.iter().find(|member| {
-            member.weight > 0 && (member.model.model().contains("sonnet")
-                || member.model.adapter() == "codex")
+            member.weight > 0
+                && (member.model.model().contains("sonnet") || member.model.adapter() == "codex")
         })?;
         let effort = cheaper.effort.as_deref().or_else(|| {
-            route.effort.as_deref().filter(|effort| cheaper.efforts.iter().any(|e| e == effort))
+            route
+                .effort
+                .as_deref()
+                .filter(|effort| cheaper.efforts.iter().any(|e| e == effort))
         });
         Some(format!(
             "advisory: Opus writer route {applied}; consider cheaper {pool} route {}{} (silence with domains.routing.suppress_opus_writer_warning = true)",
             cheaper.model.as_str(),
-            effort.map(|effort| format!(" effort={effort}")).unwrap_or_default(),
+            effort
+                .map(|effort| format!(" effort={effort}"))
+                .unwrap_or_default(),
         ))
     }
 }
@@ -183,7 +205,7 @@ impl DomainConfig for RoutingConfig {
     }
 }
 fn defaults(_: Profile) -> &'static str {
-    "[routes]\n[pools]\n[pacing]\n"
+    "suppress_opus_writer_warning = false\n[routes]\n[pools]\n[pacing]\n"
 }
 pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
 

@@ -1,4 +1,4 @@
-## Routing
+## Additions
 
 Writer lanes using an Opus route now print a one-line advisory suggesting a
 cheaper route in the same pool. Dispatch continues normally. Set

@@ -534,7 +534,10 @@ fn prepare_with(
             continue;
         }
         if writer.is_some()
-            && let Some(advisory) = config.domains.routing.opus_writer_advisory(&catalogue, &route)
+            && let Some(advisory) = config
+                .domains
+                .routing
+                .opus_writer_advisory(&catalogue, &route)
         {
             // Advice must never refuse an otherwise valid dispatch, even if
             // the caller has closed its diagnostic stream.
