@@ -295,11 +295,11 @@ pub struct Split {
 /// line, the digest line, the content, and the end marker, where the digest
 /// verifies the content and equals `recorded`, the digest the autosave stored
 /// outside the checkpoint. A digest proves integrity, not authorship, so a
-/// valid block the chair copied into their notes is not ours. With no record
-/// nothing is managed.
+/// valid block the chair copied into their notes is not ours. With no record,
+/// or when zero or several blocks verify and match it, nothing is managed.
 fn managed_block(markdown: &str, recorded: Option<&str>) -> Option<(usize, usize)> {
     let recorded = recorded?;
-    let mut found = None;
+    let mut found: Vec<(usize, usize)> = Vec::new();
     let mut from = 0;
     while let Some(offset) = markdown[from..].find(STATE_BEGIN) {
         let begin = from + offset;
@@ -323,9 +323,14 @@ fn managed_block(markdown: &str, recorded: Option<&str>) -> Option<(usize, usize
             continue;
         }
         let block_end = markdown.len() - rest.len() + inner_len + end_marker.len();
-        found = Some((begin, block_end));
+        found.push((begin, block_end));
     }
-    found
+    // A copy of the latest block (before or after the original) makes the
+    // record ambiguous; then no block is ours and no text is touched.
+    match found.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
 }
 
 /// Locate the managed block (see `managed_block`; `recorded` is the digest the
@@ -416,13 +421,27 @@ pub fn autosave_document(
     default_chair_saved_unix: i64,
     auto_saved: &str,
 ) -> Result<Autosaved, super::SessionError> {
-    let split = existing.map(|text| split(text, recorded));
-    let chair = split.as_ref().map_or("", |s| s.chair.as_str());
-    let saved = split
-        .as_ref()
-        .and_then(|s| s.chair_saved_unix)
+    let span = existing.and_then(|text| managed_block(text, recorded).map(|span| (text, span)));
+    let saved = span
+        .and_then(|(text, (begin, end))| chair_saved(&text[begin..end]))
         .unwrap_or(default_chair_saved_unix);
-    let used = chair.trim_end_matches('\n').len() + 2;
+    // Every byte outside the managed block is kept as it is. A managed block
+    // is replaced where it stands; otherwise the block is appended after the
+    // existing text with only the separator it needs.
+    let (prefix, suffix, separator) = match (existing, span) {
+        (_, Some((text, (begin, end)))) => (&text[..begin], &text[end..], 0),
+        (Some(text), None) => {
+            let trailing = text.len() - text.trim_end_matches('\n').len();
+            let separator = if text.is_empty() {
+                0
+            } else {
+                2usize.saturating_sub(trailing)
+            };
+            (text, "", separator)
+        }
+        (None, None) => ("", "", 0),
+    };
+    let used = prefix.len() + suffix.len() + separator;
     let room = (super::CHECKPOINT_LIMIT as usize).saturating_sub(used);
     if room < 512 {
         return Err(super::SessionError::TooLarge);
@@ -433,10 +452,24 @@ pub fn autosave_document(
         .find_map(|line| line.strip_prefix(DIGEST_LINE))
         .unwrap_or_default()
         .to_owned();
-    Ok(Autosaved {
-        markdown: compose(chair, &block),
-        digest,
-    })
+    let mut markdown = String::with_capacity(used + block.len());
+    markdown.push_str(prefix);
+    markdown.push_str(&"\n".repeat(separator));
+    if span.is_some() {
+        // The span stops before the newline that ends the end marker.
+        markdown.push_str(block.trim_end_matches('\n'));
+    } else {
+        markdown.push_str(&block);
+    }
+    markdown.push_str(suffix);
+    Ok(Autosaved { markdown, digest })
+}
+
+fn chair_saved(block: &str) -> Option<i64> {
+    block
+        .lines()
+        .find_map(|line| line.strip_prefix(CHAIR_SAVED))
+        .and_then(|value| value.trim().parse().ok())
 }
 
 /// Pull request numbers the chair wrote, such as `PR #12`, `pr/12` or
@@ -597,6 +630,55 @@ mod tests {
         // Even when the copy is the newest block and equals the record's text
         // elsewhere, only an exact record match is managed.
         assert_eq!(split(&notes, None).chair, notes);
+    }
+
+    #[test]
+    fn a_copy_of_the_latest_block_stops_replacement_in_either_order() {
+        let state = SessionState {
+            active: vec![lane("r/t/a")],
+            ..Default::default()
+        };
+        let first = autosave_document(Some("notes"), None, &state, 5, "t1").unwrap();
+        let block = first.markdown["notes\n\n".len()..].to_owned();
+        let after = format!("{}\nmy copy:\n{block}", first.markdown);
+        let before = format!("copy first:\n{block}\nthen\n{}", first.markdown);
+        for doc in [after, before] {
+            let next = autosave_document(Some(&doc), Some(&first.digest), &state, 9, "t2").unwrap();
+            assert!(next.markdown.starts_with(&doc), "{}", next.markdown);
+            assert_eq!(next.markdown.matches("Auto-saved: t1").count(), 2);
+            assert_eq!(next.markdown.matches("Auto-saved: t2").count(), 1);
+            // The fresh block is now the only match and is replaced alone.
+            let third =
+                autosave_document(Some(&next.markdown), Some(&next.digest), &state, 9, "t3")
+                    .unwrap();
+            assert_eq!(third.markdown.matches("Auto-saved: t1").count(), 2);
+            assert_eq!(third.markdown.matches("Auto-saved: t3").count(), 1);
+            assert!(!third.markdown.contains("Auto-saved: t2"));
+        }
+    }
+
+    #[test]
+    fn bytes_outside_the_managed_block_are_kept_exactly() {
+        let state = SessionState::default();
+        let notes = "notes\n\n\n";
+        let first = autosave_document(Some(notes), None, &state, 5, "t1").unwrap();
+        assert!(first.markdown.starts_with(notes));
+        assert!(!first.markdown[notes.len()..].starts_with('\n'));
+        let framed = format!(
+            "\n\nlead\n\n\n{}\n\n\ntail\n\n\n",
+            first.markdown.trim_start_matches(notes)
+        );
+        let framed = format!("{notes}{framed}");
+        let next = autosave_document(Some(&framed), Some(&first.digest), &state, 9, "t2").unwrap();
+        let (begin, _) = managed_block(&framed, Some(&first.digest)).unwrap();
+        assert!(next.markdown.starts_with(&framed[..begin]));
+        assert!(next.markdown.ends_with("\n\n\ntail\n\n\n"));
+        assert_eq!(next.markdown.matches("Auto-saved: ").count(), 1);
+        // No notes, one newline and two newlines each need only what is missing.
+        let one = autosave_document(Some("a\n"), None, &state, 1, "t").unwrap();
+        assert!(one.markdown.starts_with("a\n\n") && !one.markdown.starts_with("a\n\n\n"));
+        let two = autosave_document(Some("a\n\n"), None, &state, 1, "t").unwrap();
+        assert!(two.markdown.starts_with("a\n\n") && !two.markdown.starts_with("a\n\n\n"));
     }
 
     #[test]
