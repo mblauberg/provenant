@@ -50,7 +50,7 @@ pub struct TokenTotal {
 pub struct AccountUsage {
     pub adapter: Option<String>,
     pub account: Option<String>,
-    pub project: ProjectId,
+    pub project: Option<ProjectId>,
     pub lane_attempts: u64,
     pub lane_usage: Categories<TokenTotal>,
     pub chair_sessions: u64,
@@ -84,7 +84,7 @@ pub fn quota_usage(
             effort: None,
             account_label: None,
         });
-        let key = (route.provider, route.account_label, fact.project_id);
+        let key = (route.provider, route.account_label, Some(fact.project_id));
         rows.entry(key).or_default().0.record(&fact, 0, false)?;
         if rows.len() as u64 > MAX_GROUPS {
             return Err(TelemetryError::TooLarge("10,000 groups"));
@@ -92,7 +92,7 @@ pub fn quota_usage(
     }
     let mut sessions = BTreeSet::new();
     for chair in chairs {
-        if window.project.is_some_and(|p| p != chair.project) {
+        if window.project.is_some_and(|p| Some(p) != chair.project) {
             continue;
         }
         let key = (Some(chair.adapter), Some(chair.account), chair.project);

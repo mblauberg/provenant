@@ -745,14 +745,17 @@ fn usage_report(
     if let Some(adapter) = &filter.adapter {
         rows.retain(|row| row.adapter.as_ref() == Some(adapter));
     }
-    let note = "Chair token usage is not recorded; chair rows count distinct sessions observed in this window only. Historical chair tokens are not recovered. Usage logs are bounded and rotated. Lane tokens cover terminal attempts in registered projects only, not transient workspaces, and are not provider quota percentages.";
+    let note = "Chair token usage is not recorded; chair rows count distinct sessions observed in this window only. Historical chair tokens are not recovered. Chair project attribution requires usage.project_attribution=true; otherwise the project is unknown. Usage logs are bounded and rotated. Lane tokens cover terminal attempts in registered projects only, not transient workspaces, and are not provider quota percentages.";
     let mut human = format!("Recorded use: {since} to {until}\n{note}\n");
     for row in &rows {
         let project = projects
             .iter()
-            .find(|p| p.project_id() == row.project)
+            .find(|p| Some(p.project_id()) == row.project)
             .map_or_else(
-                || row.project.to_string(),
+                || {
+                    row.project
+                        .map_or_else(|| "unknown project".into(), |p| p.to_string())
+                },
                 |p| p.common_dir().display().to_string(),
             );
         human.push_str(&format!(
@@ -766,7 +769,8 @@ fn usage_report(
                 .unwrap_or("unknown adapter")
                 .escape_debug(),
             project.escape_debug(),
-            row.project,
+            row.project
+                .map_or_else(|| "unattributed".into(), |p| p.to_string()),
             row.chair_sessions,
             row.lane_attempts
         ));

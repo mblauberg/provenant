@@ -219,7 +219,10 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     let rig = configured()?;
     let config = rig.state.join("config.toml");
     let text = fs::read_to_string(&config)?;
-    fs::write(config, text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true"))?;
+    fs::write(
+        config,
+        text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true"),
+    )?;
     for _ in 0..2 {
         let output = hook(&rig, true, "ordinary-session")?;
         assert_eq!(code(&output), 0);
@@ -266,11 +269,18 @@ fn chair_start_obeys_project_attribution_opt_in() -> Result {
     let output = hook(&rig, true, "private-project")?;
     assert_eq!(code(&output), 0);
     let log = fs::read_to_string(rig.state.join("usage.jsonl"))?;
-    let event = log.lines().map(serde_json::from_str::<serde_json::Value>)
+    let event = log
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter().find(|e| e["kind"] == "chair.session").ok_or("chair event")?;
+        .into_iter()
+        .find(|e| e["kind"] == "chair.session")
+        .ok_or("chair event")?;
     assert_eq!(event["account"], "current");
-    assert!(event.get("trace").is_none(), "project attribution is off: {event}");
+    assert!(
+        event.get("trace").is_none(),
+        "project attribution is off: {event}"
+    );
     let report = rig.command(&["quota", "usage", "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
     assert!(report["data"]["rows"][0]["project"].is_null());
@@ -339,9 +349,15 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
     // Project-attribution failures must not prevent checkpoint consumption.
     let config = rig.state.join("config.toml");
     let text = fs::read_to_string(&config)?;
-    fs::write(config, format!("{text}\n[knobs]\n\"usage.project_attribution\" = true\n"))?;
+    fs::write(
+        config,
+        format!("{text}\n[knobs]\n\"usage.project_attribution\" = true\n"),
+    )?;
     rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
-    rig.env.push(("PROVENANT_GIT".into(), rig.root.join("missing-git").into_os_string()));
+    rig.env.push((
+        "PROVENANT_GIT".into(),
+        rig.root.join("missing-git").into_os_string(),
+    ));
     let resumed = hook(&rig, true, "new")?;
     let value: serde_json::Value = serde_json::from_slice(&resumed.stdout.bytes)?;
     let context = value["hookSpecificOutput"]["additionalContext"]

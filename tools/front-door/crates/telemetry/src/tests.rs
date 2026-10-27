@@ -96,7 +96,7 @@ fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
         adapter: "p".into(),
         account: "account".into(),
         session: "session".into(),
-        project,
+        project: Some(project),
     };
     let rows = quota_usage(
         [first, second, other_account, unknown],
@@ -107,7 +107,7 @@ fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
     assert_eq!(rows.len(), 4);
     let row = rows
         .iter()
-        .find(|r| r.project == project && r.account.as_deref() == Some("account"))
+        .find(|r| r.project == Some(project) && r.account.as_deref() == Some("account"))
         .unwrap();
     assert_eq!(row.lane_attempts, 1);
     assert_eq!(row.chair_sessions, 1);

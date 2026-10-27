@@ -12,3 +12,8 @@ including when no account-switch handoff is pending. Repeated starts for the
 same session count once per account and project in the selected window.
 Chair observations use the existing bounded, rotated telemetry log. Historical
 chair tokens are not recovered and transcripts are not read.
+
+Chair observations store the serving account key and session ID. Project IDs
+are recorded only when `usage.project_attribution` is enabled. Otherwise, or
+when project identity is unavailable, the report shows an unknown project.
+Attribution failures do not prevent consuming an account-switch handoff.

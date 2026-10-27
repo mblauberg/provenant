@@ -156,7 +156,7 @@ pub fn record_chair(
     clock: &dyn Clock,
     account: &str,
     session: &str,
-    project: ProjectId,
+    project: Option<ProjectId>,
 ) {
     let Ok(now) = clock.wall_now() else { return };
     let _ = append(
@@ -168,7 +168,7 @@ pub fn record_chair(
             outcome: None,
             duration_ms: 0,
             timestamp: now.to_string(),
-            trace: project_trace(Some(project)),
+            trace: project_trace(project),
             account: Some(account.into()),
             session: Some(session.into()),
         },
@@ -181,7 +181,7 @@ pub struct ChairSession {
     pub adapter: String,
     pub account: String,
     pub session: String,
-    pub project: ProjectId,
+    pub project: Option<ProjectId>,
 }
 
 /// Recent chair observations. The caller deduplicates repeated SessionStart
@@ -209,7 +209,7 @@ pub fn chair_sessions(
                 adapter: event.unit,
                 account: event.account?,
                 session: event.session?,
-                project: event.trace?.project?,
+                project: event.trace.and_then(|trace| trace.project),
             })
         })
         .collect())

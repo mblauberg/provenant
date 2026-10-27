@@ -530,6 +530,37 @@ fn message(value: &Value) -> String {
         value["command"].as_str().unwrap_or("")
     )
 }
+// Attribution is best effort and must not prevent consuming a handoff.
+fn record_start(context: &Context, input: &Input) {
+    let Ok(accounts) = crate::registered_claude(&context.roots) else {
+        return;
+    };
+    let Ok(target) = current(&accounts, context) else {
+        return;
+    };
+    let project = if crate::usage::attribution_enabled(&context.roots) {
+        crate::hooks::with_git(|runtime, executor, budget, cancel| {
+            let location = runtime
+                .project_location(executor, &context.cwd, budget, cancel)?
+                .location;
+            let binding = match provenant_config::lookup_project(&context.roots, &location)? {
+                Some(binding) => binding,
+                None => provenant_config::bind_project(&context.roots, location)?,
+            };
+            Ok(binding.project_id())
+        })
+        .ok()
+    } else {
+        None
+    };
+    provenant_telemetry::usage::record_chair(
+        &context.roots,
+        &provenant_os::clock::SystemClock::new(),
+        target.key(),
+        input.session_id.as_str(),
+        project,
+    );
+}
 // The hook protocol imposes real wall-time input and execution caps.
 #[allow(clippy::disallowed_methods)]
 pub fn hook(start: bool, globals: &Globals) -> u8 {
@@ -552,28 +583,12 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         let context = Context::new(globals, &input.cwd)?;
         check_time(Some(deadline))?;
         if start {
-            let accounts = crate::registered_claude(&context.roots)?;
-            let target = current(&accounts, &context)?;
-            let project = crate::hooks::with_git(|runtime, executor, budget, cancel| {
-                let location = runtime
-                    .project_location(executor, &context.cwd, budget, cancel)?
-                    .location;
-                let binding = match provenant_config::lookup_project(&context.roots, &location)? {
-                    Some(binding) => binding,
-                    None => provenant_config::bind_project(&context.roots, location)?,
-                };
-                Ok(binding.project_id())
-            })?;
-            provenant_telemetry::usage::record_chair(
-                &context.roots,
-                &provenant_os::clock::SystemClock::new(),
-                target.key(),
-                input.session_id.as_str(),
-                project,
-            );
+            record_start(&context, &input);
             if context.store().pending(now())?.is_none() {
                 return Ok(None);
             }
+            let accounts = crate::registered_claude(&context.roots)?;
+            let target = current(&accounts, &context)?;
             check_time(Some(deadline))?;
             let Some(handoff) = context
                 .store()
