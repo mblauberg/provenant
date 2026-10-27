@@ -355,11 +355,7 @@ impl RunStore {
         clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
-        let ledger = crate::ledger::open(
-            &self.writer_registry,
-            |class| self.policy.spacing_ms(class),
-            call,
-        )?;
+        let ledger = crate::ledger::open(&self.writer_registry, call)?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if old.state != AttemptState::Starting {

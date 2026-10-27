@@ -2835,11 +2835,7 @@ fn a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class() -> T
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let [first, second] = writers(&store, [94, 95], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
-    let ledger = crate::ledger::open(
-        &store.writer_registry,
-        |class| AdmissionPolicy::default().spacing_ms(class),
-        &call,
-    )?;
+    let ledger = crate::ledger::open(&store.writer_registry, &call)?;
     ledger.execute(
         "UPDATE spacing SET last_start=last_start+3600000000 WHERE class='writer'",
         [],
@@ -2965,45 +2961,67 @@ fn version_1_start(store: &RunStore, host: &Stepped, ago_ms: i64) -> TestResult 
 }
 
 #[test]
-fn a_version_1_start_still_holds_its_class_after_the_upgrade() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-    let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    version_1_start(&store, &host, 5_000)?;
-    let writer = starting(&store, &lane(100, true), &call)?;
-    let reader = starting(&store, &lane(101, false), &call)?;
-    assert!(
-        store.claim(writer, &host, &call)?.is_none(),
-        "a writer admitted 5 s before the upgrade still holds 15 s of its spacing"
-    );
-    assert!(
-        store.claim(reader, &host, &call)?.is_some(),
-        "the 2 s read-only spacing has run out"
-    );
-    host.pass_ms(14_000);
-    assert!(store.claim(writer, &host, &call)?.is_none());
-    host.pass_ms(1_500);
-    assert!(store.claim(writer, &host, &call)?.is_some());
+fn a_version_1_start_of_any_age_holds_each_class_one_full_spacing() -> TestResult {
+    // Old (a spacing and more), recent, and in the wall future: the upgrade
+    // reads no wall clock, so the recorded age changes nothing.
+    for (case, ago_ms) in [
+        ("old", 3_600_000),
+        ("recent", 5_000),
+        ("future", -3_600_000),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+        let call = stepped_call(&host, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        version_1_start(&store, &host, ago_ms)?;
+        let writer = starting(&store, &lane(100, true), &call)?;
+        let reader = starting(&store, &lane(101, false), &call)?;
+        assert!(
+            store.claim(writer, &host, &call)?.is_none(),
+            "{case}: the writer is held from the upgrade"
+        );
+        assert!(
+            store.claim(reader, &host, &call)?.is_none(),
+            "{case}: the read-only class is held from the upgrade"
+        );
+        host.pass_ms(1_500);
+        assert!(
+            store.claim(reader, &host, &call)?.is_none(),
+            "{case}: the read-only spacing has not run out"
+        );
+        host.pass_ms(1_000);
+        assert!(
+            store.claim(reader, &host, &call)?.is_some(),
+            "{case}: the 2 s read-only spacing has run out"
+        );
+        host.pass_ms(17_000);
+        assert!(
+            store.claim(writer, &host, &call)?.is_none(),
+            "{case}: the writer is held the full 20 s, not less"
+        );
+        host.pass_ms(1_000);
+        assert!(
+            store.claim(writer, &host, &call)?.is_some(),
+            "{case}: held one spacing, and no longer"
+        );
+    }
     Ok(())
 }
 
 #[test]
-fn a_version_1_start_in_the_wall_future_holds_a_full_spacing() -> TestResult {
+fn a_version_1_ledger_with_no_start_holds_nothing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    version_1_start(&store, &host, -3_600_000)?;
-    let writer = starting(&store, &lane(102, true), &call)?;
-    assert!(store.claim(writer, &host, &call)?.is_none());
-    host.pass_ms(19_000);
-    assert!(store.claim(writer, &host, &call)?.is_none());
-    host.pass_ms(1_500);
-    assert!(
-        store.claim(writer, &host, &call)?.is_some(),
-        "held one spacing, not until the far wall time"
-    );
+    old_ledger(
+        &store,
+        &format!("{VERSION_1_LEDGER} PRAGMA user_version=1;"),
+    )?;
+    let writer = starting(&store, &lane(104, true), &call)?;
+    let reader = starting(&store, &lane(105, false), &call)?;
+    assert!(store.claim(writer, &host, &call)?.is_some());
+    assert!(store.claim(reader, &host, &call)?.is_some());
     Ok(())
 }
 
@@ -3347,11 +3365,7 @@ fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
     let reader = starting(&store, &lane(82, false), &call)?;
 
     assert!(store.claim(old, &at(11_000), &call)?.is_some());
-    let ledger = crate::ledger::open(
-        &store.writer_registry,
-        |class| AdmissionPolicy::default().spacing_ms(class),
-        &call,
-    )?;
+    let ledger = crate::ledger::open(&store.writer_registry, &call)?;
     let class: String =
         ledger.query_row("SELECT class FROM leases WHERE attempt='legacy'", [], |r| {
             r.get(0)

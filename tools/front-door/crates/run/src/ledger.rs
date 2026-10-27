@@ -31,8 +31,7 @@ CREATE INDEX lease_projects ON leases(project);
 /// boot, kept with the boot it was read in: wall time is never recorded, so no
 /// clock step can move it. Version 1 kept one global wall-time row, which no
 /// boot can vouch for, so an upgrade carries it across as a start under the
-/// current boot, as old as the wall clock says and never older than one
-/// spacing.
+/// current boot as a start of now, holding each class one full spacing.
 const SPACING: &str = "
 CREATE TABLE spacing (
  class TEXT PRIMARY KEY CHECK(class IN ('writer','read_only')),
@@ -43,13 +42,8 @@ CREATE TABLE spacing (
 
 /// Open, creating or upgrading if needed, the ledger under the trusted host
 /// state root. Each upgrade runs in one immediate transaction, schema version
-/// last, so a crash leaves the old ledger whole or the new one. `spacing_ms`
-/// names each class's spacing for carrying a version 1 start across.
-pub(crate) fn open(
-    host: &Path,
-    spacing_ms: impl Fn(LaneClass) -> u64,
-    request: &Request<'_>,
-) -> Result<Connection> {
+/// last, so a crash leaves the old ledger whole or the new one.
+pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     let (_, db, _initialisation) = open_database(host, FILE, request)?;
     if request.retry(|| version(&db))? < 2 || !request.retry(|| timed_spacing(&db))? {
         immediate(&db, request, |tx| {
@@ -59,7 +53,7 @@ pub(crate) fn open(
                     tx.execute_batch(SPACING)?;
                 }
                 1 => {
-                    let carried = carried_starts(tx, &spacing_ms, request)?;
+                    let carried = carried_starts(tx, request)?;
                     tx.execute_batch(
                         "ALTER TABLE leases ADD COLUMN class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only'));
                          DROP TABLE spacing;",
@@ -87,41 +81,22 @@ pub(crate) fn open(
     Ok(db)
 }
 /// Each class's version 1 start as a start under the current boot. Version 1
-/// kept one wall-time start for every class, so each class inherits it. The
-/// start is placed as long ago as the wall clock says, at most one spacing; a
-/// start in the wall future, which no elapsed time can vouch for, holds the
-/// class a full spacing. A start a spacing old or more is dropped. The clocks
-/// are read once, inside the upgrade transaction, and unreadable clocks refuse
-/// the upgrade rather than drop the start.
-fn carried_starts(
-    tx: &Connection,
-    spacing_ms: &impl Fn(LaneClass) -> u64,
-    request: &Request<'_>,
-) -> Result<Vec<(LaneClass, String, u64)>> {
-    let start: Option<i64> = tx
-        .query_row("SELECT last_start FROM spacing WHERE id=1", [], |r| {
-            r.get(0)
-        })
-        .optional()?;
+/// kept one wall-time start for every class, which no boot can vouch for and
+/// which a wall clock step can move. The wall clock is not read: any version 1
+/// row, of any recorded age, is carried as a start of now, so each class is
+/// held one full spacing from the upgrade. A ledger with no row holds nothing.
+/// The boot is read once, inside the upgrade transaction, and an unreadable
+/// host clock refuses the upgrade rather than drop the start.
+fn carried_starts(tx: &Connection, request: &Request<'_>) -> Result<Vec<(LaneClass, String, u64)>> {
+    let recorded: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM spacing)", [], |r| r.get(0))?;
     let now = HostInstant::read(request.clock)?;
-    let wall = request
-        .clock
-        .wall_now()
-        .map_err(|_| RunError::Validation("wall clock"))?;
-    let Some(start) = start else {
+    if !recorded {
         return Ok(Vec::new());
-    };
-    let elapsed =
-        u64::try_from(i128::from(wall.as_micros()) - i128::from(start) * 1000).unwrap_or(0);
-    let mut carried = Vec::new();
-    for class in [LaneClass::Writer, LaneClass::ReadOnly] {
-        if elapsed < spacing_micros(spacing_ms(class))? {
-            // A host up for less than the elapsed time booted after the
-            // start, which no boot-scoped guarantee covers: clamp at zero.
-            carried.push((class, now.boot.clone(), now.micros.saturating_sub(elapsed)));
-        }
     }
-    Ok(carried)
+    Ok([LaneClass::Writer, LaneClass::ReadOnly]
+        .into_iter()
+        .map(|class| (class, now.boot.clone(), now.micros))
+        .collect())
 }
 /// Whether the spacing table records starts against a boot.
 fn timed_spacing(db: &Connection) -> Result<bool> {
