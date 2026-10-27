@@ -45,7 +45,9 @@ floor (500 MiB) refuse both classes. A ledger row or ticket with no class is a
 writer; opening a version 1 ledger upgrades it in place and keeps its last
 start as the writer start. A run's own batch concurrency (1 to 16) defaults to
 8 when any lane writes and to 16 when none does, from `lanes.max_concurrency`
-and `lanes.max_concurrency_read_only`; an explicit value wins.
+and `lanes.max_concurrency_read_only`; an explicit value wins. A
+`lanes.max_concurrency` the user set also caps the read-only default unless
+they set the read-only knob too.
 
 `lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run

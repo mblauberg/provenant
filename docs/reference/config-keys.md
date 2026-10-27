@@ -68,7 +68,7 @@ Source: `config/harness-knobs.json`.
 | Field | Value |
 |---|---|
 | `default` | `16` |
-| `effect` | `"Default number of lanes one batch runs at once when no lane in it writes a worktree, resolved from the profile. An explicit dispatch concurrency wins."` |
+| `effect` | `"Default number of lanes one batch runs at once when no lane in it writes a worktree, resolved from the profile. A lanes.max_concurrency you set yourself also caps it unless you set this knob too. An explicit dispatch concurrency wins."` |
 | `max` | `16` |
 | `min` | `1` |
 | `reader` | `"tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs"` |

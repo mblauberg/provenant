@@ -904,7 +904,12 @@ pub fn submit_with_host(
         .dispatch_profile(&submission.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     let read_only = submission.tasks.iter().all(|task| task.worktree.is_none());
-    let concurrency = run::concurrency(submission.concurrency, &profile, read_only);
+    let bound = (read_only
+        && config.knob_is_set("lanes.max_concurrency", &submission.knobs)
+        && !config.knob_is_set("lanes.max_concurrency_read_only", &submission.knobs))
+    .then(|| profile.knob_u64("lanes.max_concurrency"))
+    .flatten();
+    let concurrency = run::concurrency(submission.concurrency, &profile, read_only, bound);
     let tasks = submission
         .tasks
         .into_iter()

@@ -36,8 +36,10 @@ continuations keep that stamp.
 Batch concurrency resolves from the profile by batch class. A batch with any
 `worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a
 batch with none uses `lanes.max_concurrency_read_only` (registry default 16).
-An explicit `--concurrency N` (1 to 16) or Fabric `concurrency` wins for
-either. The `economy` preset sets 4 and 8 respectively.
+A `lanes.max_concurrency` you set yourself (in `[knobs]` or with `--knob`) also
+caps the read-only default unless you set `lanes.max_concurrency_read_only`
+too; a preset does not. An explicit `--concurrency N` (1 to 16) or Fabric
+`concurrency` wins for either. The `economy` preset sets 4 and 8 respectively.
 
 Batch concurrency is separate from host admission. Each lane has a class, and
 spacing is measured only against the last start of the same class: writers

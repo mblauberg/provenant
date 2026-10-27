@@ -10,7 +10,8 @@
 - A batch with no `worktree-write` lane now defaults to 16 lanes at once, from
   the new `lanes.max_concurrency_read_only` knob (1 to 16, default 16; the
   `economy` preset sets 8). Batches with a writer keep the `lanes.max_concurrency`
-  default of 8. An explicit `--concurrency` or Fabric `concurrency` still wins,
+  default of 8. A `lanes.max_concurrency` you set yourself also caps the
+  read-only default unless you set the read-only knob too. An explicit `--concurrency` or Fabric `concurrency` still wins,
   and its upper bound is now 16.
 - `lanes` now shows `lane_class` and `waiting_for` for queued and starting
   lanes, and uses the wait as their reason: launch not yet handed to a

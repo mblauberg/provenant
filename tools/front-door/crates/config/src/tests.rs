@@ -1139,6 +1139,23 @@ fn read_only_batch_concurrency_has_its_own_knob() {
     );
 }
 #[test]
+fn knob_is_set_tells_a_user_choice_from_a_default_or_preset() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let name = "lanes.max_concurrency";
+    assert!(!read(&roots).unwrap().knob_is_set(name, &[]));
+    knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
+    assert!(
+        !read(&roots).unwrap().knob_is_set(name, &[]),
+        "a preset is not a choice"
+    );
+    let shown = read(&roots).unwrap();
+    assert!(shown.knob_is_set(name, &["lanes.max_concurrency=2".into()]));
+    assert!(!shown.knob_is_set(name, &["lanes.max_concurrency_read_only=2".into()]));
+    knob_edit(&roots, KnobEdit::Set { name, value: "3" }).unwrap();
+    assert!(read(&roots).unwrap().knob_is_set(name, &[]));
+}
+#[test]
 fn set_rejects_out_of_range_values_and_unknown_knobs() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
