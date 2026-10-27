@@ -375,6 +375,39 @@ impl Peer {
             .collect::<Option<_>>()
             .ok_or_else(corrupt)
     }
+    /// The peer's newest lanes that `keep` accepts, plus every lane `tracked`
+    /// has seen running that those no longer include. Both reads together take
+    /// no longer than `remaining`.
+    // Remote peer polling uses a hard real-time budget.
+    #[allow(clippy::disallowed_methods)]
+    fn newest(
+        &self,
+        host: HostId,
+        remaining: Duration,
+        tracked: &mut watch::Tracked,
+        keep: &dyn Fn(&run::AttemptRecord) -> bool,
+    ) -> Result<Vec<run::AttemptRecord>, Fail> {
+        let started = Instant::now();
+        let PeerResult::RunStatuses(records) = self.call_within(
+            host,
+            PeerAction::Lanes {
+                all: true,
+                limit: PEER_LANES,
+            },
+            remaining,
+        )?
+        else {
+            return Err(corrupt());
+        };
+        if records.len() > usize::from(PEER_LANES) {
+            return Err(corrupt());
+        }
+        let page = records.into_iter().filter(|lane| keep(lane)).collect();
+        tracked.complete(page, |missing| {
+            let targets: Vec<_> = missing.iter().map(|attempt| (host, *attempt)).collect();
+            self.records_within(&targets, remaining.saturating_sub(started.elapsed()))
+        })
+    }
     /// Poll the owner until the condition holds or the reader deadline passes.
     /// Expiry never stops a provider. A transient peer failure is retried within
     /// the budget; the last cause is reported only if the budget runs out on it.
@@ -858,24 +891,10 @@ pub(super) fn host_lanes(
         .transpose()
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid --since value"))?;
     if command.wait.is_some() || command.watch.is_some() {
-        // The peer's newest lanes: the window a wait or watch can see.
-        let fetch = |remaining| {
-            let PeerResult::RunStatuses(records) = peer.call_within(
-                id,
-                PeerAction::Lanes {
-                    all: true,
-                    limit: PEER_LANES,
-                },
-                remaining,
-            )?
-            else {
-                return Err(corrupt());
-            };
-            if records.len() > usize::from(PEER_LANES) {
-                return Err(corrupt());
-            }
-            Ok(records.into_iter().filter(&by_session).collect())
-        };
+        // The peer's newest lanes show what is new; a lane seen running stays
+        // tracked by ID after later dispatches push it off that page.
+        let mut tracked = watch::Tracked::default();
+        let fetch = |remaining| peer.newest(id, remaining, &mut tracked, &by_session);
         let scope = Scope {
             exact: BTreeSet::new(),
             since,

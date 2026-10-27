@@ -98,8 +98,9 @@ expiry; the result reports `ignored_settled` otherwise. Without `--id`, a wait
 covers the calling session's lanes and resumes after the settlements that
 session last acknowledged. `--session LABEL` selects the lanes another agent
 label submitted on this host, and narrows `--id` and listings the same way.
-`--host PEER` waits on or lists the peer's own lanes (its newest 100) and
-reads `--session` as an agent label on the peer. A peer read inside a wait or
+`--host PEER` waits on or lists the peer's own lanes (its newest 100, with any
+lane it saw running tracked by ID until it settles) and reads `--session` as an
+agent label on the peer. A peer read inside a wait or
 watch is capped by the time the budget has left (at least one second, at most
 `limits.peer_seconds`), and no read starts once the budget has passed, so a
 one-second watch ends in about a second. `--wait` still excludes `--state` and
@@ -112,6 +113,8 @@ one-second watch ends in about a second. `--wait` still excludes `--state` and
   `::nothing_pending_is_refused_for_named_lanes_only`;
   `::a_fetch_gets_the_time_left_and_none_starts_after_the_deadline`;
   `::arming_stops_retrying_at_the_deadline_with_the_last_cause`;
+  `::a_running_lane_pushed_off_the_page_keeps_the_wait_open`;
+  `::a_lane_that_settles_off_the_page_is_kept_in_the_result`;
   `crates/cli/src/run/remote.rs::a_peer_call_is_capped_by_the_time_left_and_the_peer_limit`;
   `::wait_starts_no_fetch_after_its_deadline`;
   `crates/cli/src/lib.rs::lanes_session_and_watch_have_bounded_shapes`;

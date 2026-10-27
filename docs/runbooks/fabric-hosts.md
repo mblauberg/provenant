@@ -274,7 +274,9 @@ Other limits on a peer run:
   the peer's own lanes, newest first with `--all`. It takes `--state` and
   `--since` but not `--id` or `--cursor`, and filters only the page the peer
   returns. `lanes --host workshop --wait N` and `--watch` follow the peer's
-  newest 100 lanes, counting only those that settle after the call starts.
+  newest 100 lanes, counting only those that settle after the call starts. A
+  lane seen running stays tracked until it settles, even after newer
+  dispatches push it off that page.
 
 Waiting and watching work the same on both hosts. `lanes --wait N` returns when a
 lane that was unsettled at the start, or settled since, meets `--condition`

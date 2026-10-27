@@ -64,6 +64,46 @@ impl Armed {
     }
 }
 
+/// Keeps every lane a bounded page once showed unsettled in view until it
+/// settles. A peer's page holds only its newest lanes, so new dispatches can
+/// push a running lane off it; reading that lane's page absence as completion
+/// would end a wait or watch while it still runs.
+#[derive(Default)]
+pub(super) struct Tracked {
+    open: BTreeSet<AttemptId>,
+    /// Lanes that settled after falling off the page, as last read.
+    closed: BTreeMap<AttemptId, run::AttemptRecord>,
+}
+impl Tracked {
+    /// `page`, plus a current record from `lookup` for each tracked lane the
+    /// page no longer holds, and the last record of those that settled since.
+    pub(super) fn complete(
+        &mut self,
+        mut page: Vec<run::AttemptRecord>,
+        lookup: impl FnOnce(&[AttemptId]) -> Result<Vec<run::AttemptRecord>, Fail>,
+    ) -> Result<Vec<run::AttemptRecord>, Fail> {
+        let on_page: BTreeSet<AttemptId> = page.iter().map(|lane| lane.attempt_id).collect();
+        let missing: Vec<AttemptId> = self.open.difference(&on_page).copied().collect();
+        if !missing.is_empty() {
+            page.extend(lookup(&missing)?);
+        }
+        page.extend(
+            self.closed
+                .iter()
+                .filter(|(id, _)| !on_page.contains(id))
+                .map(|(_, lane)| lane.clone()),
+        );
+        for lane in &page {
+            if !settled(&lane.state).0 {
+                self.open.insert(lane.attempt_id);
+            } else if self.open.remove(&lane.attempt_id) && !on_page.contains(&lane.attempt_id) {
+                self.closed.insert(lane.attempt_id, lane.clone());
+            }
+        }
+        Ok(page)
+    }
+}
+
 pub(super) fn nothing_pending(ignored: usize) -> Fail {
     Fail::new(
         Status::Invalid,
@@ -563,6 +603,66 @@ mod tests {
             assert_eq!(given.len(), 1, "watching={watching}: {given:?}");
             assert!(given[0] <= budget, "{given:?}");
         }
+    }
+
+    #[test]
+    fn a_running_lane_pushed_off_the_page_keeps_the_wait_open() {
+        let mut tracked = Tracked::default();
+        let mut calls = 0;
+        let waited = wait(
+            |_| {
+                calls += 1;
+                // Later dispatches fill the page; lane 2 finishes, lane 1 runs on.
+                let page = if calls == 1 {
+                    vec![running(1)]
+                } else {
+                    vec![done(2, 20)]
+                };
+                tracked.complete(page, |missing| {
+                    assert_eq!(missing, [AttemptId::from_bytes([1; 16])]);
+                    Ok(vec![running(1)])
+                })
+            },
+            scope(&[], None, false),
+            Condition::All,
+            Duration::from_millis(40),
+            POLL,
+        )
+        .unwrap();
+        assert!(!waited.met, "lane 1 is still running");
+        let ids: Vec<_> = waited.lanes.iter().map(|lane| lane.attempt_id).collect();
+        assert!(ids.contains(&AttemptId::from_bytes([1; 16])), "{ids:?}");
+    }
+
+    #[test]
+    fn a_lane_that_settles_off_the_page_is_kept_in_the_result() {
+        let mut tracked = Tracked::default();
+        let mut calls = 0;
+        let waited = wait(
+            |_| {
+                calls += 1;
+                let page = match calls {
+                    1 => vec![running(1), running(2)],
+                    2 => vec![running(2)],
+                    _ => vec![done(2, 31)],
+                };
+                tracked.complete(page, |missing| {
+                    assert_eq!(missing, [AttemptId::from_bytes([1; 16])]);
+                    Ok(vec![done(1, 30)])
+                })
+            },
+            scope(&[], None, false),
+            Condition::All,
+            Duration::from_secs(5),
+            POLL,
+        )
+        .unwrap();
+        assert!(waited.met);
+        assert_eq!(
+            waited.lanes.len(),
+            2,
+            "the settled lane stays in the result"
+        );
     }
 
     #[test]
