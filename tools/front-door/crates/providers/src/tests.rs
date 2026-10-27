@@ -2070,23 +2070,112 @@ fn cursor_cli_only_account_matches_desktop_identity() {
         Some(key),
         crate::identity::cursor_account("header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature")
     );
+    std::fs::remove_file(directory.path().join("cli-config.json")).unwrap();
+    for config in [
+        None,
+        Some("{broken"),
+        Some(r#"{"authInfo":{"email":"fixture@example.test"}}"#),
+        Some(r#"{"authInfo":{"authId":""}}"#),
+        Some(r#"{"authInfo":{"authId":123}}"#),
+        Some(r#"{"authInfo":{"authId":"bad\nsubject"}}"#),
+    ] {
+        if let Some(config) = config {
+            std::fs::write(directory.path().join("cli-config.json"), config).unwrap();
+        }
+        assert!(matches!(
+            crate::accounts::detect(
+                &NoDesktop,
+                "cursor",
+                Path::new("/bin/cursor-agent"),
+                Path::new("/home/test"),
+                OsStr::new("test"),
+                directory.path(),
+                directory.path(),
+            ),
+            Err(ProviderError::UnknownIdentity)
+        ));
+    }
+}
+
+/// Desktop token output at the sqlite executor boundary.
+struct CursorDesktopToken<'a>(&'a str, i64);
+impl provenant_os::exec::Executor for CursorDesktopToken<'_> {
+    fn execute(
+        &self,
+        _: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        Ok(provenant_os::exec::ExecOutcome {
+            termination: provenant_os::exec::Termination::Exit(self.1),
+            stdout: provenant_os::exec::CapturedStream {
+                bytes: self.0.as_bytes().to_vec(),
+                ..Default::default()
+            },
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        })
+    }
+}
+
+#[test]
+fn cursor_account_falls_back_to_cli_when_desktop_has_no_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("state.vscdb"), b"").unwrap();
     std::fs::write(
         directory.path().join("cli-config.json"),
-        br#"{"authInfo":{"email":"fixture@example.test"}}"#,
+        br#"{"authInfo":{"authId":"auth0|user_fixture"}}"#,
     )
     .unwrap();
-    assert!(matches!(
-        crate::accounts::detect(
-            &NoDesktop,
+    // A logged-out database returns no rows; an empty database has no ItemTable.
+    for status in [0, 1] {
+        let key = crate::accounts::detect(
+            &CursorDesktopToken("", status),
             "cursor",
             Path::new("/bin/cursor-agent"),
             Path::new("/home/test"),
             OsStr::new("test"),
             directory.path(),
             directory.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            Some(key),
+            crate::identity::cursor_account(
+                "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature"
+            )
+        );
+    }
+}
+
+#[test]
+fn cursor_account_prefers_desktop_when_cli_is_also_signed_in() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("state.vscdb"), b"").unwrap();
+    std::fs::write(
+        directory.path().join("cli-config.json"),
+        br#"{"authInfo":{"authId":"auth0|different_cli_user"}}"#,
+    )
+    .unwrap();
+    let key = crate::accounts::detect(
+        &CursorDesktopToken(
+            "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature\n",
+            0,
         ),
-        Err(ProviderError::UnknownIdentity)
-    ));
+        "cursor",
+        Path::new("/bin/cursor-agent"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        directory.path(),
+        directory.path(),
+    )
+    .unwrap();
+    assert_eq!(
+        Some(key),
+        crate::identity::cursor_account("header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature")
+    );
 }
 
 #[test]
