@@ -145,7 +145,10 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
         );
     }
     let (status, kind) = crate::fabric::facade_outcome(&error);
-    Fail::new(status, kind, format!("peer: {message}"))
+    Fail {
+        detail: Some(error),
+        ..Fail::new(status, kind, format!("peer: {message}"))
+    }
 }
 
 fn directory(roots: &Roots) -> Result<Directory, Fail> {
@@ -746,14 +749,28 @@ pub(super) fn output(
         offset: command.offset,
         max_bytes: command.max_bytes,
     };
-    let PeerResult::Output(OutputResult::Chunk {
+    let PeerResult::Output(chunk) = peer.call(host, PeerAction::Output { input })? else {
+        return Err(corrupt());
+    };
+    chunk_response(attempt, host, &command.part, chunk)
+}
+
+fn chunk_response(
+    attempt: AttemptId,
+    host: HostId,
+    part: &Part,
+    chunk: OutputResult,
+) -> Result<(Value, String), Fail> {
+    let OutputResult::Chunk {
+        state,
+        reason,
         offset,
         next_offset,
         eof,
         digest,
         bytes,
         ..
-    }) = peer.call(host, PeerAction::Output { input })?
+    } = chunk
     else {
         return Err(corrupt());
     };
@@ -765,7 +782,9 @@ pub(super) fn output(
         json!({
             "attempt_id": attempt,
             "host": host,
-            "part": format!("{:?}", command.part).to_lowercase(),
+            "state": state,
+            "reason": reason,
+            "part": format!("{part:?}").to_lowercase(),
             "offset": offset,
             "next_offset": next_offset,
             "eof": eof,
@@ -1010,6 +1029,32 @@ mod tests {
         assert_eq!(task.base.as_deref(), Some("main"));
         assert_eq!(task.prompt, "review");
         assert_eq!(task.access, AccessMode::ReadOnly);
+    }
+
+    #[test]
+    fn remote_output_carries_the_attempt_state_and_reason() -> Result {
+        let attempt = AttemptId::from_bytes([3; 16]);
+        let host = HostId::from_bytes([7; 16]);
+        let chunk = OutputResult::Chunk {
+            target: AttemptTarget {
+                attempt,
+                host: Some(host),
+            },
+            part: OutputPart::Result,
+            state: "uncommitted".into(),
+            reason: Some("uncommitted paths: src/a.rs".into()),
+            offset: 0,
+            next_offset: 2,
+            eof: true,
+            digest: provenant_core::Digest::from_bytes([0; 32]),
+            bytes: OutputBytes::Utf8("ok".into()),
+        };
+        let (data, text) =
+            chunk_response(attempt, host, &Part::Result, chunk).map_err(|f| f.message)?;
+        assert_eq!(data["state"], "uncommitted");
+        assert_eq!(data["reason"], "uncommitted paths: src/a.rs");
+        assert_eq!(text, "ok");
+        Ok(())
     }
 
     struct Scratch(std::path::PathBuf);

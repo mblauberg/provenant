@@ -23,6 +23,13 @@ provenant worktree remove fix-repo-example
 provenant worktree remove fix-repo-example --discard
 ```
 
+`git worktree add` registers a tree with Git, so `provenant worktree list` can
+see it, but writer dispatch also needs Provenant's custody registration.
+An advisory Fabric claim does not supply that registration. Fabric refuses
+such submissions with `worktree_unregistered` and the worktree path. Create
+a writer at the branch's tip with
+`provenant worktree create <new-branch> --base <branch>`.
+
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without
 `origin`, or if fetching fails, the primary checkout's integration branch

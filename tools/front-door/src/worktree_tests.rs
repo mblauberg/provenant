@@ -2060,6 +2060,13 @@ fn lane_prepare_isolates_nested_state() -> Result {
     );
     let home = rig.root.join("fixture-home");
     fs::create_dir_all(home.join(".claude-fixture"))?;
+    if !cfg!(target_os = "macos") {
+        // Off macOS, Claude keeps its login in the account directory, not a keychain.
+        fs::write(
+            home.join(".claude-fixture/.credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#,
+        )?;
+    }
     fs::create_dir_all(home.join(".codex"))?;
     fs::write(
         home.join(".codex/auth.json"),

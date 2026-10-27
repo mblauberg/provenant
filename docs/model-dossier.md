@@ -89,36 +89,73 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** consult `provenant route list`; only models exposed by the active
   Claude routes can be dispatched.
 
-### GPT-6 Astra (OpenAI principal)
+### GPT-6.1 Sol (OpenAI senior and principal)
 
-- **Good at:** the hard, high-stakes slice: correctness, edge cases and precise
-  work on a tight scope.
-- **Watch out for:** no standing behavioural note yet. Keep the brief tight and
-  record new evidence rather than carrying GPT-5.6 Sol's profile forward by
-  assumption.
-- **Cost:** principal-tier.
-- **Reach:** `codex` adapter (preferred), `openai` family. The native Codex app
-  exposes `low` through `ultra`; the Responses API supports through `max`.
-  Treat those as separate surfaces and probe the CLI before dispatch.
+- **Good at:** correctness, edge cases and precise work on a tight scope.
+  Medium is the senior default; high is the principal default, with xhigh
+  available there for harder work.
+- **Watch out for:** the benchmark priors below vary by task. Revisit the
+  Sol/Terra split using Provenant lane telemetry.
+- **Cost:** on the Artificial Analysis Intelligence Index, max adds one point
+  over xhigh at nearly twice the cost per task. Keep max available for exact
+  model requests, outside all pools.
+- **Reach:** `codex` adapter, `openai` family. The Codex models cache fetched
+  2026-10-26T22:24Z records low, medium, high, xhigh and max. Consult the
+  catalogue for each pool's narrower effort range.
 
-### GPT-6.1 Sol (OpenAI senior)
+### GPT-6.1 Terra (OpenAI senior and junior trial)
 
-- **Good at:** Codex senior tasks: ordinary implementation, research
-  legwork, review and drafting that need more judgement than bulk extraction
-  but do not justify Astra. Very cheap for its strength.
-- **Watch out for:** new on 2026-09-23; no field record yet. Record what you see.
-- **Cost:** cheap.
-- **Reach:** `codex` adapter, `openai` family. Check the current route list for
-  a model selector and supported effort.
+- **Good at:** a trial for ordinary implementation, research legwork, review
+  and drafting in senior, and cheaper bounded work in junior. The benchmark
+  priors support trying it, rather than assuming it replaces Sol.
+- **Watch out for:** high and xhigh are unmeasured. Do not interpolate a
+  performance claim for either. Revisit the senior and junior trials using
+  Provenant lane telemetry.
+- **Cost:** below Sol; see the sourced rates in `config/telemetry-prices.toml`.
+- **Reach:** `codex` adapter, `openai` family. The owner verified
+  `codex exec -m gpt-6.1-terra`. The Codex models cache fetched
+  2026-10-26T22:24Z records low, medium, high, xhigh and max. The senior trial
+  defaults to high and allows low through high; the junior trial defaults to
+  low and allows low and medium.
+
+#### Sol/Terra benchmark priors
+
+These published results are priors, not Provenant lane measurements. Scores
+from different benchmarks are not interchangeable; task costs are USD per task,
+not token prices. Sources read 2026-10-27:
+
+| Benchmark | Model and effort | Score | Cost per task |
+|---|---|---|---|
+| AA Intelligence Index | Sol low / medium / high / xhigh / max | 42 / 48 / 50 / 51 / 52 | $0.13 / $0.21 / $0.32 / $0.39 / $0.72 |
+| AA Intelligence Index | Terra medium | 41 | $0.10 |
+| AA Intelligence Index | Terra max | 48 | $0.40 |
+| Terminal-Bench 4 | Terra low / medium / max | 24.8 / 35.8 / 50.3 | Not reported here |
+| Terminal-Bench 4 | Sol medium / max | 52.7 / 55.9 | Not reported here |
+| Agents' Last Exam | Terra low / medium / max | 55.9 / 57.6 / 60.0 | $0.16 / $0.29 / $1.01 |
+| Agents' Last Exam | Sol medium / max | 53.8 / 58.6 | $1.31 / $2.00 |
+
+The Sol Intelligence Index figures come from Artificial Analysis's
+[low](https://artificialanalysis.ai/models/gpt-6-1-sol-low),
+[medium](https://artificialanalysis.ai/models/gpt-6-1-sol-medium),
+[high](https://artificialanalysis.ai/models/gpt-6-1-sol-high),
+[xhigh](https://artificialanalysis.ai/models/gpt-6-1-sol-xhigh) and
+[max](https://artificialanalysis.ai/models/gpt-6-1-sol) entries. Terra max
+comes from [Artificial Analysis](https://artificialanalysis.ai/models/gpt-6-1-terra),
+read 2026-10-27. Terra medium is secondary evidence from
+[kingy.ai](https://kingy.ai/blog/gpt-6-1-terra/), published 2026-10-26,
+citing Artificial Analysis. Terminal-Bench 4 is OpenAI-run, reported via that
+kingy.ai article; Agents' Last Exam is OpenAI-run, reported via
+[cellcog.ai](https://cellcog.ai/blog/gpt-6-1-terra/), read 2026-10-27.
+Neither vendor-run benchmark is an independent reproduction. Terra high and
+xhigh remain unmeasured in this evidence.
 
 ### GPT-6 Luna (OpenAI junior)
 
 - **Good at:** cheap, high-token legwork and mechanical slices, and fan-out
   where several bounded opinions are worth more than one principal call.
-- **Watch out for:** the owner on its predecessor, GPT-5.6 Luna: "codex astra is
-  better at design and motion than luna - luna isn't great", and it could
-  over-engineer a loose brief. Keep briefs tight and keep design work off it
-  until GPT-6 Luna has its own record.
+- **Watch out for:** the owner found its predecessor, GPT-5.6 Luna, weak at
+  design and motion, and prone to over-engineering a loose brief. Keep briefs
+  tight and keep design work off it until GPT-6 Luna has its own record.
 - **Cost:** very cheap; the owner's standing preference is to use Luna for
   smaller implementation and fixes where the catalogue offers it.
 - **Reach:** `codex` adapter, `openai` family, in the `utility` pool after
@@ -128,8 +165,8 @@ not read an absent `Watch out for` as an endorsement.
 
 - **Good at:** the preferred Claude model for most work: implementation
   (including UI/frontend), research, screenshots, second opinions, ordinary
-  review and lane leads. Roughly level with GPT-6.1 Sol, cheaper than Opus 5.5
-  for about the same result, and probably better at design and taste.
+  review and lane leads. Cheaper than Opus 5.5 for about the same result, and
+  probably better at design and taste.
 - **Watch out for:** Opus 5.5 remains the choice for critical review,
   orchestration, crucial and terminal synthesis and hard reasoning.
 - **Cost:** senior-tier.
@@ -223,7 +260,7 @@ sign-in and quota, which dispatch decides; `provenant route list` does not probe
 | Adapter | Models in the bundled pools |
 |---|---|
 | Claude | Haiku 5.5, Sonnet 5.5, Opus 5.5 |
-| Codex | GPT-6 Luna, GPT-6.1 Sol, GPT-6 Astra |
+| Codex | GPT-6 Luna, GPT-6.1 Terra, GPT-6.1 Sol |
 | Agy | Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking |
 | Cursor | Grok 4.7 |
 | OpenCode | DeepSeek V4.1 Flash and GLM 5.3 Flash (free models) |

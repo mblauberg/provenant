@@ -132,6 +132,13 @@ pub enum RunError {
     Canonical(#[from] provenant_records::CanonicalError),
     #[error("run filesystem I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("run I/O operation {operation:?} failed at {path:?}: {source}")]
+    OperationIo {
+        operation: &'static str,
+        path: Option<std::path::PathBuf>,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("run record path is invalid")]
     Path(#[from] provenant_records::PathWireError),
 }

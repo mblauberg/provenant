@@ -29,8 +29,15 @@ pub enum ProviderError {
     InvalidPath,
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
-    #[error("provider login token is unavailable, unreadable or expired")]
+    #[error("provider login token is unavailable")]
     CredentialUnavailable,
+    #[error("provider login token was not found")]
+    CredentialNotFound,
+    #[error("provider login token has expired")]
+    CredentialExpired,
+    // Reasons must never include subprocess output or credential contents.
+    #[error("provider credential read failed: {0}")]
+    CredentialReadFailed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

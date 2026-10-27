@@ -193,13 +193,13 @@ bounds frames to 1 MiB and refuses identity or version mismatches.
 Tasks and messages have no `legacy` or `legacy_output_path` members. A store
 or peer reply that still carries one, even as null, is refused.
 
-Every request and reply envelope carries integer `protocol`, currently 3.
+Every request and reply envelope carries integer `protocol`, currently 5.
 Ingress refuses a different protocol before decoding or executing the action,
 replying with `peer_version` and its own version. The client checks the reply
 protocol; a missing field or the released peer's decode refusal means protocol
 1. Each call uses one SSH connection. A difference fails the call with
 `peer_version` (`PEER_VERSION` on the CLI), for example: "peer workshop speaks
-protocol 1, this host speaks 3; upgrade both". Peers must be upgraded together.
+protocol 1, this host speaks 5; upgrade both". Peers must be upgraded together.
 There is no capability negotiation or support for older peers. The framing
 envelope's `version` remains 1.
 
