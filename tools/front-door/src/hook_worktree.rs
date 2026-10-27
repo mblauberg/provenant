@@ -187,25 +187,21 @@ fn mark_owned(state: &Path, worktree: &Path, branch: &str, head: &str) -> Result
     Ok(())
 }
 
-/// Whether both records exist, agree, and describe this tree as it is now.
-fn hook_owned(state: &Path, worktree: &Path, branch: &str, head: &str) -> bool {
-    let Ok(canonical) = std::fs::canonicalize(worktree) else {
-        return false;
-    };
+/// The ownership record when both copies exist, agree, carry a token and name
+/// this canonical path. Branch and HEAD are the caller's to check.
+fn owned_record(state: &Path, worktree: &Path) -> Option<Ownership> {
+    let canonical = std::fs::canonicalize(worktree).ok()?;
     let read = |path: PathBuf| -> Option<Ownership> {
         serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     };
-    let (Some(admin), Some(stored)) = (
-        admin_dir(&canonical).and_then(|dir| read(dir.join(OWNER_MARKER))),
-        read(record_path(state, &canonical)),
-    ) else {
-        return false;
-    };
-    admin == stored
-        && !stored.token.is_empty()
-        && stored.path == canonical
-        && stored.branch == branch
-        && stored.head == head
+    let admin = admin_dir(&canonical).and_then(|dir| read(dir.join(OWNER_MARKER)))?;
+    let stored = read(record_path(state, &canonical))?;
+    (admin == stored && !stored.token.is_empty() && stored.path == canonical).then_some(stored)
+}
+
+/// Whether the records describe this tree as it is now.
+fn hook_owned(state: &Path, worktree: &Path, branch: &str, head: &str) -> bool {
+    owned_record(state, worktree).is_some_and(|r| r.branch == branch && r.head == head)
 }
 
 /// Drop the state-side record once the hook has removed the tree.
@@ -309,14 +305,18 @@ pub fn remove(globals: &Globals) -> u8 {
         if !listed {
             return Err("not a linked worktree that Provenant lists for this project".into());
         }
+        // Only a tree this hook made: a clean, idle tree a person created is
+        // theirs. HEAD may have moved on, so only the records are checked.
+        let state = state_root(globals, &cwd)?;
+        if owned_record(&state, &target).is_none() {
+            return Err("it was not created by this hook".into());
+        }
         let name = target
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or("worktree name is not UTF-8")?;
         let outcome = cli.data(&["worktree", "remove", name], WORK_TIME, deadline)?;
-        if !target.exists()
-            && let Ok(state) = state_root(globals, &cwd)
-        {
+        if !target.exists() {
             forget(&state, &target);
         }
         if target.exists() {

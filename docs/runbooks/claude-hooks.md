@@ -102,7 +102,9 @@ must print the new worktree's absolute path and nothing else on stdout.
   primary checkout, a tree made by hand or by another tool, a tree elsewhere
   and a dirty tree are never reused: the hook exits 2 and names the reason.
 - `worktree-remove` removes only a linked worktree that `provenant worktree
-  list` shows for the project, through `provenant worktree remove <name>`
+  list` shows for the project and that this hook created (both ownership
+  records present and equal; a commit since creation does not matter). Any
+  other tree exits 2 with "it was not created by this hook". It removes through `provenant worktree remove <name>`
   without `--discard`. The owner refuses dirty trees, live writers and the
   primary checkout, keeps an unmerged branch, and reports `not_merged`.
   A refusal exits 2 with the cause on stderr and the worktree stays.

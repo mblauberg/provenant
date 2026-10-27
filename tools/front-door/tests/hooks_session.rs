@@ -462,6 +462,58 @@ fn made_tree(rig: &TestRig, name: &str) -> Result<PathBuf> {
     ))
 }
 
+#[test]
+fn worktree_remove_keeps_a_listed_clean_tree_the_hook_did_not_make() -> Result {
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    let path = made_tree(&rig, "mine")?;
+    let record = state_record(&rig)?;
+    // Same tree, but with no state record: it reads as a person's own.
+    fs::remove_file(&record)?;
+    let output = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
+    assert_eq!(code(&output), 2);
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(stderr.contains("was not created by this hook"), "{stderr}");
+    assert!(path.is_dir());
+    // A tree made by hand and listed by the owner is kept too.
+    let hand = rig.project.join(".worktrees").join("by-hand");
+    let hand = hand.to_str().ok_or("path")?;
+    git(&rig, &["worktree", "add", "-q", "-b", "by-hand", hand])?;
+    let output = run_hook(
+        &rig,
+        "worktree-remove",
+        &removal_input(&rig, Path::new(hand)),
+    )?;
+    assert_eq!(code(&output), 2);
+    assert!(Path::new(hand).is_dir());
+    Ok(())
+}
+
+#[test]
+fn worktree_remove_accepts_an_owned_tree_after_a_commit() -> Result {
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    let path = made_tree(&rig, "moved")?;
+    let path_str = path.to_str().ok_or("path")?;
+    git(
+        &rig,
+        &[
+            "-C",
+            path_str,
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "more",
+        ],
+    )?;
+    let output = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
+    // The owner may keep an unmerged branch, but the hook does not refuse it.
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(!stderr.contains("was not created by this hook"), "{stderr}");
+    Ok(())
+}
+
 fn state_record(rig: &TestRig) -> Result<PathBuf> {
     let dir = rig.state.join("hooks").join("claude-worktrees");
     let mut records: Vec<_> = fs::read_dir(&dir)?
