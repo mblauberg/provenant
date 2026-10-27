@@ -1599,7 +1599,7 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
 }
 
 #[test]
-fn cursor_reads_and_execs_only_its_resolved_version_payload()-> Result<(), ProviderError> {
+fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("cursor", "fixture-model");
     let payload = Path::new("/fixture/home/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4");
