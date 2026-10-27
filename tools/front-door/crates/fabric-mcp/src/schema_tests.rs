@@ -591,8 +591,9 @@ fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
             .cloned()
             .unwrap_or_else(|| vec![root.clone()]);
         for operation in &operations {
-            let mut request = sample(root, operation)
-                .unwrap_or_else(|| panic!("cannot generate valid operation for {name}: {operation}"));
+            let mut request = sample(root, operation).unwrap_or_else(|| {
+                panic!("cannot generate valid operation for {name}: {operation}")
+            });
             normalise(&mut request);
             compare(name, root, &request, "operation", true, &mut counts);
             walk(name, root, operation, &request, "", true, &mut counts);
