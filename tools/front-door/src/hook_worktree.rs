@@ -314,10 +314,10 @@ pub fn remove(globals: &Globals) -> u8 {
             .and_then(|name| name.to_str())
             .ok_or("worktree name is not UTF-8")?;
         let outcome = cli.data(&["worktree", "remove", name], WORK_TIME, deadline)?;
-        if !target.exists() {
-            if let Ok(state) = state_root(globals, &cwd) {
-                forget(&state, &target);
-            }
+        if !target.exists()
+            && let Ok(state) = state_root(globals, &cwd)
+        {
+            forget(&state, &target);
         }
         if target.exists() {
             let reason = outcome["retained"][0]["reason"].as_str().unwrap_or("kept");
