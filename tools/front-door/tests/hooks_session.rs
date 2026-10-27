@@ -429,6 +429,27 @@ fn removal_input(rig: &TestRig, path: &Path) -> Value {
 }
 
 #[test]
+fn worktree_remove_distinguishes_missing_paths_from_other_errors() -> Result {
+    let rig = TestRig::new()?;
+    let missing = rig.project.join("missing");
+    let gone = run_hook(&rig, "worktree-remove", &removal_input(&rig, &missing))?;
+    assert_eq!(code(&gone), 0);
+
+    let parent = rig.project.join("private-name");
+    fs::write(&parent, "file")?;
+    let output = run_hook(
+        &rig,
+        "worktree-remove",
+        &removal_input(&rig, &parent.join("child")),
+    )?;
+    assert_eq!(code(&output), 2);
+    let stderr = String::from_utf8(output.stderr.bytes)?;
+    assert!(stderr.contains("NotADirectory"), "{stderr}");
+    assert!(!stderr.contains("private-name"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn worktree_hooks_create_and_remove_through_the_worktree_owner() -> Result {
     let rig = TestRig::new()?;
     commit_file(&rig)?;
