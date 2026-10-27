@@ -20,6 +20,7 @@ const DEFAULT_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_UTILITY_TIMEOUT: Duration = Duration::from_secs(14_400);
 const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const MAX_GIT_LOG: u64 = 1000;
+const MAX_FETCH_STDERR: usize = 1024;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 const GIT_COMMON: &[&str] = &[
@@ -77,6 +78,8 @@ pub enum UtilityError {
     Signalled { signal: i64 },
     #[error("utility capture or transport reported data loss; output cannot be used as evidence")]
     Incomplete,
+    #[error("fetching remote branch failed with exit status {status}: {stderr}")]
+    FetchFailed { status: i64, stderr: String },
     #[error(transparent)]
     Repo(#[from] RepoError),
     #[error(transparent)]
@@ -618,8 +621,8 @@ pub(crate) fn fetch_missing_remote_branch(
     }
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     // A missing remote branch is reported by the caller's subsequent resolve,
-    // which can name the requested base. Execution failures still propagate.
-    run(&[
+    // while a failed fetch needs to retain its distinct transport diagnostic.
+    let fetched = run(&[
         "fetch".into(),
         // Creation must not indirectly prune stale worktree registrations.
         "--no-auto-maintenance".into(),
@@ -630,7 +633,30 @@ pub(crate) fn fetch_missing_remote_branch(
         remote.into(),
         refspec.into(),
     ])?;
+    if let Termination::Exit(status) = fetched.termination
+        && status != 0
+    {
+        return Err(UtilityError::FetchFailed {
+            status,
+            stderr: fetch_stderr_excerpt(&fetched.stderr.bytes),
+        });
+    }
     Ok(())
+}
+
+fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
+    let safe = crate::redact::known_shapes(bytes)
+        .unwrap_or_else(|_| b"fetch stderr could not be sanitised".to_vec());
+    let mut stderr = String::from_utf8_lossy(&safe).into_owned();
+    if stderr.len() > MAX_FETCH_STDERR {
+        let mut end = MAX_FETCH_STDERR - '…'.len_utf8();
+        while !stderr.is_char_boundary(end) {
+            end -= 1;
+        }
+        stderr.truncate(end);
+        stderr.push('…');
+    }
+    stderr
 }
 
 /// Run a read for the release scan, where shallow boundaries must not hide
@@ -1308,6 +1334,44 @@ pub(crate) mod tests {
     use std::error::Error;
     use std::fs;
     use std::time::Duration;
+
+    #[test]
+    fn missing_remote_fetch_reports_bounded_sanitised_stderr() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        let missing_remote = fixture._temp.path().join("missing-remote.git");
+        let url = format!("file://{}", missing_remote.display());
+        fixture.run(&["remote", "add", "origin", &url])?;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+
+        let error = fetch_missing_remote_branch(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            &fixture.home,
+            "origin/main",
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+        .expect_err("fetch from a missing remote must fail distinctly");
+        let UtilityError::FetchFailed { status, stderr } = error else {
+            return Err(format!("unexpected error: {error}").into());
+        };
+        assert_ne!(status, 0);
+        assert!(stderr.contains("fatal"));
+        assert!(stderr.len() <= MAX_FETCH_STDERR);
+
+        let redacted = fetch_stderr_excerpt(
+            b"fatal: unable to access 'https://user:secret@example.invalid/repo': denied",
+        );
+        assert!(!redacted.contains("secret"));
+        assert!(redacted.contains("[REDACTED]"));
+        Ok(())
+    }
 
     #[test]
     fn utility_reads_status_and_head_through_the_executor() -> Result<(), Box<dyn Error>> {
