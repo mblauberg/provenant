@@ -74,6 +74,11 @@ GC retries `tmp/` cleanup for indexed terminal attempts after 24 hours,
 including child run stores. It checks reservations and writer locks and
 reports paths and allocated bytes; `--dry-run` previews the removals.
 
+Claude Code worktrees follow the same rules: with the managed hooks installed,
+Claude creates a native agent's worktree with `provenant worktree create
+claude/NAME` and removes it with `provenant worktree remove`, so it has an owner
+from the start. See the [Claude hooks runbook](runbooks/claude-hooks.md).
+
 Never share `CARGO_TARGET_DIR` across worktrees. Confined writers use
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical
 worktree and common Git paths and held directory identities. Same-named and

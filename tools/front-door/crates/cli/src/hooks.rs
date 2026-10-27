@@ -8,6 +8,10 @@ pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";
 pub const CHAIR_PROMPT: &str = "chair-prompt";
 pub const CHAIR_START: &str = "chair-start";
+pub const SESSION_START: &str = "session-start";
+pub const STOP: &str = "stop";
+pub const WORKTREE_CREATE: &str = "worktree-create";
+pub const WORKTREE_REMOVE: &str = "worktree-remove";
 pub const PRE_PUSH: &str = "pre-push";
 #[derive(Clone, Copy)]
 pub enum Handler {
@@ -17,6 +21,10 @@ pub enum Handler {
     PrePush,
     ChairPrompt,
     ChairStart,
+    SessionStart,
+    Stop,
+    WorktreeCreate,
+    WorktreeRemove,
 }
 pub struct HookSpec {
     pub registration: HookRegistration,
@@ -72,6 +80,52 @@ pub static HOOK_SPECS: &[HookSpec] = &[
         handler: Handler::ChairStart,
         fixture: None,
     },
+    // Not in `CLAUDE_HOOKS`: confined lanes get only the guard and checkpoint
+    // hooks, and these act on the chair's own session and project.
+    HookSpec {
+        registration: HookRegistration {
+            harness: Some(Harness::Claude),
+            event: "SessionStart",
+            matcher: Some("startup|resume|clear"),
+            timeout: Some(5),
+            command: &["hook", "claude", SESSION_START],
+        },
+        handler: Handler::SessionStart,
+        fixture: None,
+    },
+    HookSpec {
+        registration: HookRegistration {
+            harness: Some(Harness::Claude),
+            event: "Stop",
+            matcher: None,
+            timeout: Some(5),
+            command: &["hook", "claude", STOP],
+        },
+        handler: Handler::Stop,
+        fixture: None,
+    },
+    HookSpec {
+        registration: HookRegistration {
+            harness: Some(Harness::Claude),
+            event: "WorktreeCreate",
+            matcher: None,
+            timeout: Some(60),
+            command: &["hook", "claude", WORKTREE_CREATE],
+        },
+        handler: Handler::WorktreeCreate,
+        fixture: None,
+    },
+    HookSpec {
+        registration: HookRegistration {
+            harness: Some(Harness::Claude),
+            event: "WorktreeRemove",
+            matcher: None,
+            timeout: Some(60),
+            command: &["hook", "claude", WORKTREE_REMOVE],
+        },
+        handler: Handler::WorktreeRemove,
+        fixture: None,
+    },
 ];
 impl Hook {
     pub fn spec(&self) -> &'static HookSpec {
@@ -82,6 +136,10 @@ impl Hook {
             Self::Git(GitHook::PrePush { .. }) => 3,
             Self::Claude(ClaudeHook::ChairPrompt) => 4,
             Self::Claude(ClaudeHook::ChairStart) => 5,
+            Self::Claude(ClaudeHook::SessionStart) => 6,
+            Self::Claude(ClaudeHook::Stop) => 7,
+            Self::Claude(ClaudeHook::WorktreeCreate) => 8,
+            Self::Claude(ClaudeHook::WorktreeRemove) => 9,
         };
         // These exhaustive grammar variants correspond to the static rows.
         &HOOK_SPECS[index]

@@ -19,6 +19,8 @@ pub fn disk_guard_early() -> Option<u8> {
 }
 mod gc_support;
 mod handoff;
+mod hook_state;
+mod hook_worktree;
 mod hooks;
 mod hosts;
 mod install;

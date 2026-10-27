@@ -121,6 +121,25 @@ and never fetches.
 - Test: `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
 - Owner: `src/hooks.rs`
 
+### Claude worktree hooks go through the worktree owner
+
+`hook claude worktree-create` and `worktree-remove` call `worktree create
+claude/<name>` and `worktree remove <name>`; they create and delete nothing
+themselves. Create prints only the new absolute path on stdout and accepts a
+plain slug only. Remove acts only on a linked worktree the owner lists for
+the project and that this hook created (both ownership records present, equal
+and naming the path; a later commit does not matter), never passes `--discard`, and treats any owner refusal (dirty,
+live writer, primary) as a failure that leaves the worktree. Both exit 2 with
+a bounded stderr cause on refusal.
+- Why: a worktree Claude creates must have an owner from the start, and a
+  hook must not widen what removal may delete, so a clean tree a person made
+  is never removed on Claude's say-so.
+- Test: `tests/hooks_session.rs::worktree_hooks_create_and_remove_through_the_worktree_owner`;
+  `::worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths`;
+  `::worktree_remove_keeps_a_listed_clean_tree_the_hook_did_not_make`;
+  `::worktree_remove_accepts_an_owned_tree_after_a_commit`
+- Owner: `src/hook_worktree.rs`
+
 ### Checks report, never repair
 
 `check` exits 1 on findings, 2 on malformed input and 3 on unreadable

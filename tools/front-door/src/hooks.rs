@@ -4,7 +4,7 @@ use provenant_confinement::{
     UtilityBudget, UtilityRuntime,
     push::{PushContext, PushUpdate},
 };
-use provenant_core::{CancelToken, DurationMicros, GitOid};
+use provenant_core::{CancelToken, Clock, DurationMicros, GitOid, WaitBudget};
 use provenant_os::{clock::SystemClock, exec::SystemExecutor, sys::hook_io};
 use provenant_workflow::session::{HookEvent, HostSessionId};
 use serde::Deserialize;
@@ -16,6 +16,8 @@ use std::{
 };
 const INPUT_CAP: usize = 1024 * 1024;
 const LOCAL_BUDGET: Duration = Duration::from_secs(1);
+/// Cap for hooks that read lane and PR state through this binary's own commands.
+const SESSION_BUDGET: Duration = Duration::from_secs(4);
 type Error = Box<dyn std::error::Error>;
 
 #[derive(Deserialize)]
@@ -31,7 +33,7 @@ struct GuardInput {
 }
 #[derive(Deserialize)]
 struct AdvisoryInput {
-    hook_event_name: HookEvent,
+    hook_event_name: String,
     session_id: String,
     cwd: PathBuf,
     source: Option<String>,
@@ -40,13 +42,18 @@ struct AdvisoryInput {
 // Hook I/O and local work are constrained by real monotonic deadlines.
 #[allow(clippy::disallowed_methods)]
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
-    let deadline = Instant::now() + LOCAL_BUDGET;
+    let started = Instant::now();
+    let deadline = started + LOCAL_BUDGET;
     match hook.spec().handler {
         Handler::ChairPrompt => crate::chair::hook(false, globals),
         Handler::ChairStart => crate::chair::hook(true, globals),
         Handler::Guard => guard(globals, deadline),
-        Handler::PreCompact => advisory(HookEvent::PreCompact, globals, deadline),
-        Handler::Compact => advisory(HookEvent::SessionStart, globals, deadline),
+        Handler::PreCompact => advisory(Moment::PreCompact, globals, started),
+        Handler::Compact => advisory(Moment::Compact, globals, started),
+        Handler::SessionStart => advisory(Moment::Restart, globals, started),
+        Handler::Stop => advisory(Moment::Stop, globals, started),
+        Handler::WorktreeCreate => crate::hook_worktree::create(globals),
+        Handler::WorktreeRemove => crate::hook_worktree::remove(globals),
         Handler::PrePush => {
             let Hook::Git(GitHook::PrePush { remote, .. }) = hook else {
                 return 1;
@@ -144,7 +151,10 @@ fn guard_config(globals: &Globals, cwd: &Path) -> provenant_confinement::guard::
 }
 // Advisory work is abandoned when its real-time host deadline expires.
 #[allow(clippy::disallowed_methods)]
-fn advisory(event: HookEvent, globals: &Globals, deadline: Instant) -> u8 {
+fn advisory(moment: Moment, globals: &Globals, started: Instant) -> u8 {
+    // Reading lane and PR state can take longer than a checkpoint read, so
+    // these hooks hold a wider budget; the registered host timeouts are 5s.
+    let deadline = started + SESSION_BUDGET;
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -155,10 +165,10 @@ fn advisory(event: HookEvent, globals: &Globals, deadline: Instant) -> u8 {
     let parsed = serde_json::from_slice::<AdvisoryInput>(&input)
         .ok()
         .filter(|host| {
-            host.hook_event_name == event
+            host.hook_event_name == moment.event_name()
                 && host.cwd.is_absolute()
                 && HostSessionId::parse(&host.session_id).is_ok()
-                && (event != HookEvent::SessionStart || host.source.as_deref() == Some("compact"))
+                && moment.accepts(host.source.as_deref())
         });
     let Some(host) = parsed else {
         diagnostic("checkpoint unavailable: invalid hook input");
@@ -169,13 +179,15 @@ fn advisory(event: HookEvent, globals: &Globals, deadline: Instant) -> u8 {
         project: globals.project.clone(),
         ..Default::default()
     };
-    // Read-only advisory work can be abandoned at the local deadline. No
-    // publication, stdin readers or child custody is transferred to this thread.
+    // The work can be abandoned at the local deadline. Its only publication is
+    // the checkpoint's atomic replacement under the checkpoint lock, which a
+    // process exit mid-way leaves complete. No stdin reader or child custody is
+    // transferred to this thread, and its children carry their own timeouts.
     let (tx, rx) = mpsc::sync_channel(1);
     let spawned = std::thread::Builder::new()
         .name("checkpoint-hook".into())
         .spawn(move || {
-            let result = checkpoint(event, &selected, &host.cwd, &input).map_err(|_| ());
+            let result = checkpoint(moment, &selected, &host.cwd, &input, deadline).map_err(|_| ());
             let _ = tx.send(result);
         });
     if spawned.is_err() {
@@ -194,12 +206,49 @@ fn advisory(event: HookEvent, globals: &Globals, deadline: Instant) -> u8 {
     }
     0
 }
-fn checkpoint(
-    event: HookEvent,
+/// What a hook does with the session checkpoint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Moment {
+    /// SessionStart after compaction: checkpoint plus a fresh state digest.
+    Compact,
+    /// SessionStart on startup, resume or clear: the same report.
+    Restart,
+    /// Before compaction: save the current state into the checkpoint.
+    PreCompact,
+    /// Turn end: refresh an existing checkpoint's state, at most every few minutes.
+    Stop,
+}
+impl Moment {
+    fn event_name(self) -> &'static str {
+        match self {
+            Self::Compact | Self::Restart => "SessionStart",
+            Self::PreCompact => "PreCompact",
+            Self::Stop => "Stop",
+        }
+    }
+    fn accepts(self, source: Option<&str>) -> bool {
+        match self {
+            Self::Compact => source == Some("compact"),
+            Self::Restart => matches!(source, Some("startup" | "resume" | "clear")),
+            Self::PreCompact | Self::Stop => true,
+        }
+    }
+    fn event(self) -> HookEvent {
+        match self {
+            Self::Compact | Self::Restart => HookEvent::SessionStart,
+            Self::PreCompact | Self::Stop => HookEvent::PreCompact,
+        }
+    }
+}
+/// Longest quiet gap before the Stop hook refreshes a checkpoint's state.
+const STOP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// Settled lanes reported when no checkpoint dates the report.
+const NO_CHECKPOINT_WINDOW: i64 = 24 * 60 * 60;
+
+fn project_id(
     globals: &Globals,
     cwd: &Path,
-    input: &[u8],
-) -> Result<provenant_workflow::session::HookContext, Error> {
+) -> Result<(provenant_core::Roots, provenant_core::ProjectId), Error> {
     let project = std::fs::canonicalize(cwd)?;
     if let Some(selected) = &globals.project
         && std::fs::canonicalize(selected)? != project
@@ -215,21 +264,148 @@ fn checkpoint(
         crate::roots::Product::Required,
     )?
     .roots;
-    with_git(|runtime, executor, budget, cancel| {
+    let id = with_git(|runtime, executor, budget, cancel| {
         let location = runtime
             .project_location(executor, &project, budget, cancel)?
             .location;
         let binding =
             provenant_config::lookup_project(&roots, &location)?.ok_or("project not bound")?;
-        Ok(provenant_workflow::session::hook_context(
-            &roots.state,
-            binding.project_id(),
-            event,
-            input,
-            &SystemClock::new(),
-            DurationMicros::from_micros(24 * 60 * 60 * 1_000_000),
-        ))
-    })
+        Ok(binding.project_id())
+    })?;
+    Ok((roots, id))
+}
+fn checkpoint(
+    moment: Moment,
+    globals: &Globals,
+    cwd: &Path,
+    input: &[u8],
+    deadline: Instant,
+) -> Result<provenant_workflow::session::HookContext, Error> {
+    use provenant_workflow::session;
+    let (roots, project) = project_id(globals, cwd)?;
+    let host: AdvisoryInput = serde_json::from_slice(input)?;
+    let store = session::SessionStore::new(
+        roots.state.clone(),
+        project,
+        HostSessionId::parse(&host.session_id)?,
+    );
+    let clock = SystemClock::new();
+    let wall = clock.wall_now()?.as_micros() / 1_000_000;
+    // Lane sessions only report; they never write state into a checkpoint.
+    let in_lane = provenant_cli::fabric::in_lane();
+    let current = store.read().ok().flatten();
+    let mut digest = String::new();
+    match moment {
+        Moment::Compact | Moment::Restart if !in_lane => {
+            let baseline = current.as_ref().map(session::baseline);
+            let want = crate::hook_state::Want {
+                worktrees: false,
+                settled_after_unix: baseline
+                    .as_ref()
+                    .map_or(wall - NO_CHECKPOINT_WINDOW, |b| b.chair_saved_unix),
+                pr_refs: baseline.map(|b| b.pr_refs).unwrap_or_default(),
+            };
+            let state = crate::hook_state::collect(globals, cwd, &want, deadline);
+            digest = state.digest(session::DIGEST_LIMIT);
+        }
+        Moment::PreCompact | Moment::Stop if !in_lane => {
+            // Quiet means neither the chair's checkpoint nor the last autosave
+            // changed within the interval.
+            let last = [
+                current.as_ref().map(|checkpoint| checkpoint.modified_at),
+                store.read_autosave().ok().flatten().map(|a| a.modified_at),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|at| at.as_micros() / 1_000_000)
+            .max();
+            let quiet = current.is_some()
+                && last.is_some_and(|modified| {
+                    wall < modified || wall - modified >= STOP_INTERVAL.as_secs() as i64
+                });
+            // A turn ends often: refresh only a checkpoint that exists and has
+            // been quiet. Compaction may create the first one.
+            if moment == Moment::PreCompact || quiet {
+                match autosave(
+                    &store,
+                    globals,
+                    cwd,
+                    current.as_ref(),
+                    wall,
+                    &clock,
+                    deadline,
+                ) {
+                    Ok(note) => diagnostic(&note),
+                    Err(error) => diagnostic(&format!(
+                        "checkpoint state not auto-saved: {}",
+                        session::clean(&error.to_string(), 160)
+                    )),
+                }
+            }
+        }
+        _ => {}
+    }
+    if moment == Moment::Stop {
+        return Ok(session::HookContext {
+            session_id: None,
+            status: session::CheckpointStatus::Present,
+            needs_saving: false,
+            diagnostic: String::new(),
+            stdout: Vec::new(),
+        });
+    }
+    Ok(session::hook_context_with(
+        &roots.state,
+        project,
+        moment.event(),
+        input,
+        &clock,
+        DurationMicros::from_micros(24 * 60 * 60 * 1_000_000),
+        session::Advice {
+            digest: &digest,
+            commands: &session::CommandPrefix::new(globals.state_dir.as_deref(), cwd),
+        },
+    ))
+}
+/// Collect state and save it to the hook-owned file beside the checkpoint.
+fn autosave(
+    store: &provenant_workflow::session::SessionStore,
+    globals: &Globals,
+    cwd: &Path,
+    current: Option<&provenant_workflow::session::Checkpoint>,
+    wall: i64,
+    clock: &SystemClock,
+    deadline: Instant,
+) -> Result<String, Error> {
+    use provenant_workflow::session;
+    let baseline = current.map(session::baseline);
+    let want = crate::hook_state::Want {
+        worktrees: true,
+        settled_after_unix: baseline.as_ref().map_or(wall, |b| b.chair_saved_unix),
+        pr_refs: baseline.map(|b| b.pr_refs).unwrap_or_default(),
+    };
+    let state = crate::hook_state::collect(globals, cwd, &want, deadline);
+    let stamp = String::from(clock.wall_now()?);
+    // The chair's checkpoint is never written here: the state goes to the
+    // hook-owned file beside it.
+    store.write_autosave(
+        state.document(&stamp, session::BLOCK_LIMIT).as_bytes(),
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &CancelToken::new(),
+        clock,
+    )?;
+    Ok(format!(
+        "Checkpoint state auto-saved: {} lanes in flight, {} settled since the chair's save, {} PRs, {} worktrees.{}",
+        state.active.len(),
+        state.settled.len(),
+        state.prs.len() + state.prs_unread.len(),
+        state.worktrees.len(),
+        if state.unavailable.is_empty() {
+            String::new()
+        } else {
+            format!(" Unavailable: {}.", state.unavailable.join(", "))
+        }
+    ))
 }
 fn with_git<T>(
     operation: impl FnOnce(

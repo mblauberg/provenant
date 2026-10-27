@@ -648,12 +648,24 @@ pub enum ClaudeHook {
     /// Check a tool call before it runs
     #[command(name = crate::hooks::PRE_TOOL_USE)]
     PreToolUse,
-    /// Prepare the session before compaction
+    /// Save lane, PR and worktree state into the checkpoint before compaction
     #[command(name = crate::hooks::PRE_COMPACT)]
     PreCompact,
-    /// Restore chair context after compaction
+    /// Restore the checkpoint and report lanes and pull requests after compaction
     #[command(name = crate::hooks::COMPACT)]
     Compact,
+    /// Report the checkpoint, lanes and pull requests when a session starts, resumes or clears
+    #[command(name = crate::hooks::SESSION_START)]
+    SessionStart,
+    /// Refresh an existing checkpoint's lane, PR and worktree state when a turn ends
+    #[command(name = crate::hooks::STOP)]
+    Stop,
+    /// Create a Claude Code worktree through `provenant worktree create`
+    #[command(name = crate::hooks::WORKTREE_CREATE)]
+    WorktreeCreate,
+    /// Remove a Claude Code worktree through `provenant worktree remove`
+    #[command(name = crate::hooks::WORKTREE_REMOVE)]
+    WorktreeRemove,
 }
 #[derive(Debug, Subcommand)]
 pub enum GitHook {

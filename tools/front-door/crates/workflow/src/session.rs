@@ -7,7 +7,9 @@ use std::ffi::OsStr;
 use thiserror::Error;
 
 mod hooks;
+mod state;
 pub use hooks::*;
+pub use state::*;
 
 pub const CHECKPOINT_LIMIT: u64 = 32 * 1024;
 pub const HOST_SESSION_ID_LIMIT: usize = 128;
@@ -76,6 +78,16 @@ pub struct Checkpoint {
     pub modified_at: UtcMicros,
 }
 
+/// The state a hook derived and saved beside the checkpoint. Only hooks write
+/// it; the chair's checkpoint is never modified by an autosave.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Autosave {
+    pub markdown: String,
+    pub modified_at: UtcMicros,
+}
+/// Hook-owned file beside `checkpoint.md`.
+const AUTOSAVE_FILE: &str = "autosave.md";
+
 /// StateRoot must already exist. Reads create nothing; saves create only this key.
 pub struct SessionStore {
     root: StateRoot,
@@ -137,6 +149,62 @@ impl SessionStore {
         .require_durable()
         .map_err(SessionError::Durability)
     }
+    /// Replaces the hook-owned autosave file, creating the session directory
+    /// when missing. `checkpoint.md` is never opened for writing.
+    pub fn write_autosave(
+        &self,
+        text: &[u8],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(), SessionError> {
+        if text.len() as u64 > CHECKPOINT_LIMIT {
+            return Err(SessionError::TooLarge);
+        }
+        std::str::from_utf8(text)?;
+        let dir = self.directory(true)?;
+        let _lock = dir.lock(
+            OsStr::new("checkpoint.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )?;
+        check_wait(budget, cancel, clock).map_err(|stop| match stop {
+            WaitStop::Cancelled => SessionError::from(FsError::Cancelled {
+                path: self.root.as_path().into(),
+            }),
+            WaitStop::Deadline => SessionError::Deadline,
+        })?;
+        dir.atomic_write(
+            OsStr::new(AUTOSAVE_FILE),
+            ".autosave.",
+            text,
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(SessionError::Durability)
+    }
+    /// The hook-owned autosave file, if any hook has written one.
+    pub fn read_autosave(&self) -> Result<Option<Autosave>, SessionError> {
+        let read = || -> Result<Autosave, SessionError> {
+            let dir = self.directory(false)?;
+            let mut file = dir.open_read(OsStr::new(AUTOSAVE_FILE))?;
+            let text = file.read_bounded(CHECKPOINT_LIMIT)?;
+            let markdown = std::str::from_utf8(&text)?.to_owned();
+            let micros = i64::try_from(file.metadata()?.modified_ns / 1000)
+                .map_err(|_| provenant_core::TimeError::WallRange)?;
+            Ok(Autosave {
+                markdown,
+                modified_at: UtcMicros::from_micros(micros)?,
+            })
+        };
+        match read() {
+            Ok(autosave) => Ok(Some(autosave)),
+            Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     /// Atomic replacement allows a consistent unlocked read of one held file.
     pub fn read(&self) -> Result<Option<Checkpoint>, SessionError> {
         let read = || -> Result<Checkpoint, SessionError> {
@@ -156,6 +224,61 @@ impl SessionStore {
             Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+    /// Read, edit and replace the checkpoint under one exclusive lock, so a
+    /// concurrent `save` is never overwritten from a stale read. `edit` gets the
+    /// current Markdown and returns the replacement, or `None` to leave the file
+    /// alone. Directories are created only when `create` is set and the
+    /// checkpoint is missing; returns whether a replacement was written.
+    pub fn update(
+        &self,
+        create: bool,
+        edit: impl FnOnce(Option<&str>) -> Result<Option<String>, SessionError>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool, SessionError> {
+        let dir = match self.directory(create) {
+            Ok(dir) => dir,
+            Err(error) if !create && error.is_not_found() => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let _lock = dir.lock(
+            OsStr::new("checkpoint.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )?;
+        let current = match dir.open_read(OsStr::new("checkpoint.md")) {
+            Ok(mut file) => {
+                let text = file.read_bounded(CHECKPOINT_LIMIT)?;
+                Some(std::str::from_utf8(&text)?.to_owned())
+            }
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        };
+        let Some(next) = edit(current.as_deref())? else {
+            return Ok(false);
+        };
+        if next.len() as u64 > CHECKPOINT_LIMIT {
+            return Err(SessionError::TooLarge);
+        }
+        check_wait(budget, cancel, clock).map_err(|stop| match stop {
+            WaitStop::Cancelled => SessionError::from(FsError::Cancelled {
+                path: self.root.as_path().into(),
+            }),
+            WaitStop::Deadline => SessionError::Deadline,
+        })?;
+        dir.atomic_write(
+            OsStr::new("checkpoint.md"),
+            ".checkpoint.",
+            next.as_bytes(),
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(SessionError::Durability)?;
+        Ok(true)
     }
 }
 #[cfg(test)]
@@ -354,6 +477,83 @@ mod tests {
         save(&store(&root, project, "other"), b"independent").unwrap();
     }
     #[test]
+    fn update_edits_under_the_checkpoint_lock_and_creates_only_when_asked() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let clock = clock(0);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let cancel = CancelToken::new();
+        // Without `create`, a missing checkpoint is neither created nor edited.
+        let wrote = selected
+            .update(
+                false,
+                |_| panic!("no checkpoint to edit"),
+                budget,
+                &cancel,
+                &clock,
+            )
+            .unwrap();
+        assert!(!wrote && !path(&root, project, "host-1").exists());
+        let wrote = selected
+            .update(
+                true,
+                |current| {
+                    assert_eq!(current, None);
+                    Ok(Some("first".into()))
+                },
+                budget,
+                &cancel,
+                &clock,
+            )
+            .unwrap();
+        assert!(wrote);
+        // A concurrent save cannot interleave: the lock is held while editing.
+        let expired = TestClock::new(
+            UtcMicros::from_micros(0).unwrap(),
+            MonoTime::from_micros(1_000_000),
+        );
+        selected
+            .update(
+                true,
+                |current| {
+                    assert_eq!(current, Some("first"));
+                    assert!(matches!(
+                        selected.save(b"racing", budget, &CancelToken::new(), &expired),
+                        Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
+                    ));
+                    Ok(Some("second".into()))
+                },
+                budget,
+                &cancel,
+                &clock,
+            )
+            .unwrap();
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "second");
+        // Declining, failing and oversize edits keep the previous bytes.
+        assert!(
+            !selected
+                .update(true, |_| Ok(None), budget, &cancel, &clock)
+                .unwrap()
+        );
+        assert!(
+            selected
+                .update(
+                    true,
+                    |_| Err(SessionError::Deadline),
+                    budget,
+                    &cancel,
+                    &clock
+                )
+                .is_err()
+        );
+        let big = "x".repeat(CHECKPOINT_LIMIT as usize + 1);
+        assert!(matches!(
+            selected.update(true, |_| Ok(Some(big)), budget, &cancel, &clock),
+            Err(SessionError::TooLarge)
+        ));
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "second");
+    }
+    #[test]
     fn deadline_expiring_after_lock_keeps_previous_complete_bytes() {
         struct ExpiringAfterLock(std::cell::Cell<u32>);
         impl Clock for ExpiringAfterLock {
@@ -545,6 +745,175 @@ mod tests {
             assert!(context.contains("session save 7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37 --file"));
         }
     }
+    fn hook_with(
+        root: &StateRoot,
+        project: ProjectId,
+        commands: &CommandPrefix,
+        micros: i64,
+    ) -> HookContext {
+        hook_context_with(
+            root,
+            project,
+            HookEvent::SessionStart,
+            FIXTURES[0].0.as_bytes(),
+            &clock(micros),
+            DurationMicros::ZERO,
+            Advice {
+                digest: "",
+                commands,
+            },
+        )
+    }
+    fn context(response: &HookContext) -> String {
+        let wire: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
+        wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    const FIXTURE_ID: &str = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37";
+
+    #[test]
+    fn the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one() {
+        use std::os::unix::ffi::OsStrExt;
+        let (_temp, root, project) = setup();
+        let cwd = std::path::Path::new("/work");
+        let custom = CommandPrefix::new(Some(std::path::Path::new("rel/it's state")), cwd);
+        let text = context(&hook_with(&root, project, &custom, 0));
+        assert!(
+            text.contains(&format!(
+                "Save: provenant --state-dir '/work/rel/it'\\''s state' workflow session save {FIXTURE_ID} --file <checkpoint.md>"
+            )),
+            "{text}"
+        );
+        // The default store shows the plain command.
+        let text = context(&hook_with(&root, project, &CommandPrefix::default(), 0));
+        assert!(text.contains(&format!(
+            "Save: provenant workflow session save {FIXTURE_ID} --file"
+        )));
+        // A directory that cannot round-trip is never shown as a command.
+        let hostile = [
+            std::path::PathBuf::from("/s/a\nb"),
+            std::path::PathBuf::from("/s/a>b"),
+            std::path::PathBuf::from("/s/a`b"),
+            std::path::PathBuf::from(format!("/{}", "d".repeat(600))),
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/s/\xff")),
+        ];
+        for dir in hostile {
+            let prefix = CommandPrefix::new(Some(&dir), cwd);
+            let text = context(&hook_with(&root, project, &prefix, 0));
+            assert!(
+                !text.contains(&format!(
+                    "Save: provenant workflow session save {FIXTURE_ID}"
+                )),
+                "{text}"
+            );
+            assert!(
+                text.contains("default store") && text.contains("this hook's --state-dir"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_damaged_or_unreadable_autosave_never_hides_a_readable_checkpoint() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, FIXTURE_ID);
+        save(
+            &selected,
+            b"# Goal\nChair authority: user approved #1829 only.",
+        )
+        .unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let directory = path(&root, project, FIXTURE_ID);
+        let autosave = directory.join("autosave.md");
+        let external = root.as_path().join("outside.md");
+        std::fs::write(&external, "private").unwrap();
+        let check = |expect_problem: bool| {
+            let response = hook_with(&root, project, &CommandPrefix::default(), mtime);
+            assert_eq!(response.status, CheckpointStatus::Present);
+            assert!(!response.needs_saving);
+            let text = context(&response);
+            assert!(text.contains("user approved #1829 only"), "{text}");
+            assert_eq!(
+                text.contains("\nAutosave unavailable: "),
+                expect_problem,
+                "{text}"
+            );
+            // One line, and never a path.
+            let line = text
+                .lines()
+                .find(|line| line.starts_with("Autosave unavailable: "));
+            assert_eq!(line.is_some(), expect_problem, "{text}");
+            assert!(!text.contains(external.to_str().unwrap()));
+            assert!(!text.contains(root.as_path().to_str().unwrap()));
+        };
+        // Missing: nothing to report.
+        check(false);
+        // Damaged: not UTF-8.
+        std::fs::write(&autosave, [0xff, 0xfe]).unwrap();
+        check(true);
+        // Unreadable: a symlink the store refuses to follow.
+        std::fs::remove_file(&autosave).unwrap();
+        symlink(&external, &autosave).unwrap();
+        check(true);
+        std::fs::remove_file(&autosave).unwrap();
+        // Valid: shown after the checkpoint, with no problem line.
+        std::fs::write(&autosave, "## Provenant session state\nAuto-saved: t").unwrap();
+        check(false);
+        let saved_at = selected.read_autosave().unwrap().unwrap().modified_at;
+        let shown = hook_context(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            FIXTURES[0].0.as_bytes(),
+            &clock(saved_at.as_micros()),
+            DurationMicros::from_micros(3_600_000_000),
+        );
+        let text = context(&shown);
+        assert!(text.find("Chair authority").unwrap() < text.find("Auto-saved: t").unwrap());
+        // With no checkpoint at all, a damaged autosave is still just a line.
+        std::fs::remove_file(directory.join("checkpoint.md")).unwrap();
+        std::fs::write(&autosave, [0xff]).unwrap();
+        let response = hook_with(&root, project, &CommandPrefix::default(), mtime);
+        assert_eq!(response.status, CheckpointStatus::Missing);
+        assert!(context(&response).contains("\nAutosave unavailable: "));
+        // An unreadable checkpoint is still reported as unavailable.
+        std::fs::write(directory.join("checkpoint.md"), [0xff]).unwrap();
+        assert_eq!(
+            hook_with(&root, project, &CommandPrefix::default(), mtime).status,
+            CheckpointStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, FIXTURE_ID);
+        save(&selected, "x".repeat(20_000).as_bytes()).unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let long = std::path::PathBuf::from(format!("/{}", "s".repeat(400)));
+        for (dir, shown) in [
+            (std::path::PathBuf::from("/st ate"), true),
+            (long, true),
+            (std::path::PathBuf::from("/s/a\nb"), false),
+        ] {
+            let prefix = CommandPrefix::new(Some(&dir), std::path::Path::new("/work"));
+            let response = hook_with(&root, project, &prefix, mtime);
+            assert!(response.stdout.len() <= HOOK_OUTPUT_LIMIT);
+            let text = context(&response);
+            let quoted = format!("--state-dir '{}'", dir.display());
+            assert_eq!(
+                text.contains(&format!(
+                    "read it with `provenant {quoted} workflow session show {FIXTURE_ID}`"
+                )),
+                shown,
+                "{text}"
+            );
+            assert!(text.contains("Checkpoint excerpt"), "{text}");
+        }
+    }
+
     #[test]
     fn malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback() {
         let (_temp, root, project) = setup();

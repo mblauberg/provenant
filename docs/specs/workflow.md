@@ -110,7 +110,7 @@ session key, saved atomically with its bytes preserved. Session IDs are 1 to
 
 ### Session hooks are advisory
 
-`pre-compact` and `compact` exit 0 on missing or invalid state with a
+`pre-compact`, `compact`, `session-start` and `stop` exit 0 on missing or invalid state with a
 diagnostic naming a cause kind, never a path. SessionStart emits only the
 checkpoint for its own key, or a missing or stale status. It never emits the
 latest file, withholds stale content and caps output at 8 KiB.
@@ -118,6 +118,62 @@ latest file, withholds stale content and caps output at 8 KiB.
 - Test: `crates/workflow/src/session.rs::malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback`;
   `::native_host_fixtures_select_only_their_key_and_emit_native_json`
 - Owner: `crates/workflow/src/session.rs`
+
+### Session state is derived, bounded and never authority
+
+`session-start` and `compact` add a digest of this project's in-flight
+lanes, the lanes settled since the chair last saved, and `pr status` for the
+pull requests the chair named in the checkpoint. The digest is at most 3 KiB,
+read-only and shares the 8 KiB output cap, so the checkpoint excerpt shrinks
+first. Lane, PR and worktree facts come from the read commands (`lanes`,
+`pr status`, `worktree list`) under one 4 second deadline. A command that is
+missing, slow or failing marks its section unavailable and never reads as
+empty. Record fields are stripped of markers, backticks and control
+characters before they are shown.
+- Why: a restarted chair must see real lane state quickly, and absence of
+  evidence must not read as an empty queue.
+- Test: `crates/workflow/src/session/state.rs::output_is_bounded_and_says_when_it_was`;
+  `::unreadable_sections_are_named_not_shown_empty`;
+  `::hostile_fields_cannot_forge_markers_or_headings`;
+  `tests/hooks_session.rs::restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair`
+- Owner: `crates/workflow/src/session/state.rs`, `src/hook_state.rs`, `src/hooks.rs`
+
+### Autosave never writes the chair's checkpoint
+
+`pre-compact` saves, and `stop` refreshes after ten quiet minutes (neither the
+checkpoint nor the last autosave changed), the derived lane, PR and worktree
+state to `autosave.md`, a file beside `checkpoint.md` that only hooks write.
+No autosave path opens `checkpoint.md` for writing, so the chair's text, its
+newlines and its modification time (the "last chair save" baseline) are never
+touched, and a copy of saved state in the chair's notes is never replaced.
+`session-start` and `compact` render the chair's checkpoint followed by
+`autosave.md`. The two are read independently: a damaged or unreadable
+`autosave.md` costs one diagnostic line (`Autosave unavailable: <cause>`) and
+never hides a readable checkpoint. A checkpoint that holds a block from an earlier release keeps it
+as chair text. `stop` never creates a session directory, `autosave.md` alone is
+reported as holding only automatically saved state, and lane sessions never
+write. A next-page command in the digest is shown only if it survives
+rendering byte for byte (within 512 bytes and free of `<`, `>` and backticks);
+otherwise a plain note names the cursor. Every other command a hook prints
+(the digest heading, the bounded-output marker, the `pr status` hint, the `Save:` line, the `session show`
+pointer) repeats the hook's non-default `--state-dir` on the same terms, so
+following it reaches the store the hook used; one that cannot is not printed.
+- Why: automatic state must not erase the authority references the chair wrote
+  or hide that the chair has not saved notes; separate files remove the
+  ownership question a shared file raises.
+- Test: `tests/hooks_session.rs::autosave_never_writes_the_chair_file_and_output_shows_both_parts`;
+  `::a_legacy_block_in_the_checkpoint_stays_chair_text`;
+  `::pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing`;
+  `::stop_hook_refreshes_only_an_existing_quiet_checkpoint`;
+  `::lane_sessions_report_but_never_write_checkpoint_state`;
+  `crates/workflow/src/session/state.rs::a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte`;
+  `::the_digest_title_names_the_store_it_was_read_from`;
+  `::the_bounded_fallback_lists_the_store_the_digest_came_from`;
+  `crates/workflow/src/session.rs::a_damaged_or_unreadable_autosave_never_hides_a_readable_checkpoint`;
+  `tests/hooks_session.rs::a_damaged_autosave_leaves_the_chair_notes_visible_at_session_start`;
+  `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
+  `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
+- Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
 
 ## Session handoff
 
