@@ -314,8 +314,10 @@ cover only `base..integration-head`, regardless of the primary checkout's HEAD.
 A legacy graph without a recorded base must use a new graph ID for PR delivery.
 Once every node succeeds and custody is released, the graph publishes local
 integration through a separately created graph branch,
-recovering an interrupted publication only when its unmarked ref still points
-at the exact graph head. A different head or symbolic ref refuses. Alternatively,
+recovering an interrupted publication when its unmarked ref still points at
+the exact graph head. A matching sealed marker also permits recreating an absent
+publication ref at that same head. A different marker, a different ref head or
+a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
 contains bounded commit messages and run and attempt IDs. The checkpoint
 records the PR URL and successful final delivery;

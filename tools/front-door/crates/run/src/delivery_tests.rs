@@ -135,6 +135,81 @@ fn integration_refuses_the_default_branch_of_a_non_origin_remote()
 }
 
 #[test]
+fn graph_publication_recovers_deleted_marked_ref_and_refuses_conflicts()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    let publication = host.graph_publication_branch(&fixture.writer.project, head)?;
+    let reference = format!("refs/heads/{publication}");
+    fixture.git(&["update-ref", "-d", &reference, &head.to_string()])?;
+    assert_eq!(
+        host.graph_publication_branch(&fixture.writer.project, head)?,
+        publication
+    );
+    assert_eq!(
+        host.command(
+            &fixture.writer.project,
+            "git",
+            &["rev-parse", "--verify", &reference],
+            WriterDeliveryStage::Push
+        )?,
+        head.to_string()
+    );
+
+    fixture.commit(&fixture.writer.worktree, "other graph head")?;
+    let other = host.head(&fixture.writer)?;
+    fixture.git(&[
+        "update-ref",
+        &reference,
+        &other.to_string(),
+        &head.to_string(),
+    ])?;
+    assert!(matches!(
+        host.graph_publication_branch(&fixture.writer.project, head),
+        Err(RunError::Delivery(WriterDeliveryStage::Push))
+    ));
+    assert_eq!(
+        host.command(
+            &fixture.writer.project,
+            "git",
+            &["rev-parse", "--verify", &reference],
+            WriterDeliveryStage::Push
+        )?,
+        other.to_string()
+    );
+
+    let common = host.command(
+        &fixture.writer.project,
+        "git",
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        WriterDeliveryStage::Push,
+    )?;
+    let directory = provenant_os::fs::Directory::open_anchor(Path::new(&common))?;
+    artifacts::seal(
+        &directory,
+        &format!("provenant-graph-publication-{other}.json"),
+        publication.as_bytes(),
+        RECORD_LIMIT,
+    )?;
+    assert!(matches!(
+        host.graph_publication_branch(&fixture.writer.project, other),
+        Err(RunError::Delivery(WriterDeliveryStage::Push))
+    ));
+    let absent = format!("refs/heads/provenant/graph/{other}");
+    assert!(
+        host.command(
+            &fixture.writer.project,
+            "git",
+            &["show-ref", "--verify", "--quiet", &absent],
+            WriterDeliveryStage::Push
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn graph_publication_recovers_a_ref_created_before_its_marker()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;

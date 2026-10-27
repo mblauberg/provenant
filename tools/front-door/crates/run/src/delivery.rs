@@ -322,50 +322,41 @@ impl HostDeliveryContext {
             return Err(RunError::Delivery(stage));
         }
         if let Some(raw) = crate::artifacts::read_sealed(&directory, &marker, crate::RECORD_LIMIT)?
+            && raw != branch.as_bytes()
         {
-            if raw != branch.as_bytes()
-                || self.command(
-                    project,
-                    "git",
-                    &["rev-parse", "--verify", &reference],
-                    stage,
-                )? != head.to_string()
-            {
-                return Err(RunError::Delivery(stage));
-            }
-        } else {
-            // Recover a crash between ref creation and marker publication.
-            // Both updates compare the old value, so a different head refuses.
-            if self
-                .command(
-                    project,
-                    "git",
-                    &[
-                        "update-ref",
-                        "--no-deref",
-                        &reference,
-                        &head.to_string(),
-                        "",
-                    ],
-                    stage,
-                )
-                .is_err()
-            {
-                self.command(
-                    project,
-                    "git",
-                    &[
-                        "update-ref",
-                        "--no-deref",
-                        &reference,
-                        &head.to_string(),
-                        &head.to_string(),
-                    ],
-                    stage,
-                )?;
-            }
-            crate::artifacts::seal(&directory, &marker, branch.as_bytes(), crate::RECORD_LIMIT)?;
+            return Err(RunError::Delivery(stage));
         }
+        // Recover an unmarked publication or a marked ref deleted after a PR.
+        // Both updates compare the old value, so a different head refuses.
+        if self
+            .command(
+                project,
+                "git",
+                &[
+                    "update-ref",
+                    "--no-deref",
+                    &reference,
+                    &head.to_string(),
+                    "",
+                ],
+                stage,
+            )
+            .is_err()
+        {
+            self.command(
+                project,
+                "git",
+                &[
+                    "update-ref",
+                    "--no-deref",
+                    &reference,
+                    &head.to_string(),
+                    &head.to_string(),
+                ],
+                stage,
+            )?;
+        }
+        crate::artifacts::seal(&directory, &marker, branch.as_bytes(), crate::RECORD_LIMIT)?;
         Ok(branch)
     }
     /// Resolve the concise mode into the existing explicit destination contract.
