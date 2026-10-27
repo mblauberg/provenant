@@ -94,6 +94,47 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 }
 
 #[test]
+fn integration_refuses_the_default_branch_of_a_non_origin_remote()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "-m", "primary-live"])?;
+    fixture.git(&[
+        "remote",
+        "add",
+        "upstream",
+        fixture.root.join("remote.git").to_str().ok_or("remote")?,
+    ])?;
+    for (remote, branch) in [("origin", "trunk"), ("upstream", "release")] {
+        fixture.git(&[
+            "symbolic-ref",
+            &format!("refs/remotes/{remote}/HEAD"),
+            &format!("refs/remotes/{remote}/{branch}"),
+        ])?;
+    }
+    fixture.git(&["branch", "release"])?;
+    fixture.git(&["config", "branch.release.remote", "upstream"])?;
+    fixture.git(&["config", "branch.release.merge", "refs/heads/release"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("release".into()), "lane")?
+            .ok_or("destination")?;
+    assert!(matches!(
+        fixture.prepare(),
+        Err(RunError::DeliveryPrepare {
+            step: "integration target",
+            ..
+        })
+    ));
+    assert!(matches!(
+        HostDeliveryContext::validate_integration_target(&fixture.writer.project, "release"),
+        Err(RunError::DeliveryPrepare {
+            step: "integration target",
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[test]
 fn graph_publication_recovers_a_ref_created_before_its_marker()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;

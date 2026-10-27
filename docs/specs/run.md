@@ -318,6 +318,9 @@ PR modes use `origin` and the lane branch; `integrate:BRANCH` selects an
 existing local branch, and `integrate:origin/BRANCH` selects an existing
 remote integration branch. The legacy remote, branch and open-PR flags remain
 aliases and conflict with `--deliver`. Read-only lanes may select only none.
+Integration refuses the default branch recorded by any configured remote and
+the primary checkout branch. If no remote HEAD is available, both `main` and
+`master` are protected.
 
 Integration serialises by destination using a stable lock in the common Git
 directory. It fast-forwards when possible, otherwise uses `merge-tree` and

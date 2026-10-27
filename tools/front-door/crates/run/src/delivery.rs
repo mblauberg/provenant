@@ -110,16 +110,26 @@ impl HostDeliveryContext {
                 "symbolic branch targets are refused",
             ));
         }
-        let default = self.command(
-            &writer.worktree,
-            "git",
-            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-            Stage::Prepare,
-        )?;
-        let protected_default = match default.strip_prefix("refs/remotes/origin/") {
-            Some(branch) => branch == target,
-            None => matches!(target, "main" | "master"),
-        };
+        let remotes = self.command(&writer.worktree, "git", &["remote"], Stage::Prepare)?;
+        let mut has_default = false;
+        let mut protected_default = false;
+        for remote in remotes.lines() {
+            let default = self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "symbolic-ref",
+                    "--quiet",
+                    &format!("refs/remotes/{remote}/HEAD"),
+                ],
+                Stage::Prepare,
+            )?;
+            if let Some(branch) = default.strip_prefix(&format!("refs/remotes/{remote}/")) {
+                has_default = true;
+                protected_default |= branch == target;
+            }
+        }
+        protected_default |= !has_default && matches!(target, "main" | "master");
         let trees = self.command(
             &writer.worktree,
             "git",
