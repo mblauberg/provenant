@@ -761,7 +761,8 @@ fn worktree_remove_keeps_a_tree_with_only_ignored_output_and_says_why() -> Resul
     assert!(refused.stdout.bytes.is_empty());
     let stderr = String::from_utf8(refused.stderr.bytes)?;
     assert!(
-        stderr.starts_with("worktree-remove: refused:") && stderr.contains("dirty"),
+        stderr.starts_with("worktree-remove: refused:")
+            && stderr.contains("undeclared ignored paths: target/"),
         "{stderr}"
     );
     assert!(path.join("target/out.o").is_file());
