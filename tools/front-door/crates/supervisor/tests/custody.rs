@@ -176,6 +176,50 @@ fn scope() -> Scope {
         generation: 1,
     }
 }
+fn advanced_attempt_is_readmitted_after_settlement(root: &Path) -> Result<()> {
+    let path = root.join("advanced-writer");
+    std::fs::create_dir(&path)?;
+    let clock = SystemClock::new();
+    let token = CancelToken::new();
+    let mut lease = fixture::acquire_writer(
+        Directory::open_anchor(&path)?,
+        scope(),
+        budget(&clock)?,
+        &token,
+        &clock,
+    )?;
+    let advanced = Scope {
+        attempt: AttemptId::from_bytes([3; 16]),
+        generation: 2,
+        ..scope()
+    };
+    fixture::advance_attempt(&mut lease, advanced)?;
+    lease.withdraw_unlaunched()?;
+    // Ownership still names the first attempt; the settled attempt may return.
+    fixture::acquire_writer(
+        Directory::open_anchor(&path)?,
+        Scope {
+            generation: 3,
+            ..advanced
+        },
+        budget(&clock)?,
+        &token,
+        &clock,
+    )?
+    .withdraw_unlaunched()?;
+    let stale = fixture::acquire_writer(
+        Directory::open_anchor(&path)?,
+        Scope {
+            generation: 4,
+            ..scope()
+        },
+        budget(&clock)?,
+        &token,
+        &clock,
+    );
+    assert!(matches!(stale, Err(CustodyError::Fenced)));
+    Ok(())
+}
 fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
     let path = root.join("writer");
     std::fs::create_dir(&path)?;
@@ -1934,6 +1978,10 @@ const CASES: &[Case] = &[
     (
         "descendant_journal_failure_is_reported",
         descendant_journal_failure_is_reported,
+    ),
+    (
+        "advanced_attempt_is_readmitted_after_settlement",
+        advanced_attempt_is_readmitted_after_settlement,
     ),
     (
         "writer_is_fenced_after_every_descriptor_closes",
