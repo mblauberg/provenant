@@ -134,13 +134,19 @@ impl RunStore {
     /// names a wait only when it can see one: run concurrency, then startup
     /// spacing, then the shared host and project caps and resource floors.
     pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
+        let guard = self.disk_guard_wait();
         lanes
             .iter()
-            .filter(|lane| matches!(lane.state, AttemptState::Queued | AttemptState::Starting))
+            .filter(|lane| {
+                matches!(lane.state, AttemptState::Queued | AttemptState::Starting)
+                    || (lane.state == AttemptState::Running && guard.is_some())
+            })
             .filter_map(|lane| {
                 let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
                 let class = ticket.lane_class;
-                let waiting_for = if lane.state == AttemptState::Queued {
+                let waiting_for = if lane.state == AttemptState::Running {
+                    guard.clone()?
+                } else if lane.state == AttemptState::Queued {
                     "launch: not yet handed to a guardian".to_owned()
                 } else {
                     let active: i64 = self
@@ -181,6 +187,24 @@ impl RunStore {
                 })
             })
             .collect()
+    }
+    /// The disk guard's saved state names its pause while it holds builds
+    /// stopped: the free bytes it last saw and the level it resumes at.
+    fn disk_guard_wait(&self) -> Option<String> {
+        let path = self.writer_registry.join("disk-guard/paused.json");
+        let state: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        if state["paused"].as_array()?.is_empty() {
+            return None;
+        }
+        let gib = |key: &str| {
+            let tenths = state[key].as_u64()? * 10 / 1024_u64.pow(3);
+            Some(format!("{}.{}", tenths / 10, tenths % 10))
+        };
+        Some(format!(
+            "disk guard paused builds (free {} GiB, resumes at {} GiB)",
+            gib("free")?,
+            gib("resume_at")?
+        ))
     }
     fn ticket(&self, db: &Connection, id: AttemptId) -> Result<AdmissionTicket> {
         let raw: Vec<u8> = db

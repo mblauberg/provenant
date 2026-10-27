@@ -269,6 +269,11 @@ struct State {
     paused: Vec<Process>,
     warned_at: Option<i64>,
     paused_at: Option<i64>,
+    // What `lanes` shows while builds are held: free bytes last seen and the resume level.
+    #[serde(default)]
+    free: Option<u64>,
+    #[serde(default)]
+    resume_at: Option<u64>,
     gc_at: Option<i64>,
 }
 
@@ -305,6 +310,8 @@ fn check(
     let resume_bytes = size(&settings.resume)?;
     let warn = size(&settings.warn)?;
     if free < pause {
+        state.free = Some(free);
+        state.resume_at = Some(resume_bytes);
         let processes = host.processes()?;
         let mut protected = std::collections::HashSet::from([host.pid()]);
         loop {
@@ -882,6 +889,9 @@ mod tests {
             serde_json::from_slice::<State>(&saved[0]).unwrap().paused,
             [process(10, 501, "cargo")]
         );
+        let saved_state = serde_json::from_slice::<State>(&saved[0]).unwrap();
+        assert_eq!(saved_state.free, Some(25 * GIB - 1));
+        assert_eq!(saved_state.resume_at, Some(50 * GIB));
         state = serde_json::from_slice(saved.last().unwrap()).unwrap();
         host.free = 49 * GIB;
         tick(&mut host, &mut state, 120);

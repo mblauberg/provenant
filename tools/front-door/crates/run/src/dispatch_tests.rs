@@ -5465,13 +5465,15 @@ fn lane_waits_name_a_disk_guard_pause_for_running_lanes() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let id = starting(&store, &lane(120, true), &call)?;
-    assert!(store.claim(id, &at(0), &call)?.is_some());
-    let records = [store.record(id, &call)?];
+    let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
+    assert_eq!(running.state, AttemptState::Running);
+    let records = [running];
     assert!(store.lane_waits(&records, &call).is_empty());
     let gib = 1024_u64.pow(3);
-    std::fs::create_dir(temp.path().join("disk-guard"))?;
+    let guard = store.writer_registry().join("disk-guard");
+    std::fs::create_dir_all(&guard)?;
     std::fs::write(
-        temp.path().join("disk-guard/paused.json"),
+        guard.join("paused.json"),
         format!(
             r#"{{"paused":[{{"pid":42,"uid":501,"name":"cargo","started":"x"}}],"free":{},"resume_at":{}}}"#,
             20 * gib,
