@@ -390,11 +390,13 @@ pub(crate) fn pr_land_refuses_when_worktree_state_is_malformed() -> Result {
         .find(|path| path.is_file())
         .ok_or("no rebase head-name")?;
     let original = fs::read(&head_name)?;
-    fs::write(&head_name, "")?;
-    let (status, detail) = race(&landing, &[])?;
-    assert_eq!(status, "refused", "{detail}");
-    assert!(detail.contains("cannot parse"), "{detail}");
-    assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    for malformed in ["", "refs/\n"] {
+        fs::write(&head_name, malformed)?;
+        let (status, detail) = race(&landing, &[])?;
+        assert_eq!(status, "refused", "{malformed:?}: {detail}");
+        assert!(detail.contains("cannot parse"), "{detail}");
+        assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+    }
     fs::write(&head_name, original)?;
 
     let head = entry.join("HEAD");
@@ -406,6 +408,20 @@ pub(crate) fn pr_land_refuses_when_worktree_state_is_malformed() -> Result {
     assert_eq!(status, "refused", "{detail}");
     assert!(detail.contains("cannot parse HEAD"), "{detail}");
     assert_eq!(git(&landing.rig, &["rev-parse", "feat"])?, landing.head);
+
+    let bisect = self::landing()?;
+    hold(&bisect, "bisect")?;
+    let start = bisect.rig.project.join(".git/BISECT_START");
+    let start = if start.is_file() {
+        start
+    } else {
+        bisect.rig.project.join(".git/worktrees/held/BISECT_START")
+    };
+    fs::write(&start, ":\n")?;
+    let (status, detail) = race(&bisect, &[])?;
+    assert_eq!(status, "refused", "{detail}");
+    assert!(detail.contains("cannot parse BISECT_START"), "{detail}");
+    assert_eq!(git(&bisect.rig, &["rev-parse", "feat"])?, bisect.head);
     Ok(())
 }
 

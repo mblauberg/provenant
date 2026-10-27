@@ -165,7 +165,21 @@ fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, 
 
 /// A full ref name as Git writes it into `HEAD`.
 fn is_ref(text: &str) -> bool {
-    text.starts_with("refs/") && !text.contains(char::is_whitespace)
+    text.starts_with("refs/") && is_ref_name(text)
+}
+
+/// A name that `git check-ref-format --allow-onelevel` accepts.
+fn is_ref_name(text: &str) -> bool {
+    text != "@"
+        && !text.ends_with('.')
+        && !text.contains("..")
+        && !text.contains("@{")
+        && !text
+            .bytes()
+            .any(|b| b < 0x20 || b == 0x7f || b" ~^:?*[\\".contains(&b))
+        && text
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
 }
 
 /// A full SHA-1 or SHA-256 object id.
@@ -180,7 +194,7 @@ fn is_head_name(text: &str) -> bool {
 
 /// `BISECT_START`: the branch name or commit the bisect started from.
 fn is_bisect_start(text: &str) -> bool {
-    !text.is_empty() && !text.contains(char::is_whitespace)
+    is_object_id(text) || is_ref_name(text)
 }
 
 /// The checkout that the administrative directory `dir` belongs to, or the
