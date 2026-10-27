@@ -1,3 +1,3 @@
 ## Fixes
 
-OpenCode lanes can start repository discovery in read-only and writer modes. The read-only profile permits only the system Git shim, its `xcode-select` lookup, and the host-selected Git binary for discovery.
+OpenCode lanes use the host-selected Git for repository discovery in read-only and writer modes, bypassing Apple's system shim. Read-only lanes permit execution of only OpenCode and the selected Git binary.
