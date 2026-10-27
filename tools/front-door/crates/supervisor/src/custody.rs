@@ -43,7 +43,7 @@ pub enum CustodyError {
     /// it can reach the user without any path.
     #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
     AdmissionClock,
-    #[error("custody I/O failed")]
+    #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Filesystem(#[from] FsError),
@@ -1204,6 +1204,7 @@ impl RebootRecovery {
     /// Keep writer exclusion for normal terminal settlement, which reacquires
     /// attempt custody while verifying the canonical release artefacts.
     pub fn into_recovery(mut self) -> Recovery {
+        // Reboot ended the guardian; writer exclusion remains while verify_settlement reacquires custody.
         self.recovery.guardian_quiescent = true;
         self.recovery
     }
@@ -1343,29 +1344,35 @@ impl Recovery {
     pub fn after_reboot(self, attempt: &Directory, scope: Scope) -> Result<Option<RebootRecovery>> {
         self.after_reboot_with(attempt, scope, &SystemProcessObserver)
     }
-    pub fn after_reboot_with(
+    pub(crate) fn after_reboot_with(
         self,
         attempt: &Directory,
         scope: Scope,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<RebootRecovery>> {
-        if self.reservation.validate().is_err() || self.reservation.attempt_device.is_none() {
+        self.reservation.validate()?;
+        if self.reservation.attempt_device.is_none() {
             return Ok(None);
         }
-        let Ok(metadata) = attempt.metadata() else {
-            return Ok(None);
-        };
+        let metadata = attempt.metadata()?;
         if self.scope() != scope
             || self.reservation.attempt_device != Some(metadata.device)
             || self.reservation.attempt_inode != Some(metadata.inode)
         {
             return Ok(None);
         }
-        if !previous_boot(&self.reservation, observer) {
+        let boot = observer.boot_identity().map_err(|error| {
+            CustodyError::Io(io::Error::other(format!(
+                "boot identity unavailable: {error}"
+            )))
+        })?;
+        if boot == self.reservation.boot {
             return Ok(None);
         }
-        let Ok(custody) = attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive) else {
-            return Ok(None);
+        let custody = match attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive) {
+            Ok(custody) => custody,
+            Err(FsError::LockTimeout { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
         };
         Ok(Some(RebootRecovery {
             recovery: self,

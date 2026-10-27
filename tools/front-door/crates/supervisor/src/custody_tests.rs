@@ -439,7 +439,14 @@ fn reboot_recovery_requires_native_proof() -> TestResult {
         let attempt = Directory::open_anchor(attempt.path())?;
         let recovery = spawned_reboot_recovery(root.path(), &attempt, BOOT, 10, 20)?;
         let world = RebootWorld { boot };
-        let proof = recovery.after_reboot_with(&attempt, scope(), &world)?;
+        let result = recovery.after_reboot_with(&attempt, scope(), &world);
+        if boot.is_none() {
+            assert!(matches!(result, Err(CustodyError::Io(ref error))
+                if error.to_string().contains("boot identity unavailable")));
+            assert!(root.path().join("reservation.json").exists());
+            continue;
+        }
+        let proof = result?;
         assert_eq!(proof.is_some(), expected, "boot={boot:?}");
         if let Some(proof) = proof {
             assert_eq!(proof.scope(), scope());

@@ -6,6 +6,16 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
+/// Inject native boot observation for reboot recovery tests only.
+pub fn after_reboot_with(
+    recovery: crate::custody::Recovery,
+    attempt: &provenant_os::fs::Directory,
+    scope: crate::custody::Scope,
+    observer: &dyn ProcessObserver,
+) -> crate::custody::Result<Option<crate::custody::RebootRecovery>> {
+    recovery.after_reboot_with(attempt, scope, observer)
+}
+
 /// A process recorded by the guardian is terminated if its owning test fails.
 /// Successful tests disarm the guard after proving normal settlement.
 pub struct ProcessCleanupGuard {

@@ -5036,9 +5036,9 @@ fn recover_rebooted_writer(
             &cancel,
             &clock,
         )?;
-        let proof = recovery
-            .after_reboot_with(&attempt, scope, &observer)?
-            .ok_or("reboot not proven")?;
+        let proof =
+            provenant_supervisor::fixture::after_reboot_with(recovery, &attempt, scope, &observer)?
+                .ok_or("reboot not proven")?;
         store.commit_reboot_lost(&proof, &call)?;
         drop(proof);
         assert!(reservation.exists());

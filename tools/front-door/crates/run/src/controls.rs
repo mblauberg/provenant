@@ -115,6 +115,18 @@ mod reboot_tests {
     #[test]
     fn unreadable_exit_is_not_reboot_proof() -> std::result::Result<(), Box<dyn std::error::Error>>
     {
+        unavailable_reboot_evidence(false)
+    }
+
+    #[test]
+    fn corrupt_reservation_is_not_reboot_proof()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        unavailable_reboot_evidence(true)
+    }
+
+    fn unavailable_reboot_evidence(
+        corrupt_reservation: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
@@ -133,20 +145,30 @@ mod reboot_tests {
             &call,
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let path = context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{id}/process-exit.json",
-            run.run_id
-        ));
-        std::fs::create_dir(path)?;
-        assert!(!store.settle_rebooted(
+        let path = context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        let reservation = path.join("reservation.json");
+        let cause = if corrupt_reservation {
+            std::fs::write(&reservation, b"corrupt reservation")?;
+            "record is invalid"
+        } else {
+            std::fs::create_dir(path.join("process-exit.json"))?;
+            "process-exit.json"
+        };
+        let before = std::fs::read(&reservation).ok();
+        assert!(matches!(store.settle_rebooted(
             &store.record(id, &call)?,
             &call,
             &SystemProcessObserver
-        )?);
+        )?, Some(Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { error } })
+            if error.contains("reboot proof unavailable") && error.contains(cause)));
         assert!(matches!(
             store.cancel(id, "stop", &call)?,
-            CancelReceipt::Unobservable { .. }
+            CancelReceipt::Unobservable { reason } if reason.contains("reboot proof unavailable") && reason.contains(cause)
         ));
+        assert_eq!(std::fs::read(&reservation).ok(), before);
         assert_eq!(store.record(id, &call)?.state, AttemptState::Running);
         Ok(())
     }
@@ -616,56 +638,70 @@ impl RunStore {
         &self,
         record: &AttemptRecord,
         call: &Request<'_>,
-        observer: &dyn ProcessObserver,
-    ) -> Result<bool> {
+        _observer: &dyn ProcessObserver,
+    ) -> Result<Option<Reconciled>> {
         if record.state == AttemptState::Queued {
-            return Ok(false);
+            return Ok(None);
         }
-        let Ok(attempt) = self.attempt_dir(record.run_id, record.attempt_id, false) else {
-            return Ok(false);
-        };
-        if !matches!(record.state, AttemptState::Terminal { .. })
-            && !matches!(
-                read_sealed(&attempt, "process-exit.json", RECORD_LIMIT),
-                Ok(None)
-            )
-        {
-            // A durable exit retains its canonical completion path and facts.
-            return Ok(false);
-        }
-        // Recovery needs the persisted binding, not a fresh Git inspection of
-        // the worktree the interrupted writer left behind.
-        let Ok(fences) = self.writer_fences() else {
-            return Ok(false);
-        };
-        let fence = fences
-            .into_iter()
-            .find(|fence| fence.scope == Self::scope(record));
-        let directory = match fence {
-            Some(fence) => match fence
-                .reservation
-                .parent()
-                .and_then(|parent| provenant_os::fs::Directory::open_anchor(parent).ok())
+        // Collection failures are uncertain; settlement errors still propagate.
+        let collect = || -> Result<_> {
+            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            if !matches!(record.state, AttemptState::Terminal { .. })
+                && read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
             {
-                Some(directory) => directory,
-                None => return Ok(false),
-            },
-            None => match attempt.try_clone() {
-                Ok(directory) => directory,
-                Err(_) => return Ok(false),
-            },
+                // A durable exit retains its canonical completion path and facts.
+                return Ok(None);
+            }
+            // Recovery needs the persisted binding, not a fresh Git inspection of
+            // the worktree the interrupted writer left behind.
+            let fences = self.writer_fences()?;
+            let fence = fences
+                .into_iter()
+                .find(|fence| fence.scope == Self::scope(record));
+            let directory = match fence {
+                Some(fence) => provenant_os::fs::Directory::open_anchor(
+                    fence.reservation.parent().ok_or(RunError::UnsafePath)?,
+                )?,
+                None => attempt.try_clone()?,
+            };
+            let recovery = match custody::acquire_recovery(
+                directory,
+                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                call.cancel,
+                call.clock,
+            ) {
+                Ok(recovery) => recovery,
+                Err(CustodyError::Filesystem(error))
+                    if error.is_not_found()
+                        || matches!(error, provenant_os::fs::FsError::LockTimeout { .. }) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(RunError::Io(std::io::Error::other(error.to_string()))),
+            };
+            #[cfg(test)]
+            let proof = provenant_supervisor::fixture::after_reboot_with(
+                recovery,
+                &attempt,
+                Self::scope(record),
+                _observer,
+            );
+            #[cfg(not(test))]
+            let proof = recovery.after_reboot(&attempt, Self::scope(record));
+            let proof =
+                proof.map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+            Ok(proof.map(|proof| (attempt, proof)))
         };
-        let Ok(recovery) = custody::acquire_recovery(
-            directory,
-            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-            call.cancel,
-            call.clock,
-        ) else {
-            return Ok(false);
-        };
-        let Ok(Some(proof)) = recovery.after_reboot_with(&attempt, Self::scope(record), observer)
-        else {
-            return Ok(false);
+        let (attempt, proof) = match collect() {
+            Ok(Some(collected)) => collected,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Ok(Some(Reconciled::uncertain(
+                    UncertainReason::ReconcileFailed {
+                        error: format!("reboot proof unavailable: {error}"),
+                    },
+                )));
+            }
         };
         if matches!(record.state, AttemptState::Terminal { .. })
             && !(matches!(
@@ -679,13 +715,14 @@ impl RunStore {
         {
             self.settle_recovered(&attempt, proof.into_recovery())?;
         } else {
+            // Lost without exit evidence deliberately preserves scratch.
             self.commit_reboot_lost(&proof, call)?;
             proof
                 .release()
                 .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         }
         self.set_temporary_retained(record.attempt_id, false, call)?;
-        Ok(true)
+        Ok(Some(Reconciled::Finished))
     }
     /// Writer exclusion for an attempt, taken without waiting: failure means a
     /// guardian (or an inheritor of its lease) still holds custody.
@@ -838,8 +875,16 @@ impl RunStore {
         }
         loop {
             let record = self.record(id, call)?;
-            if self.settle_rebooted(&record, call, observer)? {
-                return Ok(CancelReceipt::AlreadyTerminal);
+            if let Some(state) = self.settle_rebooted(&record, call, observer)? {
+                return Ok(match state {
+                    Reconciled::Finished => CancelReceipt::AlreadyTerminal,
+                    Reconciled::Uncertain { reason } => CancelReceipt::Unobservable {
+                        reason: reason.to_string(),
+                    },
+                    other => CancelReceipt::Unobservable {
+                        reason: format!("{other:?}"),
+                    },
+                });
             }
             match record.state {
                 AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
@@ -1364,8 +1409,8 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
-        if self.settle_rebooted(record, call, observer)? {
-            return Ok(Some(Reconciled::Finished));
+        if let Some(state) = self.settle_rebooted(record, call, observer)? {
+            return Ok(Some(state));
         }
         let id = record.attempt_id;
         let scope = Self::scope(record);
@@ -1528,8 +1573,8 @@ impl RunStore {
         if record.state == AttemptState::Queued {
             return Ok(Reconciled::Queued);
         }
-        if self.settle_rebooted(record, call, observer)? {
-            return Ok(Reconciled::Finished);
+        if let Some(state) = self.settle_rebooted(record, call, observer)? {
+            return Ok(state);
         }
         let dir = || self.attempt_dir(record.run_id, id, false);
         match custody::reattach(dir()?, scope) {
