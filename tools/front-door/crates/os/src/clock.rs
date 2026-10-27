@@ -8,6 +8,20 @@ pub fn boot_unix_seconds() -> std::io::Result<i64> {
     crate::sys::clock::boot_unix_seconds()
 }
 
+/// Microseconds on the host's monotonic clock since boot. Every process on the
+/// host reads the same coordinate, which no wall-clock step moves and which
+/// keeps counting while the host sleeps. Compare two readings only when
+/// [`boot_identity`] matched at both.
+pub fn host_monotonic_micros() -> std::io::Result<u64> {
+    crate::sys::clock::host_monotonic_micros()
+}
+
+/// Names the current boot, so a [`host_monotonic_micros`] reading is only
+/// compared with one from the same boot.
+pub fn boot_identity() -> std::io::Result<String> {
+    crate::sys::clock::boot_identity()
+}
+
 /// Samples UTC wall time through Jiff and one process-wide monotonic origin.
 #[derive(Debug, Clone)]
 pub struct SystemClock;
@@ -32,6 +46,14 @@ impl Clock for SystemClock {
 
     fn mono_now(&self) -> MonoTime {
         crate::sys::monotonic_now()
+    }
+
+    fn host_monotonic_micros(&self) -> Result<u64, TimeError> {
+        host_monotonic_micros().map_err(|_| TimeError::HostClock)
+    }
+
+    fn boot_identity(&self) -> Result<String, TimeError> {
+        boot_identity().map_err(|_| TimeError::HostClock)
     }
 
     // Waiting uses the same real monotonic coordinate sampled by this clock.
@@ -61,6 +83,15 @@ mod tests {
         let monotonic = clock.mono_now();
         let _second = clock.wall_now().unwrap();
         assert!(clock.mono_now() >= monotonic);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn the_system_clock_reports_the_host_monotonic_clock_and_boot() {
+        let clock = SystemClock::new();
+        let first = clock.host_monotonic_micros().unwrap();
+        assert!(clock.host_monotonic_micros().unwrap() >= first);
+        assert_eq!(clock.boot_identity().unwrap(), boot_identity().unwrap());
     }
 
     #[test]
