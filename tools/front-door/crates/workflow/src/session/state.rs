@@ -67,6 +67,13 @@ pub struct PrLine {
     pub number: u64,
     pub status: String,
 }
+/// A named PR whose status could not be read, and the command that reads it
+/// from the same store the collector used (or a plain note when none is safe).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrUnread {
+    pub number: u64,
+    pub command: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeLine {
     pub path: String,
@@ -88,7 +95,7 @@ pub struct SessionState {
     pub settled_more: Option<String>,
     pub prs: Vec<PrLine>,
     /// PR numbers the chair named whose status could not be read.
-    pub prs_unread: Vec<u64>,
+    pub prs_unread: Vec<PrUnread>,
     pub worktrees: Vec<WorktreeLine>,
     pub unavailable: Vec<String>,
 }
@@ -149,8 +156,20 @@ impl SessionState {
                 .take(PR_REF_LIMIT)
                 .map(|pr| format!("#{} {}", pr.number, clean(&pr.status, FIELD_LIMIT)))
                 .collect();
-            lines.extend(self.prs_unread.iter().take(PR_REF_LIMIT).map(|number| {
-                format!("#{number} status unavailable; run `provenant pr status {number}`")
+            lines.extend(self.prs_unread.iter().take(PR_REF_LIMIT).map(|pr| {
+                // Same rule as a lane paging command: code only if it
+                // survives rendering byte for byte.
+                let how = if !pr.command.starts_with("provenant ") {
+                    clean(&pr.command, NEXT_PAGE_LIMIT)
+                } else if clean(&pr.command, NEXT_PAGE_LIMIT) == pr.command {
+                    format!("run `{}`", pr.command)
+                } else {
+                    format!(
+                        "the command is too long or unsafe to show; run provenant pr status {} with this hook's --state-dir",
+                        pr.number
+                    )
+                };
+                format!("#{} status unavailable; {how}", pr.number)
             }));
             sections.push(Section {
                 title: "Pull requests named in the checkpoint".into(),

@@ -5,7 +5,7 @@
 //! calls run in parallel under one deadline.
 use provenant_cli::Globals;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_workflow::session::{LaneLine, PrLine, SessionState, WorktreeLine};
+use provenant_workflow::session::{LaneLine, PrLine, PrUnread, SessionState, WorktreeLine};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -172,7 +172,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
                     number,
                     status: pr_status(&data),
                 }),
-                Ok((number, Err(_))) => state.prs_unread.push(number),
+                Ok((number, Err(_))) => state.prs_unread.push(PrUnread {
+                    number,
+                    command: pr_status_command(number, cli.state_dir, cli.cwd),
+                }),
                 Err(_) => {}
             }
         }
@@ -224,21 +227,7 @@ const PLAIN_NOTE: &str = "page with: ";
 /// cannot be quoted faithfully, so no runnable command is given, only a note.
 fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>, cwd: &Path) -> String {
     let cursor: String = cursor.chars().filter(char::is_ascii_digit).collect();
-    let mut command = String::from("provenant");
-    let mut note = false;
-    if let Some(state) = state_dir {
-        let absolute = cwd.join(state);
-        match absolute
-            .to_str()
-            .filter(|s| !s.chars().any(char::is_control))
-        {
-            Some(text) => {
-                command.push_str(" --state-dir ");
-                command.push_str(&shell_quote(text));
-            }
-            None => note = true,
-        }
-    }
+    let (mut command, note) = provenant_prefix(state_dir, cwd);
     command.push_str(&if settled {
         format!(" lanes --all --limit {LANE_PAGE}")
     } else {
@@ -254,6 +243,38 @@ fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>, cwd: &Path) 
         command.push_str(" --cursor ");
         command.push_str(&cursor);
     }
+    if note {
+        format!(
+            "{PLAIN_NOTE}{command} and the --state-dir this hook used (its path cannot be shown safely)"
+        )
+    } else {
+        command
+    }
+}
+/// `provenant` plus the collector's non-default state directory, quoted, and
+/// whether that directory could not be shown safely (so only a note is fit).
+fn provenant_prefix(state_dir: Option<&Path>, cwd: &Path) -> (String, bool) {
+    let mut command = String::from("provenant");
+    let mut note = false;
+    if let Some(state) = state_dir {
+        let absolute = cwd.join(state);
+        match absolute
+            .to_str()
+            .filter(|s| !s.chars().any(char::is_control))
+        {
+            Some(text) => {
+                command.push_str(" --state-dir ");
+                command.push_str(&shell_quote(text));
+            }
+            None => note = true,
+        }
+    }
+    (command, note)
+}
+/// How to read a PR's status from the store the hook used.
+fn pr_status_command(number: u64, state_dir: Option<&Path>, cwd: &Path) -> String {
+    let (mut command, note) = provenant_prefix(state_dir, cwd);
+    command.push_str(&format!(" pr status {number}"));
     if note {
         format!(
             "{PLAIN_NOTE}{command} and the --state-dir this hook used (its path cannot be shown safely)"
@@ -430,6 +451,26 @@ mod tests {
                 "{note}"
             );
         }
+        // The unread PR hint carries the same state directory.
+        assert_eq!(pr_status_command(9, None, cwd), "provenant pr status 9");
+        assert_eq!(
+            pr_status_command(9, Some(Path::new("rel/state")), cwd),
+            "provenant --state-dir '/work/rel/state' pr status 9"
+        );
+        let unread = SessionState {
+            prs_unread: vec![PrUnread {
+                number: 9,
+                command: pr_status_command(9, Some(Path::new("rel/state")), cwd),
+            }],
+            ..Default::default()
+        };
+        let shown = unread.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(
+            shown.contains(
+                "#9 status unavailable; run `provenant --state-dir '/work/rel/state' pr status 9`"
+            ),
+            "{shown}"
+        );
         let state = SessionState {
             settled: lanes,
             settled_more: Some(command),
