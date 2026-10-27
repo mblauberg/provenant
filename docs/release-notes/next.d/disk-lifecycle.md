@@ -6,7 +6,8 @@ worktree collection with `gc.projects.<id>.foreign_worktrees = "merged-clean"`.
 
 Writer admission tries a five-second pressure collection before refusing low
 disk, then rechecks all output volumes. Pressure sweeps skip network fetches
-and worktree deletion. Scheduled collection now runs daily.
+and worktree deletion, honour `gc.schedule=false` and limit writer-admission
+collection to the launching project. Scheduled collection now runs daily.
 
 `retention.logs_days` defaults to 30. Large stdout/stderr captures of closed
 runs, including child stores, expire with a 64 KiB tail retained. Disk reports

@@ -814,13 +814,13 @@ fn check_writer_disk(
                 }
             }
         },
-        || pressure_collection(state, home),
+        || pressure_collection(state, home, worktree),
     )
 }
 
 /// Run the same pressure classes as GC in a separate bounded process. A killed
 /// collector leaves identity-bearing tombstones for the next sweep.
-fn pressure_collection(state: &Path, home: &Path) -> u64 {
+fn pressure_collection(state: &Path, home: &Path, project: &Path) -> u64 {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
     let collect = || -> Result<u64, Box<dyn std::error::Error>> {
         let program = std::env::current_exe()?;
@@ -828,8 +828,9 @@ fn pressure_collection(state: &Path, home: &Path) -> u64 {
             program.into_os_string(),
             "--state-dir".into(),
             state.as_os_str().to_owned(),
+            "--project".into(),
+            project.as_os_str().to_owned(),
             "gc".into(),
-            "--scheduled".into(),
             "--pressure".into(),
             "--apply".into(),
             "--json".into(),
@@ -890,7 +891,7 @@ fn check_writer_disk_with_collection(
         }
     }
     if minimum < floor {
-        let reclaimed = collect();
+        let reclaimed = if settings.schedule { collect() } else { 0 };
         minimum = u64::MAX;
         for path in [worktree, state, cache.as_path()] {
             let bytes = available(path)?;
@@ -2786,6 +2787,26 @@ mod writer_disk_tests {
             },
         )?;
         assert_eq!(calls.get(), 0);
+        let disabled = provenant_config::GcSettings {
+            schedule: false,
+            ..settings
+        };
+        assert!(
+            check_writer_disk_with_collection(
+                &disabled,
+                Path::new("/state"),
+                Path::new("/tree"),
+                Path::new("/home"),
+                |_| Ok(1),
+                || {
+                    calls.set(calls.get() + 1);
+                    99
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(calls.get(), 0);
+
         Ok(())
     }
 

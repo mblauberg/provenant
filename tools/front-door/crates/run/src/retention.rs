@@ -113,7 +113,7 @@ impl RunStore {
         dry_run: bool,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, days, logs_days, now, dry_run, false, call)
+        self.gc_retention(expected, days, logs_days, now, dry_run, false, None, call)
     }
 
     /// Pressure collection is limited to expired temporary payloads.
@@ -124,7 +124,19 @@ impl RunStore {
         dry_run: bool,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, 7, 30, now, dry_run, true, call)
+        self.gc_retention(expected, 7, 30, now, dry_run, true, None, call)
+    }
+
+    /// Pressure collection restricted to the selected project identities.
+    pub fn gc_temporary_for_projects(
+        &self,
+        expected: &Directory,
+        now: WallTime,
+        dry_run: bool,
+        projects: &[provenant_core::ProjectId],
+        call: &Request<'_>,
+    ) -> Result<ProviderStateGc> {
+        self.gc_retention(expected, 7, 30, now, dry_run, true, Some(projects), call)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -136,6 +148,7 @@ impl RunStore {
         now: WallTime,
         dry_run: bool,
         temporary_only: bool,
+        projects: Option<&[provenant_core::ProjectId]>,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
         if !(1..=3650).contains(&logs_days) {
@@ -158,6 +171,10 @@ impl RunStore {
         })?;
         let mut report = ProviderStateGc::default();
         for (id, run, project, raw) in rows {
+            if projects.is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
+            {
+                continue;
+            }
             let path = self
                 .context
                 .state_root
@@ -1019,6 +1036,15 @@ mod tests {
             .create(attempt.join("tmp"))?;
         fs::write(attempt.join("tmp/payload"), vec![1; 8192])?;
         fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
+        let scoped = store.gc_temporary_for_projects(
+            &Directory::open_anchor(context.state_root.as_path())?,
+            WallTime::from_micros(200 + 31 * DAY_MICROS)?,
+            false,
+            &[provenant_core::ProjectId::from_bytes([99; 16])],
+            &call,
+        )?;
+        assert!(scoped.attempt_tmp.is_empty());
+        assert!(attempt.join("tmp/payload").is_file());
         let report = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,

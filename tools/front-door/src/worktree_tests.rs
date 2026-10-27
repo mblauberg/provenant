@@ -1355,6 +1355,25 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
             .is_empty()
     );
     assert!(cache.is_dir());
+    let pressure_disabled = ok(
+        &rig,
+        &[
+            "gc",
+            "--scheduled",
+            "--pressure",
+            "--apply",
+            "--idle-days",
+            "1",
+            "--json",
+        ],
+    )?;
+    assert!(
+        pressure_disabled["data"]["removed"]
+            .as_array()
+            .ok_or("removed")?
+            .is_empty()
+    );
+    assert!(cache.is_dir());
     fs::write(
         rig.state.join("config.toml"),
         b"schema_version=1\n[gc]\nfree_floor='1B'\n",

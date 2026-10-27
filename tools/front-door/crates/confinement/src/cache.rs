@@ -51,6 +51,8 @@ pub struct CacheGcPolicy {
     pub dry_run: bool,
     /// Canonical worktrees listed by the selected project.
     pub project_owners: BTreeSet<PathBuf>,
+    /// Limit collection to listed owners, including orphan and detached output.
+    pub selected_only: bool,
     /// Listing observations for canonical owners with live or unknown writers;
     /// never removed or re-probed during the sweep.
     pub protected_owners: BTreeMap<PathBuf, WriterState>,
@@ -405,6 +407,13 @@ fn prune_worktree_cache(
     }
     verify_cache_metadata(&opened)?;
     let owner = read_cache_owner(&cache, Path::new(name))?;
+    if policy.selected_only
+        && owner
+            .as_ref()
+            .is_none_or(|owner| !policy.project_owners.contains(&owner.path))
+    {
+        return Ok(());
+    }
     let reason = if let Some((device, inode, fingerprint)) = tombstone {
         // Bind retry authority to what GC intended to rename, even if a
         // process stopped before verification or quarantine could complete.
@@ -2262,7 +2271,16 @@ mod tests {
             project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
             protected_owners: [(caches[2].1.clone(), WriterState::Live)].into(),
             free_floor_bytes: None,
+            selected_only: false,
         };
+
+        policy.selected_only = true;
+        policy.project_owners = [caches[1].1.clone()].into();
+        let scoped = gc_worktree_cargo_caches_with_writer_guard(home, &policy, &mut writer_guard)?;
+        assert_eq!(scoped.removed.len(), 1);
+        assert_eq!(scoped.removed[0].path, caches[1].0);
+        policy.selected_only = false;
+        policy.project_owners = caches.iter().map(|(_, owner)| owner.clone()).collect();
 
         let dry = gc_worktree_cargo_caches_with_writer_guard(home, &policy, &mut writer_guard)?;
         assert_eq!(dry.removed.len(), 2);

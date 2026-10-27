@@ -476,8 +476,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
-    if command.scheduled {
-        if !config.gc.schedule && !command.pressure {
+    if command.scheduled || command.pressure {
+        if !config.gc.schedule {
             return Ok(GcData {
                 report: provenant_confinement::cache::CacheGcReport {
                     dry_run: command.dry_run,
@@ -489,6 +489,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
+    }
+    if command.scheduled {
         for binding in provenant_config::registered_gc_projects(&roots)? {
             let common = binding.common_dir();
             let path = if common.file_name() == Some(OsStr::new(".git")) {
@@ -638,6 +640,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .map(|info| (info.path.clone(), info.writer))
             .collect(),
         project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
+        selected_only: command.pressure && !command.scheduled,
     };
     let report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
         for project in &projects {
@@ -653,7 +656,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         Err(WorkerState::Unknown)
     });
     let provider_state = if command.pressure {
-        crate::provider_retention::collect_pressure(&roots, &home, &assets, command.dry_run)
+        crate::provider_retention::collect_pressure(
+            (!command.scheduled).then_some(project_ids.as_slice()),
+            &roots,
+            &home,
+            &assets,
+            command.dry_run,
+        )
     } else {
         crate::provider_retention::collect_with_logs(
             &roots,

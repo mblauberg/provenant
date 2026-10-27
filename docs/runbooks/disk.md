@@ -75,3 +75,6 @@ inventory scope.
 No rollback is needed because reporting changes no durable state. Preserve the
 JSON in your own chosen destination if evidence is required; investigate
 remaining errors with the owner of each reported path.
+
+Automatic pressure collection honours `gc.schedule=false`. Writer admission
+collects only the launching project; the disk guard uses scheduled enumeration.

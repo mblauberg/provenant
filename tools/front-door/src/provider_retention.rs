@@ -23,18 +23,20 @@ pub(crate) fn collect_with_logs(
     logs_days: u64,
     dry_run: bool,
 ) -> ProviderStateGc {
-    collect_retention(roots, home, assets, days, logs_days, dry_run, false)
+    collect_retention(roots, home, assets, days, logs_days, dry_run, false, None)
 }
 
 pub(crate) fn collect_pressure(
+    projects: Option<&[ProjectId]>,
     roots: &Roots,
     home: &Path,
     assets: &Path,
     dry_run: bool,
 ) -> ProviderStateGc {
-    collect_retention(roots, home, assets, 7, 30, dry_run, true)
+    collect_retention(roots, home, assets, 7, 30, dry_run, true, projects)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_retention(
     roots: &Roots,
     home: &Path,
@@ -43,6 +45,7 @@ fn collect_retention(
     logs_days: u64,
     dry_run: bool,
     temporary_only: bool,
+    projects: Option<&[ProjectId]>,
 ) -> ProviderStateGc {
     let mut report = ProviderStateGc::default();
     collect_store(
@@ -54,6 +57,7 @@ fn collect_retention(
         logs_days,
         dry_run,
         temporary_only,
+        projects,
         0,
         None,
         &mut report,
@@ -71,6 +75,7 @@ fn collect_store(
     logs_days: u64,
     dry_run: bool,
     temporary_only: bool,
+    projects: Option<&[ProjectId]>,
     depth: usize,
     expected: Option<&Directory>,
     report: &mut ProviderStateGc,
@@ -116,7 +121,16 @@ fn collect_store(
             };
             let store = store.with_writer_registry(host.state.as_path());
             let mut collected = if temporary_only {
-                store.gc_temporary(&directory, clock.wall_now()?, dry_run, &call)?
+                match projects {
+                    Some(projects) => store.gc_temporary_for_projects(
+                        &directory,
+                        clock.wall_now()?,
+                        dry_run,
+                        projects,
+                        &call,
+                    )?,
+                    None => store.gc_temporary(&directory, clock.wall_now()?, dry_run, &call)?,
+                }
             } else {
                 store.gc_provider_state_with_logs(
                     &directory,
@@ -151,6 +165,7 @@ fn collect_store(
                 logs_days,
                 dry_run,
                 temporary_only,
+                projects,
                 depth + 1,
                 Some(&child),
                 report,
