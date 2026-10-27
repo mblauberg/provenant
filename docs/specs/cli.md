@@ -36,6 +36,28 @@ per-task route, access and timeout flags.
   `crates/cli/src/run.rs::manifest_rejects_flat_route_fields`
 - Owner: `crates/run/src/service.rs`, `crates/cli/src/run.rs`
 
+### Output references and bounded tails
+
+`output` accepts a bare attempt, `RUN/ATTEMPT`, `HOST/ATTEMPT`, or the
+three-part target. `--host` selects a configured peer's own attempt. Local
+tails above 500 lines are clamped to 500 and the JSON result reports the
+effective tail and whether it was clamped. Peer output retains its existing
+part and tail restrictions.
+- Why: a chair can inspect a precise attempt without copying a full target or
+  opening a shell on its host.
+- Test: `tests/parser.rs::run_leaves_accept_control_and_report_work_refused_per_task`;
+  `tests/fabric_transport.rs::read_only_dispatch_places_on_a_peer_and_forwards_by_id`
+- Owner: `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
+
+### Positional route resolution
+
+`route resolve NAME` accepts a route name or an unambiguous catalogue model
+name, alongside the explicit `--route` and `--model` forms. Unknown or
+ambiguous names report candidates and examples.
+- Why: interactive route lookup should explain how to select a specific match.
+- Test: `tests/route.rs`
+- Owner: `crates/cli/src/route.rs`
+
 ## Results
 
 ### One bounded envelope, never truncated

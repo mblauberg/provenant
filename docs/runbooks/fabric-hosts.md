@@ -232,6 +232,10 @@ its own provider sign-ins; a `--account` pin is checked against the peer's regis
 the peer by ID, and `dispatch --wait` and `lanes --wait` poll the peer. Lanes
 keep running after the SSH call returns. Fabric MCP `fabric_run`
 (`op: submit`) takes the same placement as an optional `host` field.
+To read a peer's own attempt without a local placement record, use
+`provenant output ATTEMPT --host workshop`, or `output HOST/ATTEMPT` with
+the host ID. Output also accepts `RUN/ATTEMPT`; a local `--tail` above 500
+is clamped to 500 lines.
 
 A writer on a peer names a new branch and its base instead of `--worktree`,
 which is a path on the calling host. This is the terminal path; agents use

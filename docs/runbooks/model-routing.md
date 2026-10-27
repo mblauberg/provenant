@@ -8,6 +8,8 @@ and pacing policy; pacing and readiness apply at dispatch. Use
 `--pool NAME` for one pool. Resolve a pool with
 `provenant route resolve --route NAME`, or select an exact model with
 `--model ADAPTER/ID` and optional `--effort LEVEL`.
+`provenant route resolve NAME` also accepts a route name or an unambiguous
+model name. Unknown or ambiguous names report suggestions and examples.
 
 The resolver draws among ready positive-weight members using weight multiplied
 by the provider pacing factor. `pace` uses the best fresh quota snapshot for

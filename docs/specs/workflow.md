@@ -99,13 +99,14 @@ held during probes, provider waits or GitHub reads.
 
 ### Checkpoints are keyed exactly
 
-A checkpoint is bounded UTF-8 Markdown under an explicit project and host
+A checkpoint is UTF-8 Markdown, bounded to 256 KiB, under an explicit project and host
 session key, saved atomically with its bytes preserved. Session IDs are 1 to
 128 ASCII letters, digits, `.`, `_` and `-`, starting alphanumeric, with no
 `..`, so the injected save command is safe to copy. Symlinks are refused.
 - Why: restoring the wrong checkpoint misdirects an agent.
 - Test: `crates/workflow/src/session.rs::refuses_traversal_and_command_injection_in_host_keys`;
-  `::refuses_symlinked_directories_checkpoints_and_locks`
+  `::refuses_symlinked_directories_checkpoints_and_locks`;
+  `tests/workflow.rs::long_checkpoints_save_up_to_the_documented_bound`
 - Owner: `crates/workflow/src/session.rs`
 
 ### Session hooks are advisory

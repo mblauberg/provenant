@@ -1548,6 +1548,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `name` | `{"conflicts": ["model", "route"], "name": "name", "positional": true}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
 | `--route` | `{"name": "route"}` |
 | `--effort` | `{"name": "effort"}` |
@@ -1563,10 +1564,16 @@ bounds are null. Positional arguments have no long flag.
 ```json
 {
   "constraints": [
-    "exactly one of model or route",
+    "exactly one of NAME, model or route",
     "fallback has at most two distinct models"
   ],
   "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "RouteResolve",
+      "required": false
+    },
     {
       "arguments": [
         "model",
@@ -1582,12 +1589,13 @@ bounds are null. Positional arguments have no long flag.
     },
     {
       "arguments": [
+        "name",
         "model",
         "route"
       ],
       "multiple": false,
       "name": "route_choice",
-      "required": true
+      "required": false
     }
   ]
 }
@@ -1861,9 +1869,10 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
+| `--host` | `{"name": "host"}` |
 | `--part` | `{"defaults": ["result"], "name": "part", "values": ["result", "prompt", "stderr", "events"]}` |
 | `--offset` | `{"conflicts": ["tail"], "defaults": ["0"], "name": "offset"}` |
-| `--tail` | `{"bounds": [1, 500], "name": "tail"}` |
+| `--tail` | `{"name": "tail"}` |
 | `--max-bytes` | `{"bounds": [1, 65536], "defaults": ["65536"], "name": "max_bytes"}` |
 | `--trace` | `{"conflicts": ["part", "offset", "tail", "max_bytes"], "defaults": ["false"], "name": "trace", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
@@ -1875,12 +1884,14 @@ bounds are null. Positional arguments have no long flag.
 ```json
 {
   "constraints": [
-    "target is an ATTEMPT ID or RUN/TASK/ATTEMPT"
+    "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
+    "tail above 500 lines is clamped to 500"
   ],
   "groups": [
     {
       "arguments": [
         "attempt",
+        "host",
         "part",
         "offset",
         "tail",
@@ -1945,7 +1956,7 @@ bounds are null. Positional arguments have no long flag.
 ```json
 {
   "constraints": [
-    "target is an ATTEMPT ID or RUN/TASK/ATTEMPT",
+    "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
     "prompt is at most 1 MiB; expected generation is 0"
   ],
   "groups": [
