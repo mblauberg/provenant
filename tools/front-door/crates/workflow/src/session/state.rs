@@ -415,6 +415,10 @@ pub fn pr_refs(chair: &str) -> Vec<u64> {
     let mut found: Vec<u64> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        if !lower.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
         let rest = &lower[i..];
         let skip = ["pull request", "pull/", "pr/", "pr"]
             .iter()
@@ -629,5 +633,10 @@ mod tests {
         assert_eq!(pr_refs(text), vec![12, 34, 56, 78]);
         let many = (1..=12).map(|n| format!("PR #{n} ")).collect::<String>();
         assert_eq!(pr_refs(&many), (5..=12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn pr_references_survive_non_ascii_text() {
+        assert_eq!(pr_refs("é PR #12 — ünïcode pull/34 終"), vec![12, 34]);
     }
 }
