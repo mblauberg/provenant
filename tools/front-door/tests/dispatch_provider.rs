@@ -949,6 +949,118 @@ fn opencode_free_pool_cools_second_model() -> Result {
     Ok(())
 }
 
+fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+    let fixture_stdout = include_bytes!("../tests/fixtures/providers/opencode/free-limit.jsonl");
+    let quota_record = persisted_refusal(
+        "opencode",
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        ("open-code-free", "keyless-free"),
+        fixture_stdout,
+    )?;
+    assert_eq!(quota_record.refusals.len(), 1);
+    let refusal = &quota_record.refusals[0];
+    assert_eq!(refusal.pool.as_deref(), Some("opencode-free"));
+    let now = refusal.observed_unix_seconds;
+    let resets = now + 240;
+    assert_eq!(refusal.resets_unix_seconds, Some(resets));
+
+    let first = ResolvedRoute {
+        adapter: "opencode".into(),
+        model: "opencode/deepseek-v4.1-flash-free".into(),
+        effort: None,
+        catalogue_revision: "fixture-catalogue".into(),
+        account_key: Some("keyless-free".into()),
+        host: "fixture-host".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: RouteEligibility::Eligible,
+        readiness: RouteReadiness::Ready {
+            availability_ref: "fixture-preflight".into(),
+            expires_unix_seconds: resets + 300,
+        },
+        confidentiality: RouteConfidentiality {
+            evidence_ref: "fixture-access".into(),
+        },
+        pool_selection: None,
+    };
+    let mut second = first.clone();
+    second.model = "opencode/glm-5.3-flash-free".into();
+
+    let pools = vec!["opencode-free".to_owned()];
+    let admit = |route: &ResolvedRoute, at| {
+        provenant_quota::Admission {
+            policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
+            now_unix_seconds: at,
+            records: std::slice::from_ref(&quota_record),
+            pools: &pools,
+        }
+        .check(route)
+    };
+
+    // Both free models are refused until the stated reset time.
+    for at in [now, now + 120, resets - 1] {
+        for route in [&first, &second] {
+            assert!(matches!(
+                admit(route, at),
+                Err(provenant_quota::QuotaError::Refused(
+                    "free tier exhausted; use a paid route or wait for its allowance reset"
+                ))
+            ));
+        }
+    }
+
+    // At and after the reset passes, both free models are admitted again.
+    admit(&first, resets)?;
+    admit(&second, resets)?;
+    admit(&first, resets + 10)?;
+    admit(&second, resets + 10)?;
+
+    // Missing, null, negative and huge values fall back or clamp.
+    for (retry_ms, expected_offset) in [
+        (None, None),
+        (Some(serde_json::Value::Null), None),
+        (Some(serde_json::json!(-5000)), None),
+        (Some(serde_json::json!(999_999_999)), Some(86_400)),
+    ] {
+        let mut err = serde_json::json!({
+            "type": "provider.quota",
+            "message": "free tier exhausted",
+            "response": {
+                "body": {
+                    "error": {
+                        "type": "FreeUsageLimitError",
+                        "message": "fixture free allowance exhausted"
+                    }
+                }
+            }
+        });
+        if let Some(val) = retry_ms {
+            err["retryAfterMs"] = val;
+        }
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "error",
+            "error": err
+        }))?;
+        let record = persisted_refusal(
+            "opencode",
+            "opencode/opencode/deepseek-v4.1-flash-free",
+            ("open-code-free", "keyless-free"),
+            &payload,
+        )?;
+        let record_now = record.refusals[0].observed_unix_seconds;
+        assert_eq!(
+            record.refusals[0].resets_unix_seconds,
+            expected_offset.map(|offset| record_now + offset),
+            "failed for retry_ms: {err:?}"
+        );
+    }
+
+    Ok(())
+}
+
 fn agy_individual_quota_cools_model_until_reset() -> Result {
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -1280,6 +1392,7 @@ fn main() -> ExitCode {
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
+                "opencode_free_reset_cools_pool_until_reset_and_restores",
                 "agy_individual_quota_cools_model_until_reset",
                 "agy_denied_command_reaches_result_and_terminal_reason",
                 "agy_denial_result_reaches_terminal_reason",
@@ -1301,6 +1414,12 @@ fn main() -> ExitCode {
                     }
                     "graph_settlement_records_a_failed_advance_for_status" => {
                         graph_settlement_records_a_failed_advance_for_status()
+                    }
+                    "opencode_free_pool_cools_second_model" => {
+                        opencode_free_pool_cools_second_model()
+                    }
+                    "opencode_free_reset_cools_pool_until_reset_and_restores" => {
+                        opencode_free_reset_cools_pool_until_reset_and_restores()
                     }
                     "agy_individual_quota_cools_model_until_reset" => {
                         agy_individual_quota_cools_model_until_reset()
