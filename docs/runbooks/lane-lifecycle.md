@@ -45,9 +45,11 @@ worktrees retain their existing GC policy.
 `resume ATTEMPT --operation-id ID --prompt-file followup.md` starts fresh by
 default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the
-lane lineage; a missing or reassigned checkout uses a fresh owned worktree
-when fallback is allowed. Its receipt
-records `continuation: fresh`. Add `--no-fallback` to require provider resume.
+lane lineage for a previously lane-owned tree. Explicit unowned and adopted
+checkouts resume in place unless a lane owner now names another lineage.
+A missing or reassigned checkout uses a fresh owned worktree when fallback is
+allowed. Its receipt records `continuation: fresh`. Add `--no-fallback` to require
+provider resume.
 Custody, policy or launch refusals still need their named cause addressed.
 
 Put graph documents and briefs in `.provenant/scratch/`, or `.agent-run/` when

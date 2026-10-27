@@ -382,11 +382,16 @@ worktree owner's lane lineage. Launch snapshots durably record whether the tree
 was lane-owned. Explicit unowned and adopted trees resume in place unless a
 current lane owner names another lineage. Previously lane-owned trees still
 require a matching lane owner even if that owner record is later removed or
-replaced by adoption. Missing or reassigned worktrees require a new owned
-checkout for fresh fallback; `--no-fallback` refuses them.
+replaced by adoption. Older attempts without launch evidence retain compatibility
+with explicit worktrees, but a current foreign lane owner always refuses. Missing or
+reassigned worktrees require a new owned checkout for fresh fallback;
+`--no-fallback` refuses them.
 - Why: a missing provider handle should not require the chair to reconstruct
   context or bypass immutable attempt records and writer custody.
 - Test: `crates/run/src/dispatch_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
   `::resume_continues_a_terminal_attempt_once_with_its_route`;
+  `crates/run/src/controls.rs::lineage_tests::resume_preserves_explicit_unowned_and_adopted_worktrees`;
+  `::resume_refuses_a_pruned_worktree_reused_by_another_lane`;
+  `crates/cli/src/run.rs::tests::displaced_fallback_reports_unavailable_history`;
   `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
 - Owner: `crates/run/src/controls.rs`, `crates/run/src/launch.rs`, `crates/cli/src/run.rs`
