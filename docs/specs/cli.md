@@ -92,8 +92,10 @@ exits 124, and neither expiry nor cancelling a wait stops the work.
 or settled since, so a settled older attempt never satisfies a wait on a newer
 one. The wait starts at command entry, not at the first answer, so a lane
 that settles while a peer is unreachable still counts when the peer returns.
-`--since TIME` also counts lanes that settled at or after that time. An
-attempt named by its exact ID counts whenever it settled. When every lane
+`--since TIME` also counts lanes that settled at or after that time. Without
+`--id` the lanes are chosen by settlement time, not queue order, so one queued
+before the window that settled inside it counts; the scan covers the session's
+newest 1000 lanes and is refused beyond that. An attempt named by its exact ID counts whenever it settled. When every lane
 named by `--id RUN[/TASK]` settled before the wait started, the wait is
 refused (exit 2) with the count, instead of returning at once or idling to
 expiry; the result reports `ignored_settled` otherwise. Without `--id`, a wait
@@ -115,6 +117,8 @@ one-second watch ends in about a second. `--wait` still excludes `--state` and
   `::nothing_pending_is_refused_for_named_lanes_only`;
   `::a_fetch_gets_the_time_left_and_none_starts_after_the_deadline`;
   `::arming_stops_retrying_at_the_deadline_with_the_last_cause`;
+  `::since_selects_by_settlement_time_not_queue_order`;
+  `::since_refuses_a_scan_past_its_cap_instead_of_missing_lanes`;
   `::a_lane_that_settles_during_initial_peer_failures_still_counts`;
   `::a_running_lane_pushed_off_the_page_keeps_the_wait_open`;
   `::a_lane_that_settles_off_the_page_is_kept_in_the_result`;

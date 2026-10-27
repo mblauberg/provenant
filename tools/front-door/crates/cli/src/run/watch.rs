@@ -116,6 +116,44 @@ impl Tracked {
     }
 }
 
+/// One page of lanes, newest queued first, and the cursor of the next page.
+pub(super) type Page = (Vec<run::AttemptRecord>, Option<u64>);
+
+/// Add to `ids` every lane `pages` yields that is unsettled or settled at or
+/// after `since`, whenever it was queued. Queue order says nothing about when a
+/// lane settled, so the scan covers up to 1000 lanes and refuses past that
+/// instead of silently missing one.
+pub(super) fn settled_since(
+    mut ids: Vec<AttemptId>,
+    mut pages: impl FnMut(u64) -> Result<Page, Fail>,
+    since: WallTime,
+) -> Result<Vec<AttemptId>, Fail> {
+    const SCAN: usize = 1000;
+    let mut scanned = 0;
+    let mut after = 0;
+    loop {
+        let (lanes, next) = pages(after)?;
+        for lane in &lanes {
+            let recent = finished(lane).is_none_or(|at| at >= since);
+            if recent && !ids.contains(&lane.attempt_id) {
+                ids.push(lane.attempt_id);
+            }
+        }
+        scanned += lanes.len();
+        match next {
+            Some(next) if scanned < SCAN => after = next,
+            Some(_) => {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "--since reaches back more than 1000 lanes; narrow it or name lanes with --id",
+                ));
+            }
+            None => return Ok(ids),
+        }
+    }
+}
+
 pub(super) fn nothing_pending(ignored: usize) -> Fail {
     Fail::new(
         Status::Invalid,
@@ -616,6 +654,45 @@ mod tests {
             assert_eq!(given.len(), 1, "watching={watching}: {given:?}");
             assert!(given[0] <= budget, "{given:?}");
         }
+    }
+
+    #[test]
+    fn since_selects_by_settlement_time_not_queue_order() {
+        // Every fixture lane was queued at 1, before the window starting at 40.
+        // Page one holds the newest queued lane, which settled before the
+        // window; the lanes behind it settled inside it or are still running.
+        let mut asked = Vec::new();
+        let ids = settled_since(
+            Vec::new(),
+            |after| {
+                asked.push(after);
+                Ok(match after {
+                    0 => (vec![done(1, 10)], Some(7)),
+                    7 => (vec![done(2, 50), running(3)], Some(9)),
+                    _ => (vec![done(4, 40), done(5, 39)], None),
+                })
+            },
+            WallTime::from_micros(40).unwrap(),
+        )
+        .unwrap();
+        let ids: Vec<_> = ids.iter().map(|id| id.to_string()).collect();
+        let expected: Vec<_> = [2, 3, 4]
+            .iter()
+            .map(|n| AttemptId::from_bytes([*n; 16]).to_string())
+            .collect();
+        assert_eq!(ids, expected);
+        assert_eq!(asked, [0, 7, 9]);
+    }
+
+    #[test]
+    fn since_refuses_a_scan_past_its_cap_instead_of_missing_lanes() {
+        let refused = settled_since(
+            Vec::new(),
+            |after| Ok((vec![done(1, 10); 100], Some(after + 1))),
+            WallTime::from_micros(40).unwrap(),
+        );
+        let message = refused.err().map(|fail| fail.message).unwrap_or_default();
+        assert!(message.contains("more than 1000 lanes"), "{message}");
     }
 
     #[test]

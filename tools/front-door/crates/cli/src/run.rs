@@ -1756,45 +1756,28 @@ fn session_actor(edge: &Edge<'_>, label: &str) -> Result<ActorId, Fail> {
         .map(|address| address.actor)
         .map_err(|e| identity(e.to_string()))
 }
-/// Lanes submitted by `--since` or later and still unsettled, or settled in
-/// that window, found by scanning the session's newest lanes.
+/// Lanes still unsettled, or settled at or after `--since`, found by scanning
+/// the session's lanes newest-queued first. A lane queued before the window can
+/// still settle inside it, so the scan reads every retained lane up to its cap
+/// rather than stopping at the first older queue time.
 fn select_since(
     session: &Session,
     owner: ActorId,
     since: WallTime,
     call: &run::Request<'_>,
 ) -> Result<Vec<AttemptId>, Fail> {
-    const SCAN: usize = 1000;
-    let mut ids = select(session, &[], None, owner, call)?;
-    let mut scanned = 0;
-    let mut after = 0;
-    loop {
-        let mut query = lane_query(session, &[], true, 100, after, call)?;
-        query.newest_first = true;
-        query.owner = Some(owner);
-        let page = session.service().lanes(&query, call)?;
-        for lane in &page.lanes {
-            if !ids.contains(&lane.attempt_id) {
-                ids.push(lane.attempt_id);
-            }
-            // Older lanes settled before the window, unless still unsettled.
-            if lane.queued_at < since {
-                return Ok(ids);
-            }
-        }
-        scanned += page.lanes.len();
-        match page.next {
-            Some(next) if scanned < SCAN => after = next,
-            Some(_) => {
-                return Err(Fail::new(
-                    Status::Invalid,
-                    ErrorKind::Invalid,
-                    "--since reaches back more than 1000 lanes; narrow it or name lanes with --id",
-                ));
-            }
-            None => return Ok(ids),
-        }
-    }
+    let ids = select(session, &[], None, owner, call)?;
+    watch::settled_since(
+        ids,
+        |after| {
+            let mut query = lane_query(session, &[], true, 100, after, call)?;
+            query.newest_first = true;
+            query.owner = Some(owner);
+            let page = session.service().lanes(&query, call)?;
+            Ok((page.lanes, page.next))
+        },
+        since,
+    )
 }
 /// The candidate lanes for a wait or watch, read afresh on each call. With
 /// `seen`, an unnamed selection holds the unsettled lanes and those settled
