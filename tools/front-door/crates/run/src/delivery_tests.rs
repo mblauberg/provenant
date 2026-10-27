@@ -14,6 +14,217 @@ struct PrepareFixture {
 }
 
 #[test]
+fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "-m", "primary-live"])?;
+    for target in [
+        "main",
+        "master",
+        "primary-live",
+        "origin/main",
+        "origin/primary-live",
+    ] {
+        fixture.request =
+            HostDeliveryContext::destination(DeliveryMode::Integrate(target.into()), "lane")?
+                .ok_or("destination")?;
+        assert!(
+            matches!(
+                fixture.prepare(),
+                Err(RunError::DeliveryPrepare {
+                    step: "integration target",
+                    ..
+                })
+            ),
+            "{target}"
+        );
+    }
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/trunk",
+    ])?;
+    for target in ["trunk", "origin/trunk"] {
+        fixture.request =
+            HostDeliveryContext::destination(DeliveryMode::Integrate(target.into()), "lane")?
+                .ok_or("destination")?;
+        assert!(
+            matches!(
+                fixture.prepare(),
+                Err(RunError::DeliveryPrepare {
+                    step: "integration target",
+                    ..
+                })
+            ),
+            "{target}"
+        );
+    }
+    fixture.git(&["branch", "integration"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    let host = fixture.prepare()?;
+    fixture.commit(&fixture.writer.worktree, "lane change")?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/integration",
+    ])?;
+    let head = host.head(&fixture.writer)?;
+    assert!(matches!(
+        host.integrate(&fixture.writer, &fixture.request, head),
+        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+    ));
+    Ok(())
+}
+
+#[test]
+fn graph_publication_never_adopts_a_foreign_local_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    let publication = format!("provenant/graph/{head}");
+    fixture.git(&["branch", &publication])?;
+    assert!(
+        host.graph_publication_branch(&fixture.writer.project, head)
+            .is_err()
+    );
+    fixture.git(&["branch", "-d", &publication])?;
+    assert_eq!(
+        host.graph_publication_branch(&fixture.writer.project, head)?,
+        publication
+    );
+    assert_eq!(
+        host.graph_publication_branch(&fixture.writer.project, head)?,
+        publication
+    );
+    Ok(())
+}
+
+#[test]
+fn delivery_records_dirty_and_checked_out_failures_after_start()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for dirty in [true, false] {
+        let mut fixture = PrepareFixture::new()?;
+        fixture.git(&["branch", "integration"])?;
+        fixture.request = HostDeliveryContext::destination(
+            DeliveryMode::Integrate("integration".into()),
+            "lane",
+        )?
+        .ok_or("destination")?;
+        let host = fixture.prepare()?;
+        fixture.commit(&fixture.writer.worktree, "lane change")?;
+        if dirty {
+            std::fs::write(fixture.writer.worktree.join("dirty"), "keep")?;
+        } else {
+            fixture.git(&[
+                "worktree",
+                "add",
+                fixture.root.join("checked-out").to_str().ok_or("tree")?,
+                "integration",
+            ])?;
+        }
+        let path = fixture.root.join("attempt");
+        std::fs::create_dir(&path)?;
+        let attempt = provenant_os::fs::Directory::open_anchor(&path)?;
+        let receipt = deliver_once(
+            &host,
+            &fixture.writer,
+            &fixture.request,
+            &attempt,
+            "Run fixture\nAttempt fixture",
+        )?;
+        assert!(matches!(receipt.state, WriterDeliveryState::Failed { .. }));
+        let raw =
+            artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.ok_or("delivery")?;
+        assert_eq!(db::decode::<WriterDeliveryReceipt>(&raw)?, receipt);
+        assert!(artifacts::read_sealed(&attempt, "delivery-started.json", RECORD_LIMIT)?.is_some());
+    }
+    Ok(())
+}
+
+#[test]
+fn two_lanes_contend_for_integration_without_losing_either_head()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "integration"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    let first = fixture.prepare()?;
+    let second_writer = WriterRequest {
+        project: fixture.writer.project.clone(),
+        worktree: fixture.root.join("second-lane"),
+    };
+    fixture.git(&[
+        "worktree",
+        "add",
+        "-qb",
+        "second-lane",
+        second_writer.worktree.to_str().ok_or("tree")?,
+    ])?;
+    let second = HostDeliveryContext::new(fixture.environment.clone())
+        .prepare(&second_writer, &fixture.request)?;
+    fixture.commit(&fixture.writer.worktree, "first lane")?;
+    fixture.commit(&second_writer.worktree, "second lane")?;
+    let first_head = first.head(&fixture.writer)?;
+    let second_head = second.head(&second_writer)?;
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let one = scope.spawn(|| {
+            barrier.wait();
+            first.integrate(&fixture.writer, &fixture.request, first_head)
+        });
+        let two = scope.spawn(|| {
+            barrier.wait();
+            second.integrate(&second_writer, &fixture.request, second_head)
+        });
+        one.join()
+            .expect("first lane thread")
+            .expect("first integration");
+        two.join()
+            .expect("second lane thread")
+            .expect("second integration");
+    });
+    for head in [first_head, second_head] {
+        first.command(
+            &fixture.writer.project,
+            "git",
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &head.to_string(),
+                "integration",
+            ],
+            WriterDeliveryStage::Verify,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn commit_pr_body_is_bounded_and_contains_commit_messages()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    fixture.commit(&fixture.writer.worktree, "Commit subject\n\nCommit body")?;
+    let body = host.commit_body(
+        &fixture.writer,
+        host.head(&fixture.writer)?,
+        "Run fixture\nAttempt fixture",
+    )?;
+    assert!(
+        body.contains("Commit subject")
+            && body.contains("Commit body")
+            && body.contains("Attempt fixture")
+    );
+    let capped = cap_pr_body("\u{1f600}".repeat(30_000));
+    assert!(capped.len() <= 60_000 && capped.ends_with("[Commit summary truncated.]\n"));
+    Ok(())
+}
+
+#[test]
 fn remote_integration_refreshes_the_leased_destination()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -128,13 +339,12 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
         .to_owned();
     let request = HostDeliveryContext::destination(DeliveryMode::Integrate(primary), "lane")?
         .ok_or("destination")?;
-    let checked =
-        HostDeliveryContext::new(fixture.environment.clone()).prepare(&fixture.writer, &request)?;
     assert!(matches!(
-        checked.integrate(&fixture.writer, &request, head),
-        Err(RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::CheckedOut
-        ))
+        HostDeliveryContext::new(fixture.environment.clone()).prepare(&fixture.writer, &request),
+        Err(RunError::DeliveryPrepare {
+            step: "integration target",
+            ..
+        })
     ));
     Ok(())
 }
@@ -328,9 +538,16 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         store.worktree_settlement(id, &call)?.ok_or("settlement")?["state"],
         "pruned"
     );
-    // A changed head is refused even when a successful delivery receipt exists.
+    // Sealed successful effects replay even when the checkout has since moved.
     fixture.commit(&fixture.writer.worktree, "moved after delivery")?;
-    assert!(deliver().is_err());
+    assert_eq!(deliver()?, receipt);
+    fixture.git(&[
+        "worktree",
+        "remove",
+        "--force",
+        fixture.writer.worktree.to_str().ok_or("lane")?,
+    ])?;
+    assert_eq!(deliver()?, receipt);
     Ok(())
 }
 impl PrepareFixture {

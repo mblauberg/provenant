@@ -577,7 +577,13 @@ impl RunStore {
             } = &completion
             && let (Some(writer), Some(deliver)) = (&task.writer, &task.deliver)
         {
-            crate::delivery::deliver_once(host, writer, deliver, attempt, &decoded.result)?;
+            crate::delivery::deliver_once(
+                host,
+                writer,
+                deliver,
+                attempt,
+                &format!("Run {}\nAttempt {id}", record.run_id),
+            )?;
         }
         let publication = TerminalPublication {
             outcome: decoded.outcome,

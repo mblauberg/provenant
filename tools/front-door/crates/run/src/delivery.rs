@@ -60,9 +60,57 @@ impl std::fmt::Debug for HostDeliveryContext {
 }
 
 impl HostDeliveryContext {
+    /// Integration authority never includes the default or primary checkout ref.
+    pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
+        let writer = WriterRequest {
+            project: project.into(),
+            worktree: project.into(),
+        };
+        let mut host = Self::capture();
+        host.host_environment(&writer)?;
+        host.tools = Some(HostTools {
+            git: host.executable("git", &writer)?,
+            gh: None,
+        });
+        host.refuse_protected_target(&writer, target.strip_prefix("origin/").unwrap_or(target))
+    }
+
+    fn refuse_protected_target(&self, writer: &WriterRequest, target: &str) -> Result<()> {
+        let default = self.command(
+            &writer.worktree,
+            "git",
+            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+            Stage::Prepare,
+        )?;
+        let protected_default = match default.strip_prefix("refs/remotes/origin/") {
+            Some(branch) => branch == target,
+            None => matches!(target, "main" | "master"),
+        };
+        let trees = self.command(
+            &writer.worktree,
+            "git",
+            &["worktree", "list", "--porcelain"],
+            Stage::Prepare,
+        )?;
+        let primary_branch = trees
+            .split("\n\n")
+            .next()
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| line.strip_prefix("branch refs/heads/"));
+        if protected_default || primary_branch == Some(target) {
+            return Err(prepare_error(
+                "integration target",
+                "default and primary checkout branches require PR delivery",
+            ));
+        }
+        Ok(())
+    }
     /// Final graph delivery publishes its integration ref, with a body built
     /// from settled node receipts. No checkout is switched or edited.
     pub fn deliver_graph_pr(self, project: &Path, branch: &str, body: &str) -> Result<String> {
+        Self::validate_integration_target(project, branch)?;
+        let local = !branch.starts_with("origin/");
         let source = if let Some(branch) = branch.strip_prefix("origin/") {
             format!("refs/remotes/origin/{branch}")
         } else {
@@ -80,7 +128,6 @@ impl HostDeliveryContext {
             .bound
             .as_ref()
             .ok_or(RunError::Delivery(Stage::Prepare))?;
-        let reference = format!("refs/heads/{branch}");
         let head = host.command(
             project,
             "git",
@@ -88,19 +135,30 @@ impl HostDeliveryContext {
             Stage::Head,
         )?;
         let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
-        host.command(
-            project,
-            "git",
-            &[
-                "push",
-                "--no-follow-tags",
-                "--recurse-submodules=no",
-                "--",
-                &bound.push_url,
-                &format!("{head}:{reference}"),
-            ],
-            Stage::Push,
-        )?;
+        // A local integration ref may belong to a human. Publish a separate
+        // graph-owned ref; never push that existing local branch by name.
+        let publication = if local {
+            Some(host.graph_publication_branch(project, head)?)
+        } else {
+            None
+        };
+        let branch = publication.as_deref().unwrap_or(branch);
+        let reference = format!("refs/heads/{branch}");
+        if local {
+            host.command(
+                project,
+                "git",
+                &[
+                    "push",
+                    "--no-follow-tags",
+                    "--recurse-submodules=no",
+                    "--",
+                    &bound.push_url,
+                    &format!("{head}:{reference}"),
+                ],
+                Stage::Push,
+            )?;
+        }
         let remote = host.command(
             project,
             "git",
@@ -123,6 +181,7 @@ impl HostDeliveryContext {
         if let Some(url) = host.existing_pr(project, repo, branch, head)? {
             return Ok(url);
         }
+        let commits = host.commit_body(&writer, head, body)?;
         let url = host.command_with_input(
             project,
             "gh",
@@ -139,12 +198,61 @@ impl HostDeliveryContext {
                 "-",
             ],
             Stage::PullRequest,
-            body.as_bytes(),
+            commits.as_bytes(),
         )?;
         if !url.starts_with("https://") || url.lines().count() != 1 {
             return Err(RunError::Delivery(Stage::PullRequest));
         }
         Ok(url)
+    }
+
+    pub(super) fn graph_publication_branch(&self, project: &Path, head: GitOid) -> Result<String> {
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use provenant_os::{clock::SystemClock, fs::LockMode};
+        let stage = Stage::Push;
+        let common = self.command(
+            project,
+            "git",
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stage,
+        )?;
+        let directory = Directory::open_anchor(Path::new(&common))?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let _lock = directory.lock(
+            OsStr::new("provenant-graph-publication.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 60).map_err(|_| RunError::Delivery(stage))?,
+            &cancel,
+            &clock,
+        )?;
+        let branch = format!("provenant/graph/{head}");
+        let reference = format!("refs/heads/{branch}");
+        let marker = format!("provenant-graph-publication-{head}.json");
+        if let Some(raw) = crate::artifacts::read_sealed(&directory, &marker, crate::RECORD_LIMIT)?
+        {
+            if raw != branch.as_bytes()
+                || self.command(
+                    project,
+                    "git",
+                    &["rev-parse", "--verify", &reference],
+                    stage,
+                )? != head.to_string()
+            {
+                return Err(RunError::Delivery(stage));
+            }
+        } else {
+            // Empty expected OID means create only. A pre-existing foreign
+            // branch, including one at the same head, must be refused.
+            self.command(
+                project,
+                "git",
+                &["update-ref", &reference, &head.to_string(), ""],
+                stage,
+            )?;
+            crate::artifacts::seal(&directory, &marker, branch.as_bytes(), crate::RECORD_LIMIT)?;
+        }
+        Ok(branch)
     }
     /// Resolve the concise mode into the existing explicit destination contract.
     /// Integration names are local unless qualified as `origin/<branch>`.
@@ -244,6 +352,7 @@ impl HostDeliveryContext {
             None
         };
         self.tools = Some(HostTools { git, gh });
+        self.refuse_protected_target(writer, &request.branch)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
                 &writer.worktree,
@@ -585,7 +694,11 @@ impl HostDeliveryContext {
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
         options.env = Some(&environment);
         options.stdin = Some(input);
-        options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
+        let commit_log = tool == "git" && args.first() == Some(&"log");
+        options.stdout = StreamPolicy::Capture {
+            limit: if commit_log { 56_000 } else { 16 * 1024 },
+        };
+        options.stop_on_output_limit = commit_log;
         options.stderr = if stage == Stage::Prepare {
             StreamPolicy::Capture { limit: 4096 }
         } else {
@@ -600,9 +713,16 @@ impl HostDeliveryContext {
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
-        if (output.termination != Termination::Exit(0) && !absent_helpers)
+        let absent_default = args == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]
+            && output.termination == Termination::Exit(1)
+            && output.stdout.bytes.is_empty();
+        let bounded_log = commit_log && output.stdout.truncated && output.overflow_stopped;
+        if (output.termination != Termination::Exit(0)
+            && !absent_helpers
+            && !absent_default
+            && !bounded_log)
             || output.timed_out
-            || output.stdout.truncated
+            || output.stdout.truncated && !commit_log
             || output.stdout.read_failed
             || output.drain_truncated
         {
@@ -615,6 +735,12 @@ impl HostDeliveryContext {
                 "{tool} {:?} (timed out: {}): {stderr}",
                 output.termination, output.timed_out
             )));
+        }
+        if commit_log && output.stdout.truncated {
+            return Ok(format!(
+                "{}\n\n[Commit summary truncated.]",
+                String::from_utf8_lossy(&output.stdout.bytes)
+            ));
         }
         String::from_utf8(output.stdout.bytes)
             .map(|v| v.trim().into())
@@ -644,11 +770,30 @@ impl HostDeliveryContext {
             Stage::Head,
         )?;
         if !status.is_empty() {
-            return Err(RunError::Writer(
-                provenant_confinement::worktrees::WorktreeError::Dirty,
-            ));
+            return Err(RunError::Delivery(Stage::Head));
         }
         Ok(())
+    }
+
+    pub(super) fn commit_body(
+        &self,
+        writer: &WriterRequest,
+        head: GitOid,
+        identity: &str,
+    ) -> Result<String> {
+        let bound = self.bound.as_ref().ok_or(RunError::Delivery(Stage::Head))?;
+        let range = if bound.base_head == head {
+            head.to_string()
+        } else {
+            format!("{}..{head}", bound.base_head)
+        };
+        let commits = self.command(
+            &writer.worktree,
+            "git",
+            &["log", "--max-count=100", "--format=%s%n%b", &range, "--"],
+            Stage::Head,
+        )?;
+        Ok(cap_pr_body(format!("{identity}\n\n{commits}")))
     }
 
     /// Serialise by destination in the common Git directory. merge-tree and
@@ -663,6 +808,8 @@ impl HostDeliveryContext {
         use provenant_core::{CancelToken, Clock, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::LockMode};
         let stage = Stage::Integrate;
+        self.refuse_protected_target(writer, &request.branch)
+            .map_err(|_| RunError::Delivery(stage))?;
         let bound = self.bound.as_ref().ok_or(RunError::Delivery(stage))?;
         let common = self.command(
             &writer.worktree,
@@ -670,7 +817,8 @@ impl HostDeliveryContext {
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             stage,
         )?;
-        let directory = Directory::open_anchor(Path::new(&common))?;
+        let directory =
+            Directory::open_anchor(Path::new(&common)).map_err(|_| RunError::Delivery(stage))?;
         let clock = SystemClock;
         let cancel = CancelToken::new();
         let lock_name = format!(
@@ -682,14 +830,17 @@ impl HostDeliveryContext {
                 .bytes()
             )
         );
-        let _lock = directory.lock(
-            OsStr::new(&lock_name),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 30)
-                .map_err(|_| RunError::Validation("integration lock budget"))?,
-            &cancel,
-            &clock,
-        )?;
+        let _lock = directory
+            .lock(
+                OsStr::new(&lock_name),
+                LockMode::Exclusive,
+                // Each of at most 16 commands under this lock has a 30s deadline.
+                WaitBudget::cli(clock.mono_now(), 16 * 30 + 60)
+                    .map_err(|_| RunError::Delivery(stage))?,
+                &cancel,
+                &clock,
+            )
+            .map_err(|_| RunError::Delivery(stage))?;
         self.clean(writer)?;
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
@@ -744,9 +895,7 @@ impl HostDeliveryContext {
                 .lines()
                 .any(|line| line == format!("branch {destination}"))
             {
-                return Err(RunError::Writer(
-                    provenant_confinement::worktrees::WorktreeError::CheckedOut,
-                ));
+                return Err(RunError::Delivery(stage));
             }
         }
         let candidate = if self
@@ -900,6 +1049,8 @@ impl HostDeliveryContext {
         head: GitOid,
         body: &str,
     ) -> Result<Option<String>> {
+        self.refuse_protected_target(writer, &request.branch)
+            .map_err(|_| RunError::Delivery(Stage::Prepare))?;
         self.clean(writer)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
             self.integrate(writer, request, head)?;
@@ -1035,6 +1186,15 @@ impl HostDeliveryContext {
             Ok(None)
         }
     }
+}
+
+pub(super) fn cap_pr_body(mut body: String) -> String {
+    const NOTE: &str = "\n\n[Commit summary truncated.]\n";
+    if body.len() > 60_000 - NOTE.len() {
+        body.truncate(body.floor_char_boundary(60_000 - NOTE.len()));
+        body.push_str(NOTE);
+    }
+    body
 }
 
 fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
@@ -1278,11 +1438,46 @@ impl crate::RunStore {
             .writer
             .ok_or(RunError::Validation("delivery needs a writer"))?;
         let request = override_request
-            .or(task.deliver)
+            .or(task.deliver.clone())
             .ok_or(RunError::Validation(
                 "choose --deliver for a lane without recorded delivery",
             ))?;
         validate(&request)?;
+        let head = record
+            .head
+            .ok_or(RunError::Validation("receipt has no settled head"))?;
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let key = provenant_core::hex(
+            provenant_records::CanonicalV1::file_digest(
+                &serde_json::to_vec(&(head, &request))
+                    .map_err(|_| RunError::Validation("delivery key"))?,
+            )
+            .bytes(),
+        );
+        let receipt_name = format!("delivery-{key}.json");
+        if let Some(raw) =
+            crate::artifacts::read_sealed(&attempt, &receipt_name, crate::RECORD_LIMIT)?
+        {
+            let receipt: WriterDeliveryReceipt = crate::db::decode(&raw)?;
+            if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
+                return Ok(receipt);
+            }
+        }
+        if let Some(receipt) = record.delivery.as_ref()
+            && task.deliver.as_ref() == Some(&request)
+            && receipt.remote == request.remote
+            && receipt.branch == request.branch
+            && matches!(receipt.state, WriterDeliveryState::Delivered { .. })
+            && (!request.open_pr
+                || matches!(
+                    receipt.state,
+                    WriterDeliveryState::Delivered {
+                        pull_request: Some(_)
+                    }
+                ))
+        {
+            return Ok(receipt.clone());
+        }
         if !self.custody_released(&record, call)? {
             return Err(RunError::Validation("writer custody has not settled"));
         }
@@ -1305,51 +1500,22 @@ impl crate::RunStore {
         }
         let host = host.prepare(&writer, &request)?;
         host.clean(&writer)?;
-        let head = record
-            .head
-            .ok_or(RunError::Validation("receipt has no settled head"))?;
         if host.head(&writer)? != head {
             return Err(RunError::Validation(
                 "worktree head differs from the settled receipt",
             ));
         }
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
-        let key = provenant_core::hex(
-            provenant_records::CanonicalV1::file_digest(
-                &serde_json::to_vec(&(head, &request))
-                    .map_err(|_| RunError::Validation("delivery key"))?,
+        let result = host
+            .commit_body(
+                &writer,
+                head,
+                &format!("Run {}\nAttempt {id}", record.run_id),
             )
-            .bytes(),
-        );
-        let receipt_name = format!("delivery-{key}.json");
-        if let Some(raw) =
-            crate::artifacts::read_sealed(&attempt, &receipt_name, crate::RECORD_LIMIT)?
-        {
-            return crate::db::decode(&raw);
-        }
-        if let Some(receipt) = record.delivery.as_ref()
-            && receipt.remote == request.remote
-            && receipt.branch == request.branch
-            && matches!(receipt.state, WriterDeliveryState::Delivered { .. })
-            && (!request.open_pr
-                || matches!(
-                    receipt.state,
-                    WriterDeliveryState::Delivered {
-                        pull_request: Some(_)
-                    }
-                ))
-        {
-            return Ok(receipt.clone());
-        }
-        let body = crate::artifacts::read_sealed(&attempt, "result.md", crate::RESULT_LIMIT)?
-            .unwrap_or_default();
-        let body = String::from_utf8(body)
-            .map_err(|_| RunError::Validation("receipt result is not UTF-8"))?;
-        let result = host.push(&writer, &request, head, &body);
+            .and_then(|body| host.push(&writer, &request, head, &body));
         let state = match result {
             Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
             Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },
-            Err(error) => return Err(error),
+            Err(_) => WriterDeliveryState::Failed { stage: Stage::Push },
         };
         let receipt = WriterDeliveryReceipt {
             schema_version: 1,
@@ -1391,7 +1557,7 @@ pub(crate) fn deliver_once(
     writer: &WriterRequest,
     request: &WriterDeliveryRequest,
     attempt: &Directory,
-    result: &str,
+    identity: &str,
 ) -> Result<WriterDeliveryReceipt> {
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
@@ -1423,12 +1589,6 @@ pub(crate) fn deliver_once(
     if started.is_none() {
         crate::artifacts::seal(
             attempt,
-            "pull-request-body.md",
-            result.as_bytes(),
-            crate::RESULT_LIMIT,
-        )?;
-        crate::artifacts::seal(
-            attempt,
             "delivery-started.json",
             &crate::db::bytes(&receipt)?,
             crate::RECORD_LIMIT,
@@ -1443,11 +1603,19 @@ pub(crate) fn deliver_once(
             match receipt
                 .head
                 .ok_or(RunError::Delivery(Stage::Head))
-                .and_then(|head| host.push(writer, request, head, result))
-            {
+                .and_then(|head| {
+                    let body = host.commit_body(writer, head, identity)?;
+                    crate::artifacts::seal(
+                        attempt,
+                        "pull-request-body.md",
+                        body.as_bytes(),
+                        crate::RESULT_LIMIT,
+                    )?;
+                    host.push(writer, request, head, &body)
+                }) {
                 Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
                 Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },
-                Err(error) => return Err(error),
+                Err(_) => WriterDeliveryState::Failed { stage: Stage::Push },
             }
         };
     }
