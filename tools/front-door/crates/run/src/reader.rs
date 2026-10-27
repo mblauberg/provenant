@@ -118,6 +118,12 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         None if outcome == Outcome::Lost && exit_code.is_none() => Vec::new(),
         None => return Err(RunError::Validation("terminal result missing")),
     };
+    let transcript = r
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.provider.clone())
+        .zip(r.session.clone())
+        .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
     Ok(AttemptFact {
         attempt_id: r.attempt_id,
         task_id: r.task_id,
@@ -144,6 +150,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         lineage: r.retry_of.into_iter().collect(),
         reason,
         trace: r.trace,
+        transcript,
     })
 }
 impl AttemptReader for RunStore {
@@ -192,6 +199,8 @@ pub enum ArtifactPart {
     Result,
     /// Supervisor's bounded stderr capture; possibly not UTF-8.
     Stderr,
+    /// The provider's own transcript, found in the attempt's retained provider state.
+    Transcript,
 }
 #[derive(Debug)]
 pub struct OutputChunk {
@@ -488,6 +497,16 @@ impl RunStore {
                         false,
                     ),
                 };
+                let digest = provenant_records::CanonicalV1::file_digest(&bytes);
+                (bytes, complete, digest)
+            }
+            ArtifactPart::Transcript => {
+                let session = record.session.as_deref().ok_or(RunError::NotFound)?;
+                let dir = self.attempt_dir(record.run_id, id, false)?;
+                let (dir, name, _) =
+                    crate::transcript::find(&dir, session).ok_or(RunError::NotFound)?;
+                let (bytes, complete) =
+                    crate::transcript::tail(&dir, &name).ok_or(RunError::UnsafePath)?;
                 let digest = provenant_records::CanonicalV1::file_digest(&bytes);
                 (bytes, complete, digest)
             }

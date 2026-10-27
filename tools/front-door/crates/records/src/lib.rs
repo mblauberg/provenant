@@ -18,7 +18,8 @@ mod yaml;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
-    AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact, Usage,
+    AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact,
+    TranscriptRef, Usage,
 };
 pub use attempt_file::{AttemptFile, AttemptFileClass};
 pub use canonical::{CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest};

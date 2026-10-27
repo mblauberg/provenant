@@ -2243,6 +2243,17 @@ fn render_lanes(
                         .unwrap_or_else(|| "unknown".into())
                 ));
             }
+            // A pointer to the provider's own transcript; never a copy.
+            let transcript = lane
+                .applied_route
+                .as_ref()
+                .and_then(|r| r.provider.as_deref())
+                .zip(lane.session.as_deref())
+                .map(|(adapter, session)| {
+                    let path = run::locate_transcript(&artifact(root, lane, ""), session)
+                        .map(|relative| artifact(root, lane, &relative.to_string_lossy()));
+                    json!({ "adapter": adapter, "session": session, "path": path })
+                });
             json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
@@ -2271,6 +2282,7 @@ fn render_lanes(
                 "delivery": lane.delivery,
                 "continuation": lane.continuation,
                 "result_path": result,
+                "transcript": transcript,
             })
         })
         .collect();
@@ -2929,6 +2941,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,
         Part::Stderr => run::ArtifactPart::Stderr,
+        Part::Transcript => run::ArtifactPart::Transcript,
         Part::Events => {
             // An attempt has a handful of revisions; offset is an event cursor.
             let events = session
@@ -5301,6 +5314,54 @@ mod tests {
         lane.protected_paths = vec![];
         let (_, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
         assert!(human.contains("  review head=unknown paths=\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn render_lanes_points_at_the_provider_transcript() -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "transcript-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": {"provider":"claude","model":"claude/claude-sonnet-5"},
+            "session": "sess-1848",
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state": "terminal", "outcome": "rejected", "finished_at": now},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        let root = tempfile::tempdir()?;
+        let state = root.path().canonicalize()?;
+        let attempt = artifact(&state, &lane, "");
+        let transcript = attempt.join("provider-state/candidate-0/claude-config/projects/k");
+        std::fs::create_dir_all(&transcript)?;
+        std::fs::write(transcript.join("sess-1848.jsonl"), "{}\n")?;
+        let (data, _) = render_lanes(&[lane], &[], None, &state);
+        let found = &data["lanes"][0]["transcript"];
+        assert_eq!(found["adapter"], "claude");
+        assert_eq!(found["session"], "sess-1848");
+        assert_eq!(
+            found["path"],
+            transcript
+                .join("sess-1848.jsonl")
+                .to_string_lossy()
+                .as_ref()
+        );
         Ok(())
     }
 
