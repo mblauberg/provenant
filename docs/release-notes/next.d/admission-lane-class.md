@@ -25,3 +25,7 @@
   start, and existing leases and tickets with no class count as writers. A
   binary from before this release refuses the upgraded ledger, so upgrade every
   host together.
+- A wall clock that steps back no longer lets two lanes of one class start
+  inside one spacing. A start recorded ahead of the clock now holds its class
+  for one full spacing from the step, however large the step, instead of
+  freeing it at once.

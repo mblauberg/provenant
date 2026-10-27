@@ -43,8 +43,11 @@ read-only start, so a burst of provider launches is still staggered but a
 read-only lane never waits behind a writer. The ledger reads the wall clock
 inside the transaction that checks and records spacing, never before a probe or
 the lock, so an admission delayed behind another process's newer start still
-waits for it. A recorded start only moves forward; only a clock that stepped
-back by a whole spacing or more replaces it. The memory floor (5 %) and disk
+waits for it. A recorded start only moves forward, and one ahead of the clock
+(the wall clock stepped back) never makes a lane eligible sooner: the ledger
+refuses, rewrites that class's start to now in the same transaction and reports
+a full spacing, so a step of any size stalls that class by at most one spacing
+and never opens a second start inside it. The memory floor (5 %) and disk
 floor (500 MiB) refuse both classes. A ledger row or ticket with no class is a
 writer; opening a version 1 ledger upgrades it in place and keeps its last
 start as the writer start. A run's own batch concurrency (1 to 16) defaults to

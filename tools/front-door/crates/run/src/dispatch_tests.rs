@@ -2574,28 +2574,79 @@ fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_roo
 }
 
 #[test]
-fn a_recorded_start_only_moves_forward_unless_the_clock_stepped_back_a_spacing() -> TestResult {
+fn a_backward_clock_step_right_after_a_start_keeps_a_full_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let first = starting(&store, &lane(80, true), &call)?;
-    let stale = starting(&store, &lane(81, true), &call)?;
+    let small = starting(&store, &lane(81, true), &call)?;
     let stepped = starting(&store, &lane(82, true), &call)?;
     let left = |now_ms| {
         crate::ledger::spacing_left(&store.writer_registry, LaneClass::Writer, 20_000, now_ms)
     };
     assert!(store.claim(first, &at(100_000), &call)?.is_some());
     assert!(
-        store.claim(stale, &at(99_500), &call)?.is_none(),
-        "a clock behind the recorded start by less than a spacing still waits"
+        store.claim(small, &at(99_500), &call)?.is_none(),
+        "a clock behind the recorded start by less than a spacing waits"
     );
-    assert_eq!(left(100_500), Some(19_500), "the start was not rewound");
     assert!(
-        store.claim(stepped, &at(70_000), &call)?.is_some(),
-        "a clock stepped back a whole spacing does not hold every start"
+        store.claim(stepped, &at(80_000), &call)?.is_none(),
+        "a clock stepped back a whole spacing does not admit a second writer"
     );
-    assert_eq!(left(71_000), Some(19_000));
+    assert_eq!(left(80_000), Some(20_000), "a full spacing from the step");
+    assert!(store.claim(stepped, &at(99_999), &call)?.is_none());
+    assert!(store.claim(stepped, &at(100_000), &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn a_very_large_backward_clock_step_stalls_admission_by_one_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(83, true), &call)?;
+    let second = starting(&store, &lane(84, true), &call)?;
+    let left = |now_ms| {
+        crate::ledger::spacing_left(&store.writer_registry, LaneClass::Writer, 20_000, now_ms)
+    };
+    assert!(store.claim(first, &at(4_000_000_000), &call)?.is_some());
+    assert_eq!(
+        left(1_000),
+        Some(20_000),
+        "a start ahead of the clock reads as a full spacing"
+    );
+    assert!(store.claim(second, &at(1_000), &call)?.is_none());
+    assert!(store.claim(second, &at(20_999), &call)?.is_none());
+    assert!(
+        store.claim(second, &at(21_000), &call)?.is_some(),
+        "the stall is one spacing, not the size of the step"
+    );
+    Ok(())
+}
+
+#[test]
+fn read_only_lanes_follow_the_backward_step_rule_with_their_own_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let first = starting(&store, &lane(85, false), &call)?;
+    let second = starting(&store, &lane(86, false), &call)?;
+    let writer = starting(&store, &lane(87, true), &call)?;
+    let left = |now_ms| {
+        crate::ledger::spacing_left(&store.writer_registry, LaneClass::ReadOnly, 2_000, now_ms)
+    };
+    assert!(store.claim(first, &at(100_000), &call)?.is_some());
+    assert!(store.claim(second, &at(50_000), &call)?.is_none());
+    assert_eq!(left(50_000), Some(2_000));
+    assert!(store.claim(second, &at(51_999), &call)?.is_none());
+    assert!(
+        store.claim(writer, &at(51_999), &call)?.is_some(),
+        "the read-only start holds no writer"
+    );
+    assert!(store.claim(second, &at(52_000), &call)?.is_some());
     Ok(())
 }
 

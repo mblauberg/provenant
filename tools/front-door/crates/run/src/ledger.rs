@@ -113,18 +113,27 @@ pub(crate) fn lease(
                 |r| r.get(0),
             )
             .optional()?;
-        if last.is_some_and(|last| spacing_wait(last, now_ms, spacing_ms) > 0) {
-            return Ok(None);
+        if let Some(last) = last {
+            if last > now_ms {
+                // A start the clock has not reached can only follow a wall
+                // clock that stepped back. Never admit on it: bring the start
+                // to now, so the stall is one spacing however far the clock
+                // moved, and refuse.
+                tx.execute(
+                    "UPDATE spacing SET last_start=?2 WHERE class=?1",
+                    params![class.as_str(), now_ms],
+                )?;
+                return Ok(None);
+            }
+            if spacing_wait(last, now_ms, spacing_ms) > 0 {
+                return Ok(None);
+            }
         }
-        // A recorded start only moves forward, except a wall clock that
-        // stepped back by more than a spacing, which `spacing_wait` ignores.
+        // The recorded start is never ahead of now here, so this moves it
+        // forward.
         tx.execute(
-            "INSERT INTO spacing(class,last_start) VALUES (?1,?2) ON CONFLICT(class) DO UPDATE SET last_start=CASE WHEN ?3 THEN excluded.last_start ELSE MAX(last_start, excluded.last_start) END",
-            params![
-                class.as_str(),
-                now_ms,
-                last.is_some_and(|last| last - now_ms >= spacing_ms)
-            ],
+            "INSERT INTO spacing(class,last_start) VALUES (?1,?2) ON CONFLICT(class) DO UPDATE SET last_start=excluded.last_start",
+            params![class.as_str(), now_ms],
         )?;
         tx.execute(
             "INSERT INTO leases(attempt,project,store,class) VALUES (?1,?2,?3,?4)",
@@ -159,14 +168,16 @@ pub(crate) fn spacing_left(
         .ok()??;
     Some(spacing_wait(last, now_ms, spacing_ms))
 }
-/// Milliseconds before a start may follow the recorded `last`. A start newer
-/// than the clock still holds for as long as it keeps the clock inside its
-/// window, so a caller that sampled early cannot jump it. One more than a
-/// spacing ahead can only be a wall clock that stepped back, which must not
-/// hold every start.
+/// Milliseconds before a start may follow the recorded `last`. A start ahead
+/// of the clock can only be a wall clock that stepped back, so it never makes a
+/// lane eligible sooner: it holds for a full spacing, which `lease` then makes
+/// true by moving the start to now.
 fn spacing_wait(last: i64, now_ms: i64, spacing_ms: i64) -> i64 {
+    if last > now_ms {
+        return spacing_ms;
+    }
     let elapsed = now_ms.saturating_sub(last);
-    if elapsed >= spacing_ms || elapsed <= -spacing_ms {
+    if elapsed >= spacing_ms {
         0
     } else {
         spacing_ms - elapsed
