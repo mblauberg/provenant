@@ -320,7 +320,8 @@ mod tests {
                 .keys()
                 .filter(|path| !before.contains_key(*path))
                 .map(|path| format!("added {}", path.display()));
-            changed.chain(added).collect()
+            // Bound the CI message; a fixture tree change rarely needs more.
+            changed.chain(added).take(20).collect()
         }
         let rig = crate::worktree_tests::repository()?.without_state()?;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
