@@ -11,7 +11,10 @@ mod state;
 pub use hooks::*;
 pub use state::*;
 
-pub const CHECKPOINT_LIMIT: u64 = 32 * 1024;
+/// The most a checkpoint may hold: the size of the largest workflow input the CLI
+/// reads, so a saved file never fits the reader but not the store. Readers that
+/// need less cut it: hooks inject at most 8 KiB and a hand-off prompt 32 KiB.
+pub const CHECKPOINT_LIMIT: u64 = 256 * 1024;
 pub const HOST_SESSION_ID_LIMIT: usize = 128;
 
 /// Host-provided IDs use command-safe components, independently of core IDs.
@@ -58,7 +61,7 @@ impl From<HostSessionId> for String {
 
 #[derive(Debug, Error)]
 pub enum SessionError {
-    #[error("checkpoint exceeds 32 KiB")]
+    #[error("checkpoint exceeds 256 KiB")]
     TooLarge,
     #[error("checkpoint is not UTF-8")]
     Utf8(#[from] std::str::Utf8Error),

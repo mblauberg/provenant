@@ -63,7 +63,7 @@ pub enum Receipt {
 }
 #[derive(Debug, Subcommand)]
 pub enum Session {
-    /// Save a session checkpoint
+    /// Save a session checkpoint (up to 256 KiB)
     Save {
         /// Session ID
         session_id: String,
@@ -425,7 +425,10 @@ fn execute(
                 &edge.cancel,
                 &edge.clock,
             )?;
-            Ok(serde_json::json!({"saved_bytes": text.len()}))
+            Ok(serde_json::json!({
+                "saved_bytes": text.len(),
+                "limit_bytes": provenant_workflow::session::CHECKPOINT_LIMIT,
+            }))
         }
         Workflow::Session(Session::Show { session_id }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;

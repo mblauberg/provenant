@@ -40,6 +40,42 @@ fn receipt_request(critical: &str, decision: Value) -> Value {
 const DELIVERY: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 
 #[test]
+fn long_checkpoints_save_up_to_the_documented_bound() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("long.md");
+    let save = |bytes: usize, expected: i64| -> Result<Value> {
+        std::fs::write(&file, "x".repeat(bytes - 1) + "\n")?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                "s-long",
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            expected,
+        )
+    };
+    // Past the old 32 KiB cap, up to and including 256 KiB.
+    let saved = save(200 * 1024, 0)?;
+    assert_eq!(saved["data"]["saved_bytes"], 200 * 1024);
+    assert_eq!(saved["data"]["limit_bytes"], 256 * 1024);
+    save(256 * 1024, 0)?;
+    let shown = call(&rig, &["workflow", "session", "show", "s-long"], 0)?;
+    assert_eq!(
+        shown["data"]["markdown"].as_str().map(str::len),
+        Some(256 * 1024)
+    );
+    // One byte over is refused and leaves the saved checkpoint intact.
+    save(256 * 1024 + 1, 2)?;
+    let again = call(&rig, &["workflow", "session", "show", "s-long"], 0)?;
+    assert_eq!(again["data"]["markdown"], shown["data"]["markdown"]);
+    Ok(())
+}
+
+#[test]
 fn session_checkpoints_round_trip_and_reject_unsafe_keys() -> Result {
     let rig = TestRig::new()?;
     let file = rig.root.join("checkpoint.md");
