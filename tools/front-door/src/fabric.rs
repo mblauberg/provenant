@@ -2954,18 +2954,16 @@ fn graph_snapshot(
     use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
     let status = if checkpoint.cancelled {
         GraphStatus::Cancelled
-    } else if checkpoint.delivery_required
+    } else if (checkpoint.delivery_required
         && !checkpoint.delivered
         && checkpoint
             .nodes
             .iter()
-            .all(|node| node.state == NodeState::Succeeded)
-    {
-        GraphStatus::Pending
-    } else if checkpoint
-        .nodes
-        .iter()
-        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+            .all(|node| node.state == NodeState::Succeeded))
+        || checkpoint
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
     {
         GraphStatus::Pending
     } else {
