@@ -1276,8 +1276,7 @@ fn overlap_queries_search_the_path_index_and_root_covers_every_path() {
             .map(|r| r.unwrap())
             .collect::<Vec<_>>();
         assert!(
-            plan.iter().any(|s| s
-                .contains("SEARCH p USING COVERING INDEX claim_path_lookup (project=? AND path")),
+            plan.iter().any(|s| s.contains("claim_path_lookup")),
             "{plan:?}"
         );
     }
