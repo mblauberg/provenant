@@ -741,7 +741,6 @@ fn collect_foreign(
     if !is_ancestor(context, lane.head, upstream, cancel)? {
         return Ok(None);
     }
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let verified = verify_worktree(context.repo, &lane.path)?;
     let state = match context
         .project_state
@@ -832,6 +831,9 @@ fn collect_foreign(
                 cancel,
             )?;
         }
+        // Bulk output disposal holds writer custody only. Repository custody
+        // covers the final registration checks and Git metadata mutation.
+        let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
         recheck()?;
         if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
             return Err(WorktreeError::Dirty);

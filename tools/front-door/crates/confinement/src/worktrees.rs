@@ -2683,6 +2683,59 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let mut lane = gc_merged_worktree(&fixture, &context, "foreign-output-lock")?;
+        fs::create_dir(lane.path.join("target"))?;
+        fs::write(lane.path.join("target/artifact"), "output")?;
+        lane.writer = WriterState::Unknown;
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&lane.path))?;
+        let observations = std::cell::RefCell::new(Vec::new());
+        let no_live_lanes = |_: &Path| {
+            if state
+                .try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
+                .is_err()
+            {
+                observations.borrow_mut().push(
+                    context
+                        .project_state
+                        .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                        .is_ok(),
+                );
+            }
+            true
+        };
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| false,
+                no_live_lanes: &no_live_lanes,
+                regenerable: &["target".into()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+                foreign_merged_clean: true,
+                foreign_idle_before_ns: None,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(report.worktrees.removed.len(), 1, "{report:?}");
+        let observed = observations.borrow();
+        assert_eq!(observed.first(), Some(&true));
+        assert_eq!(observed.last(), Some(&false));
+        Ok(())
+    }
+
+    #[test]
     fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;

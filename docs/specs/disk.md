@@ -108,6 +108,8 @@ reservations, free existing writer locks and a complete free process census
 are required. Repository custody protects registration rechecks; every
 worktree is verified against the Git common directory. The primary stays
 protected and local refs survive this policy's removals.
+Bulk output pruning holds writer custody only. An exclusive repository lock
+is acquired after pruning, for the final recheck and Git removal.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.
 - Test: `crates/confinement/src/worktrees.rs::gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`
