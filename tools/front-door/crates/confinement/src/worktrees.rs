@@ -1127,6 +1127,7 @@ pub fn create(
     let entries = read_worktrees(context, cancel)?;
     let checked_out = entries
         .iter()
+        .filter(|entry| !entry.prunable)
         .any(|entry| entry.branch.as_ref() == Some(&branch));
     if checked_out {
         return Err(if request.base.is_some() {
@@ -1134,6 +1135,12 @@ pub fn create(
         } else {
             WorktreeError::CheckedOut
         });
+    }
+    if entries
+        .iter()
+        .any(|entry| entry.prunable && entry.branch.as_ref() == Some(&branch))
+    {
+        return Err(WorktreeError::StaleRegistration);
     }
     let branch_tips = read_branch_tips(context, cancel)?;
     let existing = branch_tips.get(&branch).copied();
@@ -2810,6 +2817,53 @@ mod lifecycle_tests {
             read_worktrees(&context, &cancel())?
                 .iter()
                 .any(|entry| entry.path == stale.path && entry.prunable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_with_prunable_registration_for_same_branch() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let stale = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::remove_dir_all(&stale.path)?;
+        let error = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )
+        .expect_err("stale registration must fail with prune hint");
+        assert!(matches!(error, WorktreeError::StaleRegistration));
+        assert!(error.to_string().contains("git worktree prune"), "{error}");
+
+        fixture.run(&["commit", "--allow-empty", "-m", "advance HEAD"])?;
+        let head = fixture.head()?;
+        fixture.run(&["update-ref", "-d", "refs/heads/scratch/stale"])?;
+        fixture.run(&["branch", "scratch/stale", &head.to_string()])?;
+        let error_recreated = create(
+            &context,
+            WorktreeCreate {
+                branch: "scratch/stale".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )
+        .expect_err("recreated branch with stale registration must fail with prune hint");
+        assert!(matches!(error_recreated, WorktreeError::StaleRegistration));
+        assert!(
+            error_recreated.to_string().contains("git worktree prune"),
+            "{error_recreated}"
         );
         Ok(())
     }
