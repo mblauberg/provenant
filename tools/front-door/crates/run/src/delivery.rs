@@ -202,6 +202,7 @@ impl HostDeliveryContext {
             None
         };
         let branch = publication.as_deref().unwrap_or(branch);
+        host.refuse_protected_target(&writer, branch)?;
         let reference = format!("refs/heads/{branch}");
         if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
