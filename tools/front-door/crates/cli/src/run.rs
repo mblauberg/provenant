@@ -953,6 +953,38 @@ pub fn submit_with_host(
         edge.cwd,
         call,
     )?;
+    if parent_attempt.is_none() {
+        let canonical = session.store.request(record.run_id, call)?;
+        let pending = session.store.pending_attempts(record.run_id, call)?;
+        for task in &canonical.tasks {
+            if let Some(writer) = &task.writer {
+                provenant_confinement::worktrees::with_context(
+                    edge.roots,
+                    edge.home,
+                    &writer.project,
+                    call.clock,
+                    call.cancel,
+                    |context| {
+                        use provenant_confinement::worktrees;
+                        let tree =
+                            provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
+                        if let Some(mut owner) = worktrees::load_owner(&tree)?
+                            && owner.origin == worktrees::WorktreeOrigin::Lane
+                            && owner.operation_id.as_ref() == Some(&record.operation_id)
+                            && let Some(attempt) = pending
+                                .iter()
+                                .find(|attempt| attempt.task_id == task.task_id)
+                        {
+                            owner.attempt_id = Some(attempt.attempt_id);
+                            worktrees::save_owner(&tree, &owner)?;
+                        }
+                        Ok(())
+                    },
+                )
+                .map_err(run::RunError::from)?;
+            }
+        }
+    }
     let started = if parent_attempt.is_some() {
         Vec::new()
     } else if let Some(host) = host {
@@ -975,6 +1007,95 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             ErrorKind::LaneCoordinationRefused,
             "coordination mutations are not allowed inside a lane",
         ));
+    }
+    if let Some(branch) = &command.worktree_branch {
+        if !matches!(command.access.mode, Mode::WorktreeWrite) || crate::fabric::in_lane() {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Refused,
+                "--worktree-branch requires a host worktree-write dispatch",
+            ));
+        }
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        // Initialise the state before entering the shared confinement context.
+        let call = request(&clock, &cancel)?;
+        let session = open(edge, &call)?;
+        if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call)? {
+            return Ok(replayed);
+        }
+        let host = provenant_config::bind_host(edge.roots)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+        let created_at = now(&clock)?;
+        let info = provenant_confinement::worktrees::with_context(
+            edge.roots,
+            edge.home,
+            edge.cwd,
+            &clock,
+            &cancel,
+            |context| {
+                use provenant_confinement::worktrees::{
+                    self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+                    WriterState,
+                };
+                let existing = worktrees::list(context, &cancel)?.into_iter().find(|tree| {
+                    tree.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
+                });
+                let info = match existing {
+                    Some(info)
+                        if info.dirty == WorktreeCondition::Clean
+                            && info.writer == WriterState::Free =>
+                    {
+                        info
+                    }
+                    Some(_) => return Err(worktrees::WorktreeError::InvalidRequest),
+                    None => worktrees::create(
+                        context,
+                        WorktreeCreate {
+                            branch: branch.clone(),
+                            base: command.base.clone(),
+                        },
+                        &cancel,
+                    )?,
+                };
+                let verified = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                let prior = worktrees::load_owner(&verified)?;
+                let base = if let Some(owner) = prior
+                    .as_ref()
+                    .filter(|owner| owner.origin == WorktreeOrigin::Lane)
+                {
+                    owner.base.clone()
+                } else {
+                    let git = provenant_os::git::git_executable()
+                        .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                    run::resolve_git_base(
+                        &git,
+                        context.repo.root_path(),
+                        command.base.as_deref().unwrap_or("HEAD"),
+                    )
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?
+                };
+                let owner = match prior {
+                    Some(owner) if owner.operation_id.as_ref() == Some(&command.operation_id) => {
+                        owner
+                    }
+                    _ => WorktreeOwner {
+                        attempt_id: None,
+                        operation_id: Some(command.operation_id.clone()),
+                        branch: branch.clone(),
+                        base,
+                        host,
+                        created_at,
+                        origin: WorktreeOrigin::Lane,
+                        label: None,
+                    },
+                };
+                worktrees::save_owner(&verified, &owner)?;
+                Ok(info)
+            },
+        )
+        .map_err(run::RunError::from)?;
+        command.access.worktree = Some(info.path);
     }
     let access = &command.access;
     let unsupported = |what: &str| {
@@ -1025,15 +1146,41 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
             .collect::<Vec<_>>(),
     );
     let mut tasks = Vec::new();
-    let flag_delivery =
+    let mut flag_delivery =
         command
             .deliver_remote
             .zip(command.deliver_branch)
             .map(|(remote, branch)| run::WriterDeliveryRequest {
+                mode: Default::default(),
                 remote,
                 branch,
                 open_pr: command.open_pr,
             });
+    if let Some(mode) = &command.deliver {
+        let branch = if let Some(path) = &command.access.worktree {
+            let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+            run::prepare_writer(
+                &writer,
+                edge.roots.state.as_path(),
+                execution_context(edge)?.project_id,
+            )?
+            .branch
+            .as_str()
+            .trim_start_matches("refs/heads/")
+            .to_owned()
+        } else if let Some(branch) = &command.branch {
+            branch.clone()
+        } else if matches!(mode, run::DeliveryMode::None) {
+            String::new()
+        } else {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Refused,
+                "delivery needs a writer worktree",
+            ));
+        };
+        flag_delivery = run::HostDeliveryContext::destination(mode.clone(), &branch)?;
+    }
     if let Some(path) = &command.input.manifest {
         let manifest: Manifest = provenant_records::decode_v1(
             read_bounded(path)?.as_bytes(),
@@ -1196,7 +1343,12 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         },
         &call,
     )?;
-    report(&session, &record, &started, command.wait, edge, &call)
+    let (mut data, human, timed_out) =
+        report(&session, &record, &started, command.wait, edge, &call)?;
+    if let Some(branch) = command.worktree_branch {
+        data["worktree"] = json!({"path": access.worktree, "branch": branch, "owned": true});
+    }
+    Ok((data, human, timed_out))
 }
 
 fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
@@ -1224,6 +1376,128 @@ fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fa
             .as_deref()
             .map(Path::new),
     )
+}
+
+fn replay_owned_dispatch(
+    command: &Dispatch,
+    edge: &Edge<'_>,
+    session: &Session,
+    call: &run::Request<'_>,
+) -> Result<Option<(Value, String, bool)>, Fail> {
+    let Some(operation) = session.store.operation(&command.operation_id, call)? else {
+        return Ok(None);
+    };
+    let canonical = session.store.request(operation.run_id, call)?;
+    let task = canonical
+        .tasks
+        .first()
+        .filter(|_| canonical.tasks.len() == 1)
+        .ok_or(run::RunError::OperationConflict)?;
+    let branch = command
+        .worktree_branch
+        .as_deref()
+        .ok_or(run::RunError::OperationConflict)?;
+    let writer = task
+        .writer
+        .as_ref()
+        .ok_or(run::RunError::OperationConflict)?;
+    let prompt = match &command.input.prompt_file {
+        Some(path) => read_bounded(path)?,
+        None => read_text(std::io::stdin().lock())?,
+    };
+    let route = requested(
+        command.route.model.as_ref().map(|model| model.0.as_str()),
+        command.route.route.as_deref(),
+        command.route.effort.clone(),
+    )?;
+    let delivery = match &command.deliver {
+        Some(mode) => run::HostDeliveryContext::destination(mode.clone(), branch)?,
+        None => command
+            .deliver_remote
+            .clone()
+            .zip(command.deliver_branch.clone())
+            .map(|(remote, branch)| run::WriterDeliveryRequest {
+                mode: Default::default(),
+                remote,
+                branch,
+                open_pr: command.open_pr,
+            }),
+    };
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    let profile = config
+        .dispatch_profile(&command.knobs)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    if task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
+        || task.route != route
+        || task.account != command.account
+        || task.base_ref != command.base
+        || task.deliver != delivery
+        || task.access != lane_access(&command.access, edge.roots.state.as_path())?
+        || task.profile != profile
+        || task.provider_timeout_seconds != command.provider_timeout
+        || task.delivery_id != command.delivery_id
+        || command.task_id.is_some_and(|id| id != task.task_id)
+    {
+        return Err(run::RunError::OperationConflict.into());
+    }
+    let mut settlement = None;
+    let owned = if writer.worktree.exists() {
+        provenant_confinement::worktrees::with_context(
+            edge.roots,
+            edge.home,
+            &writer.project,
+            call.clock,
+            call.cancel,
+            |context| {
+                let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
+                Ok(
+                    provenant_confinement::worktrees::load_owner(&tree)?.is_some_and(|owner| {
+                        owner.branch == branch
+                            && owner.operation_id.as_ref() == Some(&command.operation_id)
+                    }),
+                )
+            },
+        )
+        .map_err(run::RunError::from)?
+    } else {
+        let page = session.store.lanes(
+            &run::LaneQuery {
+                targets: vec![run::LaneTarget {
+                    run: operation.run_id,
+                    task: None,
+                    attempt: None,
+                }],
+                all: true,
+                limit: 2,
+                after: 0,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            call,
+        )?;
+        if let Some(attempt) = page.lanes.first() {
+            settlement = session
+                .store
+                .worktree_settlement(attempt.attempt_id, call)?;
+        }
+        settlement.as_ref().is_some_and(|receipt| {
+            receipt["state"] == "pruned"
+                && receipt["result"]["removed"][0]["branch"] == format!("refs/heads/{branch}")
+        })
+    };
+    if !owned {
+        return Err(run::RunError::OperationConflict.into());
+    }
+    let run = session.store.run(operation.run_id, call)?;
+    let started = launch(session, run.run_id, edge, call)?;
+    let (mut data, human, timed_out) = report(session, &run, &started, command.wait, edge, call)?;
+    data["worktree"] = json!({"path": writer.worktree, "branch": branch, "owned":true});
+    if let Some(settlement) = settlement {
+        data["worktree_settlement"] = settlement;
+    }
+    Ok(Some((data, human, timed_out)))
 }
 
 fn environment_text(name: &str) -> Result<Option<String>, Fail> {
@@ -1384,6 +1658,29 @@ fn launch_on_host(
             .and_then(|task| task.writer.as_ref())
         {
             host.cwd = writer.worktree.clone();
+            provenant_confinement::worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &writer.project,
+                call.clock,
+                call.cancel,
+                |context| {
+                    use provenant_confinement::worktrees;
+                    let tree =
+                        provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
+                    if let Some(mut owner) = worktrees::load_owner(&tree)?
+                        && owner.origin == worktrees::WorktreeOrigin::Lane
+                        && (owner.operation_id.as_ref() == Some(&attempt.operation_id)
+                            || owner.attempt_id.is_some() && owner.attempt_id == attempt.retry_of)
+                    {
+                        owner.attempt_id = Some(attempt.attempt_id);
+                        owner.operation_id = Some(attempt.operation_id.clone());
+                        worktrees::save_owner(&tree, &owner)?;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(run::RunError::from)?;
         }
         run::HolderContext {
             schema_version: 1,
@@ -1686,6 +1983,7 @@ fn render_lanes(
                 "head": lane.head,
                 "protected_paths": lane.protected_paths,
                 "delivery": lane.delivery,
+                "continuation": lane.continuation,
                 "result_path": result,
             })
         })
@@ -2665,6 +2963,94 @@ fn reconcile_summary(state: &run::Reconciled) -> String {
 pub fn resume(command: Resume, edge: &Edge<'_>) -> Reply {
     reply_waited("resume", resume_inner(command, edge))
 }
+pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
+    reply(
+        "lane deliver",
+        (|| {
+            if crate::fabric::in_lane() {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    "delivery is host-only",
+                ));
+            }
+            let crate::Lane::Deliver { attempt, deliver } = command;
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel)?;
+            let session = open(edge, &call)?;
+            let id = attempt.0.attempt.ok_or_else(|| {
+                Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required")
+            })?;
+            let record = session.store.record(id, &call)?;
+            if attempt.0.run.is_some_and(|run| run != record.run_id)
+                || attempt.0.task.is_some_and(|task| task != record.task_id)
+            {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::NotFound,
+                    "attempt is not in that run/task",
+                ));
+            }
+            if matches!(deliver, Some(run::DeliveryMode::None)) {
+                return Ok((
+                    json!({"delivery": "none"}),
+                    "No delivery requested.\n".into(),
+                ));
+            }
+            let task = session
+                .store
+                .request(record.run_id, &call)?
+                .tasks
+                .into_iter()
+                .find(|task| task.task_id == record.task_id)
+                .ok_or(run::RunError::NotFound)?;
+            let writer = task
+                .writer
+                .as_ref()
+                .ok_or(run::RunError::Validation("delivery needs a writer"))?;
+            if !writer.worktree.exists()
+                && session
+                    .store
+                    .worktree_settlement(id, &call)?
+                    .is_some_and(|receipt| receipt["state"] == "pruned")
+                && let Some((request, receipt)) = session.store.delivered(id, &call)?
+                && deliver.as_ref().is_none_or(|mode| {
+                    mode == &request.mode
+                        || matches!(mode, run::DeliveryMode::Pr) && request.open_pr
+                })
+            {
+                return Ok((
+                    json!({"attempt_id": id, "delivery": receipt, "replayed":true}),
+                    format!("{id} already delivered; owned worktree pruned\n"),
+                ));
+            }
+            let launch =
+                run::prepare_writer(writer, edge.roots.state.as_path(), record.project_id)?;
+            let branch = launch.branch.as_str().trim_start_matches("refs/heads/");
+            let destination = match deliver {
+                Some(mode) => run::HostDeliveryContext::destination(mode, branch)?,
+                None if task.deliver.is_none() => {
+                    run::HostDeliveryContext::destination(run::DeliveryMode::Push, branch)?
+                }
+                None => None,
+            };
+            let receipt = session.store.deliver(
+                id,
+                destination,
+                run::HostDeliveryContext::capture(),
+                &call,
+            )?;
+            if let run::WriterDeliveryState::Failed { stage } = &receipt.state {
+                return Err(run::RunError::Delivery(*stage).into());
+            }
+            Ok((
+                json!({"attempt_id": id, "delivery": receipt}),
+                format!("{id} delivered\n"),
+            ))
+        })(),
+    )
+}
 /// Continue one terminal attempt, scanned and launched on the shared path.
 /// `expected_generation` counts the attempt's prior continuations.
 pub fn continue_attempt(
@@ -2676,22 +3062,225 @@ pub fn continue_attempt(
     expected_generation: u64,
     call: &run::Request<'_>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
-    scan(&prompt)?;
-    (Registry::default()).check_continuable(&session.service().status(prior, call)?)?;
-    let run = session.service().resume(
-        &run::Resume {
-            prior,
-            expected_generation,
-            operation_id,
-            run_id: fresh(RunId::from_bytes)?,
-            attempt_id: fresh(AttemptId::from_bytes)?,
-            prompt,
-            created_at: now(call.clock)?,
-        },
+    continue_attempt_mode(
+        session,
+        edge,
+        prior,
+        operation_id,
+        prompt,
+        expected_generation,
         call,
-    )?;
-    let started = launch(session, run.run_id, edge, call)?;
+        true,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn continue_attempt_mode(
+    session: &Session,
+    edge: &Edge<'_>,
+    prior: AttemptId,
+    operation_id: OperationId,
+    mut prompt: String,
+    expected_generation: u64,
+    call: &run::Request<'_>,
+    fallback: bool,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    scan(&prompt)?;
+    let record = session.service().status(prior, call)?;
+    if !matches!(record.state, run::AttemptState::Terminal { .. }) {
+        return Err(run::RunError::Nonterminal.into());
+    }
+    // Replay the already accepted choice before checking state that retention
+    // may have expired since the first submission.
+    if let Some(operation) = session.store.operation(&operation_id, call)? {
+        let existing = session.store.request(operation.run_id, call)?;
+        if existing.parent != Some(prior) {
+            return Err(run::RunError::OperationConflict.into());
+        }
+        let page = session.store.lanes(
+            &run::LaneQuery {
+                targets: vec![run::LaneTarget {
+                    run: operation.run_id,
+                    task: None,
+                    attempt: None,
+                }],
+                all: true,
+                limit: 2,
+                after: 0,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            call,
+        )?;
+        if let Some(accepted) = page.lanes.first() {
+            let retained = read_full_prompt(session, accepted.attempt_id, call)?;
+            let matches = if existing.fresh_continuation.is_some() {
+                retained.ends_with(&format!("\n\nNew prompt:\n{prompt}"))
+            } else {
+                retained == prompt
+            };
+            if !matches {
+                return Err(run::RunError::OperationConflict.into());
+            }
+            let run = session.store.run(operation.run_id, call)?;
+            let started = launch(session, run.run_id, edge, call)?;
+            return Ok((run, started));
+        }
+    }
+    let unavailable = Registry::default()
+        .check_continuable(&record)
+        .err()
+        .map(|fail| fail.message)
+        .or_else(|| {
+            provider::continuation_available(&record, session.context.state_root.as_path()).err()
+        });
+    if !fallback && let Some(reason) = &unavailable {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::ContinuationUnsupported,
+            format!("continuation unavailable; fresh fallback disabled by --no-fallback: {reason}"),
+        ));
+    }
+    if let Some(reason) = &unavailable {
+        let mut source = record.clone();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(parent) = source.retry_of {
+            if !seen.insert(parent) || seen.len() > 128 {
+                return Err(run::RunError::Validation("continuation parent chain").into());
+            }
+            source = session.store.record(parent, call)?;
+        }
+        let original = read_full_prompt(session, source.attempt_id, call)?;
+        let result = session
+            .service()
+            .output(
+                prior,
+                run::ArtifactPart::Result,
+                run::ByteRange::default(),
+                call,
+            )
+            .ok();
+        let tail = if let Some(result) = result {
+            let result = if result.len > 16_384 {
+                session.service().output(
+                    prior,
+                    run::ArtifactPart::Result,
+                    run::ByteRange {
+                        offset: result.len - 16_384,
+                        max_bytes: 16_384,
+                    },
+                    call,
+                )?
+            } else {
+                result
+            };
+            String::from_utf8_lossy(&result.bytes).into_owned()
+        } else {
+            "[prior attempt has no result]".into()
+        };
+        let task = session
+            .store
+            .request(record.run_id, call)?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(run::RunError::NotFound)?;
+        let cwd = task
+            .writer
+            .as_ref()
+            .map_or(edge.cwd, |writer| writer.worktree.as_path());
+        let log = run::continuation_history(cwd)
+            .unwrap_or_else(|error| format!("[history unavailable: {error}]"));
+        let digest = record
+            .result
+            .as_ref()
+            .map(|artifact| provenant_core::hex(artifact.digest.bytes()))
+            .unwrap_or_else(|| "unavailable".into());
+        prompt = format!(
+            "Continuation: fresh\nFallback from {prior}: {reason}\n\nOriginal prompt:\n{original}\n\nPrior result digest: {digest}\nPrior result tail:\n{tail}\n\nGit log main..HEAD:\n{log}\n\nNew prompt:\n{prompt}"
+        );
+        scan(&prompt)?;
+    }
+    let input = run::Resume {
+        prior,
+        expected_generation,
+        operation_id,
+        run_id: fresh(RunId::from_bytes)?,
+        attempt_id: fresh(AttemptId::from_bytes)?,
+        prompt,
+        created_at: now(call.clock)?,
+    };
+    let run = if let Some(reason) = &unavailable {
+        session.store.resume_fresh(&input, reason, call)
+    } else {
+        session.service().resume(&input, call)
+    }
+    .map_err(|error| {
+        Fail::new(
+            Status::Refused,
+            ErrorKind::ContinuationUnsupported,
+            format!(
+                "continuation {}: {error}",
+                if unavailable.is_some() {
+                    "fresh fallback refused"
+                } else {
+                    "provider resume refused"
+                }
+            ),
+        )
+    })?;
+    let started = launch(session, run.run_id, edge, call).map_err(|fail| {
+        if unavailable.is_some() {
+            Fail::new(
+                fail.status,
+                ErrorKind::ContinuationUnsupported,
+                format!("fresh fallback refused: {}", fail.message),
+            )
+        } else {
+            fail
+        }
+    })?;
+    if unavailable.is_some()
+        && let Some(run::Started::Refused {
+            attempt, reason, ..
+        }) = started
+            .iter()
+            .find(|started| matches!(started, run::Started::Refused { .. }))
+    {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::ContinuationUnsupported,
+            format!("fresh fallback refused for {attempt}: {reason}"),
+        ));
+    }
     Ok((run, started))
+}
+fn read_full_prompt(
+    session: &Session,
+    id: AttemptId,
+    call: &run::Request<'_>,
+) -> Result<String, Fail> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = session.service().output(
+            id,
+            run::ArtifactPart::Prompt,
+            run::ByteRange {
+                offset: bytes.len() as u64,
+                max_bytes: run::OUTPUT_LIMIT,
+            },
+            call,
+        )?;
+        if chunk.len > PROMPT_LIMIT || chunk.bytes.is_empty() && !chunk.eof {
+            return Err(run::RunError::Validation("original prompt exceeds fallback bound").into());
+        }
+        bytes.extend(chunk.bytes);
+        if chunk.eof {
+            break;
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| run::RunError::Validation("original prompt is not UTF-8").into())
 }
 fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
     if crate::fabric::in_lane() {
@@ -2735,7 +3324,7 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     }
     // The CLI continues an attempt once; a second continuation of the same
     // attempt is a conflict, not a new branch.
-    let (run, started) = continue_attempt(
+    let (run, started) = continue_attempt_mode(
         &session,
         edge,
         prior,
@@ -2743,9 +3332,17 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
         prompt,
         0,
         &call,
+        !command.no_fallback,
     )?;
     let (mut data, human, timed_out) = report(&session, &run, &started, command.wait, edge, &call)?;
     data["resumed_from"] = json!(prior);
+    let continuation = session.store.request(run.run_id, &call)?.fresh_continuation;
+    data["continuation"] = json!(if continuation.is_some() {
+        "fresh"
+    } else {
+        "provider"
+    });
+    data["fallback_reason"] = json!(continuation);
     Ok((data, human, timed_out))
 }
 
@@ -3399,6 +3996,7 @@ mod tests {
             operation_id: OperationId::parse(&format!("trace-{n}"))?,
             created_at,
             request: run::CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
                     base: None,

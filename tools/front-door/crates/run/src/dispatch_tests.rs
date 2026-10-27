@@ -223,6 +223,7 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         worktree: worktree.into(),
     };
     let deliver = |branch: &str, open_pr| WriterDeliveryRequest {
+        mode: Default::default(),
         remote: "origin".into(),
         branch: branch.into(),
         open_pr,
@@ -4050,6 +4051,59 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
             Err(RunError::Conflict)
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let original = input();
+    store.create(&original, &call)?;
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start(original.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let prior = original.attempts[0].attempt_id;
+    let mut resume = Resume {
+        prior,
+        expected_generation: 0,
+        operation_id: "fresh-resume".parse()?,
+        run_id: RunId::from_bytes([90; 16]),
+        attempt_id: AttemptId::from_bytes([91; 16]),
+        prompt: "Original prompt\nPrior result tail\nNew prompt".into(),
+        created_at: WallTime::from_micros(100)?,
+    };
+    let run = store.resume_fresh(&resume, "retained Codex rollout missing", &call)?;
+    assert_eq!(
+        store.resume_fresh(&resume, "retained Codex rollout missing", &call)?,
+        run
+    );
+    let request = store.request(run.run_id, &call)?;
+    assert_eq!(request.parent, Some(prior));
+    assert_eq!(
+        request.tasks[0].authority_digest,
+        original.request.tasks[0].authority_digest
+    );
+    assert_eq!(request.tasks[0].writer, original.request.tasks[0].writer);
+    assert_eq!(request.tasks[0].route, original.request.tasks[0].route);
+    assert_eq!(
+        request.fresh_continuation.as_deref(),
+        Some("retained Codex rollout missing")
+    );
+    store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    assert_eq!(fake.resumed.get(), None);
+    let record = store.record(resume.attempt_id, &call)?;
+    assert_eq!(record.retry_of, Some(prior));
+    assert_eq!(record.continuation.as_deref(), Some("fresh"));
+    resume.prompt = "different".into();
+    assert!(matches!(
+        store.resume_fresh(&resume, "retained Codex rollout missing", &call),
+        Err(RunError::OperationConflict)
+    ));
     Ok(())
 }
 

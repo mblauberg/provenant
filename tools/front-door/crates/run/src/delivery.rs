@@ -46,6 +46,13 @@ struct HostTools {
     git: PathBuf,
     gh: Option<PathBuf>,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PickupReceipt {
+    schema_version: u64,
+    request: WriterDeliveryRequest,
+    receipt: WriterDeliveryReceipt,
+}
 impl std::fmt::Debug for HostDeliveryContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HostDeliveryContext([private handoff])")
@@ -53,6 +60,116 @@ impl std::fmt::Debug for HostDeliveryContext {
 }
 
 impl HostDeliveryContext {
+    /// Final graph delivery publishes its integration ref, with a body built
+    /// from settled node receipts. No checkout is switched or edited.
+    pub fn deliver_graph_pr(self, project: &Path, branch: &str, body: &str) -> Result<String> {
+        let source = if let Some(branch) = branch.strip_prefix("origin/") {
+            format!("refs/remotes/origin/{branch}")
+        } else {
+            format!("refs/heads/{branch}")
+        };
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        let request = Self::destination(crate::DeliveryMode::Pr, branch)?
+            .ok_or(RunError::Validation("graph PR destination"))?;
+        let writer = WriterRequest {
+            project: project.into(),
+            worktree: project.into(),
+        };
+        let host = self.prepare(&writer, &request)?;
+        let bound = host
+            .bound
+            .as_ref()
+            .ok_or(RunError::Delivery(Stage::Prepare))?;
+        let reference = format!("refs/heads/{branch}");
+        let head = host.command(
+            project,
+            "git",
+            &["rev-parse", "--verify", &source],
+            Stage::Head,
+        )?;
+        let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
+        host.command(
+            project,
+            "git",
+            &[
+                "push",
+                "--no-follow-tags",
+                "--recurse-submodules=no",
+                "--",
+                &bound.push_url,
+                &format!("{head}:{reference}"),
+            ],
+            Stage::Push,
+        )?;
+        let remote = host.command(
+            project,
+            "git",
+            &[
+                "ls-remote",
+                "--exit-code",
+                "--",
+                &bound.push_url,
+                &reference,
+            ],
+            Stage::Verify,
+        )?;
+        if remote.split_whitespace().next() != Some(head.to_string().as_str()) {
+            return Err(RunError::Delivery(Stage::Verify));
+        }
+        let repo = bound
+            .pull_request_repo
+            .as_deref()
+            .ok_or(RunError::Delivery(Stage::PullRequest))?;
+        if let Some(url) = host.existing_pr(project, repo, branch, head)? {
+            return Ok(url);
+        }
+        let url = host.command_with_input(
+            project,
+            "gh",
+            &[
+                "pr",
+                "create",
+                "--repo",
+                repo,
+                "--head",
+                branch,
+                "--title",
+                &format!("Graph delivery {branch}"),
+                "--body-file",
+                "-",
+            ],
+            Stage::PullRequest,
+            body.as_bytes(),
+        )?;
+        if !url.starts_with("https://") || url.lines().count() != 1 {
+            return Err(RunError::Delivery(Stage::PullRequest));
+        }
+        Ok(url)
+    }
+    /// Resolve the concise mode into the existing explicit destination contract.
+    /// Integration names are local unless qualified as `origin/<branch>`.
+    pub fn destination(
+        mode: crate::DeliveryMode,
+        branch: &str,
+    ) -> Result<Option<WriterDeliveryRequest>> {
+        let (remote, destination, open_pr) = match &mode {
+            crate::DeliveryMode::None => return Ok(None),
+            crate::DeliveryMode::Push => ("origin".to_owned(), branch.to_owned(), false),
+            crate::DeliveryMode::Pr => ("origin".to_owned(), branch.to_owned(), true),
+            crate::DeliveryMode::Integrate(target) => match target.strip_prefix("origin/") {
+                Some(branch) => ("origin".to_owned(), branch.to_owned(), false),
+                None => (String::new(), target.clone(), false),
+            },
+        };
+        let request = WriterDeliveryRequest {
+            mode,
+            remote,
+            branch: destination,
+            open_pr,
+        };
+        validate(&request)?;
+        Ok(Some(request))
+    }
     pub(crate) fn new(environment: Vec<(OsString, OsString)>) -> Self {
         Self {
             environment: environment
@@ -127,6 +244,32 @@ impl HostDeliveryContext {
             None
         };
         self.tools = Some(HostTools { git, gh });
+        if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
+            let branch = self.command(
+                &writer.worktree,
+                "git",
+                &["symbolic-ref", "--quiet", "--short", "HEAD"],
+                stage,
+            )?;
+            let git_dir = self.command(
+                &writer.worktree,
+                "git",
+                &["rev-parse", "--absolute-git-dir"],
+                stage,
+            )?;
+            let base_head = self.head(writer)?;
+            self.bound = Some(BoundDelivery {
+                base_head,
+                push_url: String::new(),
+                lane_branch: branch,
+                pull_request_repo: None,
+                git_dir: std::fs::canonicalize(git_dir)
+                    .map_err(|error| prepare_error("git dir", error))?,
+                host_cwd: writer.project.clone(),
+                destination: request.clone(),
+            });
+            return Ok(self);
+        }
         let urls = self.command(
             &writer.worktree,
             "git",
@@ -349,7 +492,23 @@ impl HostDeliveryContext {
             .find(|p| !p.starts_with(&writer.worktree) && provenant_os::sys::is_executable(p))
             .ok_or_else(|| prepare_error("gh executable", format!("{tool} is unavailable on PATH")))
     }
-    fn command(&self, cwd: &Path, tool: &str, args: &[&str], stage: Stage) -> Result<String> {
+    pub(super) fn command(
+        &self,
+        cwd: &Path,
+        tool: &str,
+        args: &[&str],
+        stage: Stage,
+    ) -> Result<String> {
+        self.command_with_input(cwd, tool, args, stage, b"")
+    }
+    fn command_with_input(
+        &self,
+        cwd: &Path,
+        tool: &str,
+        args: &[&str],
+        stage: Stage,
+        input: &[u8],
+    ) -> Result<String> {
         let failure = |reason: String| {
             if stage == Stage::Prepare {
                 let step = match args.first().copied() {
@@ -425,7 +584,7 @@ impl HostDeliveryContext {
         };
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
         options.env = Some(&environment);
-        options.stdin = Some(b"");
+        options.stdin = Some(input);
         options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
         options.stderr = if stage == Stage::Prepare {
             StreamPolicy::Capture { limit: 4096 }
@@ -461,7 +620,7 @@ impl HostDeliveryContext {
             .map(|v| v.trim().into())
             .map_err(|error| failure(error.to_string()))
     }
-    fn head(&self, writer: &WriterRequest) -> Result<GitOid> {
+    pub(super) fn head(&self, writer: &WriterRequest) -> Result<GitOid> {
         let head = self.command(
             &writer.worktree,
             "git",
@@ -470,12 +629,282 @@ impl HostDeliveryContext {
         )?;
         GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))
     }
+    fn clean(&self, writer: &WriterRequest) -> Result<()> {
+        let path = writer.worktree.to_str().ok_or(RunError::UnsafePath)?;
+        let status = self.command(
+            &writer.worktree,
+            "git",
+            &[
+                "--work-tree",
+                path,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            Stage::Head,
+        )?;
+        if !status.is_empty() {
+            return Err(RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::Dirty,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Serialise by destination in the common Git directory. merge-tree and
+    /// commit-tree create objects only; CAS publishes after a conflict-free
+    /// result, so conflicts never leave an index, sequencer or checkout changed.
+    pub(super) fn integrate(
+        &self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+        head: GitOid,
+    ) -> Result<()> {
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use provenant_os::{clock::SystemClock, fs::LockMode};
+        let stage = Stage::Integrate;
+        let bound = self.bound.as_ref().ok_or(RunError::Delivery(stage))?;
+        let common = self.command(
+            &writer.worktree,
+            "git",
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stage,
+        )?;
+        let directory = Directory::open_anchor(Path::new(&common))?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let lock_name = format!(
+            "provenant-integrate-{}.lock",
+            provenant_core::hex(
+                provenant_records::CanonicalV1::file_digest(
+                    format!("{}/{}", request.remote, request.branch).as_bytes()
+                )
+                .bytes()
+            )
+        );
+        let _lock = directory.lock(
+            OsStr::new(&lock_name),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 30)
+                .map_err(|_| RunError::Validation("integration lock budget"))?,
+            &cancel,
+            &clock,
+        )?;
+        self.clean(writer)?;
+        if self.head(writer)? != head {
+            return Err(RunError::Delivery(Stage::Head));
+        }
+        let destination = format!("refs/heads/{}", request.branch);
+        let remote = !request.remote.is_empty();
+        let target = if remote {
+            let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "--",
+                    &bound.push_url,
+                    &format!("+{destination}:{tracking}"),
+                ],
+                stage,
+            )?;
+            tracking
+        } else {
+            destination.clone()
+        };
+        let expected = self.command(
+            &writer.worktree,
+            "git",
+            &["rev-parse", "--verify", &target],
+            stage,
+        )?;
+        let expected_oid = GitOid::parse(&expected).map_err(|_| RunError::Delivery(stage))?;
+        if self
+            .command(
+                &writer.worktree,
+                "git",
+                &["merge-base", "--is-ancestor", &head.to_string(), &expected],
+                stage,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if !remote {
+            let trees = self.command(
+                &writer.worktree,
+                "git",
+                &["worktree", "list", "--porcelain"],
+                stage,
+            )?;
+            if trees
+                .lines()
+                .any(|line| line == format!("branch {destination}"))
+            {
+                return Err(RunError::Writer(
+                    provenant_confinement::worktrees::WorktreeError::CheckedOut,
+                ));
+            }
+        }
+        let candidate = if self
+            .command(
+                &writer.worktree,
+                "git",
+                &["merge-base", "--is-ancestor", &expected, &head.to_string()],
+                stage,
+            )
+            .is_ok()
+        {
+            head
+        } else {
+            // A configured merge driver may execute arbitrary repository code.
+            if !self
+                .command(
+                    &writer.worktree,
+                    "git",
+                    &["config", "--get-regexp", "^merge\\..*\\.driver$"],
+                    stage,
+                )?
+                .is_empty()
+            {
+                return Err(RunError::Delivery(stage));
+            }
+            let tree = self.command(
+                &writer.worktree,
+                "git",
+                &["merge-tree", "--write-tree", &expected, &head.to_string()],
+                stage,
+            )?;
+            let tree = GitOid::parse(tree.lines().next().unwrap_or_default())
+                .map_err(|_| RunError::Delivery(stage))?;
+            let commit = self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "-c",
+                    "user.name=Provenant",
+                    "-c",
+                    "user.email=provenant@localhost",
+                    "commit-tree",
+                    &tree.to_string(),
+                    "-p",
+                    &expected,
+                    "-p",
+                    &head.to_string(),
+                    "-m",
+                    &format!("Merge lane into {}", request.branch),
+                ],
+                stage,
+            )?;
+            GitOid::parse(&commit).map_err(|_| RunError::Delivery(stage))?
+        };
+        if remote {
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "push",
+                    "--no-follow-tags",
+                    "--recurse-submodules=no",
+                    &format!("--force-with-lease={destination}:{expected_oid}"),
+                    "--",
+                    &bound.push_url,
+                    &format!("{candidate}:{destination}"),
+                ],
+                stage,
+            )?;
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "--",
+                    &bound.push_url,
+                    &format!("+{destination}:{target}"),
+                ],
+                Stage::Verify,
+            )?;
+            if self.command(
+                &writer.worktree,
+                "git",
+                &["rev-parse", "--verify", &target],
+                Stage::Verify,
+            )? != candidate.to_string()
+            {
+                return Err(RunError::Delivery(Stage::Verify));
+            }
+        } else {
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "update-ref",
+                    &destination,
+                    &candidate.to_string(),
+                    &expected,
+                ],
+                stage,
+            )?;
+        }
+        if self.head(writer)? != head {
+            return Err(RunError::Delivery(Stage::Head));
+        }
+        Ok(())
+    }
+    fn existing_pr(
+        &self,
+        cwd: &Path,
+        repo: &str,
+        branch: &str,
+        head: GitOid,
+    ) -> Result<Option<String>> {
+        let Ok(raw) = self.command(
+            cwd,
+            "gh",
+            &[
+                "pr",
+                "view",
+                branch,
+                "--repo",
+                repo,
+                "--json",
+                "url,state,headRefOid",
+            ],
+            Stage::PullRequest,
+        ) else {
+            return Ok(None);
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+        if value["state"] != "OPEN" {
+            return Ok(None);
+        }
+        if value["headRefOid"].as_str() != Some(head.to_string().as_str()) {
+            return Err(RunError::Delivery(Stage::Verify));
+        }
+        let url = value["url"]
+            .as_str()
+            .filter(|url| url.starts_with("https://") && url.lines().count() == 1)
+            .ok_or(RunError::Delivery(Stage::PullRequest))?;
+        Ok(Some(url.to_owned()))
+    }
     fn push(
         &self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
         head: GitOid,
+        body: &str,
     ) -> Result<Option<String>> {
+        self.clean(writer)?;
+        if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
+            self.integrate(writer, request, head)?;
+            return Ok(None);
+        }
         let bound = self
             .bound
             .as_ref()
@@ -570,7 +999,14 @@ impl HostDeliveryContext {
             }
         }
         if request.open_pr {
-            let url = self.command(
+            let repo = bound
+                .pull_request_repo
+                .as_deref()
+                .ok_or(RunError::Delivery(Stage::PullRequest))?;
+            if let Some(url) = self.existing_pr(cwd, repo, &request.branch, head)? {
+                return Ok(Some(url));
+            }
+            let url = self.command_with_input(
                 cwd,
                 "gh",
                 &[
@@ -583,9 +1019,13 @@ impl HostDeliveryContext {
                         .ok_or(RunError::Delivery(Stage::PullRequest))?,
                     "--head",
                     &request.branch,
-                    "--fill",
+                    "--title",
+                    &format!("Lane delivery {}", &head.to_string()[..12]),
+                    "--body-file",
+                    "-",
                 ],
                 Stage::PullRequest,
+                body.as_bytes(),
             )?;
             if !url.starts_with("https://") || url.lines().count() != 1 {
                 return Err(RunError::Delivery(Stage::PullRequest));
@@ -695,6 +1135,21 @@ fn pull_request_repo(url: &str) -> Result<String> {
 }
 
 pub(crate) fn validate(request: &WriterDeliveryRequest) -> Result<()> {
+    if matches!(request.mode, crate::DeliveryMode::None) {
+        return Err(RunError::Validation(
+            "none delivery must omit the destination",
+        ));
+    }
+    if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
+        GitRefName::branch(&request.branch)
+            .map_err(|_| RunError::Validation("integration branch"))?;
+        if request.open_pr {
+            return Err(RunError::Validation(
+                "integration cannot also open a lane PR",
+            ));
+        }
+        return Ok(());
+    }
     if request.remote.is_empty()
         || request.remote.len() > 64
         || request.remote.starts_with('-')
@@ -711,6 +1166,224 @@ pub(crate) fn validate(request: &WriterDeliveryRequest) -> Result<()> {
     Ok(())
 }
 
+impl crate::RunStore {
+    pub fn delivered(
+        &self,
+        id: provenant_core::AttemptId,
+        call: &crate::Request<'_>,
+    ) -> Result<Option<(WriterDeliveryRequest, WriterDeliveryReceipt)>> {
+        let record = self.record(id, call)?;
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        match attempt.read_stable(OsStr::new("delivery-pickup.json"), crate::RECORD_LIMIT) {
+            Ok(raw) => {
+                let pickup: PickupReceipt = crate::db::decode(&raw)?;
+                return Ok(Some((pickup.request, pickup.receipt)));
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let Some(receipt) = record
+            .delivery
+            .filter(|receipt| matches!(receipt.state, WriterDeliveryState::Delivered { .. }))
+        else {
+            return Ok(None);
+        };
+        let request = self
+            .request(record.run_id, call)?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.deliver)
+            .ok_or(RunError::Validation("delivered destination missing"))?;
+        Ok(Some((request, receipt)))
+    }
+    pub fn worktree_settlement(
+        &self,
+        id: provenant_core::AttemptId,
+        call: &crate::Request<'_>,
+    ) -> Result<Option<serde_json::Value>> {
+        let record = self.record(id, call)?;
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        match attempt.read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT) {
+            Ok(raw) => Ok(Some(crate::db::decode(&raw)?)),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    /// Host lifecycle receipt, separate from the immutable terminal decision.
+    pub fn record_worktree_settlement(
+        &self,
+        id: provenant_core::AttemptId,
+        receipt: &serde_json::Value,
+        call: &crate::Request<'_>,
+    ) -> Result<()> {
+        let record = self.record(id, call)?;
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let _lock = attempt.lock(
+            OsStr::new("worktree-settlement.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?;
+        match attempt.read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT) {
+            Ok(raw) => {
+                let prior: serde_json::Value = crate::db::decode(&raw)?;
+                if prior["state"] == "pruned" {
+                    return Ok(());
+                }
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        attempt
+            .atomic_write(
+                OsStr::new("worktree-settlement.json"),
+                ".settlement-",
+                &crate::db::bytes(receipt)?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(RunError::from)
+    }
+    /// Explicit host pickup of a settled writer. Its immutable terminal record
+    /// stays intact; the keyed sealed receipt records this later delivery.
+    pub fn deliver(
+        &self,
+        id: provenant_core::AttemptId,
+        override_request: Option<WriterDeliveryRequest>,
+        host: HostDeliveryContext,
+        call: &crate::Request<'_>,
+    ) -> Result<WriterDeliveryReceipt> {
+        use provenant_os::fs::LockMode;
+        let record = self.record(id, call)?;
+        if !matches!(
+            record.state,
+            crate::AttemptState::Terminal {
+                outcome: crate::Outcome::Succeeded,
+                ..
+            }
+        ) {
+            return Err(RunError::Validation(
+                "delivery needs a succeeded settled writer",
+            ));
+        }
+        let task = self
+            .request(record.run_id, call)?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(RunError::NotFound)?;
+        let writer = task
+            .writer
+            .ok_or(RunError::Validation("delivery needs a writer"))?;
+        let request = override_request
+            .or(task.deliver)
+            .ok_or(RunError::Validation(
+                "choose --deliver for a lane without recorded delivery",
+            ))?;
+        validate(&request)?;
+        if !self.custody_released(&record, call)? {
+            return Err(RunError::Validation("writer custody has not settled"));
+        }
+        let mut launch = crate::prepare_writer(&writer, &self.writer_registry, record.project_id)?;
+        let state = launch.custody.take().ok_or(RunError::UnsafePath)?.0;
+        let _writer = state.lock(
+            OsStr::new("writer.lock"),
+            LockMode::Exclusive,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?;
+        match state.metadata_at(OsStr::new("reservation.json"), false) {
+            Err(error) if error.is_not_found() => {}
+            _ => {
+                return Err(RunError::Validation(
+                    "worktree has another writer reservation",
+                ));
+            }
+        }
+        let host = host.prepare(&writer, &request)?;
+        host.clean(&writer)?;
+        let head = record
+            .head
+            .ok_or(RunError::Validation("receipt has no settled head"))?;
+        if host.head(&writer)? != head {
+            return Err(RunError::Validation(
+                "worktree head differs from the settled receipt",
+            ));
+        }
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let key = provenant_core::hex(
+            provenant_records::CanonicalV1::file_digest(
+                &serde_json::to_vec(&(head, &request))
+                    .map_err(|_| RunError::Validation("delivery key"))?,
+            )
+            .bytes(),
+        );
+        let receipt_name = format!("delivery-{key}.json");
+        if let Some(raw) =
+            crate::artifacts::read_sealed(&attempt, &receipt_name, crate::RECORD_LIMIT)?
+        {
+            return crate::db::decode(&raw);
+        }
+        if let Some(receipt) = record.delivery.as_ref()
+            && receipt.remote == request.remote
+            && receipt.branch == request.branch
+            && matches!(receipt.state, WriterDeliveryState::Delivered { .. })
+            && (!request.open_pr
+                || matches!(
+                    receipt.state,
+                    WriterDeliveryState::Delivered {
+                        pull_request: Some(_)
+                    }
+                ))
+        {
+            return Ok(receipt.clone());
+        }
+        let body = crate::artifacts::read_sealed(&attempt, "result.md", crate::RESULT_LIMIT)?
+            .unwrap_or_default();
+        let body = String::from_utf8(body)
+            .map_err(|_| RunError::Validation("receipt result is not UTF-8"))?;
+        let result = host.push(&writer, &request, head, &body);
+        let state = match result {
+            Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
+            Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },
+            Err(error) => return Err(error),
+        };
+        let receipt = WriterDeliveryReceipt {
+            schema_version: 1,
+            remote: request.remote.clone(),
+            branch: request.branch.clone(),
+            head: Some(head),
+            state,
+        };
+        // Failed effects may be explicitly retried; successful effects replay.
+        if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
+            crate::artifacts::seal(
+                &attempt,
+                &receipt_name,
+                &crate::db::bytes(&receipt)?,
+                crate::RECORD_LIMIT,
+            )?;
+            attempt
+                .atomic_write(
+                    OsStr::new("delivery-pickup.json"),
+                    ".pickup-",
+                    &crate::db::bytes(&PickupReceipt {
+                        schema_version: 1,
+                        request,
+                        receipt: receipt.clone(),
+                    })?,
+                    provenant_os::fs::PublishMode::Replace,
+                )?
+                .require_durable()
+                .map_err(RunError::from)?;
+        }
+        Ok(receipt)
+    }
+}
+
 /// The live holder calls this only after success and confinement checks. A
 /// sealed start marker prevents repeating external effects after interruption.
 pub(crate) fn deliver_once(
@@ -718,6 +1391,7 @@ pub(crate) fn deliver_once(
     writer: &WriterRequest,
     request: &WriterDeliveryRequest,
     attempt: &Directory,
+    result: &str,
 ) -> Result<WriterDeliveryReceipt> {
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
@@ -749,6 +1423,12 @@ pub(crate) fn deliver_once(
     if started.is_none() {
         crate::artifacts::seal(
             attempt,
+            "pull-request-body.md",
+            result.as_bytes(),
+            crate::RESULT_LIMIT,
+        )?;
+        crate::artifacts::seal(
+            attempt,
             "delivery-started.json",
             &crate::db::bytes(&receipt)?,
             crate::RECORD_LIMIT,
@@ -763,7 +1443,7 @@ pub(crate) fn deliver_once(
             match receipt
                 .head
                 .ok_or(RunError::Delivery(Stage::Head))
-                .and_then(|head| host.push(writer, request, head))
+                .and_then(|head| host.push(writer, request, head, result))
             {
                 Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
                 Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },

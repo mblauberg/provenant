@@ -614,6 +614,7 @@ fn persisted_attempt(
         run_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
+            fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
                 base: None,
@@ -950,6 +951,63 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     Ok(())
 }
 
+fn owned_dispatch_creates_and_replays_after_pruning() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    for args in [
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["commit", "--allow-empty", "-qm", "base"],
+        vec!["branch", "-M", "main"],
+    ] {
+        let output = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&output), 0);
+    }
+    let prompt = rig.root.join("owned-prompt.md");
+    fs::write(&prompt, "Do not change files.")?;
+    let args = [
+        "dispatch",
+        "--operation-id",
+        "owned-replay",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/owned",
+        "--base",
+        "main",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--json",
+    ];
+    // No provider is installed in the rig: the admitted attempt settles at
+    // preparation, leaving a clean base that its own lifecycle can prune.
+    let first = rig.command(&args)?;
+    let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
+    let data = &first["data"];
+    assert_eq!(data["worktree"]["owned"], true, "{first}");
+    assert_eq!(
+        data["worktree_settlements"][0]["state"], "pruned",
+        "{first}"
+    );
+    let path = data["worktree"]["path"].as_str().ok_or("worktree path")?;
+    assert!(!std::path::Path::new(path).exists());
+    let second = rig.command(&args)?;
+    let second: Value = serde_json::from_slice(&second.stdout.bytes)?;
+    assert_eq!(second["data"]["run_id"], data["run_id"], "{second}");
+    assert_eq!(
+        second["data"]["worktree_settlement"]["state"], "pruned",
+        "{second}"
+    );
+    assert!(!std::path::Path::new(path).exists());
+    fs::write(&prompt, "Changed prompt")?;
+    let conflict = rig.command(&args)?;
+    assert_ne!(code(&conflict), 0);
+    assert!(!std::path::Path::new(path).exists());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = if args
@@ -961,6 +1019,7 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                "owned_dispatch_creates_and_replays_after_pruning",
                 "codex_dispatch_observes_rollout",
                 "claude_dispatch_refreshes_registered_account",
                 "graph_settlement_advances_writer_and_account_routed_review",
@@ -972,6 +1031,9 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    "owned_dispatch_creates_and_replays_after_pruning" => {
+                        owned_dispatch_creates_and_replays_after_pruning()
+                    }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()

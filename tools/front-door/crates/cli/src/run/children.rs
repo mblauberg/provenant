@@ -777,6 +777,7 @@ mod tests {
             operation_id: OperationId::parse("deferred-child")?,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
+                fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
                     base: None,

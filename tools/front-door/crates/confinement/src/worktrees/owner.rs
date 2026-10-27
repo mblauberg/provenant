@@ -135,16 +135,19 @@ pub fn prune_owned(
     })?;
     let mut result = RemoveOutcome::default();
     result.removed.push(removed.info.clone());
-    settle_branch(
+    if let Err(error) = settle_branch(
         context,
         branch,
         head,
         Disposition::Merged,
         cancel,
         &mut result,
-    )?;
+    ) {
+        retain(&mut result, branch, retain_reason(&error));
+    }
     if let Some(cache) = removed.lane_cache.as_deref()
-        && let Err(error) = crate::cache::prune_worktree_cargo_cache(context.home, cache) {
+        && let Err(error) = crate::cache::prune_worktree_cargo_cache(context.home, cache)
+    {
         warn_cache_removal(&error);
     }
     Ok(result)

@@ -2409,6 +2409,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    // CI-required fixture: lane sandboxes may deny hard_link with EPERM.
+    // Keep enabled for the macOS confinement job; the pure diagnostic test
+    // above runs even when the launch sandbox cannot construct this fixture.
     fn writable_tree_hard_link_refusal_names_nested_file() -> Result<(), Box<dyn std::error::Error>>
     {
         let temp = tempfile::tempdir()?;

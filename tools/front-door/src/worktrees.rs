@@ -104,6 +104,7 @@ impl Error {
 #[serde(untagged)]
 enum Data {
     Created(worktrees::WorktreeInfo),
+    Adopted(worktrees::WorktreeInfo),
     Listed(Vec<worktrees::WorktreeInfo>),
     Removed(worktrees::RemoveOutcome),
 }
@@ -111,6 +112,7 @@ enum Data {
 pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     let name = match &command {
         Worktree::Create { .. } => "worktree create",
+        Worktree::Adopt { .. } => "worktree adopt",
         Worktree::List => "worktree list",
         Worktree::Remove(_) => "worktree remove",
     };
@@ -160,6 +162,33 @@ fn execute(
         workers,
         |context, cancel| {
             Ok(match command {
+                Worktree::Adopt { path, owner } => {
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        project.join(path)
+                    };
+                    let info = worktrees::list(context, cancel)?
+                        .into_iter()
+                        .find(|tree| canonicalize(&path).ok().as_deref() == Some(&tree.path))
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    let owner = worktrees::WorktreeOwner {
+                        attempt_id: None,
+                        operation_id: None,
+                        branch: info
+                            .branch
+                            .as_deref()
+                            .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                            .ok_or(worktrees::WorktreeError::InvalidRequest)?
+                            .to_owned(),
+                        base: info.head.to_string(),
+                        host: provenant_config::bind_host(roots)?,
+                        created_at: context.clock.wall_now().map_err(|_| Error::Budget)?,
+                        origin: worktrees::WorktreeOrigin::Adopted,
+                        label: owner,
+                    };
+                    Data::Adopted(worktrees::adopt(context, &path, &owner, cancel)?)
+                }
                 Worktree::Create { branch, base } => Data::Created(worktrees::create(
                     context,
                     WorktreeCreate { branch, base },

@@ -2296,12 +2296,37 @@ mod lifecycle_tests {
             .is_err()
         );
         assert!(info.path.exists());
+        fixture.run(&[
+            "-C",
+            info.path.to_str().ok_or("path")?,
+            "commit",
+            "--allow-empty",
+            "-m",
+            "unmerged lane commit",
+        ])?;
+        let head = list(&context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == info.path)
+            .ok_or("lane missing")?
+            .head;
+        assert!(
+            prune_owned(
+                &context,
+                &info.path,
+                attempt,
+                head,
+                base,
+                &policy,
+                &cancel()
+            )
+            .is_err()
+        );
         let removed = prune_owned(
             &context,
             &info.path,
             attempt,
-            base,
-            base,
+            head,
+            head,
             &policy,
             &cancel(),
         )?;

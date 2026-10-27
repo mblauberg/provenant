@@ -7,6 +7,31 @@ use provenant_os::{
 use std::{ffi::OsString, path::Path, time::Duration};
 
 const CONTEXT_LIMIT: usize = 1024 * 1024;
+
+pub fn continuation_history(cwd: &Path) -> Result<String> {
+    let git = provenant_os::git::git_executable().ok_or(RunError::Validation("Git unavailable"))?;
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    let env = repository_environment(&executor, &git, cwd)?;
+    let (out, timed_out) = read_git_with_env(
+        &executor,
+        &git,
+        cwd,
+        &[
+            "log",
+            "--max-count=50",
+            "--format=%h %s",
+            "main..HEAD",
+            "--",
+        ],
+        16_384,
+        &env,
+    )?;
+    let mut text = String::from_utf8_lossy(&out.bytes).into_owned();
+    if timed_out || out.truncated {
+        text.push_str("\n[history truncated or timed out]\n");
+    }
+    Ok(text)
+}
 // Keep command-scoped overrides above repository/worktree configuration, as
 // confinement's utility reader does. Protocol denial also covers Git < 2.44,
 // which does not honour GIT_NO_LAZY_FETCH.

@@ -395,12 +395,29 @@ impl RunStore {
     /// once; `expected_generation` is 0 before that and 1 after. The route,
     /// access and timeout come from the prior task, never from the caller.
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
+        self.resume_mode(input, call, None)
+    }
+    /// Same lineage, route, authority and writer, without provider continuation.
+    pub fn resume_fresh(
+        &self,
+        input: &Resume,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<RunRecord> {
+        self.resume_mode(input, call, Some(reason))
+    }
+    fn resume_mode(
+        &self,
+        input: &Resume,
+        call: &Request<'_>,
+        fresh: Option<&str>,
+    ) -> Result<RunRecord> {
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
         }
         let replay = self.operation(&input.operation_id, call)?.is_some();
-        let _retention = if replay {
+        let _retention = if replay || fresh.is_some() {
             None
         } else {
             Some(self.retain_provider_state(input.prior, call)?)
@@ -415,6 +432,7 @@ impl RunStore {
             run_id: input.run_id,
             operation_id: input.operation_id.clone(),
             request: CanonicalRequest {
+                fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
                 tasks: vec![TaskRequest {
                     base: task.base.clone(),

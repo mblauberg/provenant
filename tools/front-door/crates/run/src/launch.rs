@@ -504,6 +504,7 @@ impl RunStore {
         };
         let resume = request
             .parent
+            .filter(|_| request.fresh_continuation.is_none())
             .map(|prior| self.record(prior, call))
             .transpose()?;
         let ids: Vec<String> = call.retry(|| {

@@ -25,6 +25,11 @@ const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_branch: Option<String>,
+    /// A graph may open one PR after all its nodes succeed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<provenant_records::run::DeliveryMode>,
     pub schema_version: u64,
     pub graph_id: String,
     pub nodes: Vec<GraphNode>,
@@ -59,6 +64,8 @@ pub struct GraphExecution {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<provenant_records::run::DeliveryMode>,
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
@@ -84,6 +91,12 @@ pub enum AccessMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphCheckpoint {
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub delivery_required: bool,
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub delivered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<String>,
     /// Durable admission fence. Resume observes the same attempt keys.
     #[serde(default)]
     pub cancelled: bool,
@@ -93,6 +106,10 @@ pub struct GraphCheckpoint {
     pub plan_digest: String,
     /// Nodes are stored in topological order.
     pub nodes: Vec<NodeProgress>,
+}
+
+fn not_delivered(delivered: &bool) -> bool {
+    !delivered
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +220,7 @@ pub struct GraphRun {
 /// What the checkpoint already knows about an attempt.
 #[derive(Clone, Copy, Debug)]
 pub struct Replay<'a> {
+    pub delivery: Option<&'a provenant_records::run::DeliveryMode>,
     /// Reference to the accepted attempt, once saved.
     pub stored_ref: Option<&'a str>,
     /// Actor to submit under when no reference was saved.
@@ -220,6 +238,13 @@ pub trait AttemptOwner {
 
     /// The actor this owner submits as, recorded before the first submit.
     fn actor(&self) -> String;
+    fn deliver_graph(
+        &mut self,
+        _document: &GraphDocument,
+        _checkpoint: &GraphCheckpoint,
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
 
     fn observe_or_start(
         &mut self,
@@ -350,11 +375,19 @@ impl FileJournal {
         let directory = graph_directory(root, project)?;
         Ok(load_checkpoint(&directory, graph_id)?.and_then(|stored| {
             (!stored.checkpoint.cancelled
-                && stored
+                && (stored
                     .checkpoint
                     .nodes
                     .iter()
-                    .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running)))
+                    .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+                    || !stored.checkpoint.delivered
+                        && stored.execution.document.delivery
+                            == Some(provenant_records::run::DeliveryMode::Pr)
+                        && stored
+                            .checkpoint
+                            .nodes
+                            .iter()
+                            .all(|node| node.state == NodeState::Succeeded)))
             .then_some(stored.execution)
         }))
     }
@@ -579,6 +612,10 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    integration_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery: Option<provenant_records::run::DeliveryMode>,
     schema_version: u64,
     graph_id: String,
     nodes: Vec<PlannedNode>,
@@ -586,6 +623,8 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery: Option<provenant_records::run::DeliveryMode>,
     access: AccessMode,
     worktree: Option<String>,
     id: String,
@@ -632,6 +671,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
         None => {
             let checkpoint = GraphCheckpoint {
+                delivery_required: document.delivery
+                    == Some(provenant_records::run::DeliveryMode::Pr),
+                delivered: false,
+                pull_request: None,
                 schema_version: 1,
                 cancelled: false,
                 graph_id: plan.graph_id.clone(),
@@ -761,6 +804,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     node.access,
                     node.worktree.as_deref(),
                     Replay {
+                        delivery: node.delivery.as_ref(),
                         stored_ref: stored_ref.as_deref(),
                         launch_actor: &launch_actor,
                     },
@@ -826,6 +870,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     }
 
+    if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
+        && !checkpoint.delivered
+        && checkpoint
+            .nodes
+            .iter()
+            .all(|node| node.state == NodeState::Succeeded)
+    {
+        checkpoint.pull_request = owner
+            .deliver_graph(document, &checkpoint)
+            .map_err(GraphError::Run)?;
+        checkpoint.delivered = true;
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
     let status = if checkpoint.nodes.iter().all(|node| {
         matches!(
             node.state,
@@ -871,6 +928,19 @@ fn validate_plan(
     if document.schema_version != 1 {
         return Err("schema version");
     }
+    use provenant_records::run::DeliveryMode;
+    if !matches!(
+        document.delivery,
+        None | Some(DeliveryMode::None) | Some(DeliveryMode::Pr)
+    ) || document.delivery == Some(DeliveryMode::Pr) && document.integration_branch.is_none()
+        || document.integration_branch.as_ref().is_some_and(|branch| {
+            format!("integrate:{branch}")
+                .parse::<DeliveryMode>()
+                .is_err()
+        })
+    {
+        return Err("graph delivery requires an integration branch and at most one PR");
+    }
     if !valid_identifier(&document.graph_id) {
         return Err("graph id");
     }
@@ -890,6 +960,14 @@ fn validate_plan(
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
         validate_access(node.access, node.worktree.as_deref())?;
+        if node.access == AccessMode::ReadOnly
+            && !matches!(node.delivery, None | Some(DeliveryMode::None))
+        {
+            return Err("read-only node cannot deliver");
+        }
+        if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
+            return Err("graph PR is exclusive with node PRs");
+        }
         if node.prompt.is_empty() || node.prompt.len() > MAX_NODE_PROMPT_BYTES {
             return Err("prompt size");
         }
@@ -928,6 +1006,7 @@ fn validate_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            delivery: node.delivery.clone(),
             access: node.access,
             worktree: node.worktree.clone(),
             id: node.id.clone(),
@@ -974,6 +1053,8 @@ fn validate_plan(
         .collect();
     Ok((
         PlannedGraph {
+            integration_branch: document.integration_branch.clone(),
+            delivery: document.delivery.clone(),
             schema_version: 1,
             graph_id: document.graph_id.clone(),
             nodes: topological_nodes,
@@ -1010,7 +1091,11 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     plan: &PlannedGraph,
     digest: &str,
 ) -> Result<(), GraphError<R, J>> {
-    if checkpoint.schema_version != 1 || checkpoint.graph_id != plan.graph_id {
+    if checkpoint.schema_version != 1
+        || checkpoint.graph_id != plan.graph_id
+        || checkpoint.delivery_required
+            != (plan.delivery == Some(provenant_records::run::DeliveryMode::Pr))
+    {
         return Err(GraphError::BadCheckpoint);
     }
     if checkpoint.plan_digest != digest {
@@ -1115,6 +1200,8 @@ mod tests {
 
     #[derive(Default)]
     struct FakeOwner {
+        deliveries: usize,
+        delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
         observations: VecDeque<AttemptObservation>,
         calls: Vec<(AttemptKey, GraphRoute)>,
         permissions: Vec<(AccessMode, Option<String>)>,
@@ -1129,6 +1216,14 @@ mod tests {
         fn actor(&self) -> String {
             self.actor.clone()
         }
+        fn deliver_graph(
+            &mut self,
+            _document: &GraphDocument,
+            _checkpoint: &GraphCheckpoint,
+        ) -> Result<Option<String>, Self::Error> {
+            self.deliveries += 1;
+            Ok(Some("https://example.invalid/pr/1".into()))
+        }
 
         fn observe_or_start(
             &mut self,
@@ -1139,6 +1234,7 @@ mod tests {
             worktree: Option<&str>,
             replay: Replay<'_>,
         ) -> Result<AttemptObservation, Self::Error> {
+            self.delivery_modes.push(replay.delivery.cloned());
             self.stored_refs.push(replay.stored_ref.map(str::to_owned));
             self.launch_actors.push(replay.launch_actor.to_owned());
             self.calls.push((key.clone(), route.clone()));
@@ -1159,6 +1255,7 @@ mod tests {
 
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
+            delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
             id: id.to_owned(),
@@ -1171,6 +1268,8 @@ mod tests {
 
     fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         GraphDocument {
+            integration_branch: None,
+            delivery: None,
             schema_version: 1,
             graph_id: "g-test".to_owned(),
             nodes,
@@ -1186,6 +1285,60 @@ mod tests {
     }
 
     #[test]
+    fn graph_delivers_nodes_and_opens_one_final_pr_only_after_success() {
+        use provenant_records::run::DeliveryMode;
+        let mut writer = node("writer", route("fixture"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some(".worktrees/writer".into());
+        writer.delivery = Some(DeliveryMode::Integrate("integration".into()));
+        let mut document = graph(vec![writer]);
+        document.integration_branch = Some("integration".into());
+        document.delivery = Some(DeliveryMode::Pr);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let result = advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(result.checkpoint.delivered);
+        assert_eq!(owner.deliveries, 1);
+        assert_eq!(
+            owner.delivery_modes,
+            vec![Some(DeliveryMode::Integrate("integration".into()))]
+        );
+        advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.deliveries, 1);
+        let mut failed = FakeOwner {
+            observations: VecDeque::from([terminal(AttemptOutcome::OtherFailure)]),
+            ..Default::default()
+        };
+        let result = advance(&document, &mut failed, &mut MemoryJournal::default()).unwrap();
+        assert!(!result.checkpoint.delivered);
+        assert_eq!(failed.deliveries, 0);
+        document.nodes[0].access = AccessMode::ReadOnly;
+        document.nodes[0].worktree = None;
+        assert!(validate_plan(&document).is_err());
+    }
+
+    #[test]
+    fn legacy_checkpoint_keeps_its_digest_without_delivery_fields() {
+        let document = graph(vec![node("reader", route("fixture"))]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let result = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let mut legacy = serde_json::to_value(&result.checkpoint).unwrap();
+        legacy.as_object_mut().unwrap().remove("delivered");
+        legacy.as_object_mut().unwrap().remove("pull_request");
+        let parsed: GraphCheckpoint = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &legacy).unwrap(),
+            CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &parsed).unwrap()
+        );
+    }
+
+    #[test]
     fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         let routes = vec![
             route("first"),
@@ -1194,6 +1347,7 @@ mod tests {
             route("fourth"),
         ];
         let document = graph(vec![GraphNode {
+            delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
             id: "node".to_owned(),
@@ -1298,6 +1452,7 @@ mod tests {
         ] {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
+                delivery: None,
                 access: AccessMode::ReadOnly,
                 worktree: None,
                 id: "node".to_owned(),
@@ -1531,6 +1686,7 @@ mod tests {
     #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
+            delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
             id: "node".to_owned(),
