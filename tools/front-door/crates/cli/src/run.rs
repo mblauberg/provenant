@@ -996,9 +996,67 @@ pub fn submit_with_host(
 }
 
 pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
-    reply_waited("dispatch", dispatch_inner(command, edge))
+    let operation_id = command.operation_id.clone();
+    let mut created = None;
+    let mut result = dispatch_inner(command, edge, &mut created);
+    if let (Err(fail), Some((path, branch))) = (&mut result, created) {
+        // A failed launch can follow admission. Those trees belong to the
+        // accepted run and must remain available for resume.
+        let cleanup = (|| -> Result<(), Fail> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel)?;
+            let session = open(edge, &call)?;
+            if session.store.operation(&operation_id, &call)?.is_some() {
+                return Ok(());
+            }
+            provenant_confinement::worktrees::with_context(
+                edge.roots,
+                edge.home,
+                edge.cwd,
+                &clock,
+                &cancel,
+                |context| {
+                    use provenant_confinement::worktrees;
+                    let info = worktrees::list(context, &cancel)?
+                        .into_iter()
+                        .find(|tree| tree.path == path)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    if info.dirty != worktrees::WorktreeCondition::Clean
+                        || info.writer != worktrees::WriterState::Free
+                    {
+                        return Err(worktrees::WorktreeError::Dirty);
+                    }
+                    worktrees::remove(
+                        context,
+                        worktrees::WorktreeRemove::Name {
+                            name: branch,
+                            discard: false,
+                            integration: None,
+                        },
+                        &cancel,
+                    )?;
+                    Ok(())
+                },
+            )
+            .map_err(run::RunError::from)?;
+            Ok(())
+        })();
+        if let Err(error) = cleanup {
+            fail.message.push_str(&format!(
+                "; new managed worktree retained for gc at {}: {}",
+                path.display(),
+                error.message
+            ));
+        }
+    }
+    reply_waited("dispatch", result)
 }
-fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, String, bool), Fail> {
+fn dispatch_inner(
+    mut command: Dispatch,
+    edge: &Edge<'_>,
+    created: &mut Option<(PathBuf, String)>,
+) -> Result<(Value, String, bool), Fail> {
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
     if command.host.is_some() && crate::fabric::in_lane() {
@@ -1027,6 +1085,7 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
         let created_at = now(&clock)?;
+        let mut owner_refused = false;
         let info = provenant_confinement::worktrees::with_context(
             edge.roots,
             edge.home,
@@ -1049,17 +1108,25 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                         info
                     }
                     Some(_) => return Err(worktrees::WorktreeError::InvalidRequest),
-                    None => worktrees::create(
-                        context,
-                        WorktreeCreate {
-                            branch: branch.clone(),
-                            base: command.base.clone(),
-                        },
-                        &cancel,
-                    )?,
+                    None => {
+                        let info = worktrees::create(
+                            context,
+                            WorktreeCreate {
+                                branch: branch.clone(),
+                                base: command.base.clone(),
+                            },
+                            &cancel,
+                        )?;
+                        *created = Some((info.path.clone(), branch.clone()));
+                        info
+                    }
                 };
                 let verified = provenant_confinement::verify_worktree(context.repo, &info.path)?;
                 let prior = worktrees::load_owner(&verified)?;
+                if prior.as_ref().is_some_and(|owner| owner.origin != WorktreeOrigin::Lane) {
+                    owner_refused = true;
+                    return Err(worktrees::WorktreeError::UnknownWriter);
+                }
                 let base = if let Some(owner) = prior
                     .as_ref()
                     .filter(|owner| owner.origin == WorktreeOrigin::Lane)
@@ -1094,7 +1161,14 @@ fn dispatch_inner(mut command: Dispatch, edge: &Edge<'_>) -> Result<(Value, Stri
                 Ok(info)
             },
         )
-        .map_err(run::RunError::from)?;
+        .map_err(|error| {
+            if owner_refused {
+                Fail::new(Status::Refused, ErrorKind::Refused,
+                    "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged")
+            } else {
+                run::RunError::from(error).into()
+            }
+        })?;
         command.access.worktree = Some(info.path);
     }
     let access = &command.access;
@@ -3074,7 +3148,7 @@ pub fn continue_attempt(
     )
 }
 #[allow(clippy::too_many_arguments)]
-fn continue_attempt_mode(
+pub fn continue_attempt_mode(
     session: &Session,
     edge: &Edge<'_>,
     prior: AttemptId,

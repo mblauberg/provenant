@@ -951,7 +951,7 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     Ok(())
 }
 
-fn owned_dispatch_creates_and_replays_after_pruning() -> Result {
+fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
@@ -981,30 +981,211 @@ fn owned_dispatch_creates_and_replays_after_pruning() -> Result {
         prompt.to_str().ok_or("prompt")?,
         "--json",
     ];
-    // No provider is installed in the rig: the admitted attempt settles at
-    // preparation, leaving a clean base that its own lifecycle can prune.
+    // A failed attempt retains its checkout even when it is clean.
     let first = rig.command(&args)?;
     let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
     let data = &first["data"];
     assert_eq!(data["worktree"]["owned"], true, "{first}");
     assert_eq!(
-        data["worktree_settlements"][0]["state"], "pruned",
+        data["worktree_settlements"][0]["state"], "retained",
         "{first}"
     );
     let path = data["worktree"]["path"].as_str().ok_or("worktree path")?;
-    assert!(!std::path::Path::new(path).exists());
+    assert!(std::path::Path::new(path).exists());
     let second = rig.command(&args)?;
     let second: Value = serde_json::from_slice(&second.stdout.bytes)?;
     assert_eq!(second["data"]["run_id"], data["run_id"], "{second}");
-    assert_eq!(
-        second["data"]["worktree_settlement"]["state"], "pruned",
-        "{second}"
-    );
-    assert!(!std::path::Path::new(path).exists());
+    assert!(std::path::Path::new(path).exists());
     fs::write(&prompt, "Changed prompt")?;
     let conflict = rig.command(&args)?;
     assert_ne!(code(&conflict), 0);
-    assert!(!std::path::Path::new(path).exists());
+    assert!(std::path::Path::new(path).exists());
+    Ok(())
+}
+
+fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    for args in [
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["commit", "--allow-empty", "-qm", "base"],
+        vec!["branch", "-M", "main"],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
+    let branch = "fixture/adopted";
+    assert_eq!(
+        code(&rig.command(&["worktree", "create", branch, "--base", "main", "--json",])?),
+        0
+    );
+    let tree = rig.project.join(".worktrees/fixture-adopted");
+    let adopted = rig.command(&[
+        "worktree",
+        "adopt",
+        tree.to_str().ok_or("tree")?,
+        "--owner",
+        "human-session",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&adopted),
+        0,
+        "{}",
+        String::from_utf8_lossy(&adopted.stdout.bytes)
+    );
+    let admin = rig.execute(
+        &git,
+        &[
+            "-C",
+            tree.to_str().ok_or("tree")?,
+            "rev-parse",
+            "--absolute-git-dir",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&admin), 0);
+    let owner_path =
+        PathBuf::from(String::from_utf8(admin.stdout.bytes)?.trim()).join("provenant-owner.json");
+    let mut owner: Value = serde_json::from_slice(&fs::read(&owner_path)?)?;
+    let base = owner["base"].clone();
+    let prompt = rig.root.join("owned-prompt.md");
+    fs::write(&prompt, "Do not change files.")?;
+    for same_operation in [false, true] {
+        owner["operation_id"] = if same_operation {
+            json!("adopted-refused")
+        } else {
+            Value::Null
+        };
+        fs::write(&owner_path, serde_json::to_vec(&owner)?)?;
+        let before = fs::read(&owner_path)?;
+        let out = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "adopted-refused",
+            "--model",
+            "codex/gpt-6-luna",
+            "--mode",
+            "worktree-write",
+            "--worktree-branch",
+            branch,
+            "--base",
+            "main",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ])?;
+        assert_ne!(code(&out), 0);
+        let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("adopted or foreign owner"),
+            "{result}"
+        );
+        assert_eq!(fs::read(&owner_path)?, before);
+        assert_eq!(owner["base"], base);
+        assert_eq!(owner["label"], "human-session");
+    }
+    // A new checkout made before prompt loading fails must be removed.
+    let missing = rig.root.join("missing-prompt.md");
+    let out = rig.command(&[
+        "dispatch",
+        "--operation-id",
+        "creation-refused",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/refused",
+        "--base",
+        "main",
+        "--prompt-file",
+        missing.to_str().ok_or("missing")?,
+        "--json",
+    ])?;
+    assert_ne!(code(&out), 0);
+    assert!(!rig.project.join(".worktrees/fixture-refused").exists());
+    Ok(())
+}
+
+fn owned_dispatch_reuses_lane_or_clean_unowned_worktree() -> Result {
+    for existing_owner in [false, true] {
+        let rig = TestRig::new()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+            vec!["branch", "-M", "main"],
+        ] {
+            assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+        }
+        assert_eq!(
+            code(&rig.command(&[
+                "worktree",
+                "create",
+                "fixture/reuse",
+                "--base",
+                "main",
+                "--json",
+            ])?),
+            0
+        );
+        let tree = rig.project.join(".worktrees/fixture-reuse");
+        let admin = rig.execute(
+            &git,
+            &[
+                "-C",
+                tree.to_str().ok_or("tree")?,
+                "rev-parse",
+                "--absolute-git-dir",
+            ],
+            None,
+        )?;
+        assert_eq!(code(&admin), 0);
+        let owner_path = PathBuf::from(String::from_utf8(admin.stdout.bytes)?.trim())
+            .join("provenant-owner.json");
+        let mut prior_base = None;
+        if existing_owner {
+            let adopted =
+                rig.command(&["worktree", "adopt", tree.to_str().ok_or("tree")?, "--json"])?;
+            assert_eq!(code(&adopted), 0);
+            let mut owner: Value = serde_json::from_slice(&fs::read(&owner_path)?)?;
+            owner["origin"] = json!("lane");
+            owner["operation_id"] = json!("previous-lane");
+            prior_base = Some(owner["base"].clone());
+            fs::write(&owner_path, serde_json::to_vec(&owner)?)?;
+        }
+        let prompt = rig.root.join("reuse-prompt.md");
+        fs::write(&prompt, "Do not change files.")?;
+        let out = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "reuse-lane",
+            "--model",
+            "codex/gpt-6-luna",
+            "--mode",
+            "worktree-write",
+            "--worktree-branch",
+            "fixture/reuse",
+            "--base",
+            "main",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ])?;
+        let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert!(result["data"]["run_id"].is_string(), "{result}");
+        let owner: Value = serde_json::from_slice(&fs::read(&owner_path)?)?;
+        assert_eq!(owner["origin"], "lane");
+        assert_eq!(owner["operation_id"], "reuse-lane");
+        if let Some(base) = prior_base {
+            assert_eq!(owner["base"], base);
+        }
+    }
     Ok(())
 }
 
@@ -1019,7 +1200,9 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
-                "owned_dispatch_creates_and_replays_after_pruning",
+                "owned_dispatch_retains_failed_attempt_and_replays",
+                "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
+                "owned_dispatch_reuses_lane_or_clean_unowned_worktree",
                 "codex_dispatch_observes_rollout",
                 "claude_dispatch_refreshes_registered_account",
                 "graph_settlement_advances_writer_and_account_routed_review",
@@ -1031,8 +1214,14 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
-                    "owned_dispatch_creates_and_replays_after_pruning" => {
-                        owned_dispatch_creates_and_replays_after_pruning()
+                    "owned_dispatch_retains_failed_attempt_and_replays" => {
+                        owned_dispatch_retains_failed_attempt_and_replays()
+                    }
+                    "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation" => {
+                        owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
+                    }
+                    "owned_dispatch_reuses_lane_or_clean_unowned_worktree" => {
+                        owned_dispatch_reuses_lane_or_clean_unowned_worktree()
                     }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "claude_dispatch_refreshes_registered_account" => {
