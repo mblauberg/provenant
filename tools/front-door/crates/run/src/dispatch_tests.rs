@@ -5457,3 +5457,31 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
     assert!(serde_json::from_value::<AttemptRecord>(invalid).is_err());
     Ok(())
 }
+
+#[test]
+fn lane_waits_name_a_disk_guard_pause_for_running_lanes() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(120, true), &call)?;
+    assert!(store.claim(id, &at(0), &call)?.is_some());
+    let records = [store.record(id, &call)?];
+    assert!(store.lane_waits(&records, &call).is_empty());
+    let gib = 1024_u64.pow(3);
+    std::fs::create_dir(temp.path().join("disk-guard"))?;
+    std::fs::write(
+        temp.path().join("disk-guard/paused.json"),
+        format!(
+            r#"{{"paused":[{{"pid":42,"uid":501,"name":"cargo","started":"x"}}],"free":{},"resume_at":{}}}"#,
+            20 * gib,
+            50 * gib
+        ),
+    )?;
+    let waits = store.lane_waits(&records, &call);
+    assert_eq!(
+        waits.first().map(|w| w.waiting_for.as_str()),
+        Some("disk guard paused builds (free 20.0 GiB, resumes at 50.0 GiB)")
+    );
+    Ok(())
+}
