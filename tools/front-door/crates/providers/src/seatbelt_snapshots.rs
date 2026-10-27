@@ -346,8 +346,9 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_core::{ProjectId, WorkScope};
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
+    use std::time::Duration;
 
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
@@ -358,16 +359,17 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))?;
     }
     let repo = root.join("repo");
+    let executor = SystemExecutor::new(1)?;
     let run_git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(args)
-            .output()?;
+        let argv = std::iter::once("/usr/bin/git")
+            .chain(args.iter().copied())
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let output = executor.execute(ExecOptions::new(&argv, &repo, Duration::from_secs(10)))?;
         assert!(
-            output.status.success(),
+            output.termination == Termination::Exit(0),
             "git failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stderr.bytes)
         );
         Ok(())
     };

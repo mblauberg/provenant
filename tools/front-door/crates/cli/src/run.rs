@@ -359,8 +359,16 @@ impl run::Providers for Registry<'_> {
             .iter()
             .find(|event| matches!(event, ProviderEvent::Denied { .. }))
         {
-            decoded.outcome = run::Outcome::Failed;
-            decoded.reason = Some(format!("provider denied: {action}"));
+            if decoded.outcome == run::Outcome::Failed
+                && decoded.reason.as_deref() == Some("provider failed")
+                && code == Some(0)
+                && !timed_out
+                && !events
+                    .iter()
+                    .any(|event| matches!(event, ProviderEvent::Error))
+            {
+                decoded.reason = Some(format!("provider denied: {action}"));
+            }
         } else if let Some(ProviderEvent::QuotaLimited {
             message,
             pool,
@@ -426,6 +434,16 @@ impl run::Providers for Registry<'_> {
             }
             reason.truncate(end);
             decoded.reason = Some(reason);
+        }
+        if let Some(ProviderEvent::DeniedNote { action }) = events
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::DeniedNote { .. }))
+        {
+            let note = format!("provider denied: {action}");
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
         }
         Ok(decoded)
     }
@@ -3650,6 +3668,57 @@ mod tests {
             assert_eq!(decoded.reason.as_deref(), Some(expected.as_str()));
             assert!(decoded.reason.unwrap().len() <= 8192);
         }
+    }
+
+    #[test]
+    fn agy_denials_preserve_answers_and_prior_failures() {
+        let route = run::RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/gemini-3.8-flash".into()),
+            ..Default::default()
+        };
+        let fixture = include_str!("../../../tests/fixtures/providers/agy/denied-result.jsonl");
+        let recovered = fixture.replace("\"response\":\"\"", "\"response\":\"Recovered answer\"");
+        let registry = Registry::default();
+        let decoded = registry
+            .decode(
+                &route,
+                recovered.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(decoded.result, "Recovered answer");
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider denied: RunCommand")
+        );
+        let decoded = registry
+            .decode(
+                &route,
+                fixture.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Failed);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider denied: RunCommand")
+        );
+        let mut failed_exit = clean_exit();
+        failed_exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let decoded = registry
+            .decode(
+                &route,
+                fixture.as_bytes(),
+                &failed_exit,
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::Failed);
+        assert_eq!(decoded.reason.as_deref(), Some("provider failed"));
     }
 
     #[test]

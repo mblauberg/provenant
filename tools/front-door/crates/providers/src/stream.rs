@@ -23,6 +23,10 @@ pub enum ProviderEvent {
     Denied {
         action: String,
     },
+    /// A denial from which the provider recovered.
+    DeniedNote {
+        action: String,
+    },
     Error,
     TransientError,
     Terminal,

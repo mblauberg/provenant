@@ -171,6 +171,18 @@ fn agy_stream_denial_is_failure() -> Result<(), ProviderError> {
     Ok(())
 }
 #[test]
+fn agy_recovered_denial_is_non_fatal() -> Result<(), ProviderError> {
+    let raw = fixture!("agy/denied-result.jsonl")
+        .replace("\"response\":\"\"", "\"response\":\"Recovered answer\"");
+    let (events, outcome) = replay(&agy::Agy, &raw, EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Success);
+    assert!(events.contains(&ProviderEvent::Text("Recovered answer".into())));
+    assert!(events.contains(&ProviderEvent::DeniedNote {
+        action: "RunCommand".into()
+    }));
+    Ok(())
+}
+#[test]
 fn agy_denials_accept_unexpected_shapes() -> Result<(), ProviderError> {
     for (denials, expected) in [
         (serde_json::json!(null), None),
@@ -180,11 +192,14 @@ fn agy_denials_accept_unexpected_shapes() -> Result<(), ProviderError> {
         let raw = serde_json::json!({"event":"result","result":{
             "conversation_id":"", "status":"SUCCESS", "response":"",
             "denied_actions":denials, "usage":{"input_tokens":0,"output_tokens":0}
-        }}).to_string();
-        let (events, outcome) = replay(&agy::Agy, &raw, EXIT)?;
+        }})
+        .to_string();
+        let (events, outcome) = replay(&agy::Agy, &format!("{raw}\n"), EXIT)?;
         if let Some(action) = expected {
             assert_eq!(outcome.status(), OutcomeStatus::Failed);
-            assert!(events.contains(&ProviderEvent::Denied { action: action.into() }));
+            assert!(events.contains(&ProviderEvent::Denied {
+                action: action.into()
+            }));
         } else {
             assert_eq!(outcome.status(), OutcomeStatus::Success);
         }

@@ -277,9 +277,12 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 });
             } else if let Some(denied) = result.denied_actions.as_array().and_then(|a| a.first()) {
                 if !result.response.is_empty() {
-                    events.push(E::Text(result.response));
+                    events.push(E::Text(result.response.clone()));
                 }
-                let name = denied.get("display_name").and_then(|n| n.as_str()).unwrap_or("");
+                let name = denied
+                    .get("display_name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
                 let action = if (1..=64).contains(&name.len())
                     && name
                         .bytes()
@@ -289,9 +292,23 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 } else {
                     "unknown action"
                 };
-                events.push(E::Denied {
-                    action: action.into(),
-                });
+                if result.status == "SUCCESS"
+                    && result.error.is_none()
+                    && result.response.is_empty()
+                {
+                    events.push(E::Denied {
+                        action: action.into(),
+                    });
+                } else {
+                    events.push(E::DeniedNote {
+                        action: action.into(),
+                    });
+                    events.push(if result.error.is_some() || result.status != "SUCCESS" {
+                        E::Error
+                    } else {
+                        E::Terminal
+                    });
+                }
             } else if result.error.is_some() || result.status != "SUCCESS" {
                 if !result.response.is_empty() {
                     events.push(E::Text(result.response));

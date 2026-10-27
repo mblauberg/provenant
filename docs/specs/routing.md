@@ -111,7 +111,9 @@ programs from `/bin`, `/usr/bin` and `/usr/libexec`, with PATH restricted to
 write grants remain attempt scratch and private state. Like read-only Codex
 lanes, read-only Agy lanes can run system programs with the lane's existing
 network access, so read roots must not hold anything the lane may not see.
-Agy result `denied_actions` are reported as provider denials naming the action.
+On a successful Agy result, a denial with an empty response fails the lane as
+`provider denied: <name>`; a non-empty response succeeds and records the denial
+as a non-fatal note. Denials do not override an earlier failure.
 - Why: headless permission prompts otherwise deny read-only commands, and a
   remaining denial must not be mistaken for an empty response.
 - Test: `crates/providers/src/tests.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
