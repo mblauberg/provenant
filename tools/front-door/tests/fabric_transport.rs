@@ -2731,6 +2731,45 @@ fn peer_terminal_missing_output_is_not_found() -> Result {
 }
 
 #[test]
+fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
+    let mut rig = TestRig::new()?;
+    loopback_peer(&mut rig)?;
+    let prompt = rig.root.join("prompt.txt");
+    // The prompt fits the launch limit, but JSON escaping exceeds the frame cap.
+    std::fs::write(&prompt, "\"".repeat(600 * 1024))?;
+    for _ in 0..2 {
+        let (status, refused) = json_command(
+            &rig,
+            &[
+                "dispatch",
+                "--host",
+                "workshop",
+                "--mode",
+                "read-only",
+                "--model",
+                "agy/gemini-3.8-flash",
+                "--operation-id",
+                "peer-frame-limit",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt path")?,
+                "--json",
+            ],
+        )?;
+        assert_ne!(status, 0);
+        assert_eq!(refused["error"]["code"], "INVALID", "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("1 MiB")),
+            "{refused}"
+        );
+    }
+    assert!(!rig.root.join("peer-stderr").exists());
+    assert!(!rig.root.join("peer-state/runs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();

@@ -512,6 +512,36 @@ mod tests {
     }
 
     #[test]
+    fn submission_prompt_bounds_follow_the_transport() {
+        use super::ValidateInput;
+        use provenant_core::WaitTransport;
+
+        for bytes in [65_536, 65_537, 117 * 1024, 1_048_576] {
+            let input: SubmitInput = serde_json::from_value(json!({
+                "op":"submit", "operation_id":"large-prompt",
+                "tasks":[{"prompt":"x".repeat(bytes), "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+            }))
+            .unwrap();
+            assert!(input.validate_input(WaitTransport::Cli).is_ok());
+            let mcp = input.validate_input(WaitTransport::Mcp);
+            if bytes <= 65_536 {
+                assert!(mcp.is_ok());
+            } else {
+                assert_eq!(mcp.unwrap_err().path, "tasks[0].prompt");
+            }
+        }
+        for prompt in [String::new(), "x\0y".into(), "x".repeat(1_048_577)] {
+            rejects::<SubmitInput>(
+                json!({
+                    "op":"submit", "operation_id":"invalid-prompt",
+                    "tasks":[{"prompt":prompt, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+                }),
+                "tasks[0].prompt",
+            );
+        }
+    }
+
+    #[test]
     fn submission_omits_absent_host() {
         let input = json!({
             "op":"submit",
