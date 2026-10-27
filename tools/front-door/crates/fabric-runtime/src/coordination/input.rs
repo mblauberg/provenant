@@ -77,6 +77,8 @@ macro_rules! bounded_input {
 pub(crate) use bounded_input;
 
 pub const MAX_TEXT_BYTES: usize = 65_536;
+/// Largest prompt a CLI peer submission may carry.
+pub const MAX_CLI_PROMPT_BYTES: usize = 1_048_576;
 pub const MAX_REFERENCE_BYTES: usize = 1_024;
 pub const MAX_ROUTE_BYTES: usize = 128;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
@@ -351,7 +353,7 @@ impl ValidateInput for GraphInput {
 }
 
 impl ValidateInput for SubmitInput {
-    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
+    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Submit {
                 tasks,
@@ -373,7 +375,13 @@ impl ValidateInput for SubmitInput {
                 }
                 for (index, task) in tasks.iter().enumerate() {
                     let path = format!("tasks[{index}]");
-                    task_text(&task.prompt, &format!("{path}.prompt"))?;
+                    // Peer dispatch uses the CLI launch limit; MCP retains its
+                    // smaller tool input bound.
+                    let prompt_limit = match transport {
+                        WaitTransport::Cli => MAX_CLI_PROMPT_BYTES,
+                        WaitTransport::Mcp => MAX_TEXT_BYTES,
+                    };
+                    bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
                     optional_text(
                         task.base.as_deref(),
                         &format!("{path}.base"),
@@ -509,6 +517,36 @@ mod tests {
                 "proof":{"id":"01".repeat(16),"generation":2,"token":"ab".repeat(16)}
             }})
         );
+    }
+
+    #[test]
+    fn submission_prompt_bounds_follow_the_transport() {
+        use super::ValidateInput;
+        use provenant_core::WaitTransport;
+
+        for bytes in [65_536, 65_537, 117 * 1024, 1_048_576] {
+            let input: SubmitInput = serde_json::from_value(json!({
+                "op":"submit", "operation_id":"large-prompt",
+                "tasks":[{"prompt":"x".repeat(bytes), "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+            }))
+            .unwrap();
+            assert!(input.validate_input(WaitTransport::Cli).is_ok());
+            let mcp = input.validate_input(WaitTransport::Mcp);
+            if bytes <= 65_536 {
+                assert!(mcp.is_ok());
+            } else {
+                assert_eq!(mcp.unwrap_err().path, "tasks[0].prompt");
+            }
+        }
+        for prompt in [String::new(), "x\0y".into(), "x".repeat(1_048_577)] {
+            rejects::<SubmitInput>(
+                json!({
+                    "op":"submit", "operation_id":"invalid-prompt",
+                    "tasks":[{"prompt":prompt, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+                }),
+                "tasks[0].prompt",
+            );
+        }
     }
 
     #[test]
