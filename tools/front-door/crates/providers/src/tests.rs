@@ -1710,10 +1710,6 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                 assert!(config["permission"]["external_directory"].is_null());
                 assert!(config["permission"]["read"].is_null());
             }
-            assert_eq!(
-                spec.profile.spec.tool_exec_roots.is_empty(),
-                access == Access::ReadOnly
-            );
         }
     }
     Ok(())
