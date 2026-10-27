@@ -308,6 +308,20 @@ mod tests {
             }
             Ok(result)
         }
+        fn changed_paths(
+            before: &BTreeMap<PathBuf, Vec<u8>>,
+            after: &BTreeMap<PathBuf, Vec<u8>>,
+        ) -> Vec<String> {
+            let changed = before
+                .iter()
+                .filter(|(path, bytes)| after.get(*path) != Some(*bytes))
+                .map(|(path, _)| format!("changed or removed {}", path.display()));
+            let added = after
+                .keys()
+                .filter(|path| !before.contains_key(*path))
+                .map(|path| format!("added {}", path.display()));
+            changed.chain(added).collect()
+        }
         let rig = crate::worktree_tests::repository()?.without_state()?;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
         inputs.state_dir = Some(rig.state.clone());
@@ -316,7 +330,8 @@ mod tests {
         let report = collect_resolved(&roots, &rig.home, &rig.project)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!rig.state.exists());
-        assert!(snapshot(&rig.root)? == before, "report changed files");
+        let changed = changed_paths(&before, &snapshot(&rig.root)?);
+        assert!(changed.is_empty(), "report changed files: {changed:?}");
         assert_eq!(report.totals["worktree"].count, 1);
         let main = report
             .entries
@@ -367,7 +382,8 @@ mod tests {
         let before = snapshot(&rig.root)?;
         let report = collect_resolved(&roots, &rig.home, &rig.project)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(snapshot(&rig.root)? == before, "report changed files");
+        let changed = changed_paths(&before, &snapshot(&rig.root)?);
+        assert!(changed.is_empty(), "report changed files: {changed:?}");
         assert_eq!(report.totals["worktree"].count, 2);
         assert_eq!(report.totals["attempt_tmp"].count, 1);
         assert_eq!(report.totals["other_state"].count, 1);
