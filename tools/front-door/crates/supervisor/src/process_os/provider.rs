@@ -290,6 +290,10 @@ fn spawn_identified(
     if let Some(pipe) = secret {
         pass.push(pipe.fd());
     }
+    // SAFETY: the hook runs only after fork and calls only umask.
+    unsafe {
+        command.pre_exec(private_umask);
+    }
     child::configure_command(&mut command, &pass, Some(env), false)?;
     let worker = std::thread::Builder::new()
         .name("provider-identity".into())
@@ -324,6 +328,14 @@ fn spawn_identified(
         }
         (Err(error), _) => Err(error),
     }
+}
+
+/// Provider-created state is private from creation; the parent keeps its mask.
+fn private_umask() -> io::Result<()> {
+    // SAFETY: umask takes an integer, is async-signal-safe and changes only the
+    // forked child's mask.
+    unsafe { libc::umask(0o077) };
+    Ok(())
 }
 
 fn identity_gate(fd: i32) -> io::Result<()> {
