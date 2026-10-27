@@ -153,7 +153,8 @@ fn collect_resolved(
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-        let utility = UtilityRuntime::read_only(git)?;
+        // The pin refuses a symlink, such as Homebrew's /opt/homebrew/bin/git.
+        let utility = UtilityRuntime::read_only(std::fs::canonicalize(git)?)?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = utility.open_repo(&executor, project, budget, &cancel)?;
