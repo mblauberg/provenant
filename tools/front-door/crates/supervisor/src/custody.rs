@@ -390,7 +390,7 @@ pub(crate) fn acquire_writer_with_observer(
                 read_record(&directory, "settlement.json", RECORD_LIMIT)
                     .map_err(|_| CustodyError::Fenced)?;
             // A settled owner no longer holds this path, so a new run may bind
-            // a worktree recreated there. Only the latest owner attempt may be
+            // a worktree recreated there. Only the attempt that settled may be
             // readmitted, and a run keeps the worktree it held.
             let same_custody = previous.binding.same_custody(&binding.0);
             if previous.schema_version != 1
@@ -399,7 +399,7 @@ pub(crate) fn acquire_writer_with_observer(
                     || settled.scope.generation < previous.scope.generation)
                 || (scope.run == previous.scope.run && !same_custody)
                 || (scope.generation > 1
-                    && (scope.attempt != previous.scope.attempt || !same_custody))
+                    && (scope.attempt != settled.scope.attempt || !same_custody))
             {
                 return Err(CustodyError::Fenced);
             }
