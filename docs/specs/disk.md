@@ -118,6 +118,10 @@ Queued and pending submitted dispatches naming a worktree retain it with
 `unknown_writer`, including managed trees without a terminal lane record.
 Tasks not yet submitted into a run store are not visible to this census;
 keep an external reservation until submission to protect such a tree.
+Applied foreign removal creates a private writer lock when state is absent,
+and holds it across final checks and Git removal without creating an ownership
+identity. Previews do not create state. Native processes do not take this
+advisory lock; the complete process census and final clean recheck still apply.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.
 - Test: `crates/confinement/src/worktrees.rs::gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`
@@ -148,6 +152,9 @@ terminal. A distinct `.log.tail` file retains the final 64 KiB. Results, exit
 evidence, original digest records, small captures and child-store databases
 survive. The same policy visits indexed child stores. Disk inventory reports
 `attempt_logs`; GC reports `provider_state.attempt_logs`.
+`output --part stderr` falls back to the retained `stderr.log.tail` when
+the full capture has expired. JSON reports `complete=false`; text marks the
+retained tail as truncated. Offsets and digest describe the retained bytes.
 - Why: bound bulky captures without rewriting what sealed digests describe.
 - Test: `crates/run/src/retention.rs::gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview`;
   `::gc_logs_refuse_symlinks`; `crates/run/src/disk.rs::disk_usage_rolls_many_attempts_up_per_run`
@@ -159,8 +166,8 @@ Writer admission makes one collection attempt bounded to five seconds before
 refusing low disk, then rechecks the worktree, state and cache volumes.
 Refusals include reported reclaimed bytes. A timeout can remove data without
 returning a byte report. Pressure collection still prunes declared idle output,
-using the one-day idle floor when below the free floor. It skips Git fetches and worktree
-deletion and honours `gc.schedule=false`. Admission-triggered collection
+using the one-day idle floor when below the free floor. It skips Git fetches and
+worktree deletion and honours `gc.schedule=false`. Admission-triggered collection
 selects only the launching project, including its caches and temporary run
 payloads; it does not enumerate other registered projects. Applied sweeps share
 a nonblocking collection lock. The scheduled agent runs at load and daily.
@@ -172,12 +179,3 @@ event wiring remains with those callers.
   `src/gc_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
   `src/disk_guard_host.rs::pressure_gc_leaves_the_configured_free_floor_in_effect`
 - Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/gc_agent.rs`
-
-Applied foreign removal creates a private writer lock when state is absent,
-and holds it across final checks and Git removal without creating an ownership
-identity. Previews do not create state. Native processes do not take this
-advisory lock; the complete process census and final clean recheck still apply.
-
-`output --part stderr` falls back to the retained `stderr.log.tail` when
-the full capture has expired. JSON reports `complete=false`; text marks the
-retained tail as truncated. Offsets and digest describe the retained bytes.

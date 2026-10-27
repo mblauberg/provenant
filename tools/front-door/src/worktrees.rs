@@ -484,20 +484,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let mut unobserved_projects = Vec::new();
     let mut skipped_transient = Vec::new();
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
-    if command.scheduled || command.pressure {
-        if !config.gc.schedule {
-            return Ok(GcData {
-                report: provenant_confinement::cache::CacheGcReport {
-                    dry_run: command.dry_run,
-                    ..Default::default()
-                },
-                idle_days: command.idle_days,
-                provider_state: Default::default(),
-                unobserved_projects,
-                skipped_transient,
+    if (command.scheduled || command.pressure) && !config.gc.schedule {
+        return Ok(GcData {
+            report: provenant_confinement::cache::CacheGcReport {
+                dry_run: command.dry_run,
                 ..Default::default()
-            });
-        }
+            },
+            idle_days: command.idle_days,
+            provider_state: Default::default(),
+            unobserved_projects,
+            skipped_transient,
+            ..Default::default()
+        });
     }
     if command.scheduled {
         let selection = provenant_config::registered_gc_project_selection(&roots)?;
@@ -518,7 +516,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             }
         }
     } else {
-        let common = project.join(".git");
+        let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
+        let runtime = UtilityRuntime::read_only(canonicalize(&git)?)?;
+        let repo = runtime.open_repo(
+            &SystemExecutor::new(1)?,
+            &project,
+            UtilityBudget::bounded(Duration::from_secs(5))?,
+            &CancelToken::new(),
+        )?;
+        let common = repo.common_git_dir().to_owned();
         if provenant_config::transient_location(&roots, &common) {
             skipped_transient.push(common);
             return Ok(GcData {
@@ -531,7 +537,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        let selected = gc_project(&roots, &home, &project, workers, command.dry_run)?;
+        let primary = if common.file_name() == Some(OsStr::new(".git")) {
+            common.parent().ok_or(Error::InvalidScope)?
+        } else {
+            &project
+        };
+        let selected = gc_project(&roots, &home, primary, workers, command.dry_run)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }

@@ -198,7 +198,13 @@ impl run::Providers for Registry<'_> {
         let home = self.home.ok_or("home directory is unavailable")?;
         let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
-        check_writer_disk(&config.gc, roots.state.as_path(), &writer.worktree, home)
+        check_writer_disk(
+            &config.gc,
+            roots.state.as_path(),
+            &writer.worktree,
+            &writer.project,
+            home,
+        )
     }
 
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
@@ -792,6 +798,7 @@ fn check_writer_disk(
     settings: &provenant_config::GcSettings,
     state: &Path,
     worktree: &Path,
+    project: &Path,
     home: &Path,
 ) -> Result<(), String> {
     check_writer_disk_with_collection(
@@ -814,7 +821,7 @@ fn check_writer_disk(
                 }
             }
         },
-        || pressure_collection(state, home, worktree),
+        || pressure_collection(state, home, project),
     )
 }
 
@@ -930,6 +937,7 @@ pub fn submit_with_host(
                     &config.gc,
                     edge.roots.state.as_path(),
                     &writer.worktree,
+                    &writer.project,
                     edge.home,
                 )
                 .map_err(|message| {
@@ -2824,7 +2832,7 @@ mod writer_disk_tests {
         };
         let state = base.join("missing/state");
         let home = base.join("missing/home");
-        check_writer_disk(&settings, &state, &base, &home)?;
+        check_writer_disk(&settings, &state, &base, &base, &home)?;
         assert!(!base.join("missing").exists());
         Ok(())
     }

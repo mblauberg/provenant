@@ -126,6 +126,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
             "gc_reports_transient_and_preserves_unobserved_project_array",
+            "gc_pressure_collects_only_the_selected_primary_project",
             "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
             "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
@@ -180,6 +181,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "provider_state_gc_sweeps_children_and_refuses_replaced_roots" => {
                     crate::provider_retention::provider_state_gc_sweeps_children_and_refuses_replaced_roots()
                 }
+                "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()
@@ -1318,6 +1320,68 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     Ok(cache)
 }
 
+fn gc_pressure_collects_only_the_selected_primary_project() -> Result {
+    let mut rig = repository()?;
+    fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
+    git(&rig, &["add", ".gitignore"])?;
+    git(&rig, &["commit", "-qm", "ignore output"])?;
+    let primary = rig.project.clone();
+    let other = rig.root.join("other-project");
+    git(
+        &rig,
+        &[
+            "clone",
+            "-q",
+            primary.to_str().ok_or("path")?,
+            other.to_str().ok_or("path")?,
+        ],
+    )?;
+    rig.project = other;
+    ok(&rig, &["worktree", "create", "other-idle", "--json"])?;
+    let other_tree = rig.project.join(".worktrees/other-idle");
+    let (_, other_context) = writer_context(&rig)?;
+    fs::create_dir(other_tree.join("target"))?;
+    fs::write(other_tree.join("target/artifact"), "other output")?;
+    age_gc_output(&other_tree.join("target"))?;
+    rig.project = primary;
+    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let tree = rig.project.join(".worktrees/idle");
+    let (_, context) = writer_context(&rig)?;
+    fs::create_dir(tree.join("target"))?;
+    fs::write(tree.join("target/artifact"), "selected output")?;
+    age_gc_output(&tree.join("target"))?;
+    let config = format!(
+        "schema_version=1\n[gc]\nschedule=false\nfree_floor='1B'\n[gc.projects.'{}']\nregenerable=['target']\n[gc.projects.'{}']\nregenerable=['target']\n",
+        context.project_id, other_context.project_id
+    );
+    fs::write(rig.state.join("config.toml"), &config)?;
+    rig.project = tree.clone();
+    let disabled = ok(&rig, &["gc", "--pressure", "--apply", "--json"])?;
+    assert!(
+        disabled["data"]["worktree_cleanup"]
+            .as_array()
+            .ok_or("cleanup")?
+            .is_empty()
+    );
+    assert!(tree.join("target/artifact").is_file());
+    fs::write(
+        rig.state.join("config.toml"),
+        config.replace("schedule=false", "schedule=true"),
+    )?;
+    let pressure = ok(&rig, &["gc", "--pressure", "--apply", "--json"])?;
+    assert_eq!(
+        pressure["data"]["worktree_cleanup"]
+            .as_array()
+            .ok_or("cleanup")?
+            .len(),
+        1
+    );
+    assert!(!tree.join("target").exists());
+    assert!(other_tree.join("target/artifact").is_file());
+    assert!(tree.is_dir() && other_tree.is_dir());
+    Ok(())
+}
+
 fn gc_reports_transient_and_preserves_unobserved_project_array() -> Result {
     let mut rig = repository()?;
     let parent = rig.root.join("scratchpads");
@@ -1325,6 +1389,24 @@ fn gc_reports_transient_and_preserves_unobserved_project_array() -> Result {
     let moved = parent.join("repository");
     fs::rename(&rig.project, &moved)?;
     rig.project = moved;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_ROOT" {
+            *value = rig.project.clone().into_os_string();
+        }
+    }
+    let common = rig.project.join(".git");
+    let outside = rig.root.join("outside");
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "outside",
+            outside.to_str().ok_or("path")?,
+        ],
+    )?;
+    rig.project = outside;
     let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
     assert_eq!(
         preview["data"]["unobserved_projects"],
@@ -1332,12 +1414,33 @@ fn gc_reports_transient_and_preserves_unobserved_project_array() -> Result {
     );
     assert_eq!(
         preview["data"]["skipped_transient"],
-        serde_json::json!([rig.project.join(".git")])
+        serde_json::json!([common])
     );
     let output = command(&rig, &["gc", "--dry-run"])?;
     assert_eq!(code(&output), 0);
     let text = String::from_utf8(output.stdout.bytes)?;
     assert!(text.contains("skipped transient project"), "{text}");
+    let mut normal = repository()?;
+    ok(&normal, &["worktree", "create", "observe", "--json"])?;
+    let scratch = normal.root.join("scratchpads");
+    fs::create_dir(&scratch)?;
+    let linked = scratch.join("linked");
+    git(
+        &normal,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "linked",
+            linked.to_str().ok_or("path")?,
+        ],
+    )?;
+    normal.project = linked;
+    let normal_preview = ok(&normal, &["gc", "--dry-run", "--json"])?;
+    assert_eq!(
+        normal_preview["data"]["skipped_transient"],
+        serde_json::json!([])
+    );
     Ok(())
 }
 
@@ -3440,7 +3543,12 @@ fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
             "schema_version=1\n[gc]\nfree_floor='1B'\nalert_below='18446744073709551615B'\n{output_config}"
         ),
     )?;
-    fs::write(rig.state.join("gc"), "blocked alert directory")?;
+    fs::create_dir(rig.state.join("gc"))?;
+    fs::set_permissions(
+        rig.state.join("gc"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+    fs::create_dir(rig.state.join("gc/alert.lock"))?;
     let collected = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
     assert!(
         collected["data"]["alerts"][0]
