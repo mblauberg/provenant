@@ -2310,13 +2310,22 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
     let state = tempfile::tempdir().unwrap();
     let host_root = state.path().canonicalize().unwrap();
     for adapter in ["claude", "cursor", "agy"] {
+        // Cursor reads its CLI login without the executor unless the desktop
+        // database exists, so give it one to reach the probe.
+        let identity = tempfile::tempdir().unwrap();
+        std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
+        let directory = if adapter == "cursor" {
+            identity.path()
+        } else {
+            Path::new("/home/test/identity")
+        };
         let error = crate::accounts::detect_with_org(
             &Fail,
             adapter,
             Path::new("/bin/provider"),
             Path::new("/home/test"),
             OsStr::new("test"),
-            Path::new("/home/test/identity"),
+            directory,
             &host_root,
         )
         .unwrap_err();
@@ -2344,13 +2353,20 @@ fn registration_names_probe_directory_failures() {
     let executor = crate::host::HostProbeExecutor::new(&Never, state.path()).unwrap();
     std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     for adapter in ["claude", "cursor", "agy"] {
+        let identity = tempfile::tempdir().unwrap();
+        std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
+        let directory = if adapter == "cursor" {
+            identity.path()
+        } else {
+            Path::new("/home/test/identity")
+        };
         let error = crate::accounts::detect_with_org(
             &executor,
             adapter,
             Path::new("/bin/provider"),
             Path::new("/home/test"),
             OsStr::new("test"),
-            Path::new("/home/test/identity"),
+            directory,
             state.path(),
         )
         .unwrap_err();
