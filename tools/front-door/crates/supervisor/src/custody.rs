@@ -103,6 +103,25 @@ impl WriterBinding {
     }
 }
 impl StoredWriterBinding {
+    /// Branch and base may advance between generations; the held worktree may not.
+    fn same_custody(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Worktree {
+                    worktree_device: a_device,
+                    worktree_inode: a_inode,
+                    ..
+                },
+                Self::Worktree {
+                    worktree_device: b_device,
+                    worktree_inode: b_inode,
+                    ..
+                },
+            ) => a_device == b_device && a_inode == b_inode,
+            (Self::ReadOnly, Self::ReadOnly) => true,
+            _ => false,
+        }
+    }
     fn validate(&self) -> Result<()> {
         if let Self::Worktree { branch, .. } = self
             && (branch.is_empty()
@@ -370,12 +389,14 @@ pub(crate) fn acquire_writer_with_observer(
             let settled: SettlementJournal =
                 read_record(&directory, "settlement.json", RECORD_LIMIT)
                     .map_err(|_| CustodyError::Fenced)?;
-            // A settled owner no longer holds this path. A later worktree can
-            // have a different identity after the original was removed.
+            // A settled owner no longer holds this path, so a new run may bind
+            // a worktree recreated there. Later generations of one run keep
+            // the worktree they held.
             if previous.schema_version != 1
                 || settled.schema_version != 1
                 || (settled.scope.run != previous.scope.run
                     || settled.scope.generation < previous.scope.generation)
+                || (scope.run == previous.scope.run && !previous.binding.same_custody(&binding.0))
             {
                 return Err(CustodyError::Fenced);
             }

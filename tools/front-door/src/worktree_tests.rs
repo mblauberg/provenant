@@ -2027,6 +2027,16 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     .withdraw_prepared()?;
     ok(&rig, &["worktree", "remove", "reused", "--json"])?;
     ok(&rig, &["worktree", "create", "reused", "--json"])?;
+    // The settled run cannot carry a later generation onto a new worktree.
+    assert!(
+        acquire(Scope {
+            generation: 2,
+            ..scope
+        })
+        .is_err_and(|error| error
+            .to_string()
+            .contains("writer reservation requires recovery"))
+    );
     let lease = acquire(Scope {
         run: provenant_core::RunId::from_bytes([33; 16]),
         ..scope
