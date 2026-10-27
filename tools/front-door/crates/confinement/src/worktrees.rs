@@ -5,7 +5,10 @@ mod gc;
 mod owner;
 pub use context::with_context;
 pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
-pub use owner::{WorktreeOrigin, WorktreeOwner, adopt, load_owner, prune_owned, save_owner};
+pub use owner::{
+    WorktreeOrigin, WorktreeOwner, adopt, load_owner, prune_owned, save_lane_owner_when_free,
+    save_owner,
+};
 
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
@@ -2151,6 +2154,66 @@ mod lifecycle_tests {
     use std::os::unix::fs::PermissionsExt;
 
     struct FreeWorkers;
+
+    #[test]
+    fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "lane-owner".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let tree = verify_worktree(&fixture.repo, &info.path)?;
+        let mut owner = WorktreeOwner {
+            attempt_id: None,
+            operation_id: Some("first-owner".parse()?),
+            branch: "lane-owner".into(),
+            base: info.head.to_string(),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: context.clock.wall_now()?,
+            origin: WorktreeOrigin::Lane,
+            label: None,
+        };
+        save_lane_owner_when_free(&context, &tree, &owner, &cancel())?;
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&info.path))?;
+        let held = state.lock(
+            OsStr::new(WRITER_LOCK),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(context.clock.mono_now()),
+            &cancel(),
+            context.clock,
+        )?;
+        let next = WorktreeOwner {
+            operation_id: Some("next-owner".parse()?),
+            ..owner.clone()
+        };
+        assert!(matches!(
+            save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+            Err(WorktreeError::LiveWriter)
+        ));
+        assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+        drop(held);
+        fs::write(info.path.join("dirty"), "keep")?;
+        assert!(matches!(
+            save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+            Err(WorktreeError::Dirty)
+        ));
+        fs::remove_file(info.path.join("dirty"))?;
+        owner.origin = WorktreeOrigin::Adopted;
+        owner.label = Some("manual".into());
+        save_owner(&tree, &owner)?;
+        assert!(save_lane_owner_when_free(&context, &tree, &next, &cancel()).is_err());
+        assert_eq!(load_owner(&tree)?, Some(owner));
+        Ok(())
+    }
 
     #[test]
     fn adopted_owner_proves_membership_and_enables_custody() -> Result<(), Box<dyn Error>> {

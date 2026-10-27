@@ -996,9 +996,21 @@ pub fn submit_with_host(
 }
 
 pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
+    dispatch_with_workers(
+        command,
+        edge,
+        &provenant_confinement::worktrees::SystemWorkerObserver,
+    )
+}
+
+fn dispatch_with_workers(
+    command: Dispatch,
+    edge: &Edge<'_>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Reply {
     let operation_id = command.operation_id.clone();
     let mut created = None;
-    let mut result = dispatch_inner(command, edge, &mut created);
+    let mut result = dispatch_inner(command, edge, &mut created, workers);
     if let (Err(fail), Some((path, branch))) = (&mut result, created) {
         // A failed launch can follow admission. Those trees belong to the
         // accepted run and must remain available for resume.
@@ -1018,6 +1030,10 @@ pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
                 &cancel,
                 |context| {
                     use provenant_confinement::worktrees;
+                    let context = &worktrees::WorktreeContext {
+                        workers,
+                        ..*context
+                    };
                     let info = worktrees::list(context, &cancel)?
                         .into_iter()
                         .find(|tree| tree.path == path)
@@ -1026,6 +1042,13 @@ pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
                         || info.writer != worktrees::WriterState::Free
                     {
                         return Err(worktrees::WorktreeError::Dirty);
+                    }
+                    let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+                    if worktrees::load_owner(&tree)?.is_none_or(|owner| {
+                        owner.origin != worktrees::WorktreeOrigin::Lane
+                            || owner.operation_id.as_ref() != Some(&operation_id)
+                    }) {
+                        return Err(worktrees::WorktreeError::UnknownWriter);
                     }
                     worktrees::remove(
                         context,
@@ -1056,6 +1079,7 @@ fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
     created: &mut Option<(PathBuf, String)>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(Value, String, bool), Fail> {
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
@@ -1097,17 +1121,24 @@ fn dispatch_inner(
                     self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
                     WriterState,
                 };
+                let context = &worktrees::WorktreeContext { workers, ..*context };
                 let existing = worktrees::list(context, &cancel)?.into_iter().find(|tree| {
                     tree.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
                 });
                 let info = match existing {
-                    Some(info)
-                        if info.dirty == WorktreeCondition::Clean
-                            && info.writer == WriterState::Free =>
-                    {
+                    Some(info) => {
+                        let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                        if worktrees::load_owner(&tree)?
+                            .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
+                        {
+                            owner_refused = true;
+                            return Err(worktrees::WorktreeError::UnknownWriter);
+                        }
+                        if info.dirty != WorktreeCondition::Clean || info.writer != WriterState::Free {
+                            return Err(worktrees::WorktreeError::InvalidRequest);
+                        }
                         info
                     }
-                    Some(_) => return Err(worktrees::WorktreeError::InvalidRequest),
                     None => {
                         let info = worktrees::create(
                             context,
@@ -1157,7 +1188,11 @@ fn dispatch_inner(
                         label: None,
                     },
                 };
-                worktrees::save_owner(&verified, &owner)?;
+                if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
+                    worktrees::save_owner(&verified, &owner)?;
+                } else {
+                    worktrees::save_lane_owner_when_free(context, &verified, &owner, &cancel)?;
+                }
                 Ok(info)
             },
         )
@@ -1452,6 +1487,16 @@ fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fa
     )
 }
 
+fn worktree_was_pruned(receipt: &Value, path: &Path) -> bool {
+    receipt["state"] == "pruned"
+        || receipt["state"] == "pruning"
+            && path
+                .to_str()
+                .is_some_and(|path| receipt["worktree"] == path)
+            && std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 fn replay_owned_dispatch(
     command: &Dispatch,
     edge: &Edge<'_>,
@@ -1557,8 +1602,9 @@ fn replay_owned_dispatch(
                 .worktree_settlement(attempt.attempt_id, call)?;
         }
         settlement.as_ref().is_some_and(|receipt| {
-            receipt["state"] == "pruned"
-                && receipt["result"]["removed"][0]["branch"] == format!("refs/heads/{branch}")
+            worktree_was_pruned(receipt, &writer.worktree)
+                && (receipt["result"]["removed"][0]["branch"] == format!("refs/heads/{branch}")
+                    || receipt["branch"] == format!("refs/heads/{branch}"))
         })
     };
     if !owned {
@@ -3087,7 +3133,7 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                 && session
                     .store
                     .worktree_settlement(id, &call)?
-                    .is_some_and(|receipt| receipt["state"] == "pruned")
+                    .is_some_and(|receipt| worktree_was_pruned(&receipt, &writer.worktree))
                 && let Some((request, receipt)) = session.store.delivered(id, &call)?
                 && deliver.as_ref().is_none_or(|mode| {
                     mode == &request.mode
@@ -4032,6 +4078,225 @@ mod lane_depth_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_confinement::worktrees::{
+            self, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+        };
+        use provenant_core::RootInputs;
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::ffi::{OsStr, OsString};
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, WorkerState::Free))
+                    .collect()
+            }
+        }
+        let executor = SystemExecutor::new(1)?;
+        if crate::fabric::in_lane() {
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree".into(),
+            ];
+            let removed = [
+                OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
+                OsStr::new(run::LANE_DEPTH_ENV),
+                OsStr::new(run::PARENT_ATTEMPT_ENV),
+            ];
+            let env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| !removed.contains(&key.as_os_str()))
+                .collect();
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let project = root.join("project");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ],
+        ] {
+            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.into_iter().map(OsString::from))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        }
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &project,
+            cwd: &project,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        // Opening dispatch's real session initialises the state root first.
+        let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+        let _session = open(&edge, &call).map_err(|fail| fail.message)?;
+        let host = provenant_config::bind_host(&roots)?;
+        for origin in [
+            None,
+            Some(WorktreeOrigin::Lane),
+            Some(WorktreeOrigin::Adopted),
+        ] {
+            let branch = match origin {
+                None => "unowned",
+                Some(WorktreeOrigin::Lane) => "lane",
+                Some(WorktreeOrigin::Adopted) => "adopted",
+            };
+            let (path, base) =
+                worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                    let context = &worktrees::WorktreeContext {
+                        workers: &Free,
+                        ..*context
+                    };
+                    let info = worktrees::create(
+                        context,
+                        WorktreeCreate {
+                            branch: branch.into(),
+                            base: Some("HEAD".into()),
+                        },
+                        &cancel,
+                    )?;
+                    let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                    if let Some(origin) = origin {
+                        worktrees::save_owner(
+                            &tree,
+                            &WorktreeOwner {
+                                attempt_id: None,
+                                operation_id: Some(
+                                    OperationId::parse("previous-lane")
+                                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                                ),
+                                branch: branch.into(),
+                                base: info.head.to_string(),
+                                host,
+                                created_at: WallTime::from_micros(1)
+                                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                                origin,
+                                label: Some("preserved-label".into()),
+                            },
+                        )?;
+                    }
+                    Ok((info.path, info.head.to_string()))
+                })?;
+            let missing = root.join("missing-prompt");
+            let args: Vec<OsString> = [
+                "dispatch",
+                "--operation-id",
+                "replacement-lane",
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "worktree-write",
+                "--worktree-branch",
+                branch,
+                "--base",
+                "HEAD",
+                "--prompt-file",
+                missing.to_str().ok_or("path")?,
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
+                return Err("parse".into());
+            };
+            let crate::Command::Dispatch(command) = invocation.command else {
+                return Err("dispatch".into());
+            };
+            let reply = dispatch_with_workers(*command, &edge, &Free);
+            assert_ne!(reply.result.status, Status::Ok);
+            let owner =
+                worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                    worktrees::load_owner(&provenant_confinement::verify_worktree(
+                        context.repo,
+                        &path,
+                    )?)
+                })?
+                .ok_or("owner")?;
+            assert_eq!(owner.base, base);
+            if origin == Some(WorktreeOrigin::Adopted) {
+                assert_eq!(owner.origin, WorktreeOrigin::Adopted);
+                assert_eq!(
+                    owner.operation_id,
+                    Some(OperationId::parse("previous-lane")?)
+                );
+                assert_eq!(owner.label.as_deref(), Some("preserved-label"));
+                assert!(
+                    reply
+                        .result
+                        .error
+                        .ok_or("error")?
+                        .message
+                        .contains("adopted or foreign owner")
+                );
+            } else {
+                assert_eq!(owner.origin, WorktreeOrigin::Lane);
+                assert_eq!(
+                    owner.operation_id,
+                    Some(OperationId::parse("replacement-lane")?)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pruning_intent_replays_only_for_its_missing_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let tree = temp.path().join("owned");
+        let receipt = serde_json::json!({"state": "pruning", "worktree": tree});
+        assert!(super::worktree_was_pruned(&receipt, &tree));
+        assert!(!super::worktree_was_pruned(
+            &receipt,
+            &temp.path().join("other")
+        ));
+        std::fs::create_dir(&tree)?;
+        assert!(!super::worktree_was_pruned(&receipt, &tree));
+        std::fs::remove_dir(&tree)?;
+        std::os::unix::fs::symlink(temp.path().join("missing-target"), &tree)?;
+        assert!(!super::worktree_was_pruned(&receipt, &tree));
+        Ok(())
+    }
+
     use super::*;
     use provenant_run::Providers;
     use provenant_supervisor::custody::CaptureTotals;

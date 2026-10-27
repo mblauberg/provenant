@@ -74,6 +74,66 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// Publish lane ownership only while both repository and writer custody are
+/// excluded. A caller's earlier free observation cannot grant reassignment.
+pub fn save_lane_owner_when_free(
+    context: &WorktreeContext<'_>,
+    worktree: &VerifiedWorktree,
+    owner: &WorktreeOwner,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    if owner.origin != WorktreeOrigin::Lane {
+        return Err(WorktreeError::InvalidRequest);
+    }
+    validate(owner)?;
+    validate_binding(context)?;
+    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let tree = verify_worktree(context.repo, worktree.path())?;
+    if !tree.identity().same_identity(&worktree.identity()) {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let branch = format!("refs/heads/{}", owner.branch);
+    if !read_worktrees(context, cancel)?.iter().any(|entry| {
+        canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
+            && entry.branch.as_ref().map(GitRefName::as_str) == Some(branch.as_str())
+            && !entry.locked
+            && !entry.prunable
+    }) {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let _writer = cache_writer_guard(
+        context.binding,
+        context.project_state,
+        tree.path(),
+        Some(&branch),
+    )
+    .map_err(|state| match state {
+        WorkerState::Live => WorktreeError::LiveWriter,
+        _ => WorktreeError::UnknownWriter,
+    })?;
+    ensure_unreserved(
+        &context
+            .project_state
+            .open_verified_directory(&state_dir_name(tree.path()))?,
+    )?;
+    if context
+        .workers
+        .observe_roots(&[tree.path().into()])
+        .get(tree.path())
+        != Some(&WorkerState::Free)
+    {
+        return Err(WorktreeError::LiveWriter);
+    }
+    if load_owner(&tree)?.is_some_and(|prior| prior.origin != WorktreeOrigin::Lane) {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    if worktree_dirty_at(context, tree.repo(), cancel)? != WorktreeCondition::Clean {
+        return Err(WorktreeError::Dirty);
+    }
+    check_writer_terminal(tree.repo())?;
+    save_owner(&tree, owner)
+}
+
 /// Opt-in lane cleanup. The delivered/base OID is pinned by the host. The
 /// normal merged-clean GC policy for other worktrees is unchanged. Only
 /// declared regenerable output is removed, through GC's existing walker.

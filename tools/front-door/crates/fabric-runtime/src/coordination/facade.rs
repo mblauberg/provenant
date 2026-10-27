@@ -382,7 +382,8 @@ mod diagnostic_tests {
     use super::FacadeError;
 
     #[test]
-    fn resume_preserves_no_fallback_and_defaults_for_older_senders() {
+    fn resume_preserves_no_fallback_and_defaults_for_older_senders()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut input = serde_json::json!({
             "op": "resume",
             "target": { "attempt": "00000000000000000000000000000001" },
@@ -390,7 +391,7 @@ mod diagnostic_tests {
             "prompt": "Continue",
             "expected_generation": 0
         });
-        let legacy: super::RunInput = serde_json::from_value(input.clone()).unwrap();
+        let legacy: super::RunInput = serde_json::from_value(input.clone())?;
         assert!(matches!(
             legacy,
             super::RunInput::Resume {
@@ -399,7 +400,7 @@ mod diagnostic_tests {
             }
         ));
         input["no_fallback"] = true.into();
-        let explicit: super::RunInput = serde_json::from_value(input).unwrap();
+        let explicit: super::RunInput = serde_json::from_value(input)?;
         assert!(matches!(
             explicit,
             super::RunInput::Resume {
@@ -407,7 +408,8 @@ mod diagnostic_tests {
                 ..
             }
         ));
-        assert_eq!(serde_json::to_value(explicit).unwrap()["no_fallback"], true);
+        assert_eq!(serde_json::to_value(explicit)?["no_fallback"], true);
+        Ok(())
     }
 
     #[test]
