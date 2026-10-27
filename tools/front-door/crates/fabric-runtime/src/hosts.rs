@@ -626,6 +626,70 @@ impl SshTransport<'_> {
                         remote: 1,
                     });
                 }
+                if code == 3
+                    && String::from_utf8_lossy(&outcome.stderr.bytes)
+                        .lines()
+                        .any(|line| {
+                            line.trim().starts_with(
+                                "provenant: fabric peer: peer agent closed without a reply; see ",
+                            )
+                        })
+                {
+                    // The v1 agent hides decode refusals, but this can also be
+                    // a lost mutation reply. Probe health, never repeat the
+                    // operation, and reclassify only a proven version mismatch.
+                    // Omit protocol and trace so v1 can decode the probe.
+                    let mut probe = serde_json::to_vec(&serde_json::json!({
+                        "version": 1,
+                        "target_host": request.target_host,
+                        "source_host": request.source_host,
+                        "agent": request.agent,
+                        "project": request.project,
+                        "action": {"action": "health"},
+                    }))
+                    .map_err(|_| PeerError::Frame)?;
+                    probe.push(b'\n');
+                    let remaining = timeout
+                        .saturating_sub(Duration::from_micros(outcome.elapsed_micros))
+                        .min(Duration::from_micros(
+                            budget.remaining(self.clock.mono_now()).as_micros(),
+                        ));
+                    if !remaining.is_zero() && !cancel.is_cancelled() {
+                        let mut options = ExecOptions::new(&argv, self.cwd, remaining);
+                        options.env = Some(&env);
+                        options.stdin = Some(&probe);
+                        options.stdout = StreamPolicy::Capture { limit: MAX_FRAME };
+                        options.stderr = StreamPolicy::Capture { limit: 4096 };
+                        options.cancel = Some(cancel);
+                        options.stop_on_output_limit = true;
+                        if let Some((terminate_grace, reap_timeout)) = cleanup {
+                            options.terminate_grace = terminate_grace;
+                            options.reap_timeout = reap_timeout;
+                        }
+                        if let Ok(reply) = self.executor.execute(options)
+                            && reply.termination == Termination::Exit(0)
+                            && !reply.timed_out
+                            && !reply.cancelled
+                            && !reply.stdout.truncated
+                            && !reply.stdout.read_failed
+                            && !reply.drain_truncated
+                            && let Ok(response) =
+                                provenant_records::decode::<PeerResponse<serde_json::Value>, _>(
+                                    reply.stdout.bytes.as_slice(),
+                                    Limits::CONFIG,
+                                )
+                            && response.version == 1
+                            && response.host == peer.host
+                            && response.project == request.project.key
+                            && response.protocol != PROTOCOL
+                        {
+                            return Err(PeerError::ProtocolMismatch {
+                                peer: peer.destination.clone(),
+                                remote: response.protocol,
+                            });
+                        }
+                    }
+                }
                 return Err(uncertain(if line.is_empty() {
                     format!("ssh exited with status {code}")
                 } else {
@@ -1071,6 +1135,11 @@ mod tests {
     struct Canned(Mutex<Option<Result<ExecOutcome, ExecError>>>);
     impl Executor for Canned {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let wire: serde_json::Value = serde_json::from_slice(options.stdin.unwrap()).unwrap();
+            if wire.get("protocol").is_none() {
+                assert_eq!(wire["action"], serde_json::json!({"action":"health"}));
+                return Err(ExecError::Busy);
+            }
             let request = decode_request(options.stdin.unwrap()).unwrap();
             assert_eq!(request.protocol, PROTOCOL);
             self.0.lock().unwrap().take().unwrap()
@@ -1095,6 +1164,10 @@ mod tests {
         exchange_failure(result, false)
     }
     fn exchange_failure(result: Result<ExecOutcome, ExecError>, mutation: bool) -> PeerError {
+        let executor = Canned(Mutex::new(Some(result)));
+        exchange_error(&executor, mutation)
+    }
+    fn exchange_error(executor: &dyn Executor, mutation: bool) -> PeerError {
         let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let host = HostId::from_bytes([2; 16]);
@@ -1131,9 +1204,8 @@ mod tests {
             remote_executable: None,
             connect_timeout_seconds: 10,
         };
-        let executor = Canned(Mutex::new(Some(result)));
         let transport = SshTransport {
-            executor: &executor,
+            executor,
             clock: &clock,
             home: Path::new("/home/a"),
             cwd: Path::new("/home/a/repo"),
@@ -1187,6 +1259,104 @@ mod tests {
                 assert!(matches!(error, PeerError::Unknown { .. }), "{error}");
             } else {
                 assert!(matches!(error, PeerError::Failed(_)), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn agent_socket_closure_requires_a_confirmed_protocol_mismatch() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        // SSH's remote entrypoint forwards to the agent socket. The
+        // protocol-1 wire fixture reproduces the old relay dropping a child's
+        // decode refusal, then answering a legacy health request.
+        struct AgentSsh(Mutex<std::collections::VecDeque<UnixStream>>);
+        impl Executor for AgentSsh {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let request: serde_json::Value =
+                    serde_json::from_slice(options.stdin.unwrap()).unwrap();
+                let probe = request.get("protocol").is_none();
+                assert_eq!(
+                    options.timeout,
+                    Duration::from_secs(if probe { 3 } else { 5 })
+                );
+                let mut stream = self.0.lock().unwrap().pop_front().unwrap();
+                stream.write_all(options.stdin.unwrap()).unwrap();
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                Ok(if bytes.is_empty() {
+                    let mut reply = outcome(
+                        3,
+                        "provenant: fabric peer: peer agent closed without a reply; see /home/a/peer-agent/agent.log\n",
+                        false,
+                    );
+                    reply.elapsed_micros = 2_000_000;
+                    reply
+                } else {
+                    let mut reply = outcome(0, "", false);
+                    reply.stdout.bytes = bytes;
+                    reply
+                })
+            }
+        }
+        for (protocol, wrong_identity) in [
+            (None, false),
+            (Some(4), false),
+            (Some(PROTOCOL), false),
+            (None, true),
+        ] {
+            for mutation in [false, true] {
+                let (client, server) = UnixStream::pair().unwrap();
+                let (probe, health) = UnixStream::pair().unwrap();
+                let server = std::thread::spawn(move || {
+                    for (index, mut stream) in [server, health].into_iter().enumerate() {
+                        let mut bytes = Vec::new();
+                        stream.read_to_end(&mut bytes).unwrap();
+                        if bytes.is_empty() {
+                            return;
+                        }
+                        let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        if index == 0 {
+                            assert_eq!(request["protocol"], PROTOCOL);
+                        } else {
+                            assert!(request.get("protocol").is_none());
+                            assert!(request.get("trace").is_none());
+                            assert_eq!(request["action"], serde_json::json!({"action":"health"}));
+                            let mut reply = serde_json::json!({
+                                "version":1, "host":request["target_host"],
+                                "project":request["project"]["key"],
+                                "result":{"result":"health","data":{
+                                    "host":request["target_host"],"available":true,"execution":true,
+                                }},
+                            });
+                            if let Some(protocol) = protocol {
+                                reply["protocol"] = protocol.into();
+                            }
+                            if wrong_identity {
+                                reply["host"] =
+                                    serde_json::to_value(HostId::from_bytes([9; 16])).unwrap();
+                            }
+                            stream
+                                .write_all(&serde_json::to_vec(&reply).unwrap())
+                                .unwrap();
+                        }
+                    }
+                });
+                let error = exchange_error(&AgentSsh(Mutex::new([client, probe].into())), mutation);
+                if protocol != Some(PROTOCOL) && !wrong_identity {
+                    assert!(
+                        matches!(error, PeerError::ProtocolMismatch { remote, .. }
+                    if remote == protocol.unwrap_or(1)),
+                        "{error}"
+                    );
+                } else if mutation {
+                    assert!(matches!(error, PeerError::Unknown { .. }), "{error}");
+                } else {
+                    assert!(matches!(error, PeerError::Failed(_)), "{error}");
+                }
+                server.join().unwrap();
             }
         }
     }
