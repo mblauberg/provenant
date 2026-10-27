@@ -37,6 +37,11 @@ const MAX_NETWORK_GRANTS: usize = 128;
 const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
 const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
+/// The lane build cache is disposable but grows with every build (a Rust
+/// workspace's `target/` holds ~100,000 entries), so its census bound is
+/// higher than a worktree's. It stays bounded and censused.
+#[cfg(target_os = "macos")]
+const MAX_CACHE_TREE_ENTRIES: usize = 500_000;
 /// The retained provider state copy shares this depth limit.
 #[cfg(target_os = "macos")]
 const MAX_WRITABLE_TREE_DEPTH: usize = 32;
@@ -196,6 +201,12 @@ pub enum PermissionError {
     NestedConfinementUnsupported,
     #[error("compiled profile exceeds its byte bound")]
     ProfileTooLarge,
+    #[error("{family} exceeds its bound of {limit}: {path:?}")]
+    BoundExceeded {
+        family: &'static str,
+        limit: usize,
+        path: PathBuf,
+    },
     #[error("sandbox backend is unavailable on this platform")]
     BackendUnavailable,
     #[error("sandbox backend probe reported unavailable: {0:?}")]
@@ -1210,12 +1221,19 @@ fn compile_sbpl(
     if plan.nested_confinement {
         return Err(PermissionError::NestedConfinementUnsupported);
     }
-    if plan.read_roots.len() > MAX_PATH_GRANTS
-        || plan.protected_roots.len() > MAX_PATH_GRANTS
-        || plan.secret_roots.len() > MAX_PATH_GRANTS
-        || plan.write_roots.len() > MAX_PATH_GRANTS
-    {
-        return Err(PermissionError::ProfileTooLarge);
+    for (family, count) in [
+        ("read root grant count", plan.read_roots.len()),
+        ("protected root grant count", plan.protected_roots.len()),
+        ("secret root grant count", plan.secret_roots.len()),
+        ("write root grant count", plan.write_roots.len()),
+    ] {
+        if count > MAX_PATH_GRANTS {
+            return Err(PermissionError::BoundExceeded {
+                family,
+                limit: MAX_PATH_GRANTS,
+                path: plan.scratch.path.clone(),
+            });
+        }
     }
     validate_profile_spec(&profile.spec)?;
     for grant in &plan.read_roots {
@@ -1288,7 +1306,12 @@ fn compile_sbpl(
     }
     verify_state_writes(plan, profile, anchors)?;
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_state_write(plan, &authority.cargo_cache, anchors)?;
+        verify_state_write(
+            plan,
+            &authority.cargo_cache,
+            anchors,
+            MAX_CACHE_TREE_ENTRIES,
+        )?;
         let cache = anchors
             .directories
             .iter()
@@ -1410,7 +1433,12 @@ fn compile_sbpl(
         }
     }
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_state_write(plan, &authority.cargo_cache, anchors)?;
+        verify_state_write(
+            plan,
+            &authority.cargo_cache,
+            anchors,
+            MAX_CACHE_TREE_ENTRIES,
+        )?;
         let cache = anchors
             .directories
             .iter()
@@ -1517,7 +1545,7 @@ fn verify_state_writes(
     anchors: &Anchors<'_>,
 ) -> Result<(), PermissionError> {
     for grant in &profile.spec.state_writes {
-        verify_state_write(plan, grant, anchors)?;
+        verify_state_write(plan, grant, anchors, MAX_WRITABLE_TREE_ENTRIES)?;
     }
     Ok(())
 }
@@ -1527,6 +1555,7 @@ fn verify_state_write(
     plan: &PlanPermissions,
     grant: &PathGrant,
     anchors: &Anchors<'_>,
+    entry_limit: usize,
 ) -> Result<(), PermissionError> {
     grant.validate()?;
     if plan
@@ -1551,7 +1580,7 @@ fn verify_state_write(
         }
     }
     match grant.scope {
-        PathScope::Subtree => verify_writable_tree(&grant.path, anchors)?,
+        PathScope::Subtree => verify_writable_tree_within(&grant.path, anchors, entry_limit)?,
         PathScope::Exact => anchors.verify_single_link_grant(grant)?,
     }
     Ok(())
@@ -1649,6 +1678,15 @@ fn verify_private_scratch(
 
 #[cfg(target_os = "macos")]
 fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), PermissionError> {
+    verify_writable_tree_within(path, anchors, MAX_WRITABLE_TREE_ENTRIES)
+}
+
+#[cfg(target_os = "macos")]
+fn verify_writable_tree_within(
+    path: &Path,
+    anchors: &Anchors<'_>,
+    entry_limit: usize,
+) -> Result<(), PermissionError> {
     let root = anchors
         .directories
         .iter()
@@ -1663,7 +1701,7 @@ fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), Permis
         return Err(PermissionError::AnchorMismatch);
     }
     let mut entries = 0;
-    inspect_writable_directory(&root.directory, path, 0, &mut entries)?;
+    inspect_writable_directory(&root.directory, path, 0, &mut entries, entry_limit)?;
     let after = root
         .directory
         .metadata()
@@ -1681,15 +1719,24 @@ fn inspect_writable_directory(
     path: &Path,
     depth: usize,
     count: &mut usize,
+    entry_limit: usize,
 ) -> Result<(), PermissionError> {
     if depth > MAX_WRITABLE_TREE_DEPTH {
-        return Err(PermissionError::ProfileTooLarge);
+        return Err(PermissionError::BoundExceeded {
+            family: "writable tree depth",
+            limit: MAX_WRITABLE_TREE_DEPTH,
+            path: path.to_owned(),
+        });
     }
     for name in directory.entries().map_err(PermissionError::Filesystem)? {
         let name = name.map_err(PermissionError::Filesystem)?;
         *count += 1;
-        if *count > MAX_WRITABLE_TREE_ENTRIES {
-            return Err(PermissionError::ProfileTooLarge);
+        if *count > entry_limit {
+            return Err(PermissionError::BoundExceeded {
+                family: "writable tree entry count",
+                limit: entry_limit,
+                path: path.to_owned(),
+            });
         }
         let before = directory
             .metadata_at(&name, false)
@@ -1705,7 +1752,7 @@ fn inspect_writable_directory(
             if !before.unchanged(&opened) {
                 return Err(PermissionError::AnchorMismatch);
             }
-            inspect_writable_directory(&child, &path.join(&name), depth + 1, count)?;
+            inspect_writable_directory(&child, &path.join(&name), depth + 1, count, entry_limit)?;
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
@@ -2422,11 +2469,34 @@ mod tests {
         let alias = nested.join("object.o");
         std::fs::hard_link(&original, &alias)?;
         let directory = Directory::open_anchor(&nested)?;
-        let error = inspect_writable_directory(&directory, &nested, 0, &mut 0).unwrap_err();
+        let error =
+            inspect_writable_directory(&directory, &nested, 0, &mut 0, MAX_WRITABLE_TREE_ENTRIES)
+                .unwrap_err();
         assert!(matches!(&error, PermissionError::HardLinkedWritableFile(path) if path == &alias));
         assert!(error.to_string().contains("disposable build output"));
         std::fs::remove_file(alias)?;
-        inspect_writable_directory(&directory, &nested, 0, &mut 0)?;
+        inspect_writable_directory(&directory, &nested, 0, &mut 0, MAX_WRITABLE_TREE_ENTRIES)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writable_tree_entry_overflow_names_its_family_not_the_profile_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        for index in 0..5 {
+            std::fs::write(temp.path().join(format!("file-{index}")), b"x")?;
+        }
+        let directory = Directory::open_anchor(temp.path())?;
+        let error = inspect_writable_directory(&directory, temp.path(), 0, &mut 0, 3).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionError::BoundExceeded { family, limit: 3, path }
+                if *family == "writable tree entry count" && path == temp.path()
+        ));
+        assert!(!error.to_string().contains("byte bound"));
+        // The disposable lane build cache outgrows a worktree-sized census.
+        const { assert!(MAX_CACHE_TREE_ENTRIES >= 5 * MAX_WRITABLE_TREE_ENTRIES) };
         Ok(())
     }
 
