@@ -2336,6 +2336,33 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
 }
 
 #[test]
+fn claude_fresh_token_does_not_create_refresh_lock() {
+    use crate::claude::{Login, refresh_if_expiring};
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude");
+    let now = 1_000_000_000_u64;
+    let item = format!(r#"{{"claudeAiOauth":{{"accessToken":"fixture-access","refreshToken":"fixture-refresh","expiresAt":{}}}}}"#, now + 3_600_000);
+    let script = FileCredentialScript::new(
+        &config,
+        KeychainScript {
+            items: std::sync::Mutex::new(vec![item.into_bytes()].into()),
+            statuses: Default::default(),
+            calls: Default::default(),
+        },
+    );
+    let login = Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+    refresh_if_expiring(&script, &login, &|| now, now + 60_000, None)
+        .expect("fresh token");
+    assert!(!config.join("provenant-oauth-refresh.lock").exists());
+}
+
+#[test]
 fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
     use crate::claude::{
         CredentialAuthority, Login, refresh_for_account_authorised, refresh_if_expiring,
