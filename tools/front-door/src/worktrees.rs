@@ -8,7 +8,7 @@ use provenant_confinement::{
         WorktreeRemove,
     },
 };
-use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
@@ -436,10 +436,13 @@ pub(crate) struct LandWorktree {
 /// keeps GC's checks: the lane must be idle with terminal writers, tracked
 /// and kept paths stay, and symlinks are never followed. Removal refuses a
 /// dirty or live worktree and keeps a branch not contained in `integration`.
+/// The worktree is only removed while its HEAD is still `tip`, the commit the
+/// caller proved merged, so commits made since keep the checkout too.
 pub(crate) fn land_cleanup(
     globals: &Globals,
     branch: &str,
     integration: &str,
+    tip: GitOid,
     workers: &dyn WorkerObserver,
 ) -> Result<LandWorktree, Error> {
     let roots::Resolved {
@@ -474,6 +477,13 @@ pub(crate) fn land_cleanup(
                 landed.kept = Some(
                     "this command runs inside that worktree; run it from another checkout".into(),
                 );
+                return Ok(landed);
+            }
+            if lane.head != tip {
+                landed.kept = Some(format!(
+                    "the worktree is at {}, not the merged {tip}",
+                    lane.head
+                ));
                 return Ok(landed);
             }
             let project_id = context.binding.project_id();

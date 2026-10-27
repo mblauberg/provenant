@@ -149,6 +149,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
             "pr_land_changes_nothing_when_the_merge_does_not_happen",
+            "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone",
             "pr_open_refuses_what_the_receipts_cannot_support",
         ],
         |name| {
@@ -226,6 +227,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "pr_land_changes_nothing_when_the_merge_does_not_happen" => {
                     crate::pr_land_tests::pr_land_changes_nothing_when_the_merge_does_not_happen()
+                }
+                "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone" => {
+                    crate::pr_land_tests::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone()
                 }
                 "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_names_the_create_command()

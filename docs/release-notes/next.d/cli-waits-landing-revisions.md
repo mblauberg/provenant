@@ -12,7 +12,9 @@ shell or monitor.
 existing merge path, then fetches, fast-forwards a clean local base, removes
 the merged branch's worktree (after its declared build output) and deletes the
 branch with `git branch -d`. Each follow-up step refuses and reports rather than
-forcing. `pr open --from-attempt` builds the pull request body from the
+forcing, and cleanup only touches the pull request's own branch: a fork's head
+leaves a same-named local branch alone, and a worktree holding commits the base
+lacks is kept along with its branch. `pr open --from-attempt` builds the pull request body from the
 attempt's receipts into the repository template, and `pr status` prints one line
 per pull request.
 

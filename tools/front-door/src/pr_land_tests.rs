@@ -22,7 +22,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     match call.as_str() {
         "pr view 1668 --json headRefOid" => io::stdout().write_all(&fs::read("head.json")?)?,
-        "pr view 1668 --json state,baseRefName,headRefName" => {
+        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
             io::stdout().write_all(&fs::read("view.json")?)?;
         }
         "pr checks 1668 --watch" => {
@@ -113,7 +113,7 @@ fn landing() -> Result<Landing> {
     )?;
     fs::write(
         rig.project.join("view.json"),
-        r#"{"state":"MERGED","baseRefName":"main","headRefName":"feat"}"#,
+        r#"{"state":"MERGED","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
     )?;
     Ok(Landing {
         rig,
@@ -235,7 +235,34 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
     git_in(&landing.rig, &landing.worktree, &["add", "later.txt"])?;
     git_in(&landing.rig, &landing.worktree, &["commit", "-qm", "later"])?;
     let value = land(&landing)?;
+    assert_eq!(status(&value, "worktree")?, "refused", "{value}");
     assert_eq!(status(&value, "branch")?, "refused", "{value}");
+    assert!(
+        landing.worktree.join("later.txt").exists(),
+        "the checkout holding unmerged commits survives"
+    );
+    assert!(branch_exists(&landing.rig, "feat")?);
+    Ok(())
+}
+
+pub(crate) fn pr_land_leaves_a_local_namesake_of_a_fork_branch_alone() -> Result {
+    // The merged pull request came from a fork's `feat`, so the local `feat`
+    // branch and its clean, fully merged worktree are somebody else's.
+    let landing = landing()?;
+    fs::write(
+        landing.rig.project.join("view.json"),
+        r#"{"state":"MERGED","baseRefName":"main","headRefName":"feat","isCrossRepository":true}"#,
+    )?;
+    let value = land(&landing)?;
+    assert_eq!(value["data"]["merged"], true, "{value}");
+    assert_eq!(status(&value, "fast_forward")?, "done", "{value}");
+    assert_eq!(status(&value, "worktree")?, "skipped", "{value}");
+    assert_eq!(status(&value, "branch")?, "skipped", "{value}");
+    assert!(
+        value.to_string().contains("another repository"),
+        "the report says why: {value}"
+    );
+    assert!(landing.worktree.exists());
     assert!(branch_exists(&landing.rig, "feat")?);
     Ok(())
 }
@@ -370,7 +397,7 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
     assert_eq!(code(&missing), 2);
     fs::write(
         landing.rig.project.join("view.json"),
-        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat"}"#,
+        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
     )?;
     let value = land(&landing)?;
     assert_eq!(value["data"]["merged"], false);

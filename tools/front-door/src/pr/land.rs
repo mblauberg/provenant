@@ -42,6 +42,9 @@ struct Pull {
     base: String,
     #[serde(rename = "headRefName")]
     branch: String,
+    /// The head branch lives in another repository, such as a fork.
+    #[serde(rename = "isCrossRepository")]
+    cross_repository: bool,
 }
 fn pull(project: &Path, number: &str) -> Result<Pull> {
     let bytes = successful(super::execute(
@@ -52,7 +55,7 @@ fn pull(project: &Path, number: &str) -> Result<Pull> {
             "view",
             number,
             "--json",
-            "state,baseRefName,headRefName",
+            "state,baseRefName,headRefName,isCrossRepository",
         ],
         false,
     )?)?;
@@ -133,9 +136,81 @@ fn follow_up(
 
     steps.push(fast_forward(&git, project, base, &remote, &upstream)?);
 
-    let landed = worktrees::land_cleanup(globals, branch, &upstream, workers);
+    match cleanup_target(&git, project, pull, &upstream)? {
+        Cleanup::Skip(status, why) => {
+            for name in ["worktree", "branch"] {
+                steps.push(Step::new(name, status, why.as_str()));
+            }
+        }
+        Cleanup::Prune(tip) => {
+            let (worktree, branch_gone) = prune_worktree(globals, branch, &upstream, tip, workers);
+            steps.push(worktree);
+            steps.push(delete_branch(
+                &git,
+                project,
+                branch,
+                base,
+                &upstream,
+                branch_gone,
+            )?);
+        }
+    }
+    Ok(steps)
+}
+
+/// Whether the local branch named like the pull request's may be cleaned up.
+enum Cleanup {
+    /// The local branch tip, which the worktree removal must still find.
+    Prune(GitOid),
+    Skip(Status, String),
+}
+
+/// A local branch is the pull request's branch only when its head lives in
+/// this repository, and is safe to remove only when the base contains its tip.
+/// A fork's `feature` says nothing about a local `feature`, and commits made
+/// after the merged head belong to neither.
+fn cleanup_target(git: &Git, project: &Path, pull: &Pull, upstream: &str) -> Result<Cleanup> {
+    let branch = pull.branch.as_str();
+    if pull.cross_repository {
+        return Ok(Cleanup::Skip(
+            Status::Skipped,
+            format!(
+                "the pull request head is in another repository, so a local {branch} is not its branch"
+            ),
+        ));
+    }
+    let local = format!("refs/heads/{branch}^{{commit}}");
+    let (exists, tip) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
+    if !exists {
+        return Ok(Cleanup::Skip(Status::Skipped, "no local branch".into()));
+    }
+    let tip = GitOid::parse(&tip)?;
+    let (contained, _) = git.run(
+        project,
+        &["merge-base", "--is-ancestor", &tip.to_string(), upstream],
+    )?;
+    if !contained {
+        return Ok(Cleanup::Skip(
+            Status::Refused,
+            format!(
+                "{branch} has commits that {upstream} does not contain, so its worktree is kept"
+            ),
+        ));
+    }
+    Ok(Cleanup::Prune(tip))
+}
+
+/// The worktree step, and whether removing it also deleted the branch.
+fn prune_worktree(
+    globals: &provenant_cli::Globals,
+    branch: &str,
+    upstream: &str,
+    tip: GitOid,
+    workers: &dyn WorkerObserver,
+) -> (Step, bool) {
+    let landed = worktrees::land_cleanup(globals, branch, upstream, tip, workers);
     let mut branch_gone = false;
-    steps.push(match landed {
+    let step = match landed {
         Ok(landed) if !landed.registered => Step::new(
             "worktree",
             Status::Skipped,
@@ -164,17 +239,8 @@ fn follow_up(
             }
         }
         Err(error) => Step::new("worktree", Status::Refused, error.to_string()),
-    });
-
-    steps.push(delete_branch(
-        &git,
-        project,
-        branch,
-        base,
-        &upstream,
-        branch_gone,
-    )?);
-    Ok(steps)
+    };
+    (step, branch_gone)
 }
 
 /// Move the local base branch to the fetched one, only forward and only in a

@@ -298,8 +298,12 @@ repeat).
 |---|---|---|
 | `fetch` | `git fetch <remote> <base>` | the fetch fails, or the fetched base does not hold the merged head |
 | `fast_forward` | moves the local base to the fetched one, in the checkout that has it, or by fetching `base:base` when none does | that checkout has any change, or the base has diverged |
-| `worktree` | deletes declared build output (`gc.projects.<id>.regenerable`, plus `target`), then removes the branch's registered worktree as `worktree remove` does | the worktree is dirty or has a live writer, or this command runs inside it |
+| `worktree` | deletes declared build output (`gc.projects.<id>.regenerable`, plus `target`), then removes the branch's registered worktree as `worktree remove` does | the worktree is dirty or has a live writer, this command runs inside it, or its HEAD holds commits the fetched base lacks (it stays whole) |
 | `branch` | `git branch -d` of the merged local branch | the branch holds commits the fetched base lacks, or Git refuses |
+
+When the pull request's head is in another repository, such as a fork, the
+`worktree` and `branch` steps are skipped with that reason: a local branch of
+the same name is not the pull request's branch and is never touched.
 
 The build-output deletion keeps GC's checks: tracked and `keep` paths stay,
 symlinks are never followed, and a lane that is not idle blocks it. Unlike a
