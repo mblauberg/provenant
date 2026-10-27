@@ -238,19 +238,51 @@ pub fn plan_tick_with_settings(
     let selected = |id: &str| tick.adapter.as_ref().is_none_or(|s| s == id);
     let mut drops = Vec::new();
     for record in records {
-        // Keep past Google accounts so returning to a sign-in restores its cooldown.
-        if !provenant_records::AdapterSpec::get(&record.account.adapter)
-            .is_some_and(|spec| spec.retain_quota_accounts)
-            && selected(&record.account.adapter)
-            && detections.iter().any(|d| {
-                d.adapter == record.account.adapter
-                    && d.accounts.as_ref().is_some_and(|accounts| {
+        // Keep past Google accounts so returning to a sign-in restores its cooldown,
+        // but drop duplicate legacy keys that share a fingerprint with a live account.
+        let retaining = provenant_records::AdapterSpec::get(&record.account.adapter)
+            .is_some_and(|spec| spec.retain_quota_accounts);
+        let absent_from_detection = detections.iter().any(|d| {
+            d.adapter == record.account.adapter
+                && d.accounts
+                    .as_ref()
+                    .map_or(d.status == QuotaStatus::Unsupported, |accounts| {
                         !accounts.iter().any(|a| {
                             a.adapter == record.account.adapter
                                 && a.account_key == record.account.account_key
                         })
                     })
-            })
+        });
+        let duplicate_fingerprint = retaining
+            && record
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.details.as_ref())
+                .and_then(|d| d.fingerprint.as_deref())
+                .is_some_and(|fp| {
+                    records.iter().any(|other| {
+                        other.account != record.account
+                            && other.account.adapter == record.account.adapter
+                            && detections.iter().any(|d| {
+                                d.adapter == other.account.adapter
+                                    && d.accounts.as_ref().is_some_and(|accounts| {
+                                        accounts.iter().any(|a| {
+                                            a.adapter == other.account.adapter
+                                                && a.account_key == other.account.account_key
+                                        })
+                                    })
+                            })
+                            && other
+                                .snapshot
+                                .as_ref()
+                                .and_then(|s| s.details.as_ref())
+                                .and_then(|d| d.fingerprint.as_deref())
+                                == Some(fp)
+                    })
+                });
+        if selected(&record.account.adapter)
+            && ((!retaining && absent_from_detection)
+                || (absent_from_detection && duplicate_fingerprint))
         {
             drops.push(UpdateIntent {
                 account: record.account.clone(),
@@ -354,6 +386,19 @@ pub fn report(
     let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
     let mut accounts = Vec::new();
     for record in records.iter().filter(|r| selected(&r.account.adapter)) {
+        if !detections.is_empty()
+            && !detections.iter().any(|d| {
+                d.adapter == record.account.adapter
+                    && d.accounts.as_ref().is_some_and(|accounts| {
+                        accounts.iter().any(|a| {
+                            a.adapter == record.account.adapter
+                                && a.account_key == record.account.account_key
+                        })
+                    })
+            })
+        {
+            continue;
+        }
         let age = record.snapshot.as_ref().map(|s| {
             u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
         });
@@ -419,7 +464,7 @@ pub fn report(
         schema_version: 1,
         generated_unix_seconds: now,
         coverage: Coverage {
-            total: (accounts.len() + sources.len()) as u64,
+            total: accounts.len() as u64,
             known,
         },
         accounts,
@@ -789,5 +834,136 @@ mod transition_tests {
             100,
             "fixture".into(),
         )
+    }
+    #[test]
+    fn report_omits_unregistered_account_record_and_excludes_it_from_coverage_total() {
+        let live = account("claude", "live");
+        let unregistered = account("claude", "old");
+        let records = [
+            AccountRecord::empty(live.clone()),
+            AccountRecord::empty(unregistered),
+        ];
+        let detections = [Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![live.clone()]),
+            status: QuotaStatus::Available,
+        }];
+        let rep = report(
+            crate::source::TEST_POLICIES,
+            &records,
+            &detections,
+            &QuotaQuery { adapter: None },
+            100,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 1);
+        assert_eq!(rep.accounts[0].account, live);
+        assert_eq!(rep.coverage.total, 1);
+    }
+    #[test]
+    fn plan_tick_drops_non_retaining_record_whose_adapter_has_no_registered_account() {
+        let opencode = account("opencode", "go");
+        let records = [AccountRecord::empty(opencode.clone())];
+        let detections = [Detection {
+            adapter: "opencode".into(),
+            accounts: None,
+            status: QuotaStatus::Unsupported,
+        }];
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Manual,
+            power: Power::Ac,
+        };
+        let plan = plan_tick(
+            crate::source::TEST_POLICIES,
+            &records,
+            &detections,
+            &tick,
+            100,
+        )
+        .unwrap();
+        assert_eq!(plan.drops.len(), 1);
+        assert_eq!(plan.drops[0].account, opencode);
+        assert!(plan.drops[0].replacement.is_none());
+    }
+    #[test]
+    fn legacy_keyed_agy_record_sharing_fingerprint_with_live_registered_account_is_not_rendered_as_second_row()
+     {
+        let live_account = AccountScope {
+            adapter: "agy".into(),
+            account_key: "agy-google-662390bb3131".into(),
+            label: "google-662390bb3131".into(),
+        };
+        let legacy_account = AccountScope {
+            adapter: "agy".into(),
+            account_key: "agy-agy".into(),
+            label: "agy".into(),
+        };
+        let mut live_record = AccountRecord::empty(live_account.clone());
+        live_record.revision = 62;
+        live_record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: live_account.clone(),
+            revision: 62,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(QuotaDetails {
+                fingerprint: Some("google-662390bb3131".into()),
+                ..Default::default()
+            }),
+            windows: vec![],
+        });
+        let mut legacy_record = AccountRecord::empty(legacy_account.clone());
+        legacy_record.revision = 14;
+        legacy_record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: legacy_account,
+            revision: 14,
+            status: QuotaStatus::Stale,
+            observed_unix_seconds: 50,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(QuotaDetails {
+                fingerprint: Some("google-662390bb3131".into()),
+                ..Default::default()
+            }),
+            windows: vec![],
+        });
+        let records = [live_record.clone(), legacy_record.clone()];
+        let detections = [Detection {
+            adapter: "agy".into(),
+            accounts: Some(vec![live_account.clone()]),
+            status: QuotaStatus::Available,
+        }];
+        let rep = report(
+            crate::source::TEST_POLICIES,
+            &records,
+            &detections,
+            &QuotaQuery { adapter: None },
+            100,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(rep.accounts.len(), 1);
+        assert_eq!(rep.accounts[0].account, live_account);
+
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Manual,
+            power: Power::Ac,
+        };
+        let plan = plan_tick(
+            crate::source::TEST_POLICIES,
+            &records,
+            &detections,
+            &tick,
+            100,
+        )
+        .unwrap();
+        assert_eq!(plan.drops.len(), 1);
+        assert_eq!(plan.drops[0].account, legacy_record.account);
     }
 }
