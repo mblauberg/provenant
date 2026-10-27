@@ -92,6 +92,8 @@ paths. Configure `regenerable`, `keep` and the opt-in
 [configuration runbook](configuration.md#lane-cache-collection).
 Applied foreign collection removes any temporary writer state it created,
 after removal or refusal. Existing worktree state stays in place.
+Temporary-state cleanup can wait up to five seconds for repository custody
+after collection stops; a cleanup failure is reported as a refusal.
 GC requires a primary checkout. Bare repositories and their linked checkouts
 are refused as collection roots; scheduled scans report them as unobserved.
 

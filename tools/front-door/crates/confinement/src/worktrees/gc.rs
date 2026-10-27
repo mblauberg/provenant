@@ -968,7 +968,17 @@ fn collect_foreign(
     })();
     if created_state {
         let cleanup_cancel = CancelToken::new();
-        let _repository = repository_lock(context, LockMode::Exclusive, &cleanup_cancel)?;
+        // A large prune may outlive the collection's original lock deadline.
+        // Cleanup has its own bounded wait while retaining writer exclusion.
+        let cleanup_budget = WaitBudget::cli(context.clock.mono_now(), 5)
+            .map_err(|_| WorktreeError::UnknownWriter)?;
+        let _repository = context.project_state.lock(
+            OsStr::new(REPOSITORY_LOCK),
+            LockMode::Exclusive,
+            cleanup_budget,
+            &cleanup_cancel,
+            context.clock,
+        )?;
         let name = state_dir_name(&lane.path);
         let state = state.as_ref().ok_or(WorktreeError::IdentityChanged)?;
         // This call's identity-less state is temporary custody, not a stable

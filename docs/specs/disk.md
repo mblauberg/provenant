@@ -131,6 +131,8 @@ identity. Previews do not create state. Native processes do not take this
 advisory lock; the complete process census and final clean recheck still apply.
 State created solely for this call is removed after removal or refusal, while
 the writer lock remains held and repository custody excludes state creation.
+Cleanup has an independent five-second repository-lock budget even when the
+collection's deadline has expired or its cancellation token has been set.
 Existing state survives. Cleanup avoids leaving identity-less directories that
 would block a later `worktree create`; creation does not adopt unknown state.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.

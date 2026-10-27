@@ -2903,11 +2903,24 @@ mod lifecycle_tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // Bounded real lock contention.
     fn gc_foreign_without_state_holds_writer_through_final_recheck() -> Result<(), Box<dyn Error>> {
-        for refuse in [false, true] {
+        for scenario in [
+            "remove",
+            "final-refusal",
+            "contended-refusal",
+            "cancelled-refusal",
+        ] {
+            let refuse = scenario != "remove";
             let fixture = Fixture::new()?;
             let test_context = TestContext::new(&fixture)?;
-            let context = test_context.context();
+            let mut context = test_context.context();
+            let clock = provenant_core::TestClock::new(
+                context.clock.wall_now()?,
+                provenant_core::MonoTime::from_micros(0),
+            );
+            context.clock = &clock;
+            context.lock_budget = WaitBudget::cli(clock.mono_now(), 1)?;
             let path = fixture._temp.path().join("native-no-state");
             fixture.run(&[
                 "worktree",
@@ -2925,7 +2938,29 @@ mod lifecycle_tests {
                     .is_err()
             );
             let final_writer_held = std::cell::Cell::new(false);
+            let holder = std::cell::RefCell::new(None);
+            let collection_cancel = cancel();
             let no_live = |_: &Path| {
+                if scenario == "contended-refusal"
+                    && let Ok(state) = context.project_state.open_verified_directory(&state_name)
+                    && matches!(
+                        state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+                        Err(FsError::LockTimeout { .. })
+                    )
+                {
+                    clock
+                        .wait_until(provenant_core::MonoTime::from_micros(10_000_000))
+                        .unwrap();
+                    let repository = context
+                        .project_state
+                        .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                        .unwrap();
+                    holder.replace(Some(std::thread::spawn(move || {
+                        std::thread::park_timeout(std::time::Duration::from_millis(50));
+                        drop(repository);
+                    })));
+                    return false;
+                }
                 if matches!(
                     context
                         .project_state
@@ -2943,6 +2978,9 @@ mod lifecycle_tests {
                         Err(FsError::LockTimeout { .. })
                     ));
                 }
+                if scenario == "cancelled-refusal" && final_writer_held.get() {
+                    collection_cancel.cancel();
+                }
                 !refuse || !final_writer_held.get()
             };
             let report = collect(
@@ -2959,7 +2997,7 @@ mod lifecycle_tests {
                     foreign_merged_clean: true,
                     foreign_idle_before_ns: None,
                 },
-                &cancel(),
+                &collection_cancel,
             )?;
             if refuse {
                 assert_eq!(
@@ -2983,10 +3021,14 @@ mod lifecycle_tests {
                 );
                 assert!(!path.exists());
             }
-            assert!(final_writer_held.get());
+            if let Some(holder) = holder.into_inner() {
+                holder.join().unwrap();
+            } else {
+                assert!(final_writer_held.get());
+            }
             assert!(
                 matches!(context.project_state.open_verified_directory(&state_name), Err(error) if error.is_not_found()),
-                "temporary state remains after refuse={refuse}"
+                "temporary state remains after {scenario}"
             );
         }
         Ok(())
