@@ -792,10 +792,24 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
             })
             .collect::<Result<Vec<_>, Fail>>()
     };
+    let write_roots = resolve(&access.write_root, "--write-root")?;
+    // Worktree-write protects `.git` inside the worktree, so a write root that
+    // is, or contains, the worktree overlaps it and the plan is invalid. A read
+    // root on the worktree is valid and stays allowed.
+    if let Some(worktree) = access.worktree.as_deref() {
+        let worktree =
+            provenant_os::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        if let Some(root) = write_roots.iter().find(|root| worktree.starts_with(root)) {
+            return Err(invalid(format!(
+                "--write-root {} overlaps the --worktree; worktree-write already grants the worktree",
+                root.display()
+            )));
+        }
+    }
     Ok(run::LaneAccess {
         network,
         read_roots: resolve(&access.read_root, "--read-root")?,
-        write_roots: resolve(&access.write_root, "--write-root")?,
+        write_roots,
     })
 }
 
