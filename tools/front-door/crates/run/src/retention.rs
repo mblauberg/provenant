@@ -40,6 +40,8 @@ pub struct ProviderStateGc {
     pub removed: Vec<PathBuf>,
     pub attempt_tmp: Vec<AttemptTmpRemoval>,
     pub attempt_logs: Vec<AttemptLogRemoval>,
+    /// Event rows expired (or eligible to expire in a dry run).
+    pub expired_events: u64,
     pub kept: Vec<ProviderStateIssue>,
     pub errors: Vec<ProviderStateIssue>,
 }
@@ -302,20 +304,31 @@ impl RunStore {
                             dry_run,
                             &mut report,
                         )?;
-                        if !dry_run {
+                        // Keep the newest event so unseen-settlement cursors and
+                        // last_event_sequence still observe terminal attempts.
+                        let expired_events = if dry_run {
+                            observation.retry(|| {
+                                Ok(self.db.query_row(
+                                    "SELECT COUNT(*) FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
+                                    rusqlite::params![id, record.project_id.to_string()],
+                                    |row| row.get::<_, u64>(0),
+                                )?)
+                            })?
+                        } else {
                             let update = Request {
                                 budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 5)
                                     .map_err(|_| RunError::Contention)?,
                                 ..observation
                             };
                             self.write(&update, |tx| {
-                                tx.execute(
-                                    "DELETE FROM events WHERE attempt=?1 AND project=?2",
+                                let deleted = tx.execute(
+                                    "DELETE FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
                                     rusqlite::params![id, record.project_id.to_string()],
                                 )?;
-                                Ok(())
-                            })?;
-                        }
+                                Ok(deleted as u64)
+                            })?
+                        };
+                        report.expired_events += expired_events;
                     }
                 }
                 if age >= DAY_MICROS {
@@ -1089,30 +1102,86 @@ mod tests {
 
         let events_before = store.events(0, 64, Some(id), &call)?;
         assert!(
-            !events_before.is_empty(),
-            "seeded terminal attempt must record events"
+            events_before.len() > 1,
+            "seeded terminal attempt must record multiple events"
         );
 
         // Younger than logs_days (e.g. 29 days): events survive.
-        sweep(&store, &context, 7, 30 * DAY_MICROS - 1, false, &call)?;
+        let young = sweep(&store, &context, 7, 30 * DAY_MICROS - 1, false, &call)?;
+        assert_eq!(young.expired_events, 0);
         assert_eq!(
             store.events(0, 64, Some(id), &call)?.len(),
             events_before.len()
         );
 
         // Dry run at logs_days (30 days): events survive.
-        sweep(&store, &context, 7, 30 * DAY_MICROS, true, &call)?;
+        let preview = sweep(&store, &context, 7, 30 * DAY_MICROS, true, &call)?;
+        assert_eq!(preview.expired_events, (events_before.len() - 1) as u64);
         assert_eq!(
             store.events(0, 64, Some(id), &call)?.len(),
             events_before.len()
         );
 
-        // Applied sweep at logs_days (30 days): closed run events expire.
-        sweep(&store, &context, 7, 30 * DAY_MICROS, false, &call)?;
-        assert!(
-            store.events(0, 64, Some(id), &call)?.is_empty(),
-            "closed run events must be expired after log retention"
+        // Applied sweep expires intermediate events, retaining the newest row.
+        let applied = sweep(&store, &context, 7, 30 * DAY_MICROS, false, &call)?;
+        assert_eq!(applied.expired_events, preview.expired_events);
+        let retained = store.events(0, 64, Some(id), &call)?;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].sequence,
+            events_before.last().ok_or("last event")?.sequence
         );
+        for dry_run in [true, false] {
+            assert_eq!(
+                sweep(&store, &context, 7, 31 * DAY_MICROS, dry_run, &call)?.expired_events,
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gc_keeps_expired_unacknowledged_settlements_visible() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let id = input.attempts[0].attempt_id;
+        let selection = "retention-unseen";
+        // Save a cursor before settlement, then leave the settlement unacknowledged.
+        store.ack_seen(selection, store.last_event_sequence(id, &call)?, &call)?;
+        withdraw(&store, &input, &call)?;
+        let newest = store.last_event_sequence(id, &call)?;
+        let cursor = store.seen_cursor(selection, false, &call)?;
+        assert!(newest > cursor);
+        sweep(&store, &context, 7, 30 * DAY_MICROS, false, &call)?;
+        let mut query = LaneQuery {
+            targets: vec![],
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: Some(context.actor_id),
+            unseen_after: Some(cursor),
+        };
+        // Exercise both the owned and explicit-target unseen filters.
+        for targets in [
+            vec![],
+            vec![LaneTarget {
+                run: input.run_id,
+                task: None,
+                attempt: Some(id),
+            }],
+        ] {
+            query.targets = targets;
+            let page = store.lanes(&query, &call)?;
+            assert_eq!(page.lanes.len(), 1, "expired settlement must remain unseen");
+            assert_eq!(page.lanes[0].attempt_id, id);
+            assert_eq!(store.last_event_sequence(id, &call)?, newest);
+            store.ack_seen(selection, newest, &call)?;
+            query.unseen_after = Some(store.seen_cursor(selection, false, &call)?);
+            assert!(store.lanes(&query, &call)?.lanes.is_empty());
+            query.unseen_after = Some(cursor);
+        }
         Ok(())
     }
 

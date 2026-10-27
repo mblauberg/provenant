@@ -144,6 +144,7 @@ fn collect_store(
             report.removed.append(&mut collected.removed);
             report.attempt_tmp.append(&mut collected.attempt_tmp);
             report.attempt_logs.append(&mut collected.attempt_logs);
+            report.expired_events += collected.expired_events;
             report.kept.append(&mut collected.kept);
             report.errors.append(&mut collected.errors);
         }
@@ -248,7 +249,10 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         &call,
     )?;
     let events_before = store.events(0, 64, Some(attempt), &call)?;
-    assert!(!events_before.is_empty(), "child attempt records events");
+    assert!(
+        events_before.len() > 1,
+        "child attempt records multiple events"
+    );
     drop(store);
     let temporary = candidate
         .parent()
@@ -260,21 +264,31 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     fs::write(temporary.join("payload"), vec![1; 8192])?;
     let preview = collect(&roots, &home, &assets, 7, true);
     assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+    assert_eq!(preview.expired_events, (events_before.len() - 1) as u64);
+    let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("child store")?;
+    assert_eq!(
+        reader.events(0, 64, Some(attempt), &call)?.len(),
+        events_before.len()
+    );
+    drop(reader);
     assert_eq!(preview.attempt_tmp.len(), 1);
     assert_eq!(preview.attempt_tmp[0].path, temporary);
     assert!(preview.attempt_tmp[0].bytes >= 8192);
     assert!(temporary.exists());
     let report = collect(&roots, &home, &assets, 7, false);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.expired_events, preview.expired_events);
     assert_eq!(report.attempt_tmp.len(), 1);
     assert_eq!(report.attempt_tmp[0].path, temporary);
     assert_eq!(report.attempt_tmp[0].bytes, preview.attempt_tmp[0].bytes);
     assert!(!temporary.exists());
     assert!(!candidate.exists());
     let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("child store")?;
-    assert!(
-        reader.events(0, 64, Some(attempt), &call)?.is_empty(),
-        "child store events must expire after log retention"
+    let retained = reader.events(0, 64, Some(attempt), &call)?;
+    assert_eq!(retained.len(), 1, "child store keeps newest event");
+    assert_eq!(
+        retained[0].sequence,
+        events_before.last().ok_or("last event")?.sequence
     );
     drop(reader);
     assert!(
