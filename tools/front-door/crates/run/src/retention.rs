@@ -988,6 +988,25 @@ mod tests {
     }
 
     #[test]
+    fn gc_repairs_open_claude_config_and_expires_state() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let config = attempt.join("provider-state/candidate-0/claude-config");
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755))?;
+
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o700);
+        assert!(!config.join(".credentials.json").exists());
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!attempt.join("provider-state").exists());
+        Ok(())
+    }
+
+    #[test]
     fn gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
