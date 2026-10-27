@@ -87,6 +87,13 @@ parent to belong to the effective user with mode 0700, and refuses mismatches.
 Host builds must use separate target directories outside this lane namespace;
 see the [release build example](runbooks/install.md#build-a-staged-release).
 
+Confined writers also get `PROVENANT_LANE_CARGO_LINT_TARGET`, a `target-lint/`
+directory in that cache. Lint-only runs (`cargo check`, `cargo clippy`) set both
+`CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` to it. Cargo locks the build
+directory, so setting only the target directory still queues behind test and
+build runs. Worktree removal and `provenant gc` remove this directory with the
+cache. Read-only lanes have no lane cache and get no variable.
+
 `provenant worktree remove` deletes only the removed worktree's own lane cache,
 derived from its verified identity before Git removes it. Cache cleanup holds
 the writer lock and uses verified detachment before deletion. A cleanup failure
