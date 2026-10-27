@@ -3950,7 +3950,7 @@ mod lifecycle_tests {
                 },
                 &cancellation,
             ),
-            Err(WorktreeError::Dirty)
+            Err(WorktreeError::IgnoredPaths(ref paths)) if paths.contains("ignored.txt")
         ));
         assert_eq!(
             fs::read_to_string(created.path.join("ignored.txt"))?,
