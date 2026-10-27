@@ -1076,8 +1076,8 @@ fn dispatch_with_workers(
     }
     reply_waited("dispatch", result)
 }
-fn validate_delivery_target(project: &Path, branch: &str) -> Result<(), Fail> {
-    run::HostDeliveryContext::validate_delivery_target(project, branch)
+fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
+    run::HostDeliveryContext::check_delivery_branch(project, branch)
         .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
 }
 
@@ -1114,10 +1114,10 @@ fn dispatch_inner(
         }
         if let Some(mode) = &command.deliver {
             if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), branch)? {
-                validate_delivery_target(edge.cwd, &delivery.branch)?;
+                check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
         } else if let Some(target) = &command.deliver_branch {
-            validate_delivery_target(edge.cwd, target)?;
+            check_delivery_branch(edge.cwd, target)?;
         }
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
@@ -1445,7 +1445,7 @@ fn dispatch_inner(
     {
         for (_, _, _, _, _, _, delivery, _) in &tasks {
             if let Some(delivery) = delivery {
-                validate_delivery_target(edge.cwd, &delivery.branch)?;
+                check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
         }
     }
@@ -4354,7 +4354,7 @@ mod tests {
         let pr =
             run::HostDeliveryContext::destination(run::DeliveryMode::Pr, "protected-existing")?
                 .ok_or("PR destination")?;
-        validate_delivery_target(&project, &pr.branch).map_err(|error| error.message)?;
+        check_delivery_branch(&project, &pr.branch).map_err(|error| error.message)?;
         assert!(pr.open_pr);
         for origin in [
             None,

@@ -82,10 +82,10 @@ impl std::fmt::Debug for HostDeliveryContext {
 impl HostDeliveryContext {
     /// Integration authority never includes the default or primary checkout ref.
     pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
-        Self::validate_delivery_target(project, target.strip_prefix("origin/").unwrap_or(target))
+        Self::check_delivery_branch(project, target.strip_prefix("origin/").unwrap_or(target))
     }
     /// A publication ref is distinct from a PR's base, which may be protected.
-    pub fn validate_delivery_target(project: &Path, target: &str) -> Result<()> {
+    pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
         let writer = WriterRequest {
             project: project.into(),
             worktree: project.into(),
