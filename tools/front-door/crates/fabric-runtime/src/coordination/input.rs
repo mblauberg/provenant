@@ -77,6 +77,8 @@ macro_rules! bounded_input {
 pub(crate) use bounded_input;
 
 pub const MAX_TEXT_BYTES: usize = 65_536;
+/// Largest prompt a CLI peer submission may carry.
+pub const MAX_CLI_PROMPT_BYTES: usize = 1_048_576;
 pub const MAX_REFERENCE_BYTES: usize = 1_024;
 pub const MAX_ROUTE_BYTES: usize = 128;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
@@ -376,7 +378,7 @@ impl ValidateInput for SubmitInput {
                     // Peer dispatch uses the CLI launch limit; MCP retains its
                     // smaller tool input bound.
                     let prompt_limit = match transport {
-                        WaitTransport::Cli => 1_048_576,
+                        WaitTransport::Cli => MAX_CLI_PROMPT_BYTES,
                         WaitTransport::Mcp => MAX_TEXT_BYTES,
                     };
                     bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
