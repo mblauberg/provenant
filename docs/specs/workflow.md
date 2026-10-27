@@ -259,11 +259,18 @@ and graph PRs combine bounded node result excerpts with their attempt IDs.
 A host delivery or worktree cleanup receipt is separate from the chair's
 workflow acceptance receipt. Successful push or local integration grants no
 additional review, protected-branch merge or release authority.
-Direct push and integration modes refuse protected publication targets before
-admission and again at delivery: the primary checkout branch, each configured
+Delivery modes refused before admission when targeting a protected branch are
+`integrate` and direct `push` (including legacy delivery flags and manifests);
+the protected branches are the primary checkout branch, each configured
 remote's recorded default, or `main` and `master` when no remote default is
-recorded. PR mode may use a protected branch as its base while publishing an
-unprotected head branch. This also applies to legacy delivery flags and manifests.
+recorded. PR mode onto the default branch is allowed, using the default branch
+as its base while publishing an unprotected head branch. Replay of an accepted
+operation is not refused before admission if branch protection changes later,
+though actual delivery still rechecks protection.
+A succeeded lane whose delivery outcome is `NoNewCommits` keeps its worktree
+on purpose, because cleanup requires a Delivered receipt. The tree is kept so
+idle runs or uncommitted edits can be inspected, and is reclaimed later
+through gc or disk reclaim.
 - Why: lifecycle automation must preserve the distinction between publishing
   evidence and accepting a change under the repository's workflow.
 - Test: `crates/run/src/delivery_tests.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;

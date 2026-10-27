@@ -2,7 +2,9 @@
 
 - Resume explicit unowned and adopted worktrees in place, preserving edits.
   Launch-time ownership evidence keeps previously owned lane trees fenced
-  after pruning, reassignment or owner removal.
+  after pruning, reassignment or owner removal. Attempts recorded before
+  #1855 have no launch evidence of running under an owned tree, so continuation
+  resumes them in place (fail open).
 - State that prior history is unavailable when resume needs a replacement
   worktree, avoiding unrelated primary-checkout commits in the fallback prompt.
 - Refuse protected direct-push targets before admission for concise delivery,
