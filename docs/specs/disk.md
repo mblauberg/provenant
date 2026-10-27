@@ -114,6 +114,10 @@ seconds. Declared ignored output contributes its directory-entry mtime rather
 than a recursive idle scan. Removal still checks nested repository boundaries.
 Bulk output pruning holds writer custody only. An exclusive repository lock
 is acquired after pruning, for the final recheck and Git removal.
+Queued and pending submitted dispatches naming a worktree retain it with
+`unknown_writer`, including managed trees without a terminal lane record.
+Tasks not yet submitted into a run store are not visible to this census;
+keep an external reservation until submission to protect such a tree.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.
 - Test: `crates/confinement/src/worktrees.rs::gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`

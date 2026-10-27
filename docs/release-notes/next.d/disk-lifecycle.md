@@ -21,3 +21,5 @@ project registrations.
 
 Large declared output no longer exhausts the idleness budget for explicit or
 foreign removal. Foreign output age uses directory-entry mtimes.
+
+Queued or pending submitted writers retain managed trees under foreign GC.

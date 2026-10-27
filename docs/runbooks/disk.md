@@ -84,3 +84,6 @@ configured free-space floor, while retaining worktrees and skipping fetches.
 Explicit removal does not require idle output. Foreign collection uses declared
 ignored output directory mtimes and scans the remaining tree within its idle
 proof budget; repository boundaries remain protected in both paths.
+
+Submitted queued writers protect their worktrees before launch. Keep a writer
+reservation for tasks that have not yet been submitted into the run store.

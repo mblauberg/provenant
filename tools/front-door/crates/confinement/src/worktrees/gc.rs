@@ -78,6 +78,12 @@ pub fn collect(
             );
             continue;
         }
+        // Queued and pending dispatches reserve a tree before a process or
+        // terminal lane record exists. Never fall back around that evidence.
+        if !(policy.no_live_lanes)(&lane.path) {
+            retain(&mut report.worktrees, &branch, RetainReason::UnknownWriter);
+            continue;
+        }
         let foreign = policy.foreign_merged_clean && !(policy.terminal)(&lane.path);
         if policy.foreign_merged_clean && lane.writer == WriterState::Unknown {
             match collect_foreign(context, entry, lane, policy, cancel) {

@@ -3348,6 +3348,25 @@ fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
         provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &queued_path)?;
     let queued = writer_run(queued_writer, "gc-queued", 121, "waiting")?;
     store.create(&queued, &call)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n{output_config}foreign_worktrees='merged-clean'\n"
+        ),
+    )?;
+    let queued_preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    assert!(
+        queued_preview["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
+            .as_array()
+            .ok_or("retained")?
+            .iter()
+            .any(|entry| entry["branch"] == "queued" && entry["reason"] == "unknown_writer")
+    );
+    assert!(queued_path.is_dir());
+    fs::write(
+        rig.state.join("config.toml"),
+        format!("schema_version=1\n[gc]\nfree_floor='1B'\n{output_config}"),
+    )?;
     let explicit = ok(
         &rig,
         &[
