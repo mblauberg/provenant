@@ -1738,13 +1738,14 @@ struct Picks<'a> {
     since: Option<WallTime>,
 }
 impl Picks<'_> {
-    fn scope(&self) -> watch::Scope {
-        watch::Scope {
+    fn scope(&self) -> Result<watch::Scope, Fail> {
+        Ok(watch::Scope {
             exact: self.targets.iter().filter_map(|t| t.attempt).collect(),
             since: self.since,
+            entered: watch::entered()?,
             explicit: !self.targets.is_empty(),
             snapshot: !self.targets.is_empty(),
-        }
+        })
     }
 }
 /// The agent label's actor on this host: the identity that submitted its lanes.
@@ -1850,7 +1851,7 @@ fn wait_lanes(
     let scope = watch::Scope {
         explicit: false,
         snapshot: false,
-        ..picks.scope()
+        ..picks.scope()?
     };
     let waited = watch::wait(
         candidates(session, &picks, None),
@@ -1881,7 +1882,7 @@ fn wait_command(
         .transpose()?;
     let waited = watch::wait(
         candidates(session, picks, seen),
-        picks.scope(),
+        picks.scope()?,
         condition,
         Duration::from_secs(seconds),
         LOCAL_POLL,
@@ -1930,7 +1931,7 @@ fn watch_command(
         .transpose()?;
     let watched = watch::watch(
         candidates(session, picks, base),
-        picks.scope(),
+        picks.scope()?,
         Duration::from_secs(seconds),
         LOCAL_POLL,
         &mut |lane| {

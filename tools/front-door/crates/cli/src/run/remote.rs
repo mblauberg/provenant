@@ -765,6 +765,7 @@ pub(super) fn lanes(
                 .filter_map(|target| target.attempt)
                 .collect(),
             since,
+            entered: watch::entered()?,
             explicit: true,
             snapshot: true,
         };
@@ -898,6 +899,7 @@ pub(super) fn host_lanes(
         let scope = Scope {
             exact: BTreeSet::new(),
             since,
+            entered: watch::entered()?,
             explicit: false,
             snapshot: true,
         };

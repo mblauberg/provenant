@@ -284,7 +284,10 @@ lane that was unsettled at the start, or settled since, meets `--condition`
 every lane of the named runs settled earlier the call is refused with their
 number, so pass the attempt ID, or `--since TIME` to count earlier
 settlements. `--session LABEL` selects the lanes an agent label submitted, so
-no ID list is needed. For a background job or monitor, run
+no ID list is needed. The wait starts when the command does, so a peer lane
+that settles while the peer is unreachable still counts once it answers. The
+comparison uses the peer's recorded settlement time against this host's clock,
+so keep the hosts' clocks synchronised. For a background job or monitor, run
 `provenant lanes --watch 3600`. Each peer read is bounded by the time the wait
 has left as well as by `limits.peer_seconds`, so a short wait or watch never
 sits in a slow SSH call past its own budget. The watch prints `STATE RUN/TASK/ATTEMPT` (and

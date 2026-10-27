@@ -5,7 +5,8 @@
 //! ID always counts, whenever it settled. Both modes poll a `fetch` of the
 //! candidate lanes, so the local store and peers share one rule.
 use super::{Condition, ErrorKind, Fail, Status, condition_met, settled, state_name};
-use provenant_core::{AttemptId, HostId, WallTime};
+use provenant_core::{AttemptId, Clock, HostId, WallTime};
+use provenant_os::clock::SystemClock;
 use provenant_run as run;
 use serde_json::json;
 use std::{
@@ -19,6 +20,10 @@ pub(super) struct Scope {
     pub(super) exact: BTreeSet<AttemptId>,
     /// Count lanes that settled at or after this time, even before arming.
     pub(super) since: Option<WallTime>,
+    /// When the command started, before any fetch. A lane that settled at or
+    /// after this time is a new settlement even if the first successful fetch
+    /// comes later, such as after peer failures.
+    pub(super) entered: WallTime,
     /// The caller named runs or attempts, so an empty selection is an error.
     pub(super) explicit: bool,
     /// Ignore lanes already settled when the wait starts. An unnamed selection
@@ -33,6 +38,13 @@ fn finished(lane: &run::AttemptRecord) -> Option<WallTime> {
     }
 }
 
+/// The time a command starts, which fixes what it counts as already settled.
+pub(super) fn entered() -> Result<WallTime, Fail> {
+    SystemClock::new()
+        .wall_now()
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))
+}
+
 /// The lanes already settled when a wait started.
 pub(super) struct Armed {
     scope: Scope,
@@ -45,7 +57,7 @@ impl Armed {
             .filter(|lane| {
                 scope.snapshot
                     && !scope.exact.contains(&lane.attempt_id)
-                    && finished(lane).is_some_and(|at| scope.since.is_none_or(|since| at < since))
+                    && finished(lane).is_some_and(|at| at < scope.since.unwrap_or(scope.entered))
             })
             .map(|lane| lane.attempt_id)
             .collect();
@@ -344,6 +356,7 @@ mod tests {
                 .map(|id| AttemptId::from_bytes([*id; 16]))
                 .collect(),
             since: since.map(|at| WallTime::from_micros(at).unwrap()),
+            entered: WallTime::from_micros(15).unwrap(),
             explicit,
             snapshot: true,
         }
@@ -603,6 +616,36 @@ mod tests {
             assert_eq!(given.len(), 1, "watching={watching}: {given:?}");
             assert!(given[0] <= budget, "{given:?}");
         }
+    }
+
+    #[test]
+    fn a_lane_that_settles_during_initial_peer_failures_still_counts() {
+        // The command entered at 15; the peer was unreachable until the lane
+        // had settled at 20, so the first successful fetch already sees it.
+        let mut calls = 0;
+        let waited = wait(
+            |_| {
+                calls += 1;
+                if calls < 3 {
+                    Err(Fail::new(
+                        Status::Unavailable,
+                        ErrorKind::PeerUnavailable,
+                        "workshop: ssh timed out",
+                    ))
+                } else {
+                    Ok(vec![done(1, 20), done(2, 10)])
+                }
+            },
+            scope(&[], None, true),
+            Condition::All,
+            Duration::from_secs(5),
+            POLL,
+        )
+        .unwrap();
+        assert!(waited.met);
+        assert_eq!(waited.ignored, 1, "only the settlement before entry");
+        assert_eq!(waited.lanes.len(), 1);
+        assert_eq!(waited.lanes[0].attempt_id, AttemptId::from_bytes([1; 16]));
     }
 
     #[test]

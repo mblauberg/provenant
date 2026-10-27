@@ -90,7 +90,9 @@ exits 124, and neither expiry nor cancelling a wait stops the work.
 
 `lanes --wait` counts a lane only if it was unsettled when the wait started
 or settled since, so a settled older attempt never satisfies a wait on a newer
-one. `--since TIME` also counts lanes that settled at or after that time. An
+one. The wait starts at command entry, not at the first answer, so a lane
+that settles while a peer is unreachable still counts when the peer returns.
+`--since TIME` also counts lanes that settled at or after that time. An
 attempt named by its exact ID counts whenever it settled. When every lane
 named by `--id RUN[/TASK]` settled before the wait started, the wait is
 refused (exit 2) with the count, instead of returning at once or idling to
@@ -113,6 +115,7 @@ one-second watch ends in about a second. `--wait` still excludes `--state` and
   `::nothing_pending_is_refused_for_named_lanes_only`;
   `::a_fetch_gets_the_time_left_and_none_starts_after_the_deadline`;
   `::arming_stops_retrying_at_the_deadline_with_the_last_cause`;
+  `::a_lane_that_settles_during_initial_peer_failures_still_counts`;
   `::a_running_lane_pushed_off_the_page_keeps_the_wait_open`;
   `::a_lane_that_settles_off_the_page_is_kept_in_the_result`;
   `crates/cli/src/run/remote.rs::a_peer_call_is_capped_by_the_time_left_and_the_peer_limit`;
