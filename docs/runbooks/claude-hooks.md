@@ -37,7 +37,8 @@ The digest is read-only and at most 3 KiB; the whole hook output stays under
 Each lane listing reads one page of 100. When more exist, the count shows a
 `+` (for example `Lanes settled since the last chair save (3+)`) and the
 section ends with `this count is partial; run <command>`, where the command
-lists the next page. A partial count is never shown as complete.
+lists the next page and repeats the hook's `--state-dir` (shell-quoted)
+when it used a non-default one, so it reads the same store. A partial count is never shown as complete.
 
 A section the hook could not read is listed as unavailable, never as empty.
 The hook budget is 4 seconds in total, with the lane, PR and worktree reads

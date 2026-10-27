@@ -151,10 +151,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             (Ok(Ok(active)), Ok(Ok(settled))) => {
                 let (lanes, next) = parse_lanes(&active, None);
                 state.active = lanes;
-                state.active_more = next.map(|cursor| next_page(&cursor, false));
+                state.active_more = next.map(|cursor| next_page(&cursor, false, cli.state_dir));
                 let (lanes, next) = parse_lanes(&settled, Some(want.settled_after_unix));
                 state.settled = lanes;
-                state.settled_more = next.map(|cursor| next_page(&cursor, true));
+                state.settled_more = next.map(|cursor| next_page(&cursor, true, cli.state_dir));
             }
             _ => state.unavailable.push("lanes".into()),
         }
@@ -208,15 +208,28 @@ fn route(lane: &Value) -> String {
         .or_else(|| requested("name"))
         .unwrap_or_else(|| "unresolved".into())
 }
+/// Single-quote `text` for a POSIX shell: a quote becomes `'\''`. Control
+/// characters are dropped, since the command is shown on one line.
+fn shell_quote(text: &str) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    format!("'{}'", clean.replace('\'', "'\\''"))
+}
 /// The command that lists the page after `cursor`, for the same listing the
 /// hook read. Only the digits of a cursor are kept, since it reaches a command.
-fn next_page(cursor: &str, settled: bool) -> String {
+/// A non-default state directory the collector used is repeated, quoted for a
+/// POSIX shell, so the command reads the same store.
+fn next_page(cursor: &str, settled: bool, state_dir: Option<&Path>) -> String {
     let cursor: String = cursor.chars().filter(char::is_ascii_digit).collect();
-    let mut command = if settled {
-        format!("provenant lanes --all --limit {LANE_PAGE}")
+    let mut command = String::from("provenant");
+    if let Some(state) = state_dir {
+        command.push_str(" --state-dir ");
+        command.push_str(&shell_quote(&state.to_string_lossy()));
+    }
+    command.push_str(&if settled {
+        format!(" lanes --all --limit {LANE_PAGE}")
     } else {
-        format!("provenant lanes --limit {LANE_PAGE}")
-    };
+        format!(" lanes --limit {LANE_PAGE}")
+    });
     if settled {
         for outcome in TERMINAL {
             command.push_str(" --state ");
@@ -361,15 +374,21 @@ mod tests {
             {"run_id":"r","task_id":"t","attempt_id":"a","state":"failed","finished_at":"2026-10-27T01:00:00Z"}
         ],"next_cursor":"1042"});
         let (lanes, next) = parse_lanes(&data, Some(0));
-        let command = next_page(&next.unwrap_or_default(), true);
+        let command = next_page(&next.unwrap_or_default(), true, None);
         assert!(
             command.starts_with("provenant lanes --all --limit 100 --state succeeded"),
             "{command}"
         );
         assert!(command.ends_with("--cursor 1042"), "{command}");
         assert_eq!(
-            next_page("1; rm -rf /", false),
+            next_page("1; rm -rf /", false, None),
             "provenant lanes --limit 100 --cursor 1"
+        );
+        // A non-default state directory is repeated, safely quoted.
+        let custom = next_page("7", false, Some(Path::new("/s/it's here")));
+        assert_eq!(
+            custom,
+            "provenant --state-dir '/s/it'\\''s here' lanes --limit 100 --cursor 7"
         );
         let state = SessionState {
             settled: lanes,
