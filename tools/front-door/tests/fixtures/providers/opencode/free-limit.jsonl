@@ -1,0 +1,1 @@
+{"type":"error","timestamp":0,"sessionID":"FIXTURE_SESSION_IDENTIFIER_012","error":{"type":"provider.quota","message":"FIXTURE_USER_OR_PROVIDER_TEXT_021","status":429,"response":{"body":"{\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"FIXTURE_USER_OR_PROVIDER_TEXT_021\"}}"},"retryAfterMs":240000}}

@@ -582,6 +582,43 @@
         "confinement_acceptance",
         "cli_version"
       ]
+    },
+    {
+      "id": "opencode-free-limit",
+      "fixture": "opencode/free-limit.jsonl",
+      "sha256": "26ca67a9beb6624722269bdfc4f6b1e36f538ee1c52607be1e01f5b718196515",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "synthetic_protocol",
+        "path": "issue-1863",
+        "capture_context": "Real opencode run --format json free-limit wire projection carrying retryAfterMs."
+      },
+      "cli_version": "2.1.4",
+      "platform": "darwin-aarch64",
+      "argv": [
+        "run",
+        "--format",
+        "json"
+      ],
+      "session_mode": null,
+      "access_mode": null,
+      "process_exit": 1,
+      "coverage": [
+        "free_limit",
+        "retry_after_ms"
+      ],
+      "projection": "Error event with structured session error, provider.quota type, and retryAfterMs.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "confinement_acceptance"
+      ]
     }
   ],
   "inventory": {

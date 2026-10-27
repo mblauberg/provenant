@@ -2939,6 +2939,134 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn opencode_free_limit_decodes_retry_after_ms() -> Result<(), Box<dyn std::error::Error>> {
+    let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
+    for (retry_after_val, expected_resets) in [
+        (serde_json::json!(240_000), Some(240)),
+        (serde_json::json!(240_000.0), Some(240)),
+        (serde_json::json!(1_500), Some(2)),
+        (serde_json::json!(999_999_999), Some(86_400)),
+        (serde_json::json!(null), None),
+        (serde_json::json!(-1000), None),
+        (serde_json::json!(0), None),
+        (serde_json::json!("soon"), None),
+        (serde_json::json!(true), None),
+    ] {
+        for wrapped in [false, true] {
+            let body = serde_json::json!({
+                "error": {
+                    "type": "FreeUsageLimitError",
+                    "message": message,
+                }
+            });
+            let mut event = serde_json::json!({
+                "type": "provider.quota",
+                "status": 429,
+                "response": {"body": body},
+                "retryAfterMs": retry_after_val,
+            });
+            if wrapped {
+                event = serde_json::json!({
+                    "type": "error",
+                    "error": event,
+                });
+            }
+            let (events, outcome) = replay(
+                &opencode::OpenCode,
+                &(event.to_string() + "\n"),
+                ExitObservation {
+                    code: Some(1),
+                    timed_out: false,
+                },
+            )?;
+            assert_eq!(outcome.status(), OutcomeStatus::Refused);
+            assert!(
+                events.contains(&ProviderEvent::QuotaLimited {
+                    message: message.into(),
+                    pool: Some("opencode-free".into()),
+                    resets_in_seconds: expected_resets,
+                }),
+                "failed for retry_after_val: {retry_after_val:?}, wrapped: {wrapped}"
+            );
+        }
+    }
+
+    let body = serde_json::json!({
+        "error": {
+            "type": "FreeUsageLimitError",
+            "message": message,
+            "retryAfterMs": 120_000,
+        }
+    });
+    let event = serde_json::json!({
+        "type": "provider.quota",
+        "status": 429,
+        "response": {"body": body},
+    });
+    let (events, outcome) = replay(
+        &opencode::OpenCode,
+        &(event.to_string() + "\n"),
+        ExitObservation {
+            code: Some(1),
+            timed_out: false,
+        },
+    )?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: message.into(),
+        pool: Some("opencode-free".into()),
+        resets_in_seconds: Some(120),
+    }));
+
+    let body = serde_json::json!({
+        "error": {
+            "type": "FreeUsageLimitError",
+            "message": message,
+        }
+    });
+    let event = serde_json::json!({
+        "type": "error",
+        "retryAfterMs": 180_000,
+        "error": {
+            "type": "provider.quota",
+            "status": 429,
+            "response": {"body": body},
+        }
+    });
+    let (events, outcome) = replay(
+        &opencode::OpenCode,
+        &(event.to_string() + "\n"),
+        ExitObservation {
+            code: Some(1),
+            timed_out: false,
+        },
+    )?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: message.into(),
+        pool: Some("opencode-free".into()),
+        resets_in_seconds: Some(180),
+    }));
+
+    let (events, outcome) = replay(
+        &opencode::OpenCode,
+        fixture!("opencode/free-limit.jsonl"),
+        ExitObservation {
+            code: Some(1),
+            timed_out: false,
+        },
+    )?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: "FIXTURE_USER_OR_PROVIDER_TEXT_021".into(),
+        pool: Some("opencode-free".into()),
+        resets_in_seconds: Some(240),
+    }));
+
+    Ok(())
+}
+
+#[test]
 fn selected_accounts_control_provider_environment_and_exact_authentication_grants()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::path::Path;

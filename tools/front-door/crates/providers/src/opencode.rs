@@ -208,11 +208,22 @@ enum Event {
     },
     Error {
         error: Failure,
+        #[serde(rename = "retryAfterMs", default)]
+        retry_after_ms: Option<serde_json::Value>,
     },
     #[serde(rename = "provider.quota")]
     Quota {
         message: Option<String>,
         response: Option<Response>,
+        #[serde(rename = "retryAfterMs", default)]
+        retry_after_ms: Option<serde_json::Value>,
+    },
+    #[serde(rename = "provider.free-limit")]
+    FreeLimit {
+        message: Option<String>,
+        response: Option<Response>,
+        #[serde(rename = "retryAfterMs", default)]
+        retry_after_ms: Option<serde_json::Value>,
     },
     #[serde(other)]
     Other,
@@ -223,6 +234,8 @@ struct Failure {
     kind: String,
     message: Option<String>,
     response: Option<Response>,
+    #[serde(rename = "retryAfterMs", default)]
+    retry_after_ms: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -240,14 +253,48 @@ enum Body {
 #[derive(Deserialize)]
 struct ErrorBody {
     error: LimitError,
+    #[serde(rename = "retryAfterMs", default)]
+    retry_after_ms: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct LimitError {
     #[serde(default, rename = "type", alias = "name")]
     kind: String,
     message: Option<String>,
+    #[serde(rename = "retryAfterMs", default)]
+    retry_after_ms: Option<serde_json::Value>,
 }
-fn quota(message: Option<String>, response: Option<Response>) -> E {
+fn parse_retry_after(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    const MAX_SECONDS: u64 = 86_400;
+    let seconds = if let Some(n) = value.as_u64() {
+        if n == 0 {
+            return None;
+        }
+        n.saturating_add(999) / 1000
+    } else if let Some(i) = value.as_i64() {
+        if i <= 0 {
+            return None;
+        }
+        (i as u64).saturating_add(999) / 1000
+    } else {
+        let f = value.as_f64()?;
+        if !f.is_finite() || f <= 0.0 {
+            return None;
+        }
+        (f / 1000.0).ceil() as u64
+    };
+    if seconds == 0 {
+        return None;
+    }
+    Some(seconds.min(MAX_SECONDS))
+}
+fn quota(
+    message: Option<String>,
+    response: Option<Response>,
+    retry_after: Option<serde_json::Value>,
+    is_free_kind: bool,
+) -> E {
     let body = response
         .and_then(|response| match response {
             Response::Body { body } => body,
@@ -258,10 +305,16 @@ fn quota(message: Option<String>, response: Option<Response>) -> E {
             Body::Text(text) => wire::<ErrorBody>(text.as_bytes()).ok(),
             Body::Other(_) => None,
         });
-    let pool = body
+    let is_free = is_free_kind
+        || body
+            .as_ref()
+            .is_some_and(|body| body.error.kind == "FreeUsageLimitError");
+    let pool = is_free.then(|| "opencode-free".into());
+    let retry_val = retry_after
         .as_ref()
-        .filter(|body| body.error.kind == "FreeUsageLimitError")
-        .map(|_| "opencode-free".into());
+        .or_else(|| body.as_ref().and_then(|b| b.retry_after_ms.as_ref()))
+        .or_else(|| body.as_ref().and_then(|b| b.error.retry_after_ms.as_ref()));
+    let resets_in_seconds = parse_retry_after(retry_val);
     let message = body
         .and_then(|body| body.error.message)
         .or(message)
@@ -270,7 +323,7 @@ fn quota(message: Option<String>, response: Option<Response>) -> E {
     E::QuotaLimited {
         message,
         pool,
-        resets_in_seconds: None,
+        resets_in_seconds,
     }
 }
 #[derive(Deserialize)]
@@ -291,9 +344,27 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }
             events
         }
-        Event::Quota { message, response } => vec![quota(message, response)],
-        Event::Error { error } if error.kind == "provider.quota" => {
-            vec![quota(error.message, error.response)]
+        Event::Quota {
+            message,
+            response,
+            retry_after_ms,
+        } => vec![quota(message, response, retry_after_ms, false)],
+        Event::FreeLimit {
+            message,
+            response,
+            retry_after_ms,
+        } => vec![quota(message, response, retry_after_ms, true)],
+        Event::Error {
+            error,
+            retry_after_ms,
+        } if error.kind == "provider.quota" || error.kind == "provider.free-limit" => {
+            let is_free_kind = error.kind == "provider.free-limit";
+            vec![quota(
+                error.message,
+                error.response,
+                error.retry_after_ms.or(retry_after_ms),
+                is_free_kind,
+            )]
         }
         Event::Error { .. } => vec![E::Error],
         _ => vec![],
