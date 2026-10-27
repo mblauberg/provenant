@@ -325,7 +325,7 @@ impl RunStore {
                 _ => false,
             };
             if fits {
-                match self.claim(id, now, &call) {
+                match self.claim(id, clock, &call) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
                     Ok(None) | Err(RunError::Contention) => {}
@@ -358,7 +358,7 @@ impl RunStore {
     pub(crate) fn claim(
         &self,
         id: AttemptId,
-        now: WallTime,
+        clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
@@ -378,15 +378,18 @@ impl RunStore {
             }
             // Host and project counts and spacing span every execution
             // namespace, so they live in the host ledger, not this store.
-            if !crate::ledger::lease(
+            // The ledger reads the clock under its own lock; the lane starts at
+            // the time spacing was judged and recorded.
+            let Some(now) = crate::ledger::lease(
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
-                now.as_micros() / 1000,
+                clock,
                 call,
-            )? {
+            )?
+            else {
                 return Ok(None);
-            }
+            };
             ticket.active = true;
             tx.execute(
                 "UPDATE admission SET active=1, record=?1 WHERE attempt=?2",

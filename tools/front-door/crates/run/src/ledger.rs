@@ -13,7 +13,7 @@ use crate::{
     db::{immediate, open_database, sql_int},
     *,
 };
-use provenant_core::ProjectId;
+use provenant_core::{Clock, ProjectId, WallTime};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
@@ -72,18 +72,25 @@ fn version(db: &Connection) -> Result<i64> {
 }
 
 /// Take this attempt's lease when host and project counts and startup spacing
-/// allow. Spacing is measured only against the last start of the same class.
-/// A retried claim finds its own lease already held.
+/// allow, returning the wall time it started at. Spacing is measured only
+/// against the last start of the same class. The clock is read inside the
+/// transaction that checks and records spacing, so a caller delayed before the
+/// lock cannot judge itself by a time older than a start another process has
+/// recorded. A retried claim finds its own lease already held.
 pub(crate) fn lease(
     db: &Connection,
     store: &Path,
     ticket: &AdmissionTicket,
-    now_ms: i64,
+    time: &dyn Clock,
     request: &Request<'_>,
-) -> Result<bool> {
+) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let spacing_ms = sql_int(ticket.startup_spacing_ms)?;
     immediate(db, request, |tx| {
+        let now = time
+            .wall_now()
+            .map_err(|_| RunError::Validation("wall clock"))?;
+        let now_ms = now.as_micros() / 1000;
         let id = ticket.attempt_id.to_string();
         let held: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1)",
@@ -91,12 +98,12 @@ pub(crate) fn lease(
             |r| r.get(0),
         )?;
         if held {
-            return Ok(true);
+            return Ok(Some(now));
         }
         if full(tx, project)? {
             prune(tx)?;
             if full(tx, project)? {
-                return Ok(false);
+                return Ok(None);
             }
         }
         let last: Option<i64> = tx
@@ -106,13 +113,18 @@ pub(crate) fn lease(
                 |r| r.get(0),
             )
             .optional()?;
-        // A wall clock that stepped back does not hold every start.
-        if last.is_some_and(|last| last <= now_ms && now_ms - last < spacing_ms) {
-            return Ok(false);
+        if last.is_some_and(|last| spacing_wait(last, now_ms, spacing_ms) > 0) {
+            return Ok(None);
         }
+        // A recorded start only moves forward, except a wall clock that
+        // stepped back by more than a spacing, which `spacing_wait` ignores.
         tx.execute(
-            "INSERT INTO spacing(class,last_start) VALUES (?1,?2) ON CONFLICT(class) DO UPDATE SET last_start=excluded.last_start",
-            params![class.as_str(), now_ms],
+            "INSERT INTO spacing(class,last_start) VALUES (?1,?2) ON CONFLICT(class) DO UPDATE SET last_start=CASE WHEN ?3 THEN excluded.last_start ELSE MAX(last_start, excluded.last_start) END",
+            params![
+                class.as_str(),
+                now_ms,
+                last.is_some_and(|last| last - now_ms >= spacing_ms)
+            ],
         )?;
         tx.execute(
             "INSERT INTO leases(attempt,project,store,class) VALUES (?1,?2,?3,?4)",
@@ -123,7 +135,7 @@ pub(crate) fn lease(
                 class.as_str()
             ],
         )?;
-        Ok(true)
+        Ok(Some(now))
     })
 }
 /// Milliseconds before spacing lets a lane of `class` start, read without
@@ -145,12 +157,20 @@ pub(crate) fn spacing_left(
         )
         .optional()
         .ok()??;
-    // A wall clock that stepped back does not hold every start.
-    Some(if last <= now_ms && now_ms - last < spacing_ms {
-        spacing_ms - (now_ms - last)
-    } else {
+    Some(spacing_wait(last, now_ms, spacing_ms))
+}
+/// Milliseconds before a start may follow the recorded `last`. A start newer
+/// than the clock still holds for as long as it keeps the clock inside its
+/// window, so a caller that sampled early cannot jump it. One more than a
+/// spacing ahead can only be a wall clock that stepped back, which must not
+/// hold every start.
+fn spacing_wait(last: i64, now_ms: i64, spacing_ms: i64) -> i64 {
+    let elapsed = now_ms.saturating_sub(last);
+    if elapsed >= spacing_ms || elapsed <= -spacing_ms {
         0
-    })
+    } else {
+        spacing_ms - elapsed
+    }
 }
 fn full(tx: &Connection, project: ProjectId) -> Result<bool> {
     let (host, project): (i64, i64) = tx.query_row(
