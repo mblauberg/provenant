@@ -96,6 +96,8 @@ pub enum Command {
     Pr(Pr),
     /// Remove lane caches and expired terminal provider state
     Gc(Gc),
+    /// Warn, collect caches and pause this user's builds under disk pressure
+    DiskGuard(DiskGuard),
     /// Inspect disk use without changing files
     #[command(subcommand)]
     Disk(Disk),
@@ -571,6 +573,21 @@ pub struct Gc {
     /// Also remove caches with no file written for this many days
     #[arg(long, default_value = "7", value_parser = clap::value_parser!(u64).range(1..=3650))]
     pub idle_days: u64,
+}
+#[derive(Debug, Args)]
+pub struct DiskGuard {
+    /// Warning threshold (defaults to disk_guard.warn)
+    #[arg(long)]
+    pub warn: Option<String>,
+    /// Pause threshold
+    #[arg(long)]
+    pub pause: Option<String>,
+    /// Resume threshold
+    #[arg(long)]
+    pub resume: Option<String>,
+    /// Exact executable names; an empty list disables pausing
+    #[arg(long, num_args = 0..)]
+    pub processes: Option<Vec<String>>,
 }
 #[derive(Debug, Args)]
 pub struct Remove {

@@ -2,6 +2,12 @@
 use provenant_core::{Clock, MonoTime, TimeError, WallTime};
 use std::time::SystemTime;
 
+/// Current boot time as UTC seconds since the Unix epoch, independent of the
+/// process environment's time zone.
+pub fn boot_unix_seconds() -> std::io::Result<i64> {
+    crate::sys::clock::boot_unix_seconds()
+}
+
 /// Samples UTC wall time through Jiff and one process-wide monotonic origin.
 #[derive(Debug, Clone)]
 pub struct SystemClock;

@@ -155,14 +155,27 @@ the owned agent. `idle_days` and the free-space floor become agent arguments
 on install. When `free_floor` is unset, the floor is 10% of the state volume,
 at least 50 GiB. See [configuration](configuration.md#lane-cache-collection).
 
+The default-state install also manages
+`~/Library/LaunchAgents/dev.provenant.disk-guard.plist`. Enabled by default,
+it runs `provenant disk-guard` at login and every 120 seconds. The plist sets
+`ProcessType = Background`, `LowPriorityIO = true` and `Nice = 10`.
+Thresholds and exact process names are installed as arguments; rerun install
+after changing `[disk_guard]`. The guard warns and runs GC below its warning
+threshold, pauses matching build processes owned by the current user below
+its pause threshold and resumes saved paused processes at its resume threshold.
+Logs and recovery state live under `<state>/disk-guard/`.
+See [configuration](configuration.md#disk-guard) for defaults and rate limits.
+
 To remove an installation, run
 `provenant --state-dir "$STATE" uninstall --harness claude`. It removes only
 unchanged owned entries and keeps the state and release assets. It never
 recursively deletes a checkout, state root or release. With `CLAUDE_CONFIG_DIR`
 or `CODEX_HOME` set, uninstall removes only that directory's target; without
 it, every recorded target of the harness.
-Removing the last recorded target also boots out the peer and GC LaunchAgents
-and removes their unchanged plists. A modified plist is kept and reported; its
+Removing the last recorded target also boots out the peer, GC and disk guard
+LaunchAgents and removes their unchanged plists. Stopping the disk guard
+resumes the saved paused processes after verifying their identities.
+A modified plist is kept and reported; its
 service is left running. A failed bootout keeps the plist for a retry.
 A missing recorded plist is stopped by its service label.
 

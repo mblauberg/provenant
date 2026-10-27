@@ -2402,6 +2402,38 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant disk-guard`
+
+| Argument | Contract |
+|---|---|
+| `--warn` | `{"name": "warn"}` |
+| `--pause` | `{"name": "pause"}` |
+| `--resume` | `{"name": "resume"}` |
+| `--processes` | `{"name": "processes", "repeatable": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "warn",
+        "pause",
+        "resume",
+        "processes"
+      ],
+      "multiple": true,
+      "name": "DiskGuard",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant disk`
 
 | Argument | Contract |

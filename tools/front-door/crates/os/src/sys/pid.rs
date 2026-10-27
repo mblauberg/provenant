@@ -1,7 +1,25 @@
-use crate::pid::{CwdObservation, PidError};
+use crate::pid::{CwdObservation, PidError, ProcessSignal};
 use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
+
+pub(crate) fn signal_process(pid: i32, signal: ProcessSignal) -> io::Result<()> {
+    // Keep group signalling impossible even if another internal caller is added.
+    if pid <= 0 {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let signal = match signal {
+        ProcessSignal::Stop => libc::SIGSTOP,
+        ProcessSignal::Continue => libc::SIGCONT,
+    };
+    // SAFETY: pid is positive so kill addresses only that process; signal is
+    // one of the two valid constants above. No pointers or ownership transfer.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
 
 fn failure(pid: i32, source: io::Error) -> PidError {
     PidError::Io { pid, source }

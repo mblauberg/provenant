@@ -1,4 +1,6 @@
 //! Read-only lane-cache and worktree disk inventory.
+pub use provenant_os::fs::available_bytes_at;
+
 use crate::cache::{
     CARGO_CACHE_OWNER, CacheGcPolicy, CacheGcReason, LEGACY_CARGO_CACHE_OWNER_PREFIX,
     cache_gc_reason_with_newest, cache_owner_fingerprint, cache_tombstone, is_cache_digest,

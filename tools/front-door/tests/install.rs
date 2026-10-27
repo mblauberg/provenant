@@ -11,6 +11,41 @@ use std::{
 use support::{Result, TestRig, code};
 
 struct FixtureSmoke(VersionInfo);
+
+#[test]
+fn healthy_disk_guard_bypasses_unrelated_startup_and_writes_nothing() -> Result {
+    let rig = TestRig::new()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(rig.state.join("config.toml"), b"invalid toml, never read")?;
+    let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let output = rig.execute_os(
+        binary,
+        &[
+            "disk-guard".into(),
+            "--state-dir".into(),
+            rig.state.clone().into_os_string(),
+            "--warn".into(),
+            "3B".into(),
+            "--pause".into(),
+            "1B".into(),
+            "--resume".into(),
+            "2B".into(),
+            "--processes".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(output.stdout.bytes.is_empty());
+    assert!(output.stderr.bytes.is_empty());
+    assert_eq!(fs::read_dir(&rig.state)?.count(), 1);
+    Ok(())
+}
+
 impl ReleaseSmoke for FixtureSmoke {
     fn check(&self, _: &Release, _: &CancelToken) -> io::Result<VersionInfo> {
         Ok(self.0.clone())
