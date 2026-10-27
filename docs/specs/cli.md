@@ -95,7 +95,8 @@ that settles while a peer is unreachable still counts when the peer returns.
 `--since TIME` also counts lanes that settled at or after that time. Without
 `--id` the lanes are chosen by settlement time, not queue order, so one queued
 before the window that settled inside it counts; the scan covers the session's
-newest 1000 lanes and is refused beyond that. An attempt named by its exact ID counts whenever it settled. When every lane
+newest 1000 lanes and is refused beyond that. An attempt named by its exact ID
+counts whenever it settled. When every lane
 named by `--id RUN[/TASK]` settled before the wait started, the wait is
 refused (exit 2) with the count, instead of returning at once or idling to
 expiry; the result reports `ignored_settled` otherwise. Without `--id`, a wait
