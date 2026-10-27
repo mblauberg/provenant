@@ -927,3 +927,57 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn provider_creates_private_state_under_a_permissive_parent_umask() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = provenant_os::fs::Directory::open_anchor(root.path()).unwrap();
+        let lease = directory
+            .try_lock(
+                std::ffi::OsStr::new("writer.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            )
+            .unwrap();
+        let argv: Vec<OsString> = ["/bin/sh", "-c", "mkdir made && : > made.txt"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let env = [(OsString::from("PATH"), OsString::from("/bin:/usr/bin"))];
+        let boot = super::super::census::SystemProcessObserver::boot_identity().unwrap();
+        // SAFETY: umask only swaps this process's creation mask; the previous
+        // mask is restored straight after the spawn.
+        let previous = unsafe { libc::umask(0o022) };
+        let spawned = ProviderGroup::spawn(
+            provenant_os::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&env),
+                cwd: root.path(),
+                input: false,
+                secret_input: None,
+                capture_stdout: false,
+                capture_stderr: false,
+            },
+            &lease,
+            &boot,
+        );
+        // SAFETY: restores the mask read above.
+        let during = unsafe { libc::umask(previous) };
+        assert_eq!(during, 0o022, "the parent umask must not change");
+        let mut group = spawned.unwrap();
+        assert!(group.child.as_mut().unwrap().wait().unwrap().success());
+        let mode = |name: &str| {
+            std::fs::metadata(root.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("made"), 0o700);
+        assert_eq!(mode("made.txt"), 0o600);
+    }
+}
