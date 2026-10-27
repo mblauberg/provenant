@@ -88,6 +88,8 @@ files such as `.env` block explicit removal, whose error names up to five
 paths. Configure `regenerable`, `keep` and the opt-in
 `foreign_worktrees = "merged-clean"` policy as described in the
 [configuration runbook](configuration.md#lane-cache-collection).
+Applied foreign collection removes any temporary writer state it created,
+after removal or refusal. Existing worktree state stays in place.
 
 A preview uses existing project custody only. An unregistered selected checkout
 or missing custody hierarchy returns an observation error without initialising

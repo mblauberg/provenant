@@ -24,6 +24,7 @@ foreign removal. Foreign output age uses directory-entry mtimes.
 
 Queued or pending submitted writers retain managed trees under foreign GC.
 
-Foreign removal now holds writer exclusion even when no state existed.
+Foreign removal holds writer exclusion even when no state existed and clears
+its temporary state after removal or refusal.
 
 Stderr output remains readable after retention, with truncation reported.

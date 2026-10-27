@@ -830,6 +830,10 @@ fn collect_foreign(
         return Ok(None);
     }
     let verified = verify_worktree(context.repo, &lane.path)?;
+    // Serialise state creation and writer acquisition with temporary-state
+    // disposal and worktree creation, so no collector opens a detached lock.
+    let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let mut created_state = false;
     let state = match context
         .project_state
         .open_verified_directory(&state_dir_name(&lane.path))
@@ -839,7 +843,7 @@ fn collect_foreign(
         Err(error) if error.is_not_found() => {
             let name = state_dir_name(&lane.path);
             match context.project_state.mkdir(&name, 0o700) {
-                Ok(()) => {}
+                Ok(()) => created_state = true,
                 Err(error) if error.is_exists() => {}
                 Err(error) => return Err(error.into()),
             }
@@ -852,6 +856,10 @@ fn collect_foreign(
             ensure_unreserved(state)?;
             let guard = if policy.dry_run {
                 state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?
+            } else if created_state {
+                // Finish establishing temporary custody even if cancellation
+                // arrives after mkdir, so cleanup can retain exclusion.
+                state.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?
             } else {
                 state.lock(
                     OsStr::new(WRITER_LOCK),
@@ -866,92 +874,114 @@ fn collect_foreign(
         }
         None => None,
     };
-    let recheck = || -> Result<(), WorktreeError> {
-        verified.repo().revalidate()?;
-        let entries = read_worktrees(context, cancel)?;
-        let fresh = entries
-            .iter()
-            .find(|fresh| fresh.path == entry.path)
-            .ok_or(WorktreeError::IdentityChanged)?;
-        if fresh.head != lane.head || fresh.branch != entry.branch || fresh.locked || fresh.prunable
-        {
-            return Err(WorktreeError::IdentityChanged);
-        }
-        if context
-            .workers
-            .observe_roots(std::slice::from_ref(&lane.path))
-            .get(&lane.path)
-            != Some(&WorkerState::Free)
-            || !(policy.no_live_lanes)(&lane.path)
+    drop(repository);
+    let result = (|| {
+        let recheck = || -> Result<(), WorktreeError> {
+            verified.repo().revalidate()?;
+            let entries = read_worktrees(context, cancel)?;
+            let fresh = entries
+                .iter()
+                .find(|fresh| fresh.path == entry.path)
+                .ok_or(WorktreeError::IdentityChanged)?;
+            if fresh.head != lane.head
+                || fresh.branch != entry.branch
+                || fresh.locked
+                || fresh.prunable
+            {
+                return Err(WorktreeError::IdentityChanged);
+            }
+            if context
+                .workers
+                .observe_roots(std::slice::from_ref(&lane.path))
+                .get(&lane.path)
+                != Some(&WorkerState::Free)
+                || !(policy.no_live_lanes)(&lane.path)
+            {
+                return Err(WorktreeError::UnknownWriter);
+            }
+            match worktree_dirty_at(context, verified.repo(), cancel)? {
+                WorktreeCondition::Clean | WorktreeCondition::Ignored => Ok(()),
+                _ => Err(WorktreeError::Dirty),
+            }
+        };
+        recheck()?;
+        let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
+        if newest_foreign(verified.repo().root_dir(), &protected, policy)?
+            >= policy
+                .foreign_idle_before_ns
+                .unwrap_or(policy.written_before_ns)
         {
             return Err(WorktreeError::UnknownWriter);
         }
-        match worktree_dirty_at(context, verified.repo(), cancel)? {
-            WorktreeCondition::Clean | WorktreeCondition::Ignored => Ok(()),
-            _ => Err(WorktreeError::Dirty),
+        let mut output = Vec::new();
+        let preview = WorktreeGcPolicy {
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            ..*policy
+        };
+        walk_output(
+            verified.repo().root_dir(),
+            &lane.path,
+            Path::new(""),
+            &preview,
+            &protected,
+            &mut output,
+            0,
+        )?;
+        if !clean_after_preview(context, verified.repo(), &lane.path, &output, cancel)? {
+            return Err(WorktreeError::Dirty);
         }
-    };
-    recheck()?;
-    let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
-    if newest_foreign(verified.repo().root_dir(), &protected, policy)?
-        >= policy
-            .foreign_idle_before_ns
-            .unwrap_or(policy.written_before_ns)
-    {
-        return Err(WorktreeError::UnknownWriter);
-    }
-    let mut output = Vec::new();
-    let preview = WorktreeGcPolicy {
-        written_before_ns: i128::MAX,
-        dry_run: true,
-        ..*policy
-    };
-    walk_output(
-        verified.repo().root_dir(),
-        &lane.path,
-        Path::new(""),
-        &preview,
-        &protected,
-        &mut output,
-        0,
-    )?;
-    if !clean_after_preview(context, verified.repo(), &lane.path, &output, cancel)? {
-        return Err(WorktreeError::Dirty);
-    }
-    recheck()?;
-    if newest_foreign(verified.repo().root_dir(), &protected, policy)?
-        >= policy
-            .foreign_idle_before_ns
-            .unwrap_or(policy.written_before_ns)
-    {
-        return Err(WorktreeError::UnknownWriter);
-    }
-    if !policy.dry_run {
-        if !output.is_empty() {
-            prepare_removal(
+        recheck()?;
+        if newest_foreign(verified.repo().root_dir(), &protected, policy)?
+            >= policy
+                .foreign_idle_before_ns
+                .unwrap_or(policy.written_before_ns)
+        {
+            return Err(WorktreeError::UnknownWriter);
+        }
+        if !policy.dry_run {
+            if !output.is_empty() {
+                prepare_removal(
+                    context,
+                    verified.repo(),
+                    policy.regenerable,
+                    policy.keep,
+                    cancel,
+                )?;
+            }
+            // Bulk output disposal holds writer custody only. Repository custody
+            // covers the final registration checks and Git metadata mutation.
+            let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+            recheck()?;
+            if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
+                return Err(WorktreeError::Dirty);
+            }
+            execute_mutation(
                 context,
-                verified.repo(),
-                policy.regenerable,
-                policy.keep,
+                GitMutation::WorktreeRemove {
+                    path: lane.path.clone(),
+                },
                 cancel,
             )?;
         }
-        // Bulk output disposal holds writer custody only. Repository custody
-        // covers the final registration checks and Git metadata mutation.
-        let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-        recheck()?;
-        if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
-            return Err(WorktreeError::Dirty);
+        Ok(Some(lane.clone()))
+    })();
+    if created_state {
+        let cleanup_cancel = CancelToken::new();
+        let _repository = repository_lock(context, LockMode::Exclusive, &cleanup_cancel)?;
+        let name = state_dir_name(&lane.path);
+        let state = state.as_ref().ok_or(WorktreeError::IdentityChanged)?;
+        // This call's identity-less state is temporary custody, not a stable
+        // owner record. Never dispose of identities or unexpected new entries.
+        if entry_names(state, 2)? != [OsString::from(WRITER_LOCK)] {
+            return Err(WorktreeError::UnknownWriter);
         }
-        execute_mutation(
-            context,
-            GitMutation::WorktreeRemove {
-                path: lane.path.clone(),
-            },
-            cancel,
-        )?;
+        let temporary = PayloadTree::claim(context.project_state, &name, &state.metadata()?)?;
+        temporary.unlink(OsStr::new(WRITER_LOCK))?;
+        context.project_state.rmdir(&name)?;
+        context.project_state.sync()?;
     }
-    Ok(Some(lane.clone()))
+    result
 }
 
 #[cfg(test)]

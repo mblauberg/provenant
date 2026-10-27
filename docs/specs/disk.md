@@ -112,8 +112,9 @@ protected and local refs survive this policy's removals.
 Foreign idleness scans the non-output tree within 1,000,000 entries and five
 seconds. Declared ignored output contributes its directory-entry mtime rather
 than a recursive idle scan. Removal still checks nested repository boundaries.
-Bulk output pruning holds writer custody only. An exclusive repository lock
-is acquired after pruning, for the final recheck and Git removal.
+Brief repository custody establishes writer state. Bulk output pruning holds
+writer custody only. Exclusive repository custody is reacquired after pruning
+for the final recheck and Git removal.
 Queued and pending submitted dispatches naming a worktree retain it with
 `unknown_writer`, including managed trees without a terminal lane record.
 Tasks not yet submitted into a run store are not visible to this census;
@@ -122,6 +123,10 @@ Applied foreign removal creates a private writer lock when state is absent,
 and holds it across final checks and Git removal without creating an ownership
 identity. Previews do not create state. Native processes do not take this
 advisory lock; the complete process census and final clean recheck still apply.
+State created solely for this call is removed after removal or refusal, while
+the writer lock remains held and repository custody excludes state creation.
+Existing state survives. Cleanup avoids leaving identity-less directories that
+would block a later `worktree create`; creation does not adopt unknown state.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.
 - Test: `crates/confinement/src/worktrees.rs::gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`
