@@ -172,3 +172,7 @@ Applied foreign removal creates a private writer lock when state is absent,
 and holds it across final checks and Git removal without creating an ownership
 identity. Previews do not create state. Native processes do not take this
 advisory lock; the complete process census and final clean recheck still apply.
+
+`output --part stderr` falls back to the retained `stderr.log.tail` when
+the full capture has expired. JSON reports `complete=false`; text marks the
+retained tail as truncated. Offsets and digest describe the retained bytes.

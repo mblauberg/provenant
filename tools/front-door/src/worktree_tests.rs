@@ -1338,7 +1338,7 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
         .next()
         .ok_or("project")??
         .path();
-    let registration = fs::read_dir(project)?
+    let registration = fs::read_dir(&project)?
         .find_map(|entry| {
             let path = entry.ok()?.path();
             path.join("identity.json").is_file().then_some(path)

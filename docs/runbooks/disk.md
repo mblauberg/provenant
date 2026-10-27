@@ -90,3 +90,6 @@ reservation for tasks that have not yet been submitted into the run store.
 
 Applied foreign cleanup may leave a private writer lock without an ownership
 record. This provides exclusion through removal and does not adopt the tree.
+
+After capture retention, `output --part stderr` reads the retained tail and
+marks it truncated (`complete=false` in JSON).

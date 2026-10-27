@@ -2027,7 +2027,10 @@ fn output_inner(command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fai
         chunk.bytes.drain(..start);
     }
     align_utf8_tail(&mut chunk);
-    let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+    let mut text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+    if matches!(command.part, Part::Stderr) && !chunk.complete {
+        text.insert_str(0, "[stderr truncated; retained tail]\n");
+    }
     // The text alone cannot tell a clean success from one that needs the chair.
     let (state, reason) = state_and_reason(&record.state);
     Ok((

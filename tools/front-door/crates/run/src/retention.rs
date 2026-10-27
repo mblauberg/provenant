@@ -1026,6 +1026,46 @@ mod tests {
     }
 
     #[test]
+    fn gc_stderr_tail_remains_readable_and_reports_truncation() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let directory = Directory::open_anchor(&attempt)?;
+        let capture = vec![b'x'; 200_000];
+        crate::artifacts::seal(&directory, "stderr.log", &capture, 300_000)?;
+        crate::artifacts::seal(&directory, "stderr.log.tail", b"older tail", 65_536)?;
+        let read = || {
+            store.read_output(
+                input.attempts[0].attempt_id,
+                crate::ArtifactPart::Stderr,
+                crate::ByteRange {
+                    offset: 0,
+                    max_bytes: 65_536,
+                },
+                &context,
+                &call,
+            )
+        };
+        let original = read()?;
+        assert!(original.complete);
+        assert_eq!(original.len, 200_000);
+        assert_eq!(original.bytes, vec![b'x'; 65_536]);
+        let report = sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?;
+        assert_eq!(report.attempt_logs.len(), 1, "{report:?}");
+        let tail = read()?;
+        assert!(!tail.complete);
+        assert!(tail.eof);
+        assert_eq!(tail.len, 65_536);
+        assert_eq!(tail.bytes, vec![b'x'; 65_536]);
+        assert_eq!(
+            tail.digest,
+            provenant_records::CanonicalV1::file_digest(&tail.bytes)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pressure_only_collects_temporary_and_keeps_captures_and_provider_state() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());

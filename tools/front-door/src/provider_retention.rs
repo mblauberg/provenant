@@ -290,6 +290,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         30,
         false,
         false,
+        None,
         1,
         Some(&expected),
         &mut report,
