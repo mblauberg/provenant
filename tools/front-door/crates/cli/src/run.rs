@@ -1999,7 +1999,11 @@ fn lanes_inner(
     let (context, store) = open_read_only(edge, &call)?;
     let Some(store) = store else {
         let root = execution_state(edge.roots, edge.home, edge.assets)?;
-        let (data, human) = render_lanes(&[], None, root.as_path());
+        let (mut data, human) = render_lanes(&[], None, root.as_path());
+        if command.wait.is_some() || command.watch.is_some() {
+            // No store means no lanes, so there is nothing left to wait for.
+            data["condition_met"] = json!(true);
+        }
         let human = if command.watch.is_some() && !json {
             "end settled lanes=0\n".into()
         } else {

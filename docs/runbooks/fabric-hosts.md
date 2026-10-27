@@ -276,6 +276,17 @@ Other limits on a peer run:
   returns. `lanes --host workshop --wait N` and `--watch` follow the peer's
   newest 100 lanes, counting only those that settle after the call starts.
 
+Waiting and watching work the same on both hosts. `lanes --wait N` returns when a
+lane that was unsettled at the start, or settled since, meets `--condition`
+(`any` by default). A settled older attempt of a named run does not count; if
+every lane of the named runs settled earlier the call is refused with their
+number, so pass the attempt ID, or `--since TIME` to count earlier
+settlements. `--session LABEL` selects the lanes an agent label submitted, so
+no ID list is needed. For a background job or monitor, run
+`provenant lanes --watch 3600`: it prints `STATE RUN/TASK/ATTEMPT` (and
+`host=ID` for a peer's lane) once per state change, then `end settled lanes=N`,
+or `end timeout lanes=N pending=M` with exit 124.
+
 `provenant help dispatch`
 shows the operation ID, route and access controls. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and

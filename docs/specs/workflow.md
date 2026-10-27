@@ -109,6 +109,28 @@ session key, saved atomically with its bytes preserved. Session IDs are 1 to
   `tests/workflow.rs::long_checkpoints_save_up_to_the_documented_bound`
 - Owner: `crates/workflow/src/session.rs`
 
+### Earlier checkpoints are bounded revisions
+
+A save keeps the checkpoint it replaces as numbered revision `N`, in
+`rev-N.md` beside `checkpoint.md`, and records every retained revision with its
+parent and a SHA-256 in `revisions.json`, all under the save's existing lock.
+The order is: store the old text, publish the new checkpoint, publish the
+history, then delete revisions beyond `retention.session_revisions` (default 8,
+1 to 64, current included). A save that stops part-way leaves a complete
+checkpoint, and the next one records the revision it finds; unreadable history
+never blocks a save. Identical text adds no revision. Each revision is held to
+the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
+a retained revision, or its unified line diff against the current one, as plain
+text; a revision whose text fails its hash is refused with `HISTORY`.
+- Why: a bad save or a compaction must not destroy the only copy of earlier
+  state, and the history must stay bounded.
+- Test: `crates/workflow/src/session.rs::each_save_keeps_the_replaced_checkpoint_as_a_linked_hashed_revision`;
+  `::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
+  `::an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost`;
+  `::unreadable_history_never_blocks_a_save_and_a_changed_revision_is_refused`;
+  `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
+- Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`
+
 ### Session hooks are advisory
 
 `pre-compact`, `compact`, `session-start` and `stop` exit 0 on missing or invalid state with a
@@ -221,3 +243,5 @@ authority.
 - Receipt mutation commands, repair and finding sidecars.
 - Provider-family maps in workflow, or a tracker replay queue.
 - Transcript reinjection and workflow MCP tools.
+- Merging, syncing or conflict-free replication of checkpoint revisions; the
+  history is one writer's bounded chain.

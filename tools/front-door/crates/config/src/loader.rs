@@ -406,6 +406,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     }
     origins.insert("install.targets".into(), compiled.clone());
     origins.insert("retention.provider_state_days".into(), compiled.clone());
+    origins.insert("retention.session_revisions".into(), compiled.clone());
     if let Some(item) = &retention_item {
         walk_item(item, "retention", None, &mut |key, _, _| {
             origins.insert(key.into(), user_origin.clone());

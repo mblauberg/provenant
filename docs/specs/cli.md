@@ -107,7 +107,8 @@ reads `--session` as an agent label on the peer. `--wait` still excludes
   `::a_named_attempt_counts_whenever_it_settled`;
   `::since_counts_settlements_before_arming`;
   `::nothing_pending_is_refused_for_named_lanes_only`;
-  `crates/cli/src/lib.rs::lanes_session_and_watch_have_bounded_shapes`
+  `crates/cli/src/lib.rs::lanes_session_and_watch_have_bounded_shapes`;
+  `tests/parser.rs::lanes_watch_and_session_selection_report_an_empty_store`
 - Owner: `crates/cli/src/run/watch.rs`, `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
 
 ### Lane watch is one stable line per event

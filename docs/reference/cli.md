@@ -2804,6 +2804,8 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
+| `--rev` | `{"name": "rev"}` |
+| `--revisions` | `{"conflicts": ["rev"], "defaults": ["false"], "name": "revisions", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2815,10 +2817,40 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
-        "session_id"
+        "session_id",
+        "rev",
+        "revisions"
       ],
       "multiple": true,
       "name": "Show",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant workflow session diff`
+
+| Argument | Contract |
+|---|---|
+| `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
+| `rev` | `{"name": "rev", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session_id",
+        "rev"
+      ],
+      "multiple": true,
+      "name": "Diff",
       "required": false
     }
   ]

@@ -17,6 +17,40 @@ fn invalid_json_is_an_envelope() -> Result {
 }
 
 #[test]
+fn lanes_watch_and_session_selection_report_an_empty_store() -> Result {
+    let rig = TestRig::new()?;
+    // Nothing to watch settles at once, as one stable line.
+    let watch = rig.command(&["lanes", "--watch", "1"])?;
+    assert_eq!(code(&watch), 0);
+    assert_eq!(
+        String::from_utf8(watch.stdout.bytes)?,
+        "end settled lanes=0\n"
+    );
+    let json = rig.command(&["lanes", "--watch", "--json"])?;
+    assert_eq!(code(&json), 0);
+    let stdout = String::from_utf8(json.stdout.bytes)?;
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(value["data"]["lanes"], serde_json::json!([]));
+    // A session's wait with no lanes is met, and its list is empty.
+    let waited = rig.command(&["lanes", "--wait", "1", "--session", "chair", "--json"])?;
+    assert_eq!(code(&waited), 0);
+    let value: serde_json::Value = serde_json::from_slice(&waited.stdout.bytes)?;
+    assert_eq!(value["data"]["condition_met"], true);
+    let listed = rig.command(&["lanes", "--session", "chair", "--json"])?;
+    assert_eq!(code(&listed), 0);
+    // Exclusive options and bad labels are usage errors.
+    for args in [
+        vec!["lanes", "--watch", "1", "--wait", "1"],
+        vec!["lanes", "--session", "not a label"],
+        vec!["lanes", "--watch", "1", "--state", "running"],
+    ] {
+        assert_eq!(code(&rig.command(&args)?), 2, "{args:?}");
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();

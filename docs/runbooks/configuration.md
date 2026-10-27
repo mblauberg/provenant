@@ -61,7 +61,9 @@ before applying an authorised install.
 
 GC also applies [terminal provider-state retention](gc.md). The separate
 `[retention] provider_state_days = 7` key accepts 1 to 3650 and is reread on
-each sweep without reinstalling. Known credential entries expire after
+each sweep without reinstalling. `[retention] session_revisions = 8` (1 to 64)
+sets how many [checkpoint revisions](session-checkpoints.md#earlier-saves) a
+session keeps and is reread on each save. Known credential entries expire after
 24 hours. GC also reclaims `tmp/` directories from indexed terminal attempts
 after 24 hours, across the state run store and its child stores. Nonterminal
 attempts, writer locks and retained reservations prevent deletion. GC JSON

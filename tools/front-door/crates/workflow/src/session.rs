@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use thiserror::Error;
 
+mod diff;
 mod hooks;
 mod state;
 pub use hooks::*;
@@ -16,6 +17,137 @@ pub use state::*;
 /// need less cut it: hooks inject at most 8 KiB and a hand-off prompt 32 KiB.
 pub const CHECKPOINT_LIMIT: u64 = 256 * 1024;
 pub const HOST_SESSION_ID_LIMIT: usize = 128;
+/// Revisions a session keeps by default: the current checkpoint and the seven
+/// before it. `retention.session_revisions` sets it from 1 (no history) to 64.
+pub const REVISIONS_DEFAULT: u64 = 8;
+pub const REVISIONS_MAX: u64 = 64;
+const MANIFEST: &str = "revisions.json";
+const MANIFEST_LIMIT: u64 = 64 * 1024;
+const REVISION_PREFIX: &str = "rev-";
+
+/// One saved state of a session checkpoint. Revisions are numbered from 1 and
+/// each names the revision it replaced, so the chain shows what came before and
+/// the content hash shows it was not altered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Revision {
+    pub revision: u64,
+    pub parent: Option<u64>,
+    pub sha256: provenant_records::FileDigest,
+    pub bytes: u64,
+    pub saved_at: UtcMicros,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Manifest {
+    schema_version: u64,
+    /// Oldest first; the last is the checkpoint in `checkpoint.md`.
+    revisions: Vec<Revision>,
+}
+/// What a save recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Saved {
+    pub revision: u64,
+    pub parent: Option<u64>,
+    /// The text equalled the current checkpoint, so no revision was added.
+    pub unchanged: bool,
+    /// Revisions kept after pruning, including this one.
+    pub retained: usize,
+}
+/// A retained revision's text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RevisionText {
+    pub revision: Revision,
+    pub markdown: String,
+}
+/// What changed between a retained revision and the current checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionDiff {
+    pub from: Revision,
+    pub to: Revision,
+    /// A unified line diff; empty when the text is the same.
+    pub text: String,
+}
+
+fn revision_file(revision: u64) -> String {
+    format!("{REVISION_PREFIX}{revision}.md")
+}
+fn revision_number(name: &OsStr) -> Option<u64> {
+    name.to_str()?
+        .strip_prefix(REVISION_PREFIX)?
+        .strip_suffix(".md")?
+        .parse()
+        .ok()
+}
+fn publish(dir: &Directory, name: &str, bytes: &[u8]) -> Result<(), SessionError> {
+    dir.atomic_write(OsStr::new(name), ".session.", bytes, PublishMode::Replace)?
+        .require_durable()
+        .map_err(SessionError::Durability)
+}
+/// The checkpoint text and when it was last written.
+fn read_current(dir: &Directory) -> Result<Option<(Vec<u8>, UtcMicros)>, SessionError> {
+    let read = || -> Result<(Vec<u8>, UtcMicros), SessionError> {
+        let mut file = dir.open_read(OsStr::new("checkpoint.md"))?;
+        let bytes = file.read_bounded(CHECKPOINT_LIMIT)?;
+        let micros = i64::try_from(file.metadata()?.modified_ns / 1000)
+            .map_err(|_| provenant_core::TimeError::WallRange)?;
+        Ok((bytes, UtcMicros::from_micros(micros)?))
+    };
+    match read() {
+        Ok(found) => Ok(Some(found)),
+        Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+fn load(dir: &Directory) -> Result<Manifest, SessionError> {
+    let bytes = dir.read_bounded(OsStr::new(MANIFEST), MANIFEST_LIMIT)?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| SessionError::History)?;
+    if manifest.schema_version != 1 || manifest.revisions.len() as u64 > REVISIONS_MAX {
+        return Err(SessionError::History);
+    }
+    Ok(manifest)
+}
+fn highest_revision_file(dir: &Directory) -> Result<u64, SessionError> {
+    let mut highest = 0;
+    for name in dir.entries()? {
+        highest = highest.max(revision_number(&name?).unwrap_or(0));
+    }
+    Ok(highest)
+}
+/// The recorded chain, plus the checkpoint on disk when no revision records
+/// it: the first save after upgrading, a save that stopped before its history
+/// was written, or a file edited by hand.
+fn reconcile(
+    manifest: &Manifest,
+    existing: Option<&(Vec<u8>, UtcMicros)>,
+    floor: u64,
+) -> Vec<Revision> {
+    let mut chain = manifest.revisions.clone();
+    if let Some((bytes, modified)) = existing {
+        let digest = provenant_records::CanonicalV1::file_digest(bytes);
+        if chain.last().is_none_or(|last| last.sha256 != digest) {
+            let parent = chain.last().map(|last| last.revision);
+            chain.push(Revision {
+                revision: parent.unwrap_or(0).max(floor) + 1,
+                parent,
+                sha256: digest,
+                bytes: bytes.len() as u64,
+                saved_at: *modified,
+            });
+        }
+    }
+    chain
+}
+/// Delete revision files the history does not name.
+fn remove_orphans(dir: &Directory, manifest: &Manifest) {
+    let Ok(entries) = dir.entries() else { return };
+    let named: Vec<u64> = manifest.revisions.iter().map(|r| r.revision).collect();
+    for name in entries.flatten() {
+        if revision_number(&name).is_some_and(|number| !named.contains(&number)) {
+            let _ = dir.unlink(&name);
+        }
+    }
+}
 
 /// Host-provided IDs use command-safe components, independently of core IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +205,8 @@ pub enum SessionError {
     Time(#[from] provenant_core::TimeError),
     #[error("checkpoint save deadline expired")]
     Deadline,
+    #[error("session revision history is unreadable or does not match its recorded hash")]
+    History,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -96,6 +230,7 @@ pub struct SessionStore {
     root: StateRoot,
     project: ProjectId,
     session: HostSessionId,
+    keep: u64,
 }
 impl SessionStore {
     pub fn new(root: StateRoot, project: ProjectId, session: HostSessionId) -> Self {
@@ -103,7 +238,14 @@ impl SessionStore {
             root,
             project,
             session,
+            keep: REVISIONS_DEFAULT,
         }
+    }
+    /// Keep this many revisions, current included, clamped to 1 through 64.
+    #[must_use]
+    pub fn with_revisions(mut self, keep: u64) -> Self {
+        self.keep = keep.clamp(1, REVISIONS_MAX);
+        self
     }
     fn directory(&self, create: bool) -> Result<Directory, FsError> {
         crate::persistence::directory(
@@ -125,7 +267,153 @@ impl SessionStore {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<(), SessionError> {
-        self.write_file("checkpoint.md", ".checkpoint.", text, budget, cancel, clock)
+        self.save_revision(text, budget, cancel, clock).map(|_| ())
+    }
+    /// As `save`, keeping the checkpoint it replaces as a numbered revision.
+    /// The previous text is stored first, then the new checkpoint is published,
+    /// then the history that names both, so a failure between steps leaves a
+    /// complete checkpoint and the next save records the revision it finds.
+    /// Revisions beyond the keep count are deleted after the history is
+    /// written; a deletion that fails is retried by the next save. Unreadable
+    /// history never blocks a save: it restarts the chain after the highest
+    /// revision file present.
+    pub fn save_revision(
+        &self,
+        text: &[u8],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<Saved, SessionError> {
+        if text.len() as u64 > CHECKPOINT_LIMIT {
+            return Err(SessionError::TooLarge);
+        }
+        std::str::from_utf8(text)?;
+        let dir = self.directory(true)?;
+        let _lock = dir.lock(
+            OsStr::new("checkpoint.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )?;
+        check_wait(budget, cancel, clock).map_err(|stop| match stop {
+            WaitStop::Cancelled => SessionError::from(FsError::Cancelled {
+                path: self.root.as_path().into(),
+            }),
+            WaitStop::Deadline => SessionError::Deadline,
+        })?;
+        let now = clock.wall_now()?;
+        // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
+        let existing = read_current(&dir).ok().flatten();
+        let mut manifest = load(&dir).unwrap_or_default();
+        let floor = highest_revision_file(&dir)?;
+        let mut chain = reconcile(&manifest, existing.as_ref(), floor);
+        let digest = provenant_records::CanonicalV1::file_digest(text);
+        let unchanged = chain.last().is_some_and(|last| last.sha256 == digest);
+        if !unchanged {
+            // Keep the text being replaced before replacing it.
+            if let (Some(last), Some((bytes, _))) = (chain.last(), existing.as_ref()) {
+                publish(&dir, &revision_file(last.revision), bytes)?;
+            }
+            let parent = chain.last().map(|last| last.revision);
+            chain.push(Revision {
+                revision: parent.unwrap_or(floor).max(floor) + 1,
+                parent,
+                sha256: digest,
+                bytes: text.len() as u64,
+                saved_at: now,
+            });
+        }
+        publish(&dir, "checkpoint.md", text)?;
+        let current = chain.last().cloned().ok_or(SessionError::History)?;
+        let keep = usize::try_from(self.keep).unwrap_or(usize::MAX);
+        let pruned: Vec<Revision> = chain.drain(..chain.len().saturating_sub(keep)).collect();
+        manifest.schema_version = 1;
+        manifest.revisions = chain;
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
+        publish(&dir, MANIFEST, &manifest_bytes)?;
+        // The history is durable, so these files are unreachable. A failed
+        // delete leaves an orphan that the next save removes.
+        for old in &pruned {
+            let _ = dir.unlink(OsStr::new(&revision_file(old.revision)));
+        }
+        remove_orphans(&dir, &manifest);
+        Ok(Saved {
+            revision: current.revision,
+            parent: current.parent,
+            unchanged,
+            retained: manifest.revisions.len(),
+        })
+    }
+    /// The retained revisions, oldest first; the last is the current checkpoint.
+    /// A checkpoint changed without a save shows as the newest revision.
+    pub fn revisions(&self) -> Result<Vec<Revision>, SessionError> {
+        let dir = match self.directory(false) {
+            Ok(dir) => dir,
+            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let existing = read_current(&dir)?;
+        let manifest = match load(&dir) {
+            Ok(manifest) => manifest,
+            Err(SessionError::Filesystem(error)) if error.is_not_found() => Manifest::default(),
+            Err(error) => return Err(error),
+        };
+        let floor = highest_revision_file(&dir)?;
+        Ok(reconcile(&manifest, existing.as_ref(), floor))
+    }
+    /// The text of one retained revision, checked against its recorded hash.
+    pub fn read_revision(&self, revision: u64) -> Result<Option<RevisionText>, SessionError> {
+        let chain = self.revisions()?;
+        let Some(found) = chain.iter().find(|r| r.revision == revision).cloned() else {
+            return Ok(None);
+        };
+        let dir = self.directory(false)?;
+        let bytes = if chain.last() == Some(&found) {
+            read_current(&dir)?.map(|(bytes, _)| bytes)
+        } else {
+            match dir.read_bounded(OsStr::new(&revision_file(revision)), CHECKPOINT_LIMIT) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.is_not_found() => None,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        // A checkpoint changed outside a save keeps no copy of the text it
+        // replaced, so a listed revision can have no text.
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        if provenant_records::CanonicalV1::file_digest(&bytes) != found.sha256 {
+            return Err(SessionError::History);
+        }
+        Ok(Some(RevisionText {
+            revision: found,
+            markdown: std::str::from_utf8(&bytes)?.to_owned(),
+        }))
+    }
+    /// A line diff from a retained revision to the current checkpoint, or
+    /// `None` when that revision is not retained.
+    pub fn diff(&self, revision: u64) -> Result<Option<SessionDiff>, SessionError> {
+        let Some(from) = self.read_revision(revision)? else {
+            return Ok(None);
+        };
+        let Some(current) = self.revisions()?.last().map(|r| r.revision) else {
+            return Ok(None);
+        };
+        let Some(to) = self.read_revision(current)? else {
+            return Ok(None);
+        };
+        let text = diff::unified(
+            &from.markdown,
+            &to.markdown,
+            &format!("revision {}", from.revision.revision),
+            &format!("revision {} (current)", to.revision.revision),
+        );
+        Ok(Some(SessionDiff {
+            from: from.revision,
+            to: to.revision,
+            text,
+        }))
     }
     /// Replaces the hook-owned autosave file, creating the session directory
     /// when missing. `checkpoint.md` is never opened for writing.
@@ -374,6 +662,210 @@ mod tests {
             Err(SessionError::Filesystem(FsError::TooLarge { .. }))
         ));
     }
+    fn saved(store: &SessionStore, text: &str) -> Saved {
+        let clock = clock(5);
+        store
+            .save_revision(
+                text.as_bytes(),
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap()
+    }
+    fn numbers(store: &SessionStore) -> Vec<u64> {
+        store
+            .revisions()
+            .unwrap()
+            .iter()
+            .map(|r| r.revision)
+            .collect()
+    }
+    #[test]
+    fn each_save_keeps_the_replaced_checkpoint_as_a_linked_hashed_revision() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        assert_eq!(saved(&selected, "first\n").revision, 1);
+        let second = saved(&selected, "second\n");
+        assert_eq!(
+            (second.revision, second.parent, second.retained),
+            (2, Some(1), 2)
+        );
+        assert_eq!(saved(&selected, "third\n").parent, Some(2));
+        let chain = selected.revisions().unwrap();
+        assert_eq!(
+            chain
+                .iter()
+                .map(|r| (r.revision, r.parent))
+                .collect::<Vec<_>>(),
+            [(1, None), (2, Some(1)), (3, Some(2))]
+        );
+        assert_eq!(
+            chain[0].sha256,
+            provenant_records::CanonicalV1::file_digest(b"first\n")
+        );
+        assert_eq!(
+            selected.read_revision(1).unwrap().unwrap().markdown,
+            "first\n"
+        );
+        assert_eq!(
+            selected.read_revision(2).unwrap().unwrap().markdown,
+            "second\n"
+        );
+        assert_eq!(
+            selected.read_revision(3).unwrap().unwrap().markdown,
+            "third\n"
+        );
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "third\n");
+        assert!(selected.read_revision(9).unwrap().is_none());
+        let diff = selected.diff(1).unwrap().unwrap();
+        assert_eq!((diff.from.revision, diff.to.revision), (1, 3));
+        assert_eq!(
+            diff.text,
+            "--- revision 1\n+++ revision 3 (current)\n@@ -1,1 +1,1 @@\n-first\n+third\n"
+        );
+        assert_eq!(selected.diff(3).unwrap().unwrap().text, "");
+    }
+
+    #[test]
+    fn saving_the_same_text_adds_no_revision_but_refreshes_the_checkpoint() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        saved(&selected, "same\n");
+        let again = saved(&selected, "same\n");
+        assert!(again.unchanged);
+        assert_eq!((again.revision, again.retained), (1, 1));
+        assert_eq!(numbers(&selected), [1]);
+    }
+
+    #[test]
+    fn only_the_newest_revisions_are_kept_and_older_files_are_deleted() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1").with_revisions(3);
+        for n in 1..=6 {
+            saved(&selected, &format!("save {n}\n"));
+        }
+        assert_eq!(numbers(&selected), [4, 5, 6]);
+        assert!(selected.read_revision(3).unwrap().is_none());
+        assert_eq!(
+            selected.read_revision(4).unwrap().unwrap().markdown,
+            "save 4\n"
+        );
+        let mut files: Vec<String> = std::fs::read_dir(path(&root, project, "host-1"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("rev-"))
+            .collect();
+        files.sort();
+        // The current checkpoint lives in checkpoint.md, not a revision file.
+        assert_eq!(files, ["rev-4.md", "rev-5.md"]);
+        // One revision keeps no history at all.
+        let single = store(&root, project, "host-2").with_revisions(1);
+        saved(&single, "a\n");
+        saved(&single, "b\n");
+        assert_eq!(numbers(&single), [2]);
+        assert!(single.diff(1).unwrap().is_none());
+        const { assert!(REVISIONS_DEFAULT <= REVISIONS_MAX) };
+        assert_eq!(store(&root, project, "x").with_revisions(0).keep, 1);
+        assert_eq!(
+            store(&root, project, "x").with_revisions(999).keep,
+            REVISIONS_MAX
+        );
+    }
+
+    #[test]
+    fn an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        // A checkpoint saved before revisions existed has no history.
+        let dir = path(&root, project, "host-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("checkpoint.md"), "legacy\n").unwrap();
+        assert_eq!(numbers(&selected), [1]);
+        let first = saved(&selected, "next\n");
+        assert_eq!((first.revision, first.parent), (2, Some(1)));
+        assert_eq!(
+            selected.read_revision(1).unwrap().unwrap().markdown,
+            "legacy\n"
+        );
+        // A save that stored the old text and published the checkpoint, but not
+        // the history, leaves the new text on disk; the next save records it.
+        std::fs::write(dir.join("rev-2.md"), "next\n").unwrap();
+        std::fs::write(dir.join("checkpoint.md"), "interrupted\n").unwrap();
+        assert_eq!(numbers(&selected), [1, 2, 3]);
+        let last = saved(&selected, "after\n");
+        assert_eq!((last.revision, last.parent), (4, Some(3)));
+        assert_eq!(
+            selected.read_revision(3).unwrap().unwrap().markdown,
+            "interrupted\n"
+        );
+        assert_eq!(
+            selected.read_revision(2).unwrap().unwrap().markdown,
+            "next\n"
+        );
+        // A hand edit keeps no copy of what it replaced, and says so.
+        std::fs::write(dir.join("checkpoint.md"), "edited\n").unwrap();
+        saved(&selected, "again\n");
+        assert_eq!(numbers(&selected), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            selected.read_revision(5).unwrap().unwrap().markdown,
+            "edited\n"
+        );
+        assert!(selected.read_revision(4).unwrap().is_none());
+    }
+
+    #[test]
+    fn unreadable_history_never_blocks_a_save_and_a_changed_revision_is_refused() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        saved(&selected, "one\n");
+        saved(&selected, "two\n");
+        let dir = path(&root, project, "host-1");
+        // A revision altered after the fact fails its recorded hash.
+        std::fs::write(dir.join("rev-1.md"), "tampered\n").unwrap();
+        assert!(matches!(
+            selected.read_revision(1),
+            Err(SessionError::History)
+        ));
+        // History that cannot be read is reported, yet the next save succeeds,
+        // keeps the checkpoint it finds and numbers past every revision file.
+        std::fs::write(dir.join("revisions.json"), "{not json").unwrap();
+        assert!(matches!(selected.revisions(), Err(SessionError::History)));
+        let recovered = saved(&selected, "three\n");
+        assert_eq!((recovered.revision, recovered.parent), (3, Some(2)));
+        assert_eq!(numbers(&selected), [2, 3]);
+        assert_eq!(
+            selected.read_revision(2).unwrap().unwrap().markdown,
+            "two\n"
+        );
+        assert!(!dir.join("rev-1.md").exists(), "an unnamed file is removed");
+    }
+
+    #[test]
+    fn every_revision_is_held_to_the_checkpoint_size_bound() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let exact = "x".repeat(CHECKPOINT_LIMIT as usize);
+        saved(&selected, &exact);
+        saved(&selected, "small\n");
+        assert_eq!(
+            selected.read_revision(1).unwrap().unwrap().markdown.len() as u64,
+            CHECKPOINT_LIMIT
+        );
+        let clock = clock(0);
+        let over = vec![b'x'; CHECKPOINT_LIMIT as usize + 1];
+        assert!(matches!(
+            selected.save_revision(
+                &over,
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock
+            ),
+            Err(SessionError::TooLarge)
+        ));
+        assert_eq!(numbers(&selected), [1, 2]);
+    }
+
     #[test]
     fn autosave_has_the_same_bounds_and_lock_but_keeps_the_chair_file_separate() {
         let (_temp, root, project) = setup();
