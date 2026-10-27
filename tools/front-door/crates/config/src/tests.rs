@@ -1108,6 +1108,17 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     );
 }
 #[test]
+fn writer_publishing_knob_defaults_on_and_can_be_disabled_per_dispatch() {
+    let config = load::<&[u8]>(&roots(), None).unwrap();
+    let profile = config.dispatch_profile(&[]).unwrap();
+    assert_eq!(profile.knobs.get("lanes.publish"), Some(&serde_json::json!(true)));
+    let disabled = config.dispatch_profile(&["lanes.publish=false".into()]).unwrap();
+    assert_eq!(disabled.knobs["lanes.publish"], false);
+    let config = load(&roots(), Some(b"schema_version=1\n[knobs]\n'lanes.publish'=false".as_slice())).unwrap();
+    assert_eq!(config.dispatch_profile(&[]).unwrap().knobs["lanes.publish"], false);
+}
+
+#[test]
 fn read_only_batch_concurrency_has_its_own_knob() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
