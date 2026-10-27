@@ -2093,6 +2093,140 @@ fn lanes_inner(
     Ok((data, human, false))
 }
 
+/// What a pull request body needs from one local attempt's own record.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttemptFacts {
+    pub attempt_id: AttemptId,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub state: String,
+    pub exit_code: Option<i64>,
+    /// `adapter/model@effort`, as the attempt ran.
+    pub route: String,
+    pub head: Option<provenant_core::GitOid>,
+    /// The branch the attempt's host delivery pushed.
+    pub branch: Option<String>,
+    pub delivery_id: Option<DeliveryId>,
+    /// The attempt's receipt directory, relative to the state root.
+    pub receipt_path: String,
+    /// The attempt's delivery receipt: risk tier and review attempts.
+    pub risk: Option<String>,
+    pub reviews: Vec<AttemptId>,
+}
+fn route_label(record: &run::AttemptRecord) -> String {
+    let ran = record
+        .observed_route
+        .as_ref()
+        .or(record.applied_route.as_ref())
+        .or(record.resolved_route.as_ref());
+    let (requested_model, requested_effort) = match &record.requested_route {
+        run::RequestedRoute::Model { model, effort, .. } => (Some(model.clone()), effort.clone()),
+        run::RequestedRoute::Named { effort, .. } => (None, effort.clone()),
+    };
+    let Some(model) = ran
+        .and_then(|route| {
+            let model = route.model.clone()?;
+            Some(match &route.provider {
+                Some(provider) if !model.starts_with(&format!("{provider}/")) => {
+                    format!("{provider}/{model}")
+                }
+                _ => model,
+            })
+        })
+        .or(requested_model)
+    else {
+        return "unresolved".into();
+    };
+    match ran
+        .and_then(|route| route.effort.clone())
+        .or(requested_effort)
+    {
+        Some(effort) => format!("{model}@{effort}"),
+        None => model,
+    }
+}
+/// The recorded facts of local attempts, for the pull request body. An attempt
+/// that ran on a peer is refused: its record lives on that host.
+pub fn attempt_facts(
+    edge: &Edge<'_>,
+    attempts: &[crate::Attempt],
+) -> Result<Vec<AttemptFacts>, Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let store = store.ok_or(Fail::new(
+        Status::Invalid,
+        ErrorKind::NotFound,
+        "run store is not initialised",
+    ))?;
+    let session = Session { store, context };
+    attempts
+        .iter()
+        .map(|attempt| {
+            if targets::placement(edge, &attempt.0, false)?.is_some() {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Unsupported,
+                    "that attempt ran on a peer; its record is read on that host",
+                ));
+            }
+            let id = targets::local(&session, &attempt.0, &call)?
+                .attempt
+                .ok_or(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "attempt required",
+                ))?;
+            let record = session.service().status(id, &call)?;
+            let (state, _) = state_and_reason(&record.state);
+            let exit_code = match &record.state {
+                run::AttemptState::Terminal { exit_code, .. } => *exit_code,
+                _ => None,
+            };
+            let (risk, reviews) = match record.delivery_id {
+                Some(delivery) => {
+                    let receipt = provenant_workflow::store::ReceiptStore::new(
+                        session.context.state_root.clone(),
+                        session.context.project_id,
+                        delivery,
+                    )
+                    .read()
+                    .map_err(|error| {
+                        Fail::new(Status::Error, ErrorKind::StateCorrupt, error.to_string())
+                    })?;
+                    match receipt {
+                        Some(receipt) => (
+                            serde_json::to_value(receipt.risk().tier())
+                                .ok()
+                                .and_then(|tier| tier.as_str().map(str::to_owned)),
+                            receipt.review_attempts().to_vec(),
+                        ),
+                        None => (None, Vec::new()),
+                    }
+                }
+                None => (None, Vec::new()),
+            };
+            Ok(AttemptFacts {
+                attempt_id: record.attempt_id,
+                run_id: record.run_id,
+                task_id: record.task_id,
+                state,
+                exit_code,
+                route: route_label(&record),
+                head: record
+                    .head
+                    .or_else(|| record.delivery.as_ref().and_then(|d| d.head)),
+                branch: record.delivery.as_ref().map(|d| d.branch.clone()),
+                delivery_id: record.delivery_id,
+                receipt_path: format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+                risk,
+                reviews,
+            })
+        })
+        .collect()
+}
+
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }

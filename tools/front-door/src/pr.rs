@@ -10,7 +10,10 @@ use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
+mod git;
 mod land;
+mod open;
+mod status;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -30,8 +33,18 @@ fn execute_for(
     timeout: Duration,
     watch: bool,
 ) -> Result<ExecOutcome> {
+    execute_with(project, argv, timeout, watch, None)
+}
+fn execute_with(
+    project: &Path,
+    argv: &[&str],
+    timeout: Duration,
+    watch: bool,
+    stdin: Option<&[u8]>,
+) -> Result<ExecOutcome> {
     let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
     let mut options = ExecOptions::new(&argv, project, timeout);
+    options.stdin = stdin;
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
     // Discard repeated progress so long CI runs cannot fill capture.
@@ -146,6 +159,8 @@ pub fn run(command: Pr, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         Pr::Watch { number } => ("pr watch", number, None),
         Pr::Merge { number, head } => ("pr merge", number, Some(head)),
         Pr::Land { number, head } => return land::run(number, head, globals, workers),
+        Pr::Open(command) => return open::run(*command, globals),
+        Pr::Status { numbers } => return status::run(numbers, globals),
     };
     let mut captured = expected;
     let result = (|| -> Result<()> {

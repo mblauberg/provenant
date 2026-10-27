@@ -155,6 +155,33 @@ instead of forcing, and the command exits 1 with `merged: true`.
   `::pr_land_changes_nothing_when_the_merge_does_not_happen`
 - Owner: `src/pr/land.rs`, `src/worktrees.rs`
 
+### Pull request bodies come from receipts
+
+`pr open --from-attempt ATTEMPT --summary-file FILE` fills the repository's
+`.github/pull_request_template.md` from the local attempt's record and, when
+the attempt has one, its delivery receipt: the summary (whose heading or first
+line is the title), `Closes #N` for each `--issue`, the head to approve, the
+risk tier, the author and reviewer routes with their receipt paths, the head
+each review read, and a gate table whose empty cells say `pending`, `none` or
+`not recorded` rather than staying empty. Reviews come from `--review` or the
+delivery receipt. Only a `succeeded` or `review_required` attempt with a
+recorded head can back a pull request; a template missing a section it fills
+is refused; the delivered branch must be at the attempt's head on the remote;
+and an attempt that ran on a peer is refused, as its record lives there. The
+attempt records no issue, so issues are named with `--issue`. `--dry-run`
+prints the title and body and opens nothing. `pr status [N...]` prints one
+line per pull request: `#N STATE HEAD checks=P/T [fail=F] [pending=W]
+merge=STATE review=DECISION`, with `draft` appended for a draft, and this
+account's open pull requests when none is named.
+- Why: the chair rebuilt the same body by hand for every pull request, and a
+  hand-built body can state a head or route the receipts do not hold.
+- Test: `crates/cli/src/pr_body.rs::the_repository_template_is_filled_from_the_receipts`;
+  `::a_review_of_another_head_or_no_review_is_stated_not_hidden`;
+  `::a_template_missing_a_section_is_refused`;
+  `src/pr_land_tests.rs::pr_open_refuses_what_the_receipts_cannot_support`;
+  `tests/pr.rs::pr_status_prints_one_compact_line_per_pull_request`
+- Owner: `crates/cli/src/pr_body.rs`, `src/pr/open.rs`, `src/pr/status.rs`
+
 ### Chair switch quoting
 
 `chair switch` single-quotes each handoff argument and writes apostrophes

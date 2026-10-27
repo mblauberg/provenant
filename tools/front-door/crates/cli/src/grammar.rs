@@ -139,6 +139,42 @@ pub enum Pr {
         #[arg(long)]
         head: GitOid,
     },
+    /// Open a pull request with the repository template filled from receipts
+    Open(Box<PrOpen>),
+    /// Print one line per pull request: state, head, checks, merge and review
+    Status {
+        /// Pull requests to report; this account's open ones when omitted
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        numbers: Vec<u64>,
+    },
+}
+#[derive(Debug, Args)]
+pub struct PrOpen {
+    /// The writer attempt that made the change
+    #[arg(long)]
+    pub from_attempt: Attempt,
+    /// An independent review attempt (repeatable); the attempt's delivery
+    /// receipt supplies them when omitted
+    #[arg(long)]
+    pub review: Vec<Attempt>,
+    /// Markdown for the summary section; its first line titles the pull request
+    #[arg(long)]
+    pub summary_file: PathBuf,
+    /// Issue the pull request closes (repeatable)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Vec<u64>,
+    /// Branch to open from; the attempt's delivered branch when omitted
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// Branch to merge into; the repository default when omitted
+    #[arg(long)]
+    pub base: Option<String>,
+    /// Open as a draft
+    #[arg(long)]
+    pub draft: bool,
+    /// Print the title and body without opening anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {

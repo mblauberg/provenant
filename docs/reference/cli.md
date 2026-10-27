@@ -2412,6 +2412,72 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant pr open`
+
+| Argument | Contract |
+|---|---|
+| `--from-attempt` | `{"name": "from_attempt", "required": true}` |
+| `--review` | `{"name": "review", "repeatable": true}` |
+| `--summary-file` | `{"name": "summary_file", "required": true}` |
+| `--issue` | `{"name": "issue", "repeatable": true}` |
+| `--branch` | `{"name": "branch"}` |
+| `--base` | `{"name": "base"}` |
+| `--draft` | `{"defaults": ["false"], "name": "draft", "values": ["true", "false"]}` |
+| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "from_attempt",
+        "review",
+        "summary_file",
+        "issue",
+        "branch",
+        "base",
+        "draft",
+        "dry_run"
+      ],
+      "multiple": true,
+      "name": "PrOpen",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant pr status`
+
+| Argument | Contract |
+|---|---|
+| `numbers` | `{"name": "numbers", "positional": true, "repeatable": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "numbers"
+      ],
+      "multiple": true,
+      "name": "Status",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant gc`
 
 | Argument | Contract |

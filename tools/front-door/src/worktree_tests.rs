@@ -149,6 +149,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
             "pr_land_changes_nothing_when_the_merge_does_not_happen",
+            "pr_open_refuses_what_the_receipts_cannot_support",
         ],
         |name| {
             let result = match name {
@@ -219,6 +220,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "pr_land_refuses_each_unsafe_step_and_reports_the_rest" => {
                     crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
+                }
+                "pr_open_refuses_what_the_receipts_cannot_support" => {
+                    crate::pr_land_tests::pr_open_refuses_what_the_receipts_cannot_support()
                 }
                 "pr_land_changes_nothing_when_the_merge_does_not_happen" => {
                     crate::pr_land_tests::pr_land_changes_nothing_when_the_merge_does_not_happen()

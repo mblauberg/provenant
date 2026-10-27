@@ -240,6 +240,106 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
     Ok(())
 }
 
+/// The message of a refused `pr open`, which is a usage error.
+fn open_refusal(rig: &TestRig, args: &[&str]) -> Result<String> {
+    let mut argv = vec!["pr", "open"];
+    argv.extend_from_slice(args);
+    argv.push("--json");
+    let output = command(rig, &argv)?;
+    assert_eq!(
+        code(&output),
+        2,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let value = json(&output)?;
+    Ok(value["error"]["message"]
+        .as_str()
+        .ok_or("error message")?
+        .to_owned())
+}
+
+pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
+    let rig = repository()?;
+    let summary = rig.root.join("summary.md");
+    let summary_arg = summary.to_str().ok_or("path")?;
+    fs::write(
+        &summary,
+        "# feat(cli): add the thing\n\nIt adds the thing.\n",
+    )?;
+    let unknown = "ab".repeat(16);
+    let args = [
+        "--from-attempt",
+        &unknown,
+        "--summary-file",
+        summary_arg,
+        "--dry-run",
+    ];
+    // No template, then an empty summary, then an attempt nobody ran.
+    assert!(open_refusal(&rig, &args)?.contains("pull request template"));
+    fs::create_dir_all(rig.project.join(".github"))?;
+    fs::write(
+        rig.project.join(".github/pull_request_template.md"),
+        include_str!("../../../.github/pull_request_template.md"),
+    )?;
+    fs::write(&summary, "\n")?;
+    assert!(open_refusal(&rig, &args)?.contains("summary file is empty"));
+    fs::write(
+        &summary,
+        "# feat(cli): add the thing\n\nIt adds the thing.\n",
+    )?;
+    assert!(!open_refusal(&rig, &args)?.is_empty());
+
+    // A lane that never ran cannot back a pull request.
+    let dispatched = rig.execute_os(
+        &std::env::current_exe()?,
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into_os_string(),
+            "dispatch".into(),
+            "--model".into(),
+            "codex/gpt-6-luna".into(),
+            "--operation-id".into(),
+            "pr-open-fixture".into(),
+            "--prompt-stdin".into(),
+            "--json".into(),
+        ],
+        Some(b"never launched"),
+    )?;
+    let attempt = json(&dispatched)?["data"]["lanes"][0]["attempt_id"]
+        .as_str()
+        .ok_or("attempt")?
+        .to_owned();
+    let message = open_refusal(
+        &rig,
+        &[
+            "--from-attempt",
+            &attempt,
+            "--summary-file",
+            summary_arg,
+            "--dry-run",
+        ],
+    )?;
+    assert!(
+        message.contains("only a succeeded or review_required attempt"),
+        "{message}"
+    );
+    // A malformed attempt ID is a usage error before anything is read.
+    let invalid = command(
+        &rig,
+        &[
+            "pr",
+            "open",
+            "--from-attempt",
+            "nope",
+            "--summary-file",
+            summary_arg,
+        ],
+    )?;
+    assert_eq!(code(&invalid), 2);
+    Ok(())
+}
+
 pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result {
     for flag in ["checks-fail", "moved"] {
         let landing = landing()?;

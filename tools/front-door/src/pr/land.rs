@@ -1,16 +1,14 @@
 //! `pr land`: the existing CI watch and head-pinned merge, then local
 //! follow-up. No step forces: each one refuses and says why.
-use super::{Result, checks, execute_for, head, merge, successful};
+use super::git::{Git, plain_ref};
+use super::{Result, checks, head, merge, successful};
 use crate::{emit, roots, worktrees};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::GitOid;
-use provenant_os::exec::Termination;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{path::Path, time::Duration};
-
-const GIT_TIMEOUT: Duration = Duration::from_secs(300);
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -61,57 +59,6 @@ fn pull(project: &Path, number: &str) -> Result<Pull> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// A branch or remote name that cannot be read as an option or a revision
-/// expression, so it is safe as a Git argument.
-fn plain_ref(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('-')
-        && !name.contains("..")
-        && !name
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\@{".contains(c))
-}
-
-struct Git {
-    executable: String,
-}
-impl Git {
-    fn new() -> Result<Self> {
-        let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
-        let executable = git
-            .to_str()
-            .ok_or("Git executable path is not UTF-8")?
-            .to_owned();
-        Ok(Self { executable })
-    }
-    /// Whether Git exited zero, and its first line of output or error.
-    fn run(&self, dir: &Path, args: &[&str]) -> Result<(bool, String)> {
-        let mut argv = vec![self.executable.as_str()];
-        argv.extend_from_slice(args);
-        let output = execute_for(dir, &argv, GIT_TIMEOUT, false)?;
-        let succeeded = output.termination == Termination::Exit(0);
-        let bytes = if succeeded {
-            &output.stdout.bytes
-        } else {
-            &output.stderr.bytes
-        };
-        let text = String::from_utf8_lossy(bytes);
-        let line = text
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or_default();
-        Ok((succeeded, line.chars().take(200).collect()))
-    }
-    fn full(&self, dir: &Path, args: &[&str]) -> Result<Option<String>> {
-        let mut argv = vec![self.executable.as_str()];
-        argv.extend_from_slice(args);
-        let output = execute_for(dir, &argv, GIT_TIMEOUT, false)?;
-        Ok((output.termination == Termination::Exit(0))
-            .then(|| String::from_utf8_lossy(&output.stdout.bytes).into_owned()))
-    }
-}
-
 /// The path of the checkout that has `branch` checked out, if any.
 fn checkout_of(git: &Git, project: &Path, branch: &str) -> Result<Option<String>> {
     let Some(listing) = git.full(project, &["worktree", "list", "--porcelain"])? else {
@@ -141,16 +88,7 @@ fn follow_up(
     if !plain_ref(base) || !plain_ref(branch) {
         return Err("pull request branch names are not plain Git names".into());
     }
-    let configured = git.full(
-        project,
-        &["config", "--get", &format!("branch.{base}.remote")],
-    )?;
-    let remote = configured
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| plain_ref(name) && *name != ".")
-        .unwrap_or("origin")
-        .to_owned();
+    let remote = git.remote_of(project, base)?;
     let upstream = format!("{remote}/{base}");
     let merged = merged.to_string();
     let mut steps = Vec::new();

@@ -265,6 +265,25 @@ protection and any merge queue. Neither helper bypasses those gates.
 
 `pr merge` is for the immediate-merge path; use `gh pr merge --auto` to queue a merge.
 
+### Open a pull request from receipts
+
+```sh
+provenant pr open --from-attempt <writer-attempt> --review <review-attempt> \
+  --summary-file summary.md --issue 1829 --dry-run
+```
+
+`pr open` builds the body from the repository's pull request template and the
+attempts' own records, so the routes, receipt paths and heads in it are the
+recorded ones. The summary file's first line (a heading or plain text) is the
+title and the rest is the Summary section. Check the dry run, then drop
+`--dry-run` to run `gh pr create` for the attempt's delivered branch, which
+must be at the attempt's head on the remote. Complete the gate rows marked
+`pending` with the exact command and result before asking for review. The
+attempt must be local and `succeeded` or `review_required`, with a recorded
+head; read-only reviews supply the reviewer rows. `provenant pr status 148 149`
+prints `#148 OPEN <head> checks=3/4 pending=1 merge=blocked review=none`, one
+line each, for polling without parsing `gh` output.
+
 ### Land a pull request
 
 `provenant pr land 148 --head <reviewed-sha>` runs the four landing steps in
