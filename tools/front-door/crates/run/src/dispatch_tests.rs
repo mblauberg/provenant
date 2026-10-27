@@ -4779,6 +4779,83 @@ fn reconcile_recovers_a_writer_from_a_previous_boot() -> TestResult {
 }
 
 #[test]
+fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let record = store.finish(id, &attempt, &observed, &Fake::default(), &call)?;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    // Recreate the reservation retained by a crash after the canonical commit.
+    drop(provenant_supervisor::fixture::acquire_writer(
+        attempt.try_clone()?,
+        observed.scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let reservation = path.join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+    let meta = attempt.metadata()?;
+    value["boot"] = "darwin:00000000-0000-0000-0000-000000000000".into();
+    value["guardian"] = serde_json::json!({"boot":value["boot"], "pid":123, "native_start":1, "group_id":123, "session_id":123});
+    value["launch_state"] = "spawned".into();
+    value["attempt_device"] = meta.device.into();
+    value["attempt_inode"] = meta.inode.into();
+    std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+    artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
+    store.set_temporary_retained(id, true, &call)?;
+    let manifest_path = path.join("quarantine/manifest.json");
+    let manifest = std::fs::read(&manifest_path)?;
+    std::fs::write(&manifest_path, b"invalid manifest")?;
+    assert!(
+        matches!(store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
+        [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
+    );
+    assert!(
+        reservation.exists(),
+        "failed verification retains the reservation"
+    );
+    assert_eq!(store.record(id, &call)?, record);
+    std::fs::write(manifest_path, manifest)?;
+    assert_eq!(
+        store.reconcile(run.run_id, &Fake::default(), &call)?,
+        vec![(id, Reconciled::Finished)]
+    );
+    assert!(
+        !path.join("scratch").exists(),
+        "normal settlement removes empty launch staging"
+    );
+    assert!(
+        path.join("release.json").exists(),
+        "normal settlement verifies release evidence"
+    );
+    assert!(!reservation.exists());
+    assert_eq!(store.record(id, &call)?, record);
+    Ok(())
+}
+
+#[test]
 fn cancel_recovers_a_writer_from_a_previous_boot() -> TestResult {
     recover_rebooted_writer(true, false, true)
 }

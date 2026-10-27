@@ -656,10 +656,23 @@ impl RunStore {
         let Ok(Some(proof)) = recovery.after_reboot(&attempt, Self::scope(record)) else {
             return Ok(false);
         };
-        self.commit_reboot_lost(&proof, call)?;
-        proof
-            .release()
-            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        if matches!(record.state, AttemptState::Terminal { .. })
+            && !(matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Lost,
+                    exit_code: None,
+                    ..
+                }
+            ) && record.exit_evidence.is_none())
+        {
+            self.settle_recovered(&attempt, proof.into_recovery())?;
+        } else {
+            self.commit_reboot_lost(&proof, call)?;
+            proof
+                .release()
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        }
         self.set_temporary_retained(record.attempt_id, false, call)?;
         Ok(true)
     }

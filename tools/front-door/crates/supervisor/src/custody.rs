@@ -1201,6 +1201,11 @@ impl RebootRecovery {
     pub fn release(self) -> Result<()> {
         clear_reservation(&self.recovery.directory, self.scope())
     }
+    /// Keep writer exclusion for normal terminal settlement, which reacquires
+    /// attempt custody while verifying the canonical release artefacts.
+    pub fn into_recovery(self) -> Recovery {
+        self.recovery
+    }
 }
 pub fn acquire_recovery(
     directory: Directory,
