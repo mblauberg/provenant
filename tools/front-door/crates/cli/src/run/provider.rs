@@ -2619,6 +2619,15 @@ mod tests {
                     candidate.join("sessions/fixture-session.jsonl"),
                     "transcript",
                 )?;
+                // Codex's thread index can point to the source attempt even
+                // after its rollout has been copied into another CODEX_HOME.
+                let stale_path = candidate.join("sessions/fixture-session.jsonl");
+                for index in ["state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm"] {
+                    std::fs::write(
+                        candidate.join(index),
+                        stale_path.as_os_str().as_encoded_bytes(),
+                    )?;
+                }
                 for cache in ["cache", "plugins", "skills"] {
                     std::fs::DirBuilder::new()
                         .mode(0o700)
@@ -2669,6 +2678,105 @@ mod tests {
                     std::fs::read_to_string(copied.join("sessions/fixture-session.jsonl"))?,
                     "transcript"
                 );
+                for index in ["state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm"] {
+                    assert!(
+                        !copied.join(index).exists(),
+                        "resumed Codex must discover local rollouts without the source attempt's index: {index}"
+                    );
+                    assert_eq!(
+                        std::fs::read(candidate.join(index))?,
+                        stale_path.as_os_str().as_encoded_bytes()
+                    );
+                }
+
+                // Exercise the hand-off to the real adapter without launching
+                // a nested Codex process under the harness's confinement.
+                let home = base.join("home");
+                let cwd = base.join("checkout");
+                let scratch = base.join("scratch");
+                let assets = base.join("assets");
+                let plan = ConfinedPlan::new(confinement_request(
+                    prior.project_id,
+                    ConfinementRoots {
+                        cwd: &cwd,
+                        home: &home,
+                        scratch: &scratch,
+                        private_state: &copied,
+                        assets: &assets,
+                        prompt_file: None,
+                    },
+                    None,
+                    &Default::default(),
+                    &Default::default(),
+                    "codex",
+                )?)?;
+                use provenant_providers::{Adapter, ProviderEvent, codex::Codex};
+                let prompt = Prompt::new("continue".into());
+                let launch = Codex.prepare(PrepareInput {
+                    route: &route,
+                    confined: &plan,
+                    prompt: &prompt,
+                    continuation: Some(&continuation),
+                    grant_digest: "fixture",
+                    executable: Path::new("/opt/homebrew/Cellar/codex/fixture/bin/codex"),
+                    home: &home,
+                    user: "fixture".as_ref(),
+                    host_var: &|_| None,
+                    account: None,
+                    token: None,
+                    cwd: &cwd,
+                    git_context: false,
+                    nonce: [9; 16],
+                    provenant: LaneRuntime {
+                        executable: Path::new("/fixture/provenant/bin/provenant"),
+                        git: Path::new("/usr/bin/git"),
+                        state: context.state_root.as_path(),
+                        child_state: &base.join("children"),
+                        home: &home,
+                        depth: 1,
+                        attempt: AttemptId::from_bytes([6; 16]),
+                        assets: &assets,
+                    },
+                })?;
+                assert_eq!(launch.argv[2], "resume");
+                assert_eq!(launch.argv[3], "fixture-session");
+                assert!(
+                    launch
+                        .env
+                        .iter()
+                        .any(|(key, value)| { key == "CODEX_HOME" && value == copied.as_os_str() })
+                );
+                assert!(
+                    plan.permissions()
+                        .private_state
+                        .as_ref()
+                        .is_some_and(|grant| {
+                            grant.path == copied && grant.scope == PathScope::Subtree
+                        })
+                );
+                assert!(
+                    plan.permissions()
+                        .read_roots
+                        .iter()
+                        .all(|grant| { !candidate.starts_with(&grant.path) })
+                );
+                assert!(
+                    launch
+                        .profile
+                        .spec
+                        .runtime_reads
+                        .iter()
+                        .all(|grant| { !candidate.starts_with(&grant.path) })
+                );
+                let recorded = include_str!(
+                    "../../../../tests/fixtures/providers/codex/live-worktree_write-resume.jsonl"
+                )
+                .replace("FIXTURE_SESSION_IDENTIFIER", "fixture-session");
+                let mut stream = Codex.stream(Some(&continuation))?;
+                let events = Codex.observe(&mut stream, recorded.as_bytes())?;
+                assert!(events.iter().any(|event| {
+                    matches!(event, ProviderEvent::Session(session) if session == "fixture-session")
+                }));
             } else {
                 assert_eq!(result?.session(), "fixture-session");
                 prior.session = None;
