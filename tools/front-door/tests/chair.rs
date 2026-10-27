@@ -518,14 +518,17 @@ fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Res
     rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
     rig.env
         .push(("PROVENANT_GIT".into(), git.clone().into_os_string()));
-    let output = hook(&rig, false, "slow-identity")?;
+    // The prompt hook abandons a switch when under 3s of its 8s wall clock
+    // remain, so a loaded machine could race the 1.1s delay. `chair switch`
+    // reaches the same snapshot with no wall-clock deadline.
+    let output = rig.command(&["chair", "switch", "--session-id", "slow-identity", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes).map_err(|e| {
         format!(
             "{e}; stderr: {}",
             String::from_utf8_lossy(&output.stderr.bytes)
         )
     })?;
-    assert_eq!(value["continue"], false, "{value}");
+    assert_eq!(value["data"]["outcome"], "prepared", "{value}");
     assert!(
         rig.root.join("git.started").exists(),
         "fake git never ran; PROVENANT_GIT={}; exit={:?}; stdout={}; stderr={}; git.log={}",

@@ -38,6 +38,7 @@ const CREDENTIALS: &[&str] = &[
 #[derive(Debug, Default, Serialize)]
 pub struct ProviderStateGc {
     pub removed: Vec<PathBuf>,
+    pub tightened: Vec<PathBuf>,
     pub attempt_tmp: Vec<AttemptTmpRemoval>,
     pub attempt_logs: Vec<AttemptLogRemoval>,
     /// Event rows expired (or eligible to expire in a dry run).
@@ -183,6 +184,7 @@ impl RunStore {
                 .as_path()
                 .join(format!("runs/{run}/attempts/{id}/provider-state"));
             let first_removal = report.removed.len();
+            let first_tightened = report.tightened.len();
             let result = (|| -> Result<()> {
                 let record: AttemptRecord = decode(&raw)?;
                 crate::reader::validate_attempt(&record)?;
@@ -332,10 +334,14 @@ impl RunStore {
                         report.expired_events += expired_events;
                     }
                 }
-                if age >= DAY_MICROS {
-                    credentials(&attempt, dry_run, &mut report)?;
+                if age >= DAY_MICROS
+                    && let Err(error) = credentials(&attempt, &path, dry_run, &mut report)
+                {
+                    record_issue(&mut report, path.clone(), &error);
                 }
-                prune_caches(&attempt, &record, dry_run, &mut report)?;
+                if let Err(error) = prune_caches(&attempt, &record, dry_run, &mut report) {
+                    record_issue(&mut report, path.clone(), &error);
+                }
                 if age >= DAY_MICROS.saturating_mul(days as i64) {
                     expire(&attempt, &record, dry_run, &mut report)?;
                 }
@@ -346,6 +352,9 @@ impl RunStore {
                 first_removal,
                 path.parent().ok_or(RunError::UnsafePath)?,
             );
+            for tightened in &mut report.tightened[first_tightened..] {
+                *tightened = path.parent().ok_or(RunError::UnsafePath)?.join(&*tightened);
+            }
             if let Err(error) = result {
                 let cancelled = matches!(error, RunError::Cancelled);
                 record_issue(&mut report, path, &error);
@@ -588,32 +597,53 @@ fn candidates(state: &Directory) -> Result<Vec<OsString>> {
         .collect())
 }
 
-fn credentials(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> Result<()> {
+fn credentials(
+    attempt: &Directory,
+    path: &std::path::Path,
+    dry_run: bool,
+    report: &mut ProviderStateGc,
+) -> Result<()> {
     let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
     };
     for name in candidates(&state)? {
-        let candidate = subdir(&state, &name, false)?;
+        let candidate = match subdir(&state, &name, false) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                record_issue(report, path.join(&name), &error);
+                continue;
+            }
+        };
         for credential in CREDENTIALS {
             let first = report.removed.len();
-            let mut parent = candidate.try_clone()?;
-            let mut parts = credential.split('/').peekable();
-            while let Some(part) = parts.next() {
-                if parts.peek().is_none() {
-                    retry_tombstones(&parent, &[part], dry_run, report)?;
-                    dispose(&parent, OsStr::new(part), dry_run, report)?;
-                } else if let Some(child) = existing(&parent, part)? {
-                    parent = child;
-                } else {
-                    break;
+            let result = (|| -> Result<()> {
+                let mut parent = candidate.try_clone()?;
+                let mut parts = credential.split('/').peekable();
+                while let Some(part) = parts.next() {
+                    if parts.peek().is_none() {
+                        retry_tombstones(&parent, &[part], dry_run, report)?;
+                        dispose(&parent, OsStr::new(part), dry_run, report)?;
+                    } else if let Some(child) = if part == "claude-config" {
+                        existing_config(&parent, &name, dry_run, report)?
+                    } else {
+                        existing(&parent, part)?
+                    } {
+                        parent = child;
+                    } else {
+                        break;
+                    }
                 }
-            }
+                Ok(())
+            })();
             let prefix = std::path::Path::new(STATE).join(&name).join(
                 std::path::Path::new(credential)
                     .parent()
                     .ok_or(RunError::UnsafePath)?,
             );
             prefix_removals(report, first, &prefix);
+            if let Err(error) = result {
+                record_issue(report, path.join(&name).join(credential), &error);
+            }
         }
     }
     Ok(())
@@ -687,7 +717,7 @@ fn expire(
                     candidate.sync()?;
                 }
             }
-            if let Some(config) = existing(&candidate, "claude-config")? {
+            if let Some(config) = existing_config(&candidate, name, dry_run, report)? {
                 match config.metadata_at(OsStr::new("projects"), false) {
                     Ok(_) => {
                         let archived_config = subdir(&archive, OsStr::new("claude-config"), true)?;
@@ -726,6 +756,37 @@ fn existing(parent: &Directory, name: &str) -> Result<Option<Directory>> {
         Err(RunError::Filesystem(error)) if error.is_not_found() => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn existing_config(
+    parent: &Directory,
+    candidate: &OsStr,
+    dry_run: bool,
+    report: &mut ProviderStateGc,
+) -> Result<Option<Directory>> {
+    let directory = match parent.open_verified_directory(OsStr::new("claude-config")) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = directory.metadata()?;
+    if metadata.uid != provenant_os::fs::effective_uid() {
+        return Err(RunError::UnsafePath);
+    }
+    if metadata.mode & 0o077 != 0 {
+        if !dry_run {
+            directory.make_private()?;
+        }
+        report.tightened.push(
+            std::path::Path::new(STATE)
+                .join(candidate)
+                .join("claude-config"),
+        );
+    }
+    if !dry_run {
+        crate::db::private(&directory)?;
+    }
+    Ok(Some(directory))
 }
 
 fn dispose(
@@ -985,6 +1046,81 @@ mod tests {
             dry_run,
             call,
         )
+    }
+
+    #[test]
+    fn gc_repairs_open_claude_config_and_expires_state() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let config = attempt.join("provider-state/candidate-0/claude-config");
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755))?;
+
+        let preview = sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        assert_eq!(preview.tightened, vec![config.clone()]);
+        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o755);
+        assert!(config.join(".credentials.json").exists());
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.tightened, vec![config.clone()]);
+        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o700);
+        assert!(!config.join(".credentials.json").exists());
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!attempt.join("provider-state").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_expiry_sweep_tightens_open_claude_config_itself() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let config = attempt.join("provider-state/candidate-0/claude-config");
+        let other = attempt.join("provider-state/candidate-1/claude-config");
+        fs::create_dir(&other)?;
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o707))?;
+
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.tightened.contains(&config), "{:?}", report.tightened);
+        assert!(report.tightened.contains(&other), "{:?}", report.tightened);
+        assert!(!attempt.join("provider-state").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_continues_after_unsafe_credential_path() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let candidate = attempt.join("provider-state/candidate-0");
+        let config = candidate.join("claude-config");
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join(".credentials.json"), "outside")?;
+        fs::remove_dir_all(&config)?;
+        std::os::unix::fs::symlink(outside.path(), &config)?;
+        fs::create_dir(candidate.join("cache"))?;
+        fs::write(candidate.join("cache/item"), "cache")?;
+
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(!report.errors.is_empty());
+        assert!(
+            !attempt
+                .join("provider-state/candidate-1/auth.json")
+                .exists()
+        );
+        assert!(!candidate.join("cache").exists());
+        assert_eq!(
+            fs::read_to_string(outside.path().join(".credentials.json"))?,
+            "outside"
+        );
+        Ok(())
     }
 
     #[test]

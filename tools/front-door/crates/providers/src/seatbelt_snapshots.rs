@@ -184,6 +184,11 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
     )?);
     for (name, access, network) in [
         (
+            "network-open-read-only",
+            Access::ReadOnly,
+            NetworkAccess::Open,
+        ),
+        (
             "network-local-read-only",
             Access::ReadOnly,
             NetworkAccess::Local,

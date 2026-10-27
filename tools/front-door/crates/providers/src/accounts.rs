@@ -190,25 +190,45 @@ pub fn detect_with_org(
     }
     if adapter == "cursor" {
         let db = directory.join("state.vscdb");
-        let argv: Vec<OsString> = vec![
-            "/usr/bin/sqlite3".into(),
-            "-readonly".into(),
-            db.into(),
-            "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1".into(),
-        ];
-        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
-        options.stdout = StreamPolicy::Capture { limit: 65536 };
-        options.stderr = StreamPolicy::Discard;
-        options.stop_on_output_limit = true;
-        let out = executor.execute(options).map_err(exec_error)?;
-        if out.termination != Termination::Exit(0) || out.stdout.truncated || out.timed_out {
-            return Err(ProviderError::UnknownIdentity);
+        if db
+            .try_exists()
+            .map_err(|_| ProviderError::UnknownIdentity)?
+        {
+            let argv: Vec<OsString> = vec![
+                "/usr/bin/sqlite3".into(),
+                "-readonly".into(),
+                db.into(),
+                "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1".into(),
+            ];
+            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Discard;
+            options.stop_on_output_limit = true;
+            let out = executor.execute(options).map_err(exec_error)?;
+            if out.stdout.truncated || out.timed_out {
+                return Err(ProviderError::UnknownIdentity);
+            }
+            if out.termination == Termination::Exit(0)
+                && let Some(key) = std::str::from_utf8(&out.stdout.bytes)
+                    .ok()
+                    .and_then(|token| crate::identity::cursor_account(token.trim()))
+            {
+                return Ok((key, None));
+            }
         }
-        return std::str::from_utf8(&out.stdout.bytes)
-            .ok()
-            .and_then(|token| crate::identity::cursor_account(token.trim()))
-            .map(|key| (key, None))
-            .ok_or(ProviderError::UnknownIdentity);
+        let bytes = read_following(
+            &directory.join("cli-config.json"),
+            ReadOptions { limit: 1024 * 1024 },
+        )
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+        let config: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
+        // authInfo.authId and the desktop JWT sub are the same subject, verified 27 Oct 2026.
+        let key = config["authInfo"]["authId"]
+            .as_str()
+            .and_then(crate::identity::digest)
+            .ok_or(ProviderError::UnknownIdentity)?;
+        return Ok((format!("cursor-{key}"), None));
     }
     if adapter != "claude" || directory == home.join(".claude") {
         return Err(ProviderError::UnknownIdentity);
