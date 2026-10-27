@@ -75,15 +75,18 @@ pub(crate) fn find(
         {
             continue;
         }
-        // Open each component beneath / without following symlinks.
-        let mut dir = Directory::root(true).ok()?;
-        for component in parent.strip_prefix("/").ok()?.components() {
-            dir = dir.open_verified_directory(component.as_os_str()).ok()?;
+        // Open each component beneath / without following symlinks; a stale
+        // or linked grant falls through to the next candidate.
+        let open = || {
+            let mut dir = Directory::root(true).ok()?;
+            for component in parent.strip_prefix("/").ok()?.components() {
+                dir = dir.open_verified_directory(component.as_os_str()).ok()?;
+            }
+            (dir.metadata_at(name, false).ok()?.kind == FileKind::Regular).then_some(dir)
+        };
+        if let Some(dir) = open() {
+            return Some((dir, name.to_owned(), path));
         }
-        if dir.metadata_at(name, false).ok()?.kind != FileKind::Regular {
-            return None;
-        }
-        return Some((dir, name.to_owned(), path));
     }
     let state = attempt
         .open_verified_directory(OsStr::new("provider-state"))
@@ -117,10 +120,12 @@ pub(crate) fn tail(dir: &Directory, name: &OsStr) -> Option<(Vec<u8>, bool)> {
     if clipped {
         file.seek(SeekFrom::Start(meta.size - WINDOW)).ok()?;
     }
-    // A provider may append after metadata or seek. Cap the read itself,
-    // rather than rejecting the file if more bytes become available.
+    // A provider may append after metadata or seek. Read only the bytes the
+    // metadata covered, so the result is that snapshot and `complete` holds.
     let mut bytes = Vec::new();
-    file.take(WINDOW).read_to_end(&mut bytes).ok()?;
+    file.take(meta.size.min(WINDOW))
+        .read_to_end(&mut bytes)
+        .ok()?;
     if clipped {
         let start = bytes
             .iter()
@@ -162,7 +167,10 @@ mod tests {
             scope: PathScope::Exact,
             path: provenant_records::AbsolutePath::new(&path)?,
         };
-        assert_eq!(locate(&root, "sess-1848", &[grant.clone()]), Some(path));
+        assert_eq!(
+            locate(&root, "sess-1848", &[grant.clone()]),
+            Some(path.clone())
+        );
         let (dir, name, _) = find(
             &Directory::open_anchor(&root)?,
             "sess-1848",
@@ -180,7 +188,14 @@ mod tests {
         let linked_file = project.join("linked-session.jsonl");
         std::os::unix::fs::symlink(project.join("sess-1848.jsonl"), &linked_file)?;
         grant.path = provenant_records::AbsolutePath::new(&linked_file)?;
-        assert!(locate(&root, "linked-session", &[grant]).is_none());
+        assert!(locate(&root, "linked-session", &[grant.clone()]).is_none());
+        // A stale matching grant does not hide a later valid one.
+        let mut stale = grant.clone();
+        stale.path = provenant_records::AbsolutePath::new(
+            &root.join("gone/projects/project-key/sess-1848.jsonl"),
+        )?;
+        grant.path = provenant_records::AbsolutePath::new(&path)?;
+        assert_eq!(locate(&root, "sess-1848", &[stale, grant]), Some(path));
         Ok(())
     }
 
