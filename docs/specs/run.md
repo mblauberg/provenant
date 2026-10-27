@@ -270,3 +270,33 @@ in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 - Watchdog silence as an outcome, `fallback:any` or silent effort downgrade.
 - Alias coercion, old-root scans, record migration or a state deletion
   command.
+
+## Lane-owned worktrees and adoption
+
+Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
+[--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
+confinement's existing registered-worktree path. Reuse requires the same branch,
+a clean tree and free writer custody; an explicit base applies at creation.
+The private Git admin directory holds `provenant-owner.json` as a bounded,
+atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
+pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
+owner label. `load_owner` and `save_owner` require a verified linked worktree.
+
+`worktree adopt PATH [--owner LABEL]` proves common-repository registration
+and the Git backlink, acquires repository and writer locks, refuses live or
+reserved writers and publishes the ordinary custody identity plus an adopted
+owner. Ownership never grants deletion authority by itself. Existing explicit
+`--worktree` dispatches keep their existing lifecycle.
+
+Owned lane settlement may prune its own clean checkout and local branch only
+when its exact recorded head is reachable from the pinned delivered ref or its
+creation base. It rechecks ownership, terminal state, absent live lanes,
+registration, writer custody, Git sequencer state and head under the existing
+removal locks. Ignored output uses GC's existing declared-regenerable walker
+and keep paths; undeclared ignored files retain the tree. Other worktrees keep
+the existing GC/removal policy. A host lifecycle receipt names pruning or the
+retention reason in `worktree-settlement.json` beside the attempt result.
+- Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
+- Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
+  `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`.
+- Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`

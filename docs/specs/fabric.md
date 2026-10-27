@@ -278,3 +278,19 @@ Peer changes need exact-head CI and a chair-run smoke between two real hosts.
 - Host auto-placement, moving a running lane, or local fallback after an
   explicit host choice.
 - Shared or replicated SQLite, a daemon or listener, and the async `rmcp` SDK.
+
+### Project-local scratch
+
+Operator graph documents default to `.provenant/scratch/graphs/`; an existing
+`.agent-run/` is reused as the scratch root. Bare document names resolve there
+when no explicitly named file exists in the current directory. Explicit project-local
+paths remain supported. Scratch setup appends its anchored directory pattern to
+Git's common `info/exclude` under a stable lock, preserving existing bytes and
+never editing tracked `.gitignore`. Symlinked scratch roots and exclude files
+are refused. The graph path error and CLI help name these directories. Scratch
+is disposable operator data, separate from authoritative run state; expiry is
+owned by GC rather than graph execution.
+- Why: graph documents and lane briefs need a discoverable project-local home
+  without creating tracked configuration changes.
+- Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`.
+- Owner: `crates/confinement/src/scratch.rs`, `src/fabric.rs`
