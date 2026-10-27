@@ -57,6 +57,11 @@ fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::
         assert!(advisory.contains(model), "{advisory}");
         assert!(advisory.contains(alternative), "{advisory}");
         assert!(advisory.contains(tier), "{advisory}");
+        let quiet = RoutingConfig {
+            suppress_opus_writer_warning: true,
+            ..RoutingConfig::default()
+        };
+        assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
     }
     // The same Opus model belongs to principal and design. A pool receipt
     // takes precedence over the inference used for an exact-model request.
@@ -77,19 +82,26 @@ fn opus_only_pool_still_advises_a_cheaper_tier_member() -> Result<(), Box<dyn st
     let catalogue = Catalogue::bundled()?;
     let mut config = RoutingConfig::default();
     for pool in ["principal", "custom"] {
-        config.pools.insert(pool.into(), vec![RoutePoolMember {
-            model: ModelId::parse("claude/claude-opus-5-5")?,
-            weight: 1,
-            effort: None,
-            efforts: vec![],
-            free: false,
-        }]);
+        config.pools.insert(
+            pool.into(),
+            vec![RoutePoolMember {
+                model: ModelId::parse("claude/claude-opus-5-5")?,
+                weight: 1,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            }],
+        );
         let mut query = request("claude/claude-opus-5-5")?;
         query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
         let route = resolve(&query, &context(&catalogue, &config, now()?))?;
-        let advisory = config.opus_writer_advisory(&catalogue, &route)
+        let advisory = config
+            .opus_writer_advisory(&catalogue, &route)
             .ok_or("missing advisory for Opus-only pool")?;
-        assert!(advisory.contains("principal route codex/gpt-6.1-sol"), "{advisory}");
+        assert!(
+            advisory.contains("principal route codex/gpt-6.1-sol"),
+            "{advisory}"
+        );
     }
     Ok(())
 }

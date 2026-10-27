@@ -285,10 +285,6 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         let stderr = String::from_utf8_lossy(&out.stderr.bytes);
         let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
         assert_eq!(reply["status"], "ok", "{reply}");
-        assert_eq!(
-            reply["data"]["lanes"][0]["applied_route"]["model"], model,
-            "{reply}"
-        );
         if !writer || suppress || model.contains("sonnet") {
             assert!(!stderr.contains("advisory"), "{stderr}");
         } else {

@@ -25,8 +25,8 @@ pub struct RoutingConfig {
     pub pacing: BTreeMap<String, PacingPolicy>,
 }
 impl RoutingConfig {
-    /// Suggest a cheaper member of the applied pool. Exact models use their
-    /// highest bundled implementation tier when there is no selection receipt.
+    /// Suggest a cheaper route in the applied tier. Exact models and custom
+    /// pools use the model's highest bundled implementation tier.
     pub fn opus_writer_advisory(
         &self,
         catalogue: &Catalogue,
@@ -39,6 +39,7 @@ impl RoutingConfig {
         let pool = route
             .pool_selection
             .as_ref()
+            .filter(|receipt| catalogue.has_pool(&receipt.pool))
             .map(|receipt| receipt.pool.as_str())
             .or_else(|| {
                 [
@@ -58,10 +59,14 @@ impl RoutingConfig {
                 })
             })?;
         let members = self.pools.get(pool).or_else(|| catalogue.pools.get(pool))?;
-        let cheaper = members.iter().find(|member| {
-            member.weight > 0
-                && (member.model.model().contains("sonnet") || member.model.adapter() == "codex")
-        })?;
+        let cheaper = members
+            .iter()
+            .chain(catalogue.pools.get(pool).into_iter().flatten())
+            .find(|member| {
+                member.weight > 0
+                    && (member.model.model().contains("sonnet")
+                        || member.model.adapter() == "codex")
+            })?;
         let effort = cheaper.effort.as_deref().or_else(|| {
             route
                 .effort
