@@ -323,6 +323,8 @@ aliases and conflict with `--deliver`. Read-only lanes may select only none.
 Integration refuses the default branch recorded by any configured remote and
 the primary checkout branch. If no remote HEAD is available, both `main` and
 `master` are protected.
+Dispatch checks integration protection before admission, and before creating
+an owned worktree, so a refused target leaves no admitted run.
 
 Integration serialises by destination using a stable lock in the common Git
 directory. It fast-forwards when possible, otherwise uses `merge-tree` and

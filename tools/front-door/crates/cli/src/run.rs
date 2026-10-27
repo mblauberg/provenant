@@ -1075,6 +1075,14 @@ fn dispatch_with_workers(
     }
     reply_waited("dispatch", result)
 }
+fn validate_integration_mode(project: &Path, mode: &run::DeliveryMode) -> Result<(), Fail> {
+    if let run::DeliveryMode::Integrate(target) = mode {
+        run::HostDeliveryContext::validate_integration_target(project, target)
+            .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))?;
+    }
+    Ok(())
+}
+
 fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
@@ -1097,6 +1105,9 @@ fn dispatch_inner(
                 ErrorKind::Refused,
                 "--worktree-branch requires a host worktree-write dispatch",
             ));
+        }
+        if let Some(mode) = &command.deliver {
+            validate_integration_mode(edge.cwd, mode)?;
         }
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -1421,6 +1432,11 @@ fn dispatch_inner(
             },
             command.wait,
         );
+    }
+    for (_, _, _, _, _, _, delivery, _) in &tasks {
+        if let Some(delivery) = delivery {
+            validate_integration_mode(edge.cwd, &delivery.mode)?;
+        }
     }
     let tasks = tasks
         .into_iter()
@@ -4170,6 +4186,106 @@ mod tests {
         let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
         let _session = open(&edge, &call).map_err(|fail| fail.message)?;
         let host = provenant_config::bind_host(&roots)?;
+        let prompt = root.join("protected-prompt.md");
+        std::fs::write(&prompt, "reply OK")?;
+        let existing =
+            worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                worktrees::create(
+                    &worktrees::WorktreeContext {
+                        workers: &Free,
+                        ..*context
+                    },
+                    WorktreeCreate {
+                        branch: "protected-existing".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )
+            })?;
+        let primary = {
+            let argv = vec![
+                git.as_os_str().to_owned(),
+                "symbolic-ref".into(),
+                "--short".into(),
+                "HEAD".into(),
+            ];
+            let output =
+                executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
+            assert_eq!(output.termination, Termination::Exit(0));
+            String::from_utf8(output.stdout.bytes)?.trim().to_owned()
+        };
+        for (index, (target, placement)) in ["main", "master", primary.as_str()]
+            .into_iter()
+            .flat_map(|target| {
+                ["owned", "existing", "manifest"].map(|placement| (target, placement))
+            })
+            .enumerate()
+        {
+            let operation = format!("protected-integration-{index}");
+            let mut args: Vec<OsString> = [
+                "dispatch",
+                "--operation-id",
+                &operation,
+                "--base",
+                "HEAD",
+            ]
+            .map(OsString::from)
+            .into();
+            let mode = run::DeliveryMode::Integrate(target.into());
+            if placement != "manifest" {
+                args.extend(["--model", "codex/gpt-6-luna", "--mode", "worktree-write"].map(OsString::from));
+            }
+            if placement == "owned" {
+                args.extend(["--worktree-branch", "refused-lane"].map(OsString::from));
+            } else if placement == "existing" {
+                args.extend([
+                    OsString::from("--worktree"),
+                    existing.path.as_os_str().to_owned(),
+                ]);
+            }
+            if placement == "manifest" {
+                let manifest = root.join("protected-manifest.json");
+                std::fs::write(
+                    &manifest,
+                    serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
+                        "prompt":"reply OK", "route":run::RequestedRoute::Model { provider:"codex".into(), model:"codex/gpt-6-luna".into(), effort:None },
+                        "deliver":run::HostDeliveryContext::destination(mode, "protected-existing")?
+                    }]}))?,
+                )?;
+                args.extend([OsString::from("--manifest"), manifest.into_os_string()]);
+            } else {
+                args.extend([
+                    OsString::from("--deliver"),
+                    format!("integrate:{target}").into(),
+                    OsString::from("--prompt-file"),
+                    prompt.as_os_str().to_owned(),
+                ]);
+            }
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
+                return Err("parse".into());
+            };
+            let crate::Command::Dispatch(command) = invocation.command else {
+                return Err("dispatch".into());
+            };
+            let reply = dispatch_with_workers(*command, &edge, &Free);
+            assert!(
+                _session
+                    .store
+                    .operation(&operation.parse()?, &call)?
+                    .is_none(),
+                "protected delivery was admitted"
+            );
+            assert_eq!(reply.result.status, Status::Refused);
+            assert!(
+                reply
+                    .result
+                    .error
+                    .ok_or("refusal")?
+                    .message
+                    .contains("default and primary checkout branches")
+            );
+            assert!(!project.join(".worktrees/refused-lane").exists());
+        }
         for origin in [
             None,
             Some(WorktreeOrigin::Lane),
